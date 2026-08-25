@@ -1,0 +1,13 @@
+# name: query-repeated-param-any-occurrence-first
+# Repeated parameters: matching is any-occurrence over raw pairs, so a
+# matcher for the FIRST value hits.
+routes:
+  - name: picky
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: a, value: '1'}
+    action: {type: proxy}
+request: {method: GET, path: '/search?a=1&a=2'}
+expect: {route: picky}

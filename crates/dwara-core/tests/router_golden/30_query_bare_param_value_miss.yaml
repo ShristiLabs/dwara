@@ -1,0 +1,13 @@
+# name: query-bare-param-value-miss
+# The same bare '?beta' does NOT satisfy a value matcher: its value is
+# the empty string, not '1'.
+routes:
+  - name: beta-flag
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: beta, value: '1'}
+    action: {type: proxy}
+request: {method: GET, path: '/search?beta'}
+expect: {route: null}

@@ -1,0 +1,17 @@
+# name: cookie-spaces-after-semicolon
+# RFC-6265-style 'a=1; b=2' (space after the semicolon): pairs are
+# trimmed, so b matches its value.
+routes:
+  - name: session-route
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: b, value: '2'}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/home
+  headers:
+    cookie: 'a=1; b=2'
+expect: {route: session-route}

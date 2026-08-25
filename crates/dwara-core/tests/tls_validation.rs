@@ -79,8 +79,10 @@ fn base_gateway(listener: Listener) -> Gateway {
                 host: None,
                 methods: vec![],
                 headers: Default::default(),
+                query: vec![],
+                cookies: vec![],
             },
-            action: RouteAction::Proxy {},
+            action: RouteAction::Proxy { rewrite: None },
             policies: vec![],
         }],
         services: vec![Service {

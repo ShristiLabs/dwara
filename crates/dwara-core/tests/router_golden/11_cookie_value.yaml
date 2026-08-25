@@ -1,0 +1,16 @@
+# name: cookie-value-exact
+# Cookie value must match exactly; the wrong value (and the missing cookie)
+# are both misses.
+routes:
+  - name: logged-in
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: session, value: abc}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/page
+  headers: {cookie: 'session=xyz; theme=dark'}
+expect: {route: null}

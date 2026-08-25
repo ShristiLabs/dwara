@@ -1,0 +1,15 @@
+# name: header-exact-match
+# Header criteria need exact presence and value.
+routes:
+  - name: v2-clients
+    service: svc
+    match:
+      path: {type: prefix, value: /api}
+      headers:
+        x-api-version: '2'
+    action: {type: proxy}
+request:
+  method: GET
+  path: /api/users
+  headers: {x-api-version: '2'}
+expect: {route: v2-clients}

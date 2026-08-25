@@ -1,0 +1,13 @@
+# name: rewrite-strip-prefix-equal-to-prefix
+# A path exactly equal to the matched prefix strips to '/' (the empty
+# remainder normalizes to the root path).
+routes:
+  - name: api
+    service: svc
+    match:
+      path: {type: prefix, value: /api}
+    action:
+      type: proxy
+      rewrite: {type: strip_prefix}
+request: {method: GET, path: /api}
+expect: {route: api, upstream_path: /}

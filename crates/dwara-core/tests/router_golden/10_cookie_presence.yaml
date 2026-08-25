@@ -1,0 +1,15 @@
+# name: cookie-presence-match
+# Name-only cookie matcher matches presence among the Cookie pairs.
+routes:
+  - name: themed
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - name: theme
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/page
+  headers: {cookie: 'session=abc; theme=dark'}
+expect: {route: themed}

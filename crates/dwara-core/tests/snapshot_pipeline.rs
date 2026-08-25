@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use dwara_core::config::{
     Credential, Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer,
-    PathMatch, PathMatchKind, Policy, RateLimit, Route, RouteAction, RouteMatch, Service, TlsMode,
-    Upstream, UpstreamProtocol,
+    NameValueMatch, PathMatch, PathMatchKind, PathRewrite, Policy, RateLimit, Route, RouteAction,
+    RouteMatch, Service, TlsMode, Upstream, UpstreamProtocol,
 };
 use dwara_core::snapshot::{compile, validate, CompileError, ConfigState};
 
@@ -40,8 +40,10 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
             host: None,
             methods: vec![],
             headers: Default::default(),
+            query: vec![],
+            cookies: vec![],
         },
-        action: RouteAction::Proxy {},
+        action: RouteAction::Proxy { rewrite: None },
         policies: vec![],
     }
 }
@@ -244,6 +246,7 @@ fn validation_rejects_respond_status_999() {
     gw.routes[0].action = RouteAction::Respond {
         status: 999,
         body: None,
+        headers: Default::default(),
     };
     assert_single_issue(&gw, "route", "r", "action.status");
 }
@@ -254,6 +257,7 @@ fn validation_rejects_respond_status_0() {
     gw.routes[0].action = RouteAction::Respond {
         status: 0,
         body: None,
+        headers: Default::default(),
     };
     assert_single_issue(&gw, "route", "r", "action.status");
 }
@@ -892,7 +896,161 @@ fn validation_rejects_empty_upstream_endpoint_address() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. DONE-WHEN guard: new rules still gate publishing
+// 12. DW-010 validation: query/cookie matchers, rewrites, respond headers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validation_rejects_empty_query_matcher_name() {
+    let mut gw = base_gateway();
+    gw.routes[0].r#match.query = vec![NameValueMatch {
+        name: "  ".into(),
+        value: None,
+    }];
+    assert_single_issue(&gw, "route", "r", "match.query");
+}
+
+#[test]
+fn validation_rejects_empty_cookie_matcher_name() {
+    let mut gw = base_gateway();
+    gw.routes[0].r#match.cookies = vec![NameValueMatch {
+        name: String::new(),
+        value: None,
+    }];
+    assert_single_issue(&gw, "route", "r", "match.cookies");
+}
+
+#[test]
+fn validation_rejects_empty_query_matcher_value() {
+    // An empty value can never match (raw exact-match semantics); the
+    // message steers the operator to presence-only matching.
+    let mut gw = base_gateway();
+    gw.routes[0].r#match.query = vec![NameValueMatch {
+        name: "beta".into(),
+        value: Some(String::new()),
+    }];
+    let issues = validate(&gw);
+    assert_eq!(issues.len(), 1, "got: {issues:?}");
+    assert_eq!(issues[0].field, "match.query");
+    assert!(issues[0].message.contains("omit value"));
+}
+
+#[test]
+fn validation_rejects_replace_prefix_replacement_without_leading_slash() {
+    let mut gw = base_gateway();
+    gw.routes[0].action = RouteAction::Proxy {
+        rewrite: Some(PathRewrite::ReplacePrefix {
+            prefix: "/api".into(),
+            replacement: "internal".into(),
+        }),
+    };
+    assert_single_issue(&gw, "route", "r", "action.rewrite.replacement");
+}
+
+#[test]
+fn validation_rejects_replace_prefix_empty_replacement_as_root() {
+    // An EMPTY replacement is explicitly allowed (prefix becomes the root).
+    let mut gw = base_gateway();
+    gw.routes[0].action = RouteAction::Proxy {
+        rewrite: Some(PathRewrite::ReplacePrefix {
+            prefix: "/api".into(),
+            replacement: String::new(),
+        }),
+    };
+    assert!(validate(&gw).is_empty());
+}
+
+#[test]
+fn validation_rejects_respond_header_value_with_control_character() {
+    let mut gw = base_gateway();
+    gw.routes[0].action = RouteAction::Respond {
+        status: 200,
+        body: None,
+        headers: [("x-evil".to_string(), "a\r\nb".to_string())].into(),
+    };
+    assert_single_issue(&gw, "route", "r", "action.headers");
+}
+
+#[test]
+fn validation_rejects_rewrite_regex_substitution_without_leading_slash() {
+    // TEST EDIT (DW-010 hardening follow-up): this test previously pinned
+    // the OLD reality — a free-form substitution passed validation and
+    // compiled, and a relative result was silently no-op'd by the
+    // dataplane (also pinned by golden case 42, now deleted). The
+    // substitution must now start with '/' or a capture reference so it
+    // expands to an absolute path.
+    let mut gw = base_gateway();
+    gw.routes[0].action = RouteAction::Proxy {
+        rewrite: Some(PathRewrite::Regex {
+            pattern: "^/api/(.*)$".into(),
+            substitution: "no-leading-slash/$1".into(),
+        }),
+    };
+    assert_single_issue(&gw, "route", "r", "action.rewrite.substitution");
+    match compile(&gw) {
+        Err(CompileError::Validation(_)) => {}
+        other => panic!("expected Validation rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn validation_rejects_rewrite_regex_substitution_with_unsafe_characters() {
+    // Whitespace, '?', '#', and control characters would corrupt the
+    // path/query split or the upstream request line.
+    // Each case starts with '/' so ONLY the charset rule fires.
+    for bad in ["/ x/$1", "/x?/$1", "/x#/$1", "/x\u{0000}/$1"] {
+        let mut gw = base_gateway();
+        gw.routes[0].action = RouteAction::Proxy {
+            rewrite: Some(PathRewrite::Regex {
+                pattern: "^/api/(.*)$".into(),
+                substitution: bad.into(),
+            }),
+        };
+        let issues = validate(&gw);
+        assert_eq!(
+            issues.len(),
+            1,
+            "substitution '{bad:?}': expected exactly one issue, got: {issues:?}"
+        );
+        assert_eq!(issues[0].field, "action.rewrite.substitution");
+    }
+}
+
+#[test]
+fn validation_accepts_capture_only_rewrite_regex_substitution() {
+    // A substitution that is a pure capture reference ('$1' or '${name}')
+    // expands to the captured text; the captured group is a path segment
+    // from the inbound URI, so this is the one non-'/' start that is safe.
+    for ok in ["$1", "${name}", "/x/$1", "/$1/suffix"] {
+        let mut gw = base_gateway();
+        gw.routes[0].action = RouteAction::Proxy {
+            rewrite: Some(PathRewrite::Regex {
+                pattern: "^/api/(.*)$".into(),
+                substitution: ok.into(),
+            }),
+        };
+        assert!(validate(&gw).is_empty(), "substitution '{ok}' should pass");
+        compile(&gw).unwrap_or_else(|e| panic!("substitution '{ok}' should compile: {e}"));
+    }
+}
+
+#[test]
+fn compile_and_publish_rejects_invalid_rewrite_regex() {
+    let mut gw = base_gateway();
+    gw.routes[0].action = RouteAction::Proxy {
+        rewrite: Some(PathRewrite::Regex {
+            pattern: "/bad/(unclosed".into(),
+            substitution: "/x/$1".into(),
+        }),
+    };
+    let state = ConfigState::new();
+    match state.compile_and_publish(&gw) {
+        Err(CompileError::InvalidRegex { route, .. }) => assert_eq!(route, "r"),
+        other => panic!("expected InvalidRegex, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13. DONE-WHEN guard: new rules still gate publishing
 // ---------------------------------------------------------------------------
 
 #[test]

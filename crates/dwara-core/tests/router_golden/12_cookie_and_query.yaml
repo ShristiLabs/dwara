@@ -1,0 +1,17 @@
+# name: cookie-and-query-together
+# Query and cookie criteria AND with each other and with the path.
+routes:
+  - name: canary-ui
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      query:
+        - {name: env, value: canary}
+      cookies:
+        - name: session
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/page?env=canary
+  headers: {cookie: 'session=abc'}
+expect: {route: canary-ui}

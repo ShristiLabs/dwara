@@ -1,0 +1,13 @@
+# name: rewrite-strip-prefix
+# strip_prefix removes the route's matched prefix; the rest keeps its
+# leading slash.
+routes:
+  - name: api
+    service: svc
+    match:
+      path: {type: prefix, value: /api}
+    action:
+      type: proxy
+      rewrite: {type: strip_prefix}
+request: {method: GET, path: /api/users/42}
+expect: {route: api, upstream_path: /users/42}

@@ -1,0 +1,13 @@
+# name: query-percent-encoded-raw-match
+# No percent-decoding in v1: matching runs over the raw bytes the client
+# sent, so the matcher must carry the '%20' literally to hit.
+routes:
+  - name: raw
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: a, value: '%20'}
+    action: {type: proxy}
+request: {method: GET, path: '/search?a=%20'}
+expect: {route: raw}

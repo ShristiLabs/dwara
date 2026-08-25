@@ -204,7 +204,8 @@ fn route_action_respond_minimal_fields() {
         gw.routes[0].action,
         RouteAction::Respond {
             status: 503,
-            body: None
+            body: None,
+            headers: Default::default(),
         }
     );
 }
@@ -216,7 +217,7 @@ fn route_action_proxy_empty_map_parses_to_proxy_variant() {
     let gw = parse_ok(
         "routes:\n  - name: r\n    service: s\n    match:\n      path: {type: exact, value: /}\n    action: {type: proxy}\n",
     );
-    assert_eq!(gw.routes[0].action, RouteAction::Proxy {});
+    assert_eq!(gw.routes[0].action, RouteAction::Proxy { rewrite: None });
 }
 
 // --- Unknown-field rejection inside every RouteAction variant ------------------
@@ -504,6 +505,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 host: None,
                 methods: vec![],
                 headers: Default::default(),
+                query: vec![],
+                cookies: vec![],
             },
             action: RouteAction::Redirect {
                 scheme: None,

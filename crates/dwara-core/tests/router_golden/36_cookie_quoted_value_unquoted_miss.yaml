@@ -1,0 +1,17 @@
+# name: cookie-quoted-value-unquoted-miss
+# The flip side: matching the unquoted '1' against a="1" fails — raw
+# exact-match semantics, pinned.
+routes:
+  - name: session-route
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: a, value: '1'}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/home
+  headers:
+    cookie: 'a="1"'
+expect: {route: null}

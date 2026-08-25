@@ -1,0 +1,13 @@
+# name: matchit-static-beats-param
+# Within the exact kind, matchit specificity: static segment beats {param}.
+routes:
+  - name: users-by-id
+    service: svc
+    match: {path: {type: exact, value: '/users/{id}'}}
+    action: {type: proxy}
+  - name: users-active
+    service: svc
+    match: {path: {type: exact, value: /users/active}}
+    action: {type: proxy}
+request: {method: GET, path: /users/active}
+expect: {route: users-active}

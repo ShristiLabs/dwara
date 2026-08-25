@@ -1,0 +1,13 @@
+# name: query-repeated-param-any-occurrence-second
+# ...and equally a matcher for the SECOND value: 'a=2' is one of the raw
+# 'a' pairs, so it also matches (any, not first-wins).
+routes:
+  - name: picky
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: a, value: '2'}
+    action: {type: proxy}
+request: {method: GET, path: '/search?a=1&a=2'}
+expect: {route: picky}

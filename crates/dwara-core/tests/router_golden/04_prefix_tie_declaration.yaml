@@ -1,0 +1,14 @@
+# name: prefix-tie-goes-to-first-declared
+# "/api/v1" and "/api/v1/" compile to the SAME prefix (trailing slashes
+# trimmed); equal length is a tie, broken by declaration order (first wins).
+routes:
+  - name: declared-first
+    service: svc
+    match: {path: {type: prefix, value: /api/v1}}
+    action: {type: proxy}
+  - name: declared-second
+    service: svc
+    match: {path: {type: prefix, value: /api/v1/}}
+    action: {type: proxy}
+request: {method: GET, path: /api/v1/users}
+expect: {route: declared-first}

@@ -1,0 +1,17 @@
+# name: cookie-quoted-value-matches-raw
+# v1 does no cookie-unquoting: the value of a="1" IS the three characters
+# '"1"', so a matcher must quote to hit.
+routes:
+  - name: session-route
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: a, value: '"1"'}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/home
+  headers:
+    cookie: 'a="1"'
+expect: {route: session-route}

@@ -1,0 +1,12 @@
+# name: rewrite-strip-prefix-to-root
+# Stripping the whole path leaves "/".
+routes:
+  - name: api
+    service: svc
+    match:
+      path: {type: prefix, value: /api}
+    action:
+      type: proxy
+      rewrite: {type: strip_prefix}
+request: {method: GET, path: /api}
+expect: {route: api, upstream_path: /}

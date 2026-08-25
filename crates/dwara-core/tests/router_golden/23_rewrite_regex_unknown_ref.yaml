@@ -1,0 +1,16 @@
+# name: rewrite-regex-unknown-ref-is-empty
+# A capture reference with no corresponding group expands to the empty
+# string (never an error at request time).
+routes:
+  - name: shop
+    service: svc
+    match:
+      path: {type: prefix, value: /shop}
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: '^/shop/([^/]+)'
+        substitution: '/items/$1/from$3'
+request: {method: GET, path: /shop/thing/rest}
+expect: {route: shop, upstream_path: '/items/thing/from/rest'}

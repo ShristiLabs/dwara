@@ -1,0 +1,13 @@
+# name: query-entries-are-anded
+# Two query entries must BOTH match; one present + one absent = no route.
+routes:
+  - name: both-required
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - name: beta
+        - {name: env, value: canary}
+    action: {type: proxy}
+request: {method: GET, path: '/search?beta=1&env=prod'}
+expect: {route: null}

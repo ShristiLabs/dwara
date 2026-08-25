@@ -1,0 +1,20 @@
+# name: redirect-fires-after-cookie-match
+# Redirect actions compose with the new matchers: cookie criterion gates a
+# 3xx straight from the gateway, no upstream involved.
+routes:
+  - name: force-login
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: session, value: valid}
+    action:
+      type: redirect
+      status: 302
+      scheme: https
+      host: example.org
+request:
+  method: GET
+  path: /app/home
+  headers: {cookie: 'session=valid'}
+expect: {route: force-login}

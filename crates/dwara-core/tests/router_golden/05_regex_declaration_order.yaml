@@ -1,0 +1,13 @@
+# name: regex-first-declared-wins
+# Two regexes both matching: the first-declared route wins.
+routes:
+  - name: regex-a
+    service: svc
+    match: {path: {type: regex, value: '/x/'}}
+    action: {type: proxy}
+  - name: regex-b
+    service: svc
+    match: {path: {type: regex, value: '/x/[0-9]+'}}
+    action: {type: proxy}
+request: {method: GET, path: /x/42}
+expect: {route: regex-a}

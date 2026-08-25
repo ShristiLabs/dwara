@@ -1,0 +1,16 @@
+# name: rewrite-regex-no-match-is-noop
+# A rewrite regex that does not match the path changes nothing: regex
+# replace with no match returns the path verbatim (documented no-op).
+routes:
+  - name: api
+    service: svc
+    match:
+      path: {type: prefix, value: /pfx}
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: '^/nomatch/(.*)$'
+        substitution: '/x/$1'
+request: {method: GET, path: /pfx/thing}
+expect: {route: api, upstream_path: /pfx/thing}

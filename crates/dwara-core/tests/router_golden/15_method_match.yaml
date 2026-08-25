@@ -1,0 +1,11 @@
+# name: method-allowlist
+# Method list is an allowlist; unlisted methods do not match the route.
+routes:
+  - name: users-write
+    service: svc
+    match:
+      path: {type: exact, value: /users}
+      methods: [GET, POST]
+    action: {type: proxy}
+request: {method: DELETE, path: /users}
+expect: {route: null}

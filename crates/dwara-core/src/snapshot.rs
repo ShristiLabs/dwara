@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex};
 use arc_swap::ArcSwap;
 
 use crate::config::{
-    gateway_to_yaml, Credential, Gateway, ListenerProtocol, PathMatchKind, Route, RouteAction,
-    TlsMode,
+    gateway_to_yaml, Credential, Gateway, ListenerProtocol, PathMatchKind, PathRewrite, Route,
+    RouteAction, TlsMode,
 };
 
 /// One semantic-validation finding. Operators get every issue at once, not a
@@ -410,6 +410,26 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             }
         }
         let m = &r.r#match.path;
+        for (field, entries) in [
+            ("match.query", &r.r#match.query),
+            ("match.cookies", &r.r#match.cookies),
+        ] {
+            for e in entries.iter() {
+                if e.name.trim().is_empty() {
+                    issues.push(issue("route", &r.name, field, "matcher name is empty"));
+                }
+                if let Some(v) = &e.value {
+                    if v.is_empty() {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            field,
+                            format!("matcher '{}' carries an empty value; omit value for presence-only matching", e.name),
+                        ));
+                    }
+                }
+            }
+        }
         if !m.value.starts_with('/') {
             issues.push(issue(
                 "route",
@@ -492,7 +512,11 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     }
                 }
             }
-            RouteAction::Respond { status, .. } => {
+            RouteAction::Respond {
+                status,
+                ref headers,
+                ..
+            } => {
                 if !(100..=599).contains(&status) {
                     issues.push(issue(
                         "route",
@@ -501,8 +525,32 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                         format!("respond status {status} is not a valid HTTP status"),
                     ));
                 }
+                for (name, value) in headers {
+                    if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.headers",
+                            format!("respond header name '{name}' is not a valid HTTP header name"),
+                        ));
+                    }
+                    if hyper::header::HeaderValue::from_str(value.as_str()).is_err() {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.headers",
+                            format!(
+                                "respond header value for '{name}' contains characters that \
+                                 cannot appear in an HTTP header value"
+                            ),
+                        ));
+                    }
+                }
             }
-            RouteAction::Proxy {} => {}
+            RouteAction::Proxy { rewrite: None } => {}
+            RouteAction::Proxy {
+                rewrite: Some(ref rw),
+            } => validate_rewrite(&r.name, rw, &mut issues),
         }
     }
 
@@ -610,14 +658,130 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     issues
 }
 
+/// Validate a proxy-action path rewrite (shape only; regex COMPILATION is
+/// checked in [`compile`], like the regex path-match kind).
+fn validate_rewrite(route: &str, rw: &PathRewrite, issues: &mut Vec<ValidationIssue>) {
+    match rw {
+        PathRewrite::StripPrefix {} => {}
+        PathRewrite::ReplacePrefix {
+            prefix,
+            replacement,
+        } => {
+            if !prefix.starts_with('/') {
+                issues.push(issue(
+                    "route",
+                    route,
+                    "action.rewrite.prefix",
+                    format!("replace_prefix prefix '{prefix}' must start with '/'"),
+                ));
+            }
+            if !replacement.is_empty() && !replacement.starts_with('/') {
+                issues.push(issue(
+                    "route",
+                    route,
+                    "action.rewrite.replacement",
+                    format!(
+                        "replace_prefix replacement '{replacement}' must start with '/' or be \
+                         empty (empty turns the prefix into the root path)"
+                    ),
+                ));
+            }
+        }
+        PathRewrite::Regex {
+            pattern,
+            substitution,
+        } => {
+            if pattern.is_empty() {
+                issues.push(issue(
+                    "route",
+                    route,
+                    "action.rewrite.pattern",
+                    "rewrite regex pattern is empty",
+                ));
+            }
+            if substitution.is_empty() {
+                issues.push(issue(
+                    "route",
+                    route,
+                    "action.rewrite.substitution",
+                    "rewrite substitution is empty (use replace_prefix or strip_prefix to \
+                     remove path material)",
+                ));
+            } else {
+                // The substitution must expand to an absolute path or be a
+                // pure capture expansion: reject anything that starts with
+                // a literal (a relative result cannot be reparsed as a
+                // request URI, and the dataplane would silently forward the
+                // ORIGINAL path). Whitespace, '?', and '#' would corrupt
+                // the path/query split; control characters never belong.
+                if !substitution.starts_with(['/', '$', '{']) {
+                    issues.push(issue(
+                        "route",
+                        route,
+                        "action.rewrite.substitution",
+                        format!(
+                            "rewrite substitution '{substitution}' must start with '/' (or a \
+                             capture reference like '$1' / '${{name}}') so it expands to an \
+                             absolute path"
+                        ),
+                    ));
+                }
+                if substitution
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '?' || c == '#' || c.is_control())
+                {
+                    issues.push(issue(
+                        "route",
+                        route,
+                        "action.rewrite.substitution",
+                        format!(
+                            "rewrite substitution '{substitution}' must not contain \
+                             whitespace, '?', '#', or control characters"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Compiled route structures for one snapshot. Path-only lookup (v1); host,
-/// method, and header matching are applied by the dataplane after path
-/// resolution (documented deferral to the M1 dataplane issues).
+/// method, header, query, and cookie matching are applied by the dataplane
+/// after path resolution (see `proxy::route_applies`).
+///
+/// # Route precedence (canonical spec, DW-010)
+///
+/// A request path resolves to AT MOST ONE route, chosen across three
+/// path-match kinds in a fixed order:
+///
+/// 1. **Exact** — `matchit` radix templates (`type: exact`). Within this
+///    kind, `matchit`'s specificity rules apply: static segments beat
+///    parameters (`/users/active` before `/users/{id}`). Templates that
+///    would conflict are rejected at compile time
+///    ([`CompileError::RouteConflict`]), so there is no ambiguity here.
+/// 2. **Regex** — a shared `RegexSet` over all `type: regex` routes. When
+///    several patterns match, the FIRST-DECLARED route in config order
+///    wins (`RegexSet` returns matches in insertion order and lookup takes
+///    the first).
+/// 3. **Prefix** — byte-prefix matching (no segment boundary: `/v1` also
+///    matches `/v1anything`). The LONGEST matching prefix wins; equal-length
+///    ties go to the FIRST-DECLARED route (strict `>` comparison keeps the
+///    earlier entry).
+///
+/// Cross-kind precedence is therefore: exact beats regex beats prefix,
+/// regardless of declaration order and regardless of how "specific" a
+/// regex or prefix looks. A shorter exact template beats a longer regex.
+/// The prefix stored is the configured value with trailing `/` trimmed,
+/// so `/v1/` and `/v1` are the same prefix and equal-length ties are
+/// possible (first declared wins).
+///
+/// Non-path criteria (host, method, headers, query, cookies) are applied
+/// AFTER this resolution; a criteria miss does NOT fall through to the
+/// next candidate — the request is unmatched (404 in v1).
 ///
 /// Prefix lookup is a linear scan over the prefix list, O(n) in the number
 /// of prefix routes per request; fine at v1 route counts, revisit if route
-/// tables grow large. Prefixes are pure byte prefixes with no segment
-/// boundary: prefix `/v1` intentionally also matches `/v1anything`.
+/// tables grow large.
 #[derive(Debug)]
 pub struct RouteTable {
     exact: matchit::Router<usize>,
@@ -626,6 +790,10 @@ pub struct RouteTable {
     regex_set: regex::RegexSet,
     /// Route index per RegexSet member, in insertion order.
     regex_indices: Vec<usize>,
+    /// Compiled `path_rewrite.regex` pattern per route index (None where
+    /// the action carries no regex rewrite). Validation guarantees these
+    /// compiled at config-compile time, never at request time.
+    rewrite_regexes: Vec<Option<regex::Regex>>,
 }
 
 impl RouteTable {
@@ -635,18 +803,32 @@ impl RouteTable {
             prefixes: Vec::new(),
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
+            rewrite_regexes: Vec::new(),
         }
     }
 
     /// Resolve a request path to a route index. Precedence: exact template,
     /// then first regex match, then longest prefix. `None` means no route.
     pub fn find(&self, path: &str) -> Option<usize> {
+        self.find_full(path).map(|(idx, _)| idx)
+    }
+
+    /// Like [`RouteTable::find`] but also returns the path parameters
+    /// captured by an exact-template match (`{name}` segments), as
+    /// (name, value) pairs in template order. Regex- and prefix-kind
+    /// routes return an empty parameter list.
+    pub fn find_full(&self, path: &str) -> Option<(usize, Vec<(String, String)>)> {
         if let Ok(m) = self.exact.at(path) {
-            return Some(*m.value);
+            let params = m
+                .params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            return Some((*m.value, params));
         }
         let matches = self.regex_set.matches(path);
         if let Some(i) = matches.iter().next() {
-            return Some(self.regex_indices[i]);
+            return Some((self.regex_indices[i], Vec::new()));
         }
         let mut best: Option<(usize, usize)> = None; // (prefix len, index)
         for (prefix, idx) in &self.prefixes {
@@ -654,7 +836,13 @@ impl RouteTable {
                 best = Some((prefix.len(), *idx));
             }
         }
-        best.map(|(_, idx)| idx)
+        best.map(|(_, idx)| (idx, Vec::new()))
+    }
+
+    /// The compiled rewrite regex for `idx`, if the route's proxy action
+    /// carries a `path_rewrite.regex`.
+    pub fn rewrite_regex(&self, idx: usize) -> Option<&regex::Regex> {
+        self.rewrite_regexes.get(idx).and_then(|r| r.as_ref())
     }
 }
 
@@ -758,6 +946,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
     let mut prefixes = Vec::new();
     let mut regex_patterns = Vec::new();
     let mut regex_indices = Vec::new();
+    let mut rewrite_regexes: Vec<Option<regex::Regex>> = vec![None; gateway.routes.len()];
 
     for (idx, route) in gateway.routes.iter().enumerate() {
         let path = &route.r#match.path;
@@ -785,6 +974,17 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 regex_indices.push(idx);
             }
         }
+        if let RouteAction::Proxy {
+            rewrite: Some(PathRewrite::Regex { pattern, .. }),
+        } = &route.action
+        {
+            let compiled = regex::Regex::new(pattern).map_err(|e| CompileError::InvalidRegex {
+                route: route.name.clone(),
+                pattern: pattern.clone(),
+                message: e.to_string(),
+            })?;
+            rewrite_regexes[idx] = Some(compiled);
+        }
     }
 
     let regex_set =
@@ -802,6 +1002,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             prefixes,
             regex_set,
             regex_indices,
+            rewrite_regexes,
         }),
         content_hash: hasher.finish(),
     })
@@ -891,8 +1092,10 @@ mod tests {
                         host: None,
                         methods: vec![],
                         headers: Default::default(),
+                        query: vec![],
+                        cookies: vec![],
                     },
-                    action: RouteAction::Proxy {},
+                    action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                 },
                 Route {
@@ -906,8 +1109,10 @@ mod tests {
                         host: None,
                         methods: vec![],
                         headers: Default::default(),
+                        query: vec![],
+                        cookies: vec![],
                     },
-                    action: RouteAction::Proxy {},
+                    action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                 },
                 Route {
@@ -921,8 +1126,10 @@ mod tests {
                         host: None,
                         methods: vec![],
                         headers: Default::default(),
+                        query: vec![],
+                        cookies: vec![],
                     },
-                    action: RouteAction::Proxy {},
+                    action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                 },
             ],
@@ -1002,6 +1209,55 @@ mod tests {
             Err(CompileError::InvalidRegex { route, .. }) => assert_eq!(route, "legacy"),
             other => panic!("expected InvalidRegex, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compile_rejects_invalid_rewrite_regex_and_exposes_it_for_lookup() {
+        let mut gw = good_gateway();
+        gw.routes[0].action = RouteAction::Proxy {
+            rewrite: Some(PathRewrite::Regex {
+                pattern: "/bad/(unclosed".into(),
+                substitution: "/x/$1".into(),
+            }),
+        };
+        match compile(&gw) {
+            Err(CompileError::InvalidRegex { route, .. }) => assert_eq!(route, "users-get"),
+            other => panic!("expected InvalidRegex, got {other:?}"),
+        }
+
+        // Happy path: a compiling rewrite regex is stored for request-time
+        // lookup (never compiled per request).
+        gw.routes[0].action = RouteAction::Proxy {
+            rewrite: Some(PathRewrite::Regex {
+                pattern: r"/v1/users/(\d+)".into(),
+                substitution: "/u/$1".into(),
+            }),
+        };
+        let compiled = compile(&gw).expect("compiling rewrite regex");
+        assert!(compiled.route_table().rewrite_regex(0).is_some());
+        assert!(compiled.route_table().rewrite_regex(1).is_none());
+    }
+
+    #[test]
+    fn validate_rejects_malformed_rewrites_and_respond_headers() {
+        let mut gw = good_gateway();
+        gw.routes[0].action = RouteAction::Proxy {
+            rewrite: Some(PathRewrite::ReplacePrefix {
+                prefix: "api".into(),
+                replacement: "/internal".into(),
+            }),
+        };
+        assert!(validate(&gw)
+            .iter()
+            .any(|i| i.field == "action.rewrite.prefix"));
+
+        let mut gw = good_gateway();
+        gw.routes[0].action = RouteAction::Respond {
+            status: 200,
+            body: None,
+            headers: [("bad header".to_string(), "v".to_string())].into(),
+        };
+        assert!(validate(&gw).iter().any(|i| i.field == "action.headers"));
     }
 
     #[test]

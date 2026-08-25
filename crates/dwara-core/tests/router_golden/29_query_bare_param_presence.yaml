@@ -1,0 +1,13 @@
+# name: query-bare-param-presence
+# A bare parameter with no '=' counts as present for a presence-only
+# matcher (it splits to (name, "")).
+routes:
+  - name: beta-flag
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - name: beta
+    action: {type: proxy}
+request: {method: GET, path: '/search?beta'}
+expect: {route: beta-flag}

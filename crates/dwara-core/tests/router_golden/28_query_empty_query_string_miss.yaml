@@ -1,0 +1,13 @@
+# name: query-presence-empty-query-string
+# A bare trailing '?' yields an empty query string: the single empty
+# pair is not the parameter, so presence still misses.
+routes:
+  - name: beta-flag
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - name: beta
+    action: {type: proxy}
+request: {method: GET, path: '/search?'}
+expect: {route: null}

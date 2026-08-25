@@ -184,6 +184,27 @@ pub struct RouteMatch {
     /// Exact header matches.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub headers: std::collections::BTreeMap<String, String>,
+    /// Query-parameter matches; every entry must match (AND). Name-only
+    /// entries match on presence; a `value` requires an exact raw match (no
+    /// percent-decoding in v1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub query: Vec<NameValueMatch>,
+    /// Cookie matches (parsed from the `Cookie` header); every entry must
+    /// match (AND). Name-only entries match on presence; a `value` requires
+    /// an exact match (no cookie-unquoting in v1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cookies: Vec<NameValueMatch>,
+}
+
+/// One query-parameter or cookie criterion: the parameter/cookie must be
+/// present; when `value` is given it must equal that exact string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NameValueMatch {
+    pub name: String,
+    /// Exact value required; `None` means "present is enough".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 /// How a route's path pattern is interpreted.
@@ -209,7 +230,14 @@ pub enum PathMatchKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RouteAction {
     /// Forward to the route's service (its upstream).
-    Proxy {},
+    ///
+    /// `rewrite` (at most ONE per action in v1) is applied to the inbound
+    /// path before the request is sent upstream; the query string is always
+    /// preserved verbatim.
+    Proxy {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rewrite: Option<PathRewrite>,
+    },
     Redirect {
         #[serde(skip_serializing_if = "Option::is_none")]
         scheme: Option<String>,
@@ -223,6 +251,40 @@ pub enum RouteAction {
         status: u16,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<String>,
+        /// Extra response headers (name -> value), emitted verbatim.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        headers: std::collections::BTreeMap<String, String>,
+    },
+}
+
+/// Path rewrite applied before proxying (DW-010). Exactly one variant per
+/// proxy action; there is no rewrite chaining in v1. All variants operate
+/// on the path component only — the inbound query string is re-attached
+/// untouched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathRewrite {
+    /// Strip the route's matched prefix (the `match.path.value` with
+    /// trailing slashes trimmed) from the front of the request path.
+    /// Meaningful for prefix-kind routes; for other kinds it strips the
+    /// pattern's byte length when the path starts with the pattern value
+    /// and is a no-op otherwise. If nothing remains (or the remainder
+    /// lacks a leading `/`), the result is normalized to `/rest`.
+    StripPrefix {},
+    /// Replace a literal prefix: when the request path starts with
+    /// `prefix`, that prefix is replaced by `replacement`; otherwise this
+    /// rewrite is a no-op (the path is forwarded unchanged).
+    ReplacePrefix { prefix: String, replacement: String },
+    /// Replace the FIRST regex match on the request path with
+    /// `substitution`. Substitution references: `$1`..`$9` / `${n}` for
+    /// capture groups of `pattern`; `$name` / `${name}` for named capture
+    /// groups of `pattern`, falling back to path parameters captured by
+    /// the route's `{param}` template. Unknown references expand to the
+    /// empty string. The pattern must compile — checked at config compile
+    /// time, never at request time.
+    Regex {
+        pattern: String,
+        substitution: String,
     },
 }
 

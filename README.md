@@ -93,23 +93,59 @@ Config passes through a fixed pipeline before the gateway serves it:
   snapshot, and each successful publish gets a new generation id.
 
 Route paths match one of three ways: `exact` (a full template, path
-parameters like `/users/{id}` supported), `regex`, or `prefix`. Lookup
-precedence is exact, then regex (first declared pattern wins), then
-longest prefix. A route can also require a `host` (matched
-case-insensitively against the `Host` header, with or without a port),
-a list of `methods` (empty = all methods), and exact-value `headers`.
+parameters like `/users/{id}` supported), `regex`, or `prefix`. A
+request path resolves to at most ONE route, chosen in this order:
+
+1. **Exact** — the matchit radix template; static segments beat
+   parameters (`/users/active` before `/users/{id}`), and conflicting
+   templates are rejected at config-compile time.
+2. **Regex** — when several `regex` routes match, the FIRST-declared
+   one in config order wins.
+3. **Prefix** — the LONGEST matching prefix wins (byte prefix, no
+   segment boundary: `/v1` also matches `/v1anything`); equal-length
+   ties go to the first-declared route.
+
+Cross-kind order is fixed: exact beats regex beats prefix, regardless
+of declaration order or how specific a regex/prefix looks. A route can
+also require non-path criteria: a `host` (matched case-insensitively
+against the `Host` header, with or without a port — exact only, no
+wildcards), a list of `methods` (empty = all methods), exact-value
+`headers`, `query` parameters, and `cookies`:
+
+```yaml
+match:
+  path: { type: prefix, value: /api }
+  query:
+    - name: apikey            # present is enough
+    - name: version           # exact value required
+      value: "2"
+  cookies:
+    - name: session
+      value: abc123
+```
+
+Every criterion is AND-ed. Query and cookie matching is over the RAW
+bytes the client sent: no percent-decoding for query values and no
+cookie-unquoting in v1 — configure the value exactly as it appears on
+the wire. A path that resolves to a route whose criteria miss does NOT
+fall through to the next candidate route; the request is answered
+`404`.
 
 ### Route actions
 
 A matched route does one of three things:
 
-- `proxy`: forward to the route's service (and its upstream).
+- `proxy`: forward to the route's service (and its upstream). An
+  optional `rewrite` (at most one per action, no chaining) rewrites the
+  path before it is sent upstream — see below.
 - `redirect`: answer with a 3xx whose `Location` is built from the
   optional `scheme`, `host`, and `path`; when no `path` is configured
   the inbound path and query are preserved verbatim. `status` is
   required (e.g. 301, 302).
-- `respond`: answer directly with the configured `status` and optional
-  plain-text `body`.
+- `respond`: answer directly with the configured `status`, optional
+  plain-text `body`, and optional extra `headers` (a name-to-value map,
+  emitted verbatim; invalid header names/values are rejected by
+  validation).
 
 ```yaml
 routes:
@@ -134,6 +170,45 @@ routes:
 
 Requests that match no route (path or criteria miss) get a plain-text
 `404`.
+
+### Path rewrite (proxy)
+
+A `proxy` action may carry one `rewrite`, applied to the path component
+only — the query string is always re-attached verbatim. Three kinds:
+
+- `strip_prefix`: strip the route's matched prefix (the `match.path`
+  value with trailing slashes trimmed). If nothing remains, the result
+  is `/`.
+- `replace_prefix`: when the request path starts with `prefix`, replace
+  that prefix with `replacement` (must start with `/` or be empty);
+  otherwise the path is forwarded unchanged.
+- `regex`: replace the FIRST match of `pattern` with `substitution`.
+  The substitution may reference numbered capture groups (`$1`,
+  `${2}`, ...) and named groups of the pattern, falling back to the
+  route's `{param}` path-template captures; unknown references expand
+  to the empty string. The pattern must compile; this is checked at
+  config-compile time, never at request time.
+
+```yaml
+routes:
+  - name: api-strip
+    service: echo
+    match:
+      path: { type: prefix, value: /v1/ }
+    action:
+      type: proxy
+      rewrite: { type: strip_prefix }
+  - name: api-relabel
+    service: echo
+    match:
+      path: { type: regex, value: "^/api/(.*)$" }
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: "^/api/(.*)$"
+        substitution: "/internal/$1"
+```
 
 ### Proxying semantics
 

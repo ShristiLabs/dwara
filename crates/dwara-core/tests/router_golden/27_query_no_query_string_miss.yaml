@@ -1,0 +1,13 @@
+# name: query-presence-no-query-string
+# No query string at all: even a presence-only matcher misses (there is
+# no parameter, let alone the named one).
+routes:
+  - name: beta-flag
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - name: beta
+    action: {type: proxy}
+request: {method: GET, path: '/search'}
+expect: {route: null}

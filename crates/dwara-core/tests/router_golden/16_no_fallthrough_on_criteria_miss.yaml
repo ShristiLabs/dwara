@@ -1,0 +1,16 @@
+# name: criteria-miss-does-not-fall-through
+# The exact route wins path resolution but fails the method criterion; the
+# prefix fallback is NOT consulted — the request is unmatched (404 in v1).
+routes:
+  - name: exact-post-only
+    service: svc
+    match:
+      path: {type: exact, value: /report}
+      methods: [POST]
+    action: {type: proxy}
+  - name: catch-report
+    service: svc
+    match: {path: {type: prefix, value: /report}}
+    action: {type: proxy}
+request: {method: GET, path: /report}
+expect: {route: null}

@@ -1,0 +1,12 @@
+# name: query-presence-match
+# Name-only query matcher: the parameter being present is enough, any value.
+routes:
+  - name: beta-flag
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - name: beta
+    action: {type: proxy}
+request: {method: GET, path: '/search?q=x&beta=maybe'}
+expect: {route: beta-flag}

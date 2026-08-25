@@ -1,0 +1,15 @@
+# name: rewrite-regex-sees-matchit-params
+# A $name reference that misses the pattern's capture groups falls back to
+# the {param} captures of the exact-template match.
+routes:
+  - name: tenant-orders
+    service: svc
+    match: {path: {type: exact, value: '/tenants/{tenant}/orders/{id}'}}
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: '^/tenants/[^/]+'
+        substitution: '/t/${tenant}'
+request: {method: GET, path: /tenants/acme/orders/7}
+expect: {route: tenant-orders, upstream_path: '/t/acme/orders/7'}

@@ -1,0 +1,17 @@
+# name: rewrite-ref-collision-regex-group-beats-param
+# ${name} resolves against the rewrite pattern's own named group BEFORE
+# the exact-template {param} capture, so a collision is won by the
+# regex group ('reg', not the template capture 'reg-tail').
+routes:
+  - name: files
+    service: svc
+    match:
+      path: {type: exact, value: '/files/{id}'}
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: '^/files/(?P<id>reg)-tail$'
+        substitution: '${id}'
+request: {method: GET, path: /files/reg-tail}
+expect: {route: files, upstream_path: reg}

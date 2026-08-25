@@ -1,0 +1,12 @@
+# name: rewrite-replace-prefix
+# replace_prefix swaps a literal prefix when it matches.
+routes:
+  - name: legacy
+    service: svc
+    match:
+      path: {type: prefix, value: /v}
+    action:
+      type: proxy
+      rewrite: {type: replace_prefix, prefix: /v2, replacement: /internal/v2}
+request: {method: GET, path: /v2/users}
+expect: {route: legacy, upstream_path: /internal/v2/users}

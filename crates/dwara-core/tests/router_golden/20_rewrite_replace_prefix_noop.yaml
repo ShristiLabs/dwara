@@ -1,0 +1,12 @@
+# name: rewrite-replace-prefix-noop
+# The path does not start with the configured prefix: forwarded unchanged.
+routes:
+  - name: legacy
+    service: svc
+    match:
+      path: {type: prefix, value: /v}
+    action:
+      type: proxy
+      rewrite: {type: replace_prefix, prefix: /v2, replacement: /internal/v2}
+request: {method: GET, path: /v3/users}
+expect: {route: legacy, upstream_path: /v3/users}

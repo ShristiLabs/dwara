@@ -1,0 +1,14 @@
+# name: host-miss-is-no-route
+# A host criterion miss reads as "no route" (v1 has no fallthrough).
+routes:
+  - name: api-host
+    service: svc
+    match:
+      path: {type: prefix, value: /any}
+      host: api.example.com
+    action: {type: proxy}
+request:
+  method: GET
+  path: /anything/here
+  host: other.example.com
+expect: {route: null}

@@ -1,0 +1,15 @@
+# name: host-match-with-port
+# Host criterion matches the Host header case-insensitively, with or
+# without a port.
+routes:
+  - name: api-host
+    service: svc
+    match:
+      path: {type: prefix, value: /any}
+      host: api.example.com
+    action: {type: proxy}
+request:
+  method: GET
+  path: /anything/here
+  host: API.example.com:8443
+expect: {route: api-host}

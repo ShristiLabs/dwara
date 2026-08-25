@@ -1,0 +1,16 @@
+# name: cookie-no-spaces-after-semicolon
+# 'a=1;b=2' without spaces parses identically (trim is a no-op here).
+routes:
+  - name: session-route
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: b, value: '2'}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/home
+  headers:
+    cookie: 'a=1;b=2'
+expect: {route: session-route}

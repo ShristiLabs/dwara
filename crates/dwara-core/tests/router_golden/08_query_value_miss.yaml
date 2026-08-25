@@ -1,0 +1,12 @@
+# name: query-value-must-match-exactly
+# Value query matcher requires the exact raw value; a wrong value is a miss.
+routes:
+  - name: beta-on
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: beta, value: "true"}
+    action: {type: proxy}
+request: {method: GET, path: '/search?beta=false'}
+expect: {route: null}

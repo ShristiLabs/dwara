@@ -1,0 +1,16 @@
+# name: respond-action-carries-headers
+# Direct responses accept extra response headers (additive v1 schema).
+routes:
+  - name: maintenance
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+    action:
+      type: respond
+      status: 503
+      body: back in 5
+      headers:
+        retry-after: '300'
+        x-maintenance: 'true'
+request: {method: GET, path: /app/anything}
+expect: {route: maintenance}

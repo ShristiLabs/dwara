@@ -1392,3 +1392,229 @@ async fn dataplane_new_loads_once_and_serves_without_refresh() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_text(resp.into_body()).await, "ok");
 }
+
+// --- 13. DW-010 routing through real HTTP -------------------------------------
+
+fn dw010_yaml(backend_port: u16, routes: &str) -> String {
+    format!(
+        "routes:\n\
+         {routes}\
+         services:\n\
+         - name: svc\n\
+         \x20 upstream: up\n\
+         upstreams:\n\
+         - name: up\n\
+         \x20 endpoints:\n\
+         \x20   - address: 127.0.0.1\n\
+         \x20     port: {backend_port}\n"
+    )
+}
+
+#[tokio::test]
+async fn matching_cookie_and_query_reach_upstream_with_rewritten_path() {
+    let backend = spawn_backend_full(Arc::new(|req: Request<Incoming>| {
+        Response::new(Full::new(Bytes::from(req.uri().to_string())))
+    }))
+    .await;
+    let yaml = dw010_yaml(
+        backend,
+        "- name: api\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /api\n\
+         \x20   query:\n\
+         \x20     - {name: v, value: '2'}\n\
+         \x20   cookies:\n\
+         \x20     - {name: session, value: abc}\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         \x20   rewrite:\n\
+         \x20     type: replace_prefix\n\
+         \x20     prefix: /api\n\
+         \x20     replacement: /internal\n",
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .uri(uri(port, "/api/orders?x=9&v=2"))
+                .header("cookie", "other=1; session=abc")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "/internal/orders?x=9&v=2",
+        "criteria matched: rewrite applied AND query preserved upstream"
+    );
+}
+
+#[tokio::test]
+async fn non_matching_query_is_404_with_no_upstream_contact() {
+    let hit = Arc::new(AtomicBool::new(false));
+    let h = Arc::clone(&hit);
+    let backend = spawn_backend_full(Arc::new(move |_req: Request<Incoming>| {
+        h.store(true, Ordering::SeqCst);
+        Response::new(Full::new(Bytes::from_static(b"should-not-happen")))
+    }))
+    .await;
+    let yaml = dw010_yaml(
+        backend,
+        "- name: api\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /api\n\
+         \x20   query:\n\
+         \x20     - {name: v, value: '2'}\n\
+         \x20 action:\n\
+         \x20   type: proxy\n",
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client().get(uri(port, "/api/x?v=wrong")).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "criteria miss must not fall through to any other route: 404"
+    );
+    assert_eq!(body_text(resp.into_body()).await, "no route");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !hit.load(Ordering::SeqCst),
+        "a criteria miss must never reach the upstream"
+    );
+}
+
+#[tokio::test]
+async fn respond_action_headers_reach_the_client() {
+    let yaml = dw010_yaml(
+        9,
+        "- name: fixed\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /maintenance\n\
+         \x20 action:\n\
+         \x20   type: respond\n\
+         \x20   status: 503\n\
+         \x20   body: down for maintenance\n\
+         \x20   headers:\n\
+         \x20     x-retry-after-s: '30'\n\
+         \x20     x-tag: dwara\n",
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client()
+        .get(uri(port, "/maintenance/anything"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers().get("x-retry-after-s").unwrap(), "30");
+    assert_eq!(resp.headers().get("x-tag").unwrap(), "dwara");
+    assert_eq!(body_text(resp.into_body()).await, "down for maintenance");
+}
+
+#[tokio::test]
+async fn query_string_survives_every_rewrite_kind() {
+    let backend = spawn_backend_full(Arc::new(|req: Request<Incoming>| {
+        Response::new(Full::new(Bytes::from(req.uri().to_string())))
+    }))
+    .await;
+    let yaml = dw010_yaml(
+        backend,
+        "- name: strip\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /s\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         \x20   rewrite: {type: strip_prefix}\n\
+         - name: replace\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /r\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         \x20   rewrite:\n\
+         \x20     type: replace_prefix\n\
+         \x20     prefix: /r\n\
+         \x20     replacement: /replaced\n\
+         - name: regex\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /x\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         \x20   rewrite:\n\
+         \x20     type: regex\n\
+         \x20     pattern: '^/x/(.*)$'\n\
+         \x20     substitution: '/xr/$1'\n",
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    for (inbound, expected) in [
+        ("/s/deep/path?keep=1", "/deep/path?keep=1"),
+        ("/r/deep?keep=1", "/replaced/deep?keep=1"),
+        ("/x/thing?keep=1", "/xr/thing?keep=1"),
+    ] {
+        let resp = h1_client().get(uri(port, inbound)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_text(resp.into_body()).await,
+            expected,
+            "query must survive the rewrite for '{inbound}'"
+        );
+    }
+}
+
+#[test]
+fn relative_rewrite_substitution_is_rejected_at_compile_time() {
+    // TEST EDIT (DW-010 hardening follow-up): this test previously pinned
+    // the OLD behavior end-to-end — a substitution without a leading '/'
+    // produced a relative path that could not be reparsed as a URI, and
+    // the dataplane silently forwarded the original path. Validation now
+    // rejects the shape at compile time, so the config must not publish.
+    // The runtime no-op in proxy::handle remains only as defense-in-depth
+    // for snapshots compiled before the rule.
+    let yaml = dw010_yaml(
+        9,
+        "- name: rel\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /rel\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         \x20   rewrite:\n\
+         \x20     type: regex\n\
+         \x20     pattern: '^/rel/(.*)$'\n\
+         \x20     substitution: 'v1/$1'\n",
+    );
+    let gateway = parse_gateway(&yaml).expect("test config parses");
+    let state = ConfigState::new();
+    match state.compile_and_publish(&gateway) {
+        Err(CompileError::Validation(issues)) => assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "action.rewrite.substitution"),
+            "expected a substitution issue, got: {issues:?}"
+        ),
+        other => panic!("expected Validation rejection, got {other:?}"),
+    }
+}

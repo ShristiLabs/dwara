@@ -1,0 +1,14 @@
+# name: rewrite-regex-positional-captures
+# Regex rewrite with $1/$2 positional capture substitution on the path.
+routes:
+  - name: shop
+    service: svc
+    match: {path: {type: regex, value: '/shop/(.+)/item/(.+)$'}}
+    action:
+      type: proxy
+      rewrite:
+        type: regex
+        pattern: '^/shop/(.+)/item/(.+)$'
+        substitution: '/catalog/$1/product/$2'
+request: {method: GET, path: /shop/books/item/42}
+expect: {route: shop, upstream_path: /catalog/books/product/42}

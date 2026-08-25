@@ -1,8 +1,8 @@
 //! Reverse-proxy dataplane (DW-009, feature analysis sections 4.1 and 9.2).
 //!
 //! Per request: snapshot lookup, route resolution (path via the compiled
-//! [`RouteTable`](crate::snapshot::RouteTable), then the route's non-path
-//! criteria: host, methods, headers), and the route action:
+//! `RouteTable`, then the route's non-path criteria: host, methods,
+//! headers, query, cookies), and the route action:
 //!
 //! - `proxy`: strip hop-by-hop headers, rebuild `Host` to the upstream
 //!   authority (upstream `address:port`, NOT the inbound host — v1 choice:
@@ -65,12 +65,15 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderMap, HeaderName, HeaderValue, CONNECTION, HOST, LOCATION, UPGRADE};
+use hyper::header::{
+    HeaderMap, HeaderName, HeaderValue, CONNECTION, COOKIE, HOST, LOCATION, UPGRADE,
+};
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::config::{Gateway, Route, RouteAction, RouteMatch};
+use crate::config::{Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch};
+use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
 use crate::upstream::{UpstreamError, UpstreamRegistry};
 
@@ -140,7 +143,7 @@ where
     let gateway = gen.snapshot.gateway();
     let path = req.uri().path().to_string();
 
-    let Some(idx) = gen.snapshot.route_table().find(&path) else {
+    let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
         return simple(StatusCode::NOT_FOUND, "no route");
     };
     let Some(route) = gateway.routes.get(idx) else {
@@ -152,7 +155,9 @@ where
     }
 
     match &route.action {
-        RouteAction::Proxy {} => proxy_request(&gen, gateway, peer, req, route).await,
+        RouteAction::Proxy { .. } => {
+            proxy_request(&gen, gateway, peer, req, route, idx, &params).await
+        }
         RouteAction::Redirect {
             scheme,
             host,
@@ -165,14 +170,22 @@ where
             redirect_path.as_deref(),
             *status,
         ),
-        RouteAction::Respond { status, body } => respond(*status, body.as_deref()),
+        RouteAction::Respond {
+            status,
+            body,
+            headers,
+        } => respond(*status, body.as_deref(), headers),
     }
 }
 
-/// Apply the route's non-path criteria. Empty method list = all methods;
-/// host matches the `Host` header (case-insensitive, with or without a
-/// port); headers must all be present with exact values.
-fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
+/// Apply the route's non-path criteria. All criteria are AND-ed. Empty
+/// method list = all methods; host matches the `Host` header
+/// (case-insensitive, with or without a port); headers must all be present
+/// with exact values; query and cookie entries match on presence, or on
+/// exact value when one is configured. Public so router golden-file tests
+/// (tests/router_golden.rs) can exercise the full resolution pipeline
+/// without a live upstream.
+pub fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
     if let Some(want) = &m.host {
         let Some(got) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
             return false;
@@ -200,7 +213,179 @@ fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
             None => return false,
         }
     }
+    let query = req.uri().query();
+    for want in &m.query {
+        if !query_param_matches(query, want) {
+            return false;
+        }
+    }
+    for want in &m.cookies {
+        let present = req.headers().get_all(COOKIE).iter().any(|header| {
+            header
+                .to_str()
+                .map(|raw| {
+                    parse_cookies(raw)
+                        .iter()
+                        .any(|(n, v)| name_value_hits(n, v, want))
+                })
+                .unwrap_or(false)
+        });
+        if !present {
+            return false;
+        }
+    }
     true
+}
+
+/// One `key=value` (or bare `key`) pair of a query string. No
+/// percent-decoding in v1: matching is over the raw bytes the client sent.
+fn query_param_matches(query: Option<&str>, want: &NameValueMatch) -> bool {
+    let Some(raw) = query else { return false };
+    raw.split('&').any(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        name_value_hits(name, value, want)
+    })
+}
+
+/// Parse a `Cookie` request header into (name, value) pairs. Simple
+/// RFC-6265-shaped parsing: split on `;`, trim spaces, split each pair on
+/// the FIRST `=`. No quoting/encoding handling in v1 — values are matched
+/// exactly as sent. Public for the router golden-file tests.
+pub fn parse_cookies(header: &str) -> Vec<(&str, &str)> {
+    header
+        .split(';')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                return None;
+            }
+            Some(pair.split_once('=').unwrap_or((pair, "")))
+        })
+        .collect()
+}
+
+fn name_value_hits(name: &str, value: &str, want: &NameValueMatch) -> bool {
+    if name != want.name {
+        return false;
+    }
+    match &want.value {
+        Some(v) => value == v,
+        None => true,
+    }
+}
+
+/// Apply a proxy action's path rewrite (DW-010). `params` are the
+/// `{param}` captures of the exact-template match for this request (empty
+/// for regex/prefix routes); they are available to `regex` substitutions
+/// as `$name` references that miss the pattern's own capture groups.
+/// Returns the rewritten path; a rewrite that does not apply (e.g.
+/// `strip_prefix` on a path that does not start with the prefix) leaves
+/// the path unchanged. The query string is NOT touched here — the caller
+/// re-attaches it. Public for the router golden-file tests.
+pub fn apply_path_rewrite(
+    route: &Route,
+    table: &RouteTable,
+    idx: usize,
+    path: &str,
+    params: &[(String, String)],
+) -> String {
+    let rewrite = match &route.action {
+        RouteAction::Proxy { rewrite: Some(rw) } => rw,
+        _ => return path.to_string(),
+    };
+    match rewrite {
+        PathRewrite::StripPrefix {} => {
+            let prefix = route.r#match.path.value.trim_end_matches('/');
+            match path.strip_prefix(prefix) {
+                Some("") => "/".to_string(),
+                Some(rest) if rest.starts_with('/') => rest.to_string(),
+                Some(rest) => format!("/{rest}"),
+                None => path.to_string(),
+            }
+        }
+        PathRewrite::ReplacePrefix {
+            prefix,
+            replacement,
+        } => match path.strip_prefix(prefix) {
+            Some(rest) => format!("{replacement}{rest}"),
+            None => path.to_string(),
+        },
+        PathRewrite::Regex { substitution, .. } => match table.rewrite_regex(idx) {
+            Some(re) => re
+                .replace(path, |caps: &regex::Captures<'_>| {
+                    expand_substitution(substitution, caps, params)
+                })
+                .into_owned(),
+            None => path.to_string(),
+        },
+    }
+}
+
+/// Expand `$1` / `${name}` references against a regex match. Lookup order
+/// for a name: numeric -> pattern capture group by index; otherwise ->
+/// pattern named group, then the route's `{param}` path capture; unknown
+/// references expand to the empty string. A lone `$` (end of string, or
+/// followed by a non-identifier character) is kept literally.
+pub fn expand_substitution(
+    substitution: &str,
+    caps: &regex::Captures<'_>,
+    params: &[(String, String)],
+) -> String {
+    let mut out = String::with_capacity(substitution.len());
+    let mut rest = substitution;
+    while let Some(dollar) = rest.find('$') {
+        out.push_str(&rest[..dollar]);
+        let after = &rest[dollar + 1..];
+        if after.is_empty() {
+            out.push('$');
+            rest = after;
+            break;
+        }
+        if let Some(braced) = after.strip_prefix('{') {
+            match braced.find('}') {
+                Some(end) => {
+                    out.push_str(resolve_ref(&braced[..end], caps, params));
+                    rest = &braced[end + 1..];
+                }
+                None => {
+                    out.push('$');
+                    rest = after;
+                }
+            }
+        } else {
+            let end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            if end == 0 {
+                out.push('$');
+                rest = after;
+            } else {
+                out.push_str(resolve_ref(&after[..end], caps, params));
+                rest = &after[end..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn resolve_ref<'a>(
+    name: &str,
+    caps: &'a regex::Captures<'_>,
+    params: &'a [(String, String)],
+) -> &'a str {
+    if let Ok(i) = name.parse::<usize>() {
+        return caps.get(i).map(|m| m.as_str()).unwrap_or("");
+    }
+    caps.name(name)
+        .map(|m| m.as_str())
+        .or_else(|| {
+            params
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        })
+        .unwrap_or("")
 }
 
 async fn proxy_request<B>(
@@ -209,6 +394,8 @@ async fn proxy_request<B>(
     peer: IpAddr,
     mut req: Request<B>,
     route: &Route,
+    route_idx: usize,
+    params: &[(String, String)],
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -232,6 +419,31 @@ where
             StatusCode::NOT_IMPLEMENTED,
             "protocol upgrade is not supported over HTTP/2",
         );
+    }
+
+    // Path rewrite (DW-010): applied to the path component only, before
+    // anything is sent upstream; the inbound query string is re-attached
+    // verbatim. Validation rejects relative substitutions, so a parse
+    // failure here should be unreachable for a freshly compiled config —
+    // the no-op fallback below stays as defense-in-depth (e.g. a snapshot
+    // compiled before this rule): keep the original path, never a 500,
+    // never a panic.
+    let inbound = req.uri().clone();
+    let new_path = apply_path_rewrite(
+        route,
+        gen.snapshot.route_table(),
+        route_idx,
+        inbound.path(),
+        params,
+    );
+    if new_path != inbound.path() {
+        let pq = match inbound.query() {
+            Some(q) => format!("{new_path}?{q}"),
+            None => new_path,
+        };
+        if let Ok(uri) = pq.parse() {
+            *req.uri_mut() = uri;
+        }
     }
 
     // The inbound upgrade handle, if the listener enabled upgrades: pulled
@@ -391,11 +603,26 @@ fn redirect<B>(
         .expect("static redirect response is valid")
 }
 
-fn respond(status: u16, body: Option<&str>) -> Response<ProxyBody> {
+fn respond(
+    status: u16,
+    body: Option<&str>,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Response<ProxyBody> {
     let body = body.unwrap_or("");
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::CONTENT_TYPE, "text/plain");
+    for (name, value) in headers {
+        // Validation rejects unbuildable name/value pairs; skip rather
+        // than panic if a generation tear slipped one through.
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            builder = builder.header(n, v);
+        }
+    }
+    builder
         .body(Either::Left(Full::new(Bytes::from(body.to_string()))))
         .expect("static respond body is valid")
 }

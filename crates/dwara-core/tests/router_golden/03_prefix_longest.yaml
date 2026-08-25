@@ -1,0 +1,13 @@
+# name: prefix-longest-wins
+# Within the prefix kind, the longest matching prefix wins.
+routes:
+  - name: api-short
+    service: svc
+    match: {path: {type: prefix, value: /api}}
+    action: {type: proxy}
+  - name: api-v1
+    service: svc
+    match: {path: {type: prefix, value: /api/v1}}
+    action: {type: proxy}
+request: {method: GET, path: /api/v1/users}
+expect: {route: api-v1}

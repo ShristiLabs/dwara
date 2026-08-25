@@ -1,0 +1,14 @@
+# name: exact-beats-regex
+# Cross-kind precedence: an exact template wins over a regex route even
+# though the regex was declared first and matches the same path.
+routes:
+  - name: anything-health
+    service: svc
+    match: {path: {type: regex, value: '/health.*'}}
+    action: {type: proxy}
+  - name: healthz-exact
+    service: svc
+    match: {path: {type: exact, value: /healthz}}
+    action: {type: proxy}
+request: {method: GET, path: /healthz}
+expect: {route: healthz-exact}

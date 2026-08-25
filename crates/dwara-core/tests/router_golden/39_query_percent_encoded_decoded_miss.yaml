@@ -1,0 +1,13 @@
+# name: query-percent-encoded-decoded-miss
+# The documented flip side: a=%20 does NOT match a space — the gateway
+# never decodes the query before matching.
+routes:
+  - name: raw
+    service: svc
+    match:
+      path: {type: prefix, value: /search}
+      query:
+        - {name: a, value: ' '}
+    action: {type: proxy}
+request: {method: GET, path: '/search?a=%20'}
+expect: {route: null}

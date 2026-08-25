@@ -1,0 +1,17 @@
+# name: multiple-cookie-headers
+# Several Cookie header lines: every line is parsed and any line may
+# satisfy the criterion (get_all, not get).
+routes:
+  - name: session-route
+    service: svc
+    match:
+      path: {type: prefix, value: /app}
+      cookies:
+        - {name: b, value: '2'}
+    action: {type: proxy}
+request:
+  method: GET
+  path: /app/home
+  headers:
+    cookie: ['a=1', 'b=2']
+expect: {route: session-route}

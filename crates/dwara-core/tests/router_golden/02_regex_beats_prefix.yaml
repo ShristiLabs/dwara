@@ -1,0 +1,13 @@
+# name: regex-beats-prefix
+# Cross-kind precedence: regex beats prefix regardless of declaration order.
+routes:
+  - name: v1-prefix
+    service: svc
+    match: {path: {type: prefix, value: /v1}}
+    action: {type: proxy}
+  - name: v1-regex
+    service: svc
+    match: {path: {type: regex, value: '/v1/'}}
+    action: {type: proxy}
+request: {method: GET, path: /v1/users}
+expect: {route: v1-regex}
