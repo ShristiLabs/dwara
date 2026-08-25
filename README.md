@@ -57,6 +57,26 @@ full). A machine-readable `json_schema()` export exists
 programmatically; it is the intended canonical reference once the
 schema stabilizes. The schema still churns during M1.
 
+Config passes through a fixed pipeline before the gateway serves it:
+
+- **Parse** (strict): unknown fields rejected, errors carry the path of
+  the offending node.
+- **Validate** (semantic): duplicate names, unknown upstream/service/
+  policy references, listener address+port conflicts, empty or invalid
+  credentials and endpoint weights are checked, and every issue is
+  reported at once rather than one per attempt.
+- **Compile**: route paths are built into lookup structures. This is
+  where schema-valid config can still fail (an invalid regex or
+  conflicting path template names the route and pattern at fault).
+- **Publish** (atomic): a config that fails anywhere above never
+  replaces the running one; the gateway keeps serving the previous
+  snapshot, and each successful publish gets a new generation id.
+
+Route paths match one of three ways: `exact` (a full template, path
+parameters like `/users/{id}` supported), `regex`, or `prefix`. Lookup
+precedence is exact, then regex (first declared pattern wins), then
+longest prefix.
+
 ## Crates
 
 | Crate | Role |

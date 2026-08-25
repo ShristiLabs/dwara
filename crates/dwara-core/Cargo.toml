@@ -12,6 +12,9 @@ serde = { workspace = true }
 serde_path_to_error = { workspace = true }
 serde_yaml_ng = { workspace = true }
 async-trait = { workspace = true }
+arc-swap = { workspace = true }
+matchit = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
