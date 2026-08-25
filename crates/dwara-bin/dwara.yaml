@@ -1,6 +1,13 @@
 # Default dwara configuration, loaded when DWARA_CONFIG is not set and the
-# binary runs from this directory. The served response is still the M1 hello
-# placeholder; the config drives validation and the hot-reload snapshot.
+# binary runs from this directory. Requests are PROXIED: the route below
+# forwards everything under /v1 to the echo-upstream pool, whose endpoint
+# points at an example backend on 127.0.0.1:9000. Run any HTTP server
+# there (e.g. `python3 -m http.server 9000`) and the gateway will stream
+# requests and responses through it unbuffered.
+#
+# trusted_proxies (gateway-level, optional) lists IPs/CIDRs whose inbound
+# X-Forwarded-For chains are preserved; unset means trust nobody and every
+# proxied request carries XFF = the direct peer.
 listeners:
   - name: main
     address: 0.0.0.0

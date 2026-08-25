@@ -46,21 +46,24 @@ fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn config_v1() -> String {
-    "\
+fn respond_config(body: &str) -> String {
+    format!(
+        "\
 listeners:
   - name: main
     address: 127.0.0.1
     port: 8080
 routes:
-  - name: v1
+  - name: all
     service: echo
     match:
       path:
-        type: prefix
-        value: /v1
+        type: regex
+        value: /.*
     action:
-      type: proxy
+      type: respond
+      status: 200
+      body: {body}
 services:
   - name: echo
     upstream: echo-upstream
@@ -70,11 +73,16 @@ upstreams:
       - address: 127.0.0.1
         port: 9000
 "
-    .to_string()
+    )
 }
 
+fn config_v1() -> String {
+    respond_config("dwara")
+}
+
+/// Valid change flipping the route's served content (DW-009 hot-swap).
 fn config_v2() -> String {
-    config_v1().replace("value: /v1", "value: /v2")
+    respond_config("dwara-v2")
 }
 
 struct Output {
@@ -135,26 +143,29 @@ fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
     false
 }
 
-/// One GET with `Connection: close`; true iff HTTP 200 and body "dwara".
-fn one_shot_request(stream: &mut TcpStream) -> bool {
-    if stream
+/// One GET with `Connection: close`; returns the full response text, or
+/// None on any transport failure.
+fn one_shot_text(stream: &mut TcpStream) -> Option<String> {
+    stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
+        .ok()?;
     let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() {
+    stream.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// One GET; true iff HTTP 200 with the pre- or post-reload respond body.
+fn one_shot_request(stream: &mut TcpStream) -> bool {
+    let Some(text) = one_shot_text(stream) else {
         return false;
-    }
-    let text = String::from_utf8_lossy(&buf);
+    };
     (text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200"))
-        && text.ends_with("dwara")
+        && (text.ends_with("dwara") || text.ends_with("dwara-v2"))
 }
 
 /// One keepalive GET (no `Connection: close`): read headers until the
-/// blank line, then exactly Content-Length body bytes. The response body
-/// is a fixed "dwara" (5 bytes).
+/// blank line, parse Content-Length, then read exactly that many body
+/// bytes. The body is the pre- or post-reload respond content.
 fn keepalive_request(stream: &mut TcpStream) -> bool {
     if stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -180,8 +191,20 @@ fn keepalive_request(stream: &mut TcpStream) -> bool {
     if !(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")) {
         return false;
     }
-    let mut body = [0u8; 5];
-    stream.read_exact(&mut body).is_ok() && &body == b"dwara"
+    let len: usize = head
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .find_map(|(k, v)| {
+            (k.trim().eq_ignore_ascii_case("content-length"))
+                .then(|| v.trim().parse().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; len];
+    if stream.read_exact(&mut body).is_err() {
+        return false;
+    }
+    &body == b"dwara" || &body == b"dwara-v2"
 }
 
 fn kill_signal(pid: u32, sig: &str) {
@@ -311,9 +334,12 @@ fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
     std::thread::sleep(Duration::from_millis(1500));
 
     let mut stream = TcpStream::connect(&addr).expect("connect after empty reload");
+    // The empty gateway has no routes, so the dataplane answers a clean
+    // 404 — still an HTTP response from the running generation.
+    let text = one_shot_text(&mut stream).expect("server must keep answering after empty reload");
     assert!(
-        one_shot_request(&mut stream),
-        "server must keep serving after empty-config reload"
+        text.starts_with("HTTP/1.1 404"),
+        "empty generation serves 404 no-route: {text}"
     );
 
     kill_signal(guard.0.id(), "TERM");

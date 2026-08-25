@@ -127,6 +127,19 @@ fn issue(entity: &str, name: &str, field: &str, message: impl Into<String>) -> V
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
 
+    // Trusted proxies: each entry must be an IP address or CIDR (parsed by
+    // the dataplane's trusted-proxy matcher; rejected here at compile time).
+    for (i, entry) in gateway.trusted_proxies.iter().enumerate() {
+        if crate::proxy::parse_ip_or_cidr(entry).is_none() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("trusted_proxies[{i}]"),
+                format!("'{entry}' is not an IP address or CIDR (e.g. 10.0.0.0/8 or ::1/128)"),
+            ));
+        }
+    }
+
     // Duplicate names within each entity kind.
     let mut check_dups = |kind: &str, field: &str, names: Vec<&str>| {
         let mut seen = std::collections::BTreeSet::new();
@@ -418,7 +431,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             ));
         }
         match r.action {
-            RouteAction::Redirect { status, .. } => {
+            RouteAction::Redirect {
+                status,
+                ref scheme,
+                ref host,
+                path: ref redirect_path,
+            } => {
                 if !(300..=399).contains(&status) {
                     issues.push(issue(
                         "route",
@@ -426,6 +444,52 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                         "action.status",
                         format!("redirect status {status} is not a 3xx redirect"),
                     ));
+                }
+                // Location is built into a HeaderValue at request time; a
+                // hostile config must fail HERE, not panic the dataplane.
+                if let Some(s) = scheme {
+                    if !s.eq_ignore_ascii_case("http") && !s.eq_ignore_ascii_case("https") {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.scheme",
+                            format!("redirect scheme '{s}' must be http or https"),
+                        ));
+                    }
+                }
+                if let Some(h) = host {
+                    if h.is_empty() || !h.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.host",
+                            format!(
+                                "redirect host '{h}' contains whitespace or control \
+                                 characters and cannot form a Location header"
+                            ),
+                        ));
+                    }
+                }
+                if let Some(p) = redirect_path {
+                    if !p.is_empty() && !p.starts_with('/') {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.path",
+                            format!("redirect path '{p}' must start with '/' or be empty"),
+                        ));
+                    }
+                    if !p.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "action.path",
+                            format!(
+                                "redirect path '{p}' contains control characters and \
+                                 cannot form a Location header"
+                            ),
+                        ));
+                    }
                 }
             }
             RouteAction::Respond { status, .. } => {
@@ -634,6 +698,7 @@ impl Snapshot {
             generation: 0,
             content_hash: 0,
             gateway: Arc::new(Gateway {
+                trusted_proxies: vec![],
                 listeners: Vec::new(),
                 routes: Vec::new(),
                 services: Vec::new(),
@@ -806,6 +871,7 @@ mod tests {
 
     fn good_gateway() -> Gateway {
         Gateway {
+            trusted_proxies: vec![],
             listeners: vec![Listener {
                 name: "main".into(),
                 address: "0.0.0.0".into(),

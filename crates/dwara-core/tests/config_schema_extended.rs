@@ -479,6 +479,7 @@ fn duplicate_keys_inside_a_listener_are_rejected() {
 fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
     use dwara_core::config::*;
     let gw = Gateway {
+        trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "l".into(),
             address: "0.0.0.0".into(),

@@ -75,6 +75,7 @@ fn upstream(name: &str) -> Upstream {
 /// one upstream.
 fn base_gateway() -> Gateway {
     Gateway {
+        trusted_proxies: vec![],
         listeners: vec![listener("l", "0.0.0.0", 8080)],
         routes: vec![proxy_route("r", PathMatchKind::Exact, "/x")],
         services: vec![service("svc", "pool")],

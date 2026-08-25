@@ -59,6 +59,15 @@ pub struct Gateway {
     /// Named reusable rule bundles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<Policy>,
+    /// IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims
+    /// are trusted (gateway-level; the direct connection peer must be in
+    /// this list for an inbound XFF chain to be preserved and extended).
+    /// Each entry must be an IP address (e.g. `10.1.2.3`) or a CIDR
+    /// (e.g. `10.0.0.0/8`); anything else fails validation. Empty (the
+    /// default) trusts nobody: every proxied request carries an XFF of
+    /// exactly the direct peer, and inbound XFF values are discarded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
 }
 
 /// Entry point: bind address + port + TLS termination (or passthrough) config.

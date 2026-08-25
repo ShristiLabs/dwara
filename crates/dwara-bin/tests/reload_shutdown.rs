@@ -40,21 +40,24 @@ fn unique_temp_config(tag: &str) -> PathBuf {
     ))
 }
 
-fn config_v1() -> String {
-    "\
+fn respond_config(body: &str) -> String {
+    format!(
+        "\
 listeners:
   - name: main
     address: 127.0.0.1
     port: 8080
 routes:
-  - name: v1
+  - name: all
     service: echo
     match:
       path:
-        type: prefix
-        value: /v1
+        type: regex
+        value: /.*
     action:
-      type: proxy
+      type: respond
+      status: 200
+      body: {body}
 services:
   - name: echo
     upstream: echo-upstream
@@ -64,11 +67,17 @@ upstreams:
       - address: 127.0.0.1
         port: 9000
 "
-    .to_string()
+    )
 }
 
+fn config_v1() -> String {
+    respond_config("dwara")
+}
+
+/// Valid change flipping the route's served content: the reload visibly
+/// hot-swaps route behavior mid-traffic (DW-009 headline).
 fn config_v2() -> String {
-    config_v1().replace("value: /v1", "value: /v2")
+    respond_config("dwara-v2")
 }
 
 fn config_invalid() -> String {
@@ -125,21 +134,26 @@ fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
     false
 }
 
-/// One GET with connection: close. Returns (ok, body_matched).
-fn one_request(stream: &mut TcpStream) -> (bool, bool) {
+/// One GET with connection: close. Returns (ok, v1_body, v2_body): the
+/// response is a 200 whose body is the pre-reload or post-reload content.
+fn one_request(stream: &mut TcpStream) -> (bool, bool, bool) {
     if stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .is_err()
     {
-        return (false, false);
+        return (false, false, false);
     }
     let mut buf = Vec::new();
     if stream.read_to_end(&mut buf).is_err() {
-        return (false, false);
+        return (false, false, false);
     }
     let text = String::from_utf8_lossy(&buf);
     let ok = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
-    (ok, text.ends_with("dwara"))
+    (
+        ok,
+        text.ends_with("dwara\r\n") || text.ends_with("dwara"),
+        text.ends_with("dwara-v2"),
+    )
 }
 
 fn kill_signal(pid: u32, sig: &str) {
@@ -165,28 +179,38 @@ fn wait_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
 }
 
 /// N concurrent request-driver threads; each loops GETs until `stop` is
-/// set, counting failures. Returns total requests served. Failures include
-/// any connect error, read error, non-200, or wrong body.
+/// set, counting failures. Returns (total served, v1 bodies, v2 bodies).
+/// Failures include any connect error, read error, non-200, or an
+/// unexpected body (neither the pre- nor the post-reload content).
 fn drive_requests(
     addr: &str,
     threads: usize,
     stop: Arc<AtomicBool>,
     failures: Arc<AtomicUsize>,
-) -> std::thread::JoinHandle<usize> {
+) -> std::thread::JoinHandle<(usize, usize, usize)> {
     let total = Arc::new(AtomicUsize::new(0));
+    let v1 = Arc::new(AtomicUsize::new(0));
+    let v2 = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     for _ in 0..threads {
         let addr = addr.to_string();
         let stop = Arc::clone(&stop);
         let failures = Arc::clone(&failures);
         let total = Arc::clone(&total);
+        let v1 = Arc::clone(&v1);
+        let v2 = Arc::clone(&v2);
         handles.push(std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 match TcpStream::connect(&addr) {
                     Ok(mut stream) => {
-                        let (ok, body) = one_request(&mut stream);
-                        if ok && body {
+                        let (ok, body_v1, body_v2) = one_request(&mut stream);
+                        if ok && (body_v1 || body_v2) {
                             total.fetch_add(1, Ordering::Relaxed);
+                            if body_v1 {
+                                v1.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                v2.fetch_add(1, Ordering::Relaxed);
+                            }
                         } else {
                             failures.fetch_add(1, Ordering::Relaxed);
                         }
@@ -202,11 +226,17 @@ fn drive_requests(
         }));
     }
     let served = Arc::clone(&total);
+    let v1_out = Arc::clone(&v1);
+    let v2_out = Arc::clone(&v2);
     std::thread::spawn(move || {
         for h in handles {
             h.join().expect("driver thread panicked");
         }
-        served.load(Ordering::Relaxed)
+        (
+            served.load(Ordering::Relaxed),
+            v1_out.load(Ordering::Relaxed),
+            v2_out.load(Ordering::Relaxed),
+        )
     })
 }
 
@@ -239,13 +269,16 @@ fn reload_under_load_keeps_generation_safe_and_shuts_down_cleanly() {
     // drain guarantee under test).
     kill_signal(guard.0.id(), "TERM");
     stop.store(true, Ordering::Relaxed);
-    let served = drivers.join().expect("driver panicked");
+    let (served, v1_count, v2_count) = drivers.join().expect("driver panicked");
     let status = wait_exit(&mut guard.0, Duration::from_secs(15));
     assert!(status.success(), "expected clean exit, got {status}");
 
     let out = stdout.read_all();
     let failure_count = failures.load(Ordering::Relaxed);
-    println!("e2e: {served} requests served, {failure_count} failures across reloads + shutdown");
+    println!(
+        "e2e: {served} requests served ({v1_count} pre-reload bodies, {v2_count} post-reload bodies), \
+         {failure_count} failures across reloads + shutdown"
+    );
     assert_eq!(
         failure_count, 0,
         "dropped/failed requests during reload+shutdown: {failure_count} (served {served})"
@@ -253,6 +286,10 @@ fn reload_under_load_keeps_generation_safe_and_shuts_down_cleanly() {
     assert!(
         served > 50,
         "expected steady traffic, only {served} requests"
+    );
+    assert!(
+        v1_count > 0 && v2_count > 0,
+        "route hot-swap must be visible: {v1_count} pre-reload and {v2_count} post-reload bodies"
     );
     assert!(
         out.contains("config reloaded (file-watch): generation 1 -> 2"),

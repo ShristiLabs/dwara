@@ -264,7 +264,26 @@ listeners:
         - server_names: [b.example.com]
           cert_file: {}
           key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             ca.cert.display(),
             ca.key.display(),
@@ -345,7 +364,26 @@ async fn cleartext_listener_accepts_http1_and_h2c_prior_knowledge() {
     std::fs::write(
         &config,
         format!(
-            "listeners:\n  - name: plain\n    address: 127.0.0.1\n    port: {port}\nroutes: []\n"
+            "listeners:\n  - name: plain\n    address: 127.0.0.1\n    port: {port}\nroutes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+\n"
         ),
     )
     .unwrap();
@@ -516,7 +554,26 @@ listeners:
       mode: terminate
       cert_file: {}
       key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             ca.cert.display(),
             ca.key.display()

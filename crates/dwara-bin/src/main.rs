@@ -1,12 +1,12 @@
 //! Gateway server binary.
 //!
-//! M1 role: bind listeners, serve traffic off the published config
-//! snapshot, keep that snapshot hot (DW-006), and terminate or pass
-//! through TLS (DW-007). The response body is still the hello
-//! placeholder (real proxying lands with the dataplane issues), but
-//! every request is served from the current `Snapshot` obtained
-//! per-request from [`ConfigState`], so a reload swaps the generation
-//! under the accept loop without ever interrupting accept.
+//! M1 role: bind listeners, proxy traffic off the published config
+//! snapshot (DW-009), keep that snapshot hot (DW-006), and terminate or
+//! pass through TLS (DW-007). Every request is served by
+//! [`dwara_core::proxy::handle`] against the generation pair (snapshot +
+//! upstream registry) current at request time; a reload swaps the pair
+//! under the accept loop without ever interrupting accept, and in-flight
+//! requests keep their old pair alive until they complete.
 //!
 //! Runtime controls (environment):
 //! - `DWARA_BIND`: when set, overrides the config listeners with a
@@ -53,19 +53,17 @@
 //! whatever remains at the deadline is force-closed by process exit.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use dwara_core::config::{Listener, ListenerProtocol, TlsMode};
 use dwara_core::extensions::config_source::{ConfigSource, FileConfigSource};
+use dwara_core::proxy::{self, DataPlane};
 use dwara_core::snapshot::{ConfigState, Snapshot};
 use dwara_core::tls::{self, TlsTermination};
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
 use notify::Watcher;
@@ -98,28 +96,16 @@ struct BoundListener {
     mode: ListenerMode,
 }
 
-/// Serve the hello response from the snapshot generation current at request
-/// time. Holding the `Arc<Snapshot>` for the request's lifetime is what
-/// makes generation retirement safe: the old snapshot is freed only after
-/// the last request referencing it completes.
-async fn hello(
-    state: Arc<ConfigState>,
-    _: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
-    let _current_generation = state.snapshot();
-    Ok(Response::builder()
-        .header(CONTENT_TYPE, "text/plain")
-        .body(Full::new(Bytes::from_static(b"dwara")))
-        .expect("static response is valid"))
-}
-
 /// One reload attempt: re-read from disk, validate, publish atomically.
 /// Never fatal: on any failure the published snapshot is untouched and the
-/// process keeps running. On success, terminate listeners' TLS configs are
+/// process keeps running. On success, the dataplane's (snapshot, registry)
+/// pair is rebuilt (routes and upstream pools hot-swap together; in-flight
+/// requests keep the old pair) and terminate listeners' TLS configs are
 /// rebuilt from the new snapshot (certificate material follows the config
 /// generation it belongs to).
 async fn reload(
     state: &ConfigState,
+    dp: &DataPlane,
     source: &FileConfigSource,
     trigger: &str,
     tls_states: &BTreeMap<String, Arc<TlsTermination>>,
@@ -137,6 +123,7 @@ async fn reload(
                     info.route_count,
                     old.generation(),
                 );
+                dp.refresh();
                 refresh_tls_states(&state.snapshot(), tls_states, trigger);
             }
             Err(err) => {
@@ -267,12 +254,13 @@ async fn run_listener(
     bound: BoundListener,
     listener: TcpListener,
     state: Arc<ConfigState>,
+    dp: Arc<DataPlane>,
     graceful: Arc<GracefulShutdown>,
     mut shutdown: watch::Receiver<()>,
     timeout: Duration,
 ) {
     loop {
-        let (mut stream, _peer) = tokio::select! {
+        let (mut stream, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok(conn) => conn,
                 Err(err) => {
@@ -284,7 +272,7 @@ async fn run_listener(
         };
         match &bound.mode {
             ListenerMode::Cleartext => {
-                serve_http_tls(graceful.watcher(), Arc::clone(&state), stream)
+                serve_http_tls(graceful.watcher(), Arc::clone(&dp), stream, peer)
             }
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
@@ -319,11 +307,11 @@ async fn run_listener(
                 // a reload only affects handshakes started after it.
                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                 let watcher = graceful.watcher();
-                let state = Arc::clone(&state);
+                let dp = Arc::clone(&dp);
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
-                            serve_http_tls(watcher, state, tls_stream);
+                            serve_http_tls(watcher, dp, tls_stream, peer);
                         }
                         Err(err) => eprintln!("tls handshake error: {err}"),
                     }
@@ -347,7 +335,7 @@ async fn run_listener(
         let mut accepted = 0usize;
         loop {
             match std_listener.accept() {
-                Ok((std_stream, _)) => {
+                Ok((std_stream, peer)) => {
                     accepted += 1;
                     if std_stream.set_nonblocking(true).is_err() {
                         continue;
@@ -358,15 +346,15 @@ async fn run_listener(
                     match &bound.mode {
                         ListenerMode::Passthrough => {}
                         ListenerMode::Cleartext => {
-                            serve_http_tls(graceful.watcher(), Arc::clone(&state), stream);
+                            serve_http_tls(graceful.watcher(), Arc::clone(&dp), stream, peer);
                         }
                         ListenerMode::Terminate(term) => {
                             let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                             let watcher = graceful.watcher();
-                            let state = Arc::clone(&state);
+                            let dp = Arc::clone(&dp);
                             tokio::spawn(async move {
                                 match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => serve_http_tls(watcher, state, tls_stream),
+                                    Ok(tls_stream) => serve_http_tls(watcher, dp, tls_stream, peer),
                                     Err(err) => eprintln!("tls handshake error: {err}"),
                                 }
                             });
@@ -394,10 +382,14 @@ async fn run_listener(
     drop(std_listener);
 }
 
+/// Serve one (possibly TLS-terminated) connection with the proxy dataplane.
+/// Upgrades are enabled on the inbound connection so WebSocket-style 101
+/// tunnels can be spliced (generic tunneling; see dwara-core's proxy docs).
 fn serve_http_tls<S>(
     watcher: hyper_util::server::graceful::Watcher,
-    state: Arc<ConfigState>,
+    dp: Arc<DataPlane>,
     stream: S,
+    peer: SocketAddr,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -405,13 +397,17 @@ fn serve_http_tls<S>(
     // spawned task.
     tokio::spawn(async move {
         let auto = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        let conn = watcher.watch(auto.serve_connection(
-            TokioIo::new(stream),
-            service_fn(move |req| {
-                let state = Arc::clone(&state);
-                async move { hello(state, req).await }
-            }),
-        ));
+        let conn =
+            watcher.watch(auto.serve_connection_with_upgrades(
+                TokioIo::new(stream),
+                service_fn(move |req| {
+                    let dp = Arc::clone(&dp);
+                    let peer_ip = peer.ip();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(proxy::handle(&dp, peer_ip, req).await)
+                    }
+                }),
+            ));
         if let Err(err) = conn.await {
             eprintln!("connection error: {err}");
         }
@@ -555,6 +551,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Reload driver: config file events (debounced) and SIGHUP.
     let reload_state = Arc::clone(&state);
+    let dp = DataPlane::new(Arc::clone(&state));
+    let reload_dp = Arc::clone(&dp);
     let reload_tls = tls_states.clone();
     let reload_shutdown = shutdown_rx.clone();
     let reload_task = tokio::spawn(async move {
@@ -563,7 +561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
             tokio::select! {
                 _ = sighup.recv() => {
-                    reload(&reload_state, &source, "sighup", &reload_tls).await;
+                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls).await;
                 }
                 maybe_event = watcher_rx.recv() => {
                     let Some(()) = maybe_event else { break };
@@ -572,7 +570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         _ = shutting_down.changed() => return,
                     }
                     while watcher_rx.try_recv().is_ok() {}
-                    reload(&reload_state, &source, "file-watch", &reload_tls).await;
+                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls).await;
                 }
                 _ = shutting_down.changed() => return,
             }
@@ -619,10 +617,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut tasks = Vec::new();
     for (bound, tcp) in bound_listeners {
         let state = Arc::clone(&state);
+        let dp = Arc::clone(&dp);
         let graceful = Arc::clone(&graceful);
         let rx = shutdown_rx.clone();
         tasks.push(tokio::spawn(run_listener(
-            bound, tcp, state, graceful, rx, timeout,
+            bound, tcp, state, dp, graceful, rx, timeout,
         )));
     }
 

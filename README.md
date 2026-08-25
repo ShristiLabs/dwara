@@ -2,34 +2,43 @@
 
 A high-performance API gateway written in Rust.
 
-Status: pre-alpha. The workspace scaffolds the gateway; proxying arrives in M1.
+Status: pre-alpha. The core reverse-proxy dataplane works — routing,
+streaming proxying, TLS termination/passthrough, and hot config reload —
+with load balancing and traffic policy still to come in M1.
 
 ## Quickstart
 
 Requires Rust 1.94 (pinned in `rust-toolchain.toml`).
 
-The binary requires a config file at startup: it exits with code 1,
-printing every validation issue, if the config is missing or invalid. A
-sample config ships in the `dwara-bin` crate, so from the repo root:
+The gateway proxies: the sample config forwards everything under `/v1`
+to an upstream at `127.0.0.1:9000`. Start any HTTP server there, then
+run the gateway from the repo root with the sample config:
 
 ```sh
+python3 -m http.server 9000
 DWARA_CONFIG=crates/dwara-bin/dwara.yaml cargo run -p dwara-bin
 ```
 
-Starts a hello listener on `http://127.0.0.1:8080` (proxying arrives in
-M1):
+Then request through the gateway (the listener binds
+`http://127.0.0.1:8080`):
 
 ```sh
-curl http://127.0.0.1:8080
-# dwara
+curl http://127.0.0.1:8080/v1/
 ```
 
-Stop it with Ctrl-C.
+The request is streamed to the backend unbuffered and the response
+streams back the same way. A path with no matching route gets `404`; a
+dead backend gets `502` (or `504` on connect timeout). Stop with Ctrl-C.
+
+The binary exits with code 1, printing every validation issue, if the
+config is missing or invalid.
 
 Environment variables (all optional):
 
 - `DWARA_CONFIG`: path to the gateway YAML config, default `./dwara.yaml`.
-- `DWARA_BIND`: listen address, default `127.0.0.1:8080`.
+- `DWARA_BIND`: when set, overrides the config listeners with a single
+  cleartext HTTP listener on that address (test/dev escape hatch;
+  default unset = bind every configured listener).
 - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on
   SIGTERM/SIGINT, default 10.
 
@@ -86,7 +95,86 @@ Config passes through a fixed pipeline before the gateway serves it:
 Route paths match one of three ways: `exact` (a full template, path
 parameters like `/users/{id}` supported), `regex`, or `prefix`. Lookup
 precedence is exact, then regex (first declared pattern wins), then
-longest prefix.
+longest prefix. A route can also require a `host` (matched
+case-insensitively against the `Host` header, with or without a port),
+a list of `methods` (empty = all methods), and exact-value `headers`.
+
+### Route actions
+
+A matched route does one of three things:
+
+- `proxy`: forward to the route's service (and its upstream).
+- `redirect`: answer with a 3xx whose `Location` is built from the
+  optional `scheme`, `host`, and `path`; when no `path` is configured
+  the inbound path and query are preserved verbatim. `status` is
+  required (e.g. 301, 302).
+- `respond`: answer directly with the configured `status` and optional
+  plain-text `body`.
+
+```yaml
+routes:
+  - name: old
+    service: echo
+    match:
+      path: { type: prefix, value: /old }
+    action:
+      type: redirect
+      scheme: https
+      host: api.example.com
+      status: 301
+  - name: health
+    service: echo
+    match:
+      path: { type: exact, value: /healthz }
+    action:
+      type: respond
+      status: 200
+      body: ok
+```
+
+Requests that match no route (path or criteria miss) get a plain-text
+`404`.
+
+### Proxying semantics
+
+Proxying streams end to end: neither request nor response bodies are
+buffered by the gateway — SSE and large bodies pass through with
+hyper's natural frame-based backpressure. Hop-by-hop headers
+(`Connection` and everything it names, `Keep-Alive`, `TE`, `Trailer`,
+`Transfer-Encoding`, `Proxy-*`, plus `Upgrade` on non-upgrade
+requests) are stripped in both directions. The outbound `Host` is set
+to the upstream authority (`address:port` of the endpoint), not the
+inbound host.
+
+Protocol upgrades tunnel generically: an HTTP/1.1 request with an
+`Upgrade` header whose upstream answers `101` (e.g. WebSocket) has
+both connections upgraded and spliced byte-for-byte until either side
+closes. An `Upgrade` request received over HTTP/2 or h2c is answered
+`501 Not Implemented`.
+
+Upstream failures are classified, and details are logged server-side
+only: connect timeout -> `504`; endpoint refused, pool failure, or no
+endpoints -> `502`; upstream TLS configuration errors -> `500`.
+
+### Forwarded headers and trusted proxies
+
+Gateway-level `trusted_proxies` (a list of IP addresses or CIDR
+ranges, e.g. `10.1.2.3` or `10.0.0.0/8`) controls
+`X-Forwarded-For` handling; anything else in the list fails
+validation:
+
+```yaml
+trusted_proxies:
+  - 10.0.0.0/8
+```
+
+- `X-Forwarded-For`: if the direct connection peer is inside
+  `trusted_proxies`, the inbound XFF chain is preserved and the peer
+  appended (`"<inbound>, <peer>"`). Otherwise — including the empty
+  default, which trusts nobody — the inbound XFF is discarded and
+  replaced with exactly the peer, so a spoofed chain from an
+  untrusted client never reaches the upstream.
+- `X-Real-IP`: always the direct connection peer, no configuration.
 
 ### Upstreams
 
@@ -192,7 +280,10 @@ needed.
 Reload: the config file is watched (the file's directory, so atomic
 write-temp-plus-rename replacement is observed; events are debounced)
 and `SIGHUP` also triggers a reload. A reload re-reads the file,
-validates, and publishes a new generation atomically. A rejected
+validates, and publishes a new generation atomically; the route table
+and the upstream connection pools hot-swap together, so a new route
+never runs against old pools. In-flight requests keep the generation
+they started with until they complete. A rejected
 reload (unreadable, parse, or validation failure) logs every issue and
 keeps serving the running generation — the process never exits on a
 bad reload. If the file watch cannot start, SIGHUP reload still works.

@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod extensions;
+pub mod proxy;
 pub mod snapshot;
 pub mod tls;
 pub mod upstream;

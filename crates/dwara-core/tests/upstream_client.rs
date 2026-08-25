@@ -33,6 +33,7 @@ const SEND_BOUND: Duration = Duration::from_secs(8);
 fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Snapshot> {
     dwara_core::tls::install_aws_lc_rs_provider();
     let gw = Gateway {
+        trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
@@ -648,6 +649,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
     ];
     for (field, timeouts) in cases {
         let issues = dwara_core::snapshot::validate(&Gateway {
+            trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
@@ -674,6 +676,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
 #[test]
 fn validate_accepts_positive_connection_cap_and_timeouts() {
     let issues = dwara_core::snapshot::validate(&Gateway {
+        trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],

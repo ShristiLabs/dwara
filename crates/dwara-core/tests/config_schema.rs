@@ -106,6 +106,7 @@ fn empty_document_is_valid() {
     assert_eq!(
         gateway,
         dwara_core::config::Gateway {
+            trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],

@@ -617,6 +617,7 @@ mod tests {
             }],
         };
         let gateway = Gateway {
+            trusted_proxies: vec![],
             listeners: vec![Listener {
                 name: "edge".into(),
                 address: "0.0.0.0".into(),

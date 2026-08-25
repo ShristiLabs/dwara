@@ -309,7 +309,26 @@ listeners:
         - server_names: [a.example.com]
           cert_file: {}
           key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             ca.cert.display(),
             ca.key.display(),
@@ -385,7 +404,26 @@ listeners:
         - server_names: [UPPER.example.com]
           cert_file: {}
           key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             first.cert.display(),
             first.key.display()
@@ -612,7 +650,26 @@ listeners:
       mode: terminate
       cert_file: {}
       key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             ca.cert.display(),
             ca.key.display()
@@ -685,7 +742,26 @@ listeners:
       mode: terminate
       cert_file: {}
       key_file: {}
-routes: []
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+
 ",
             ca.cert.display(),
             ca.key.display()
@@ -748,7 +824,26 @@ async fn h2c_malformed_preface_does_not_hang_the_listener() {
     std::fs::write(
         &config,
         format!(
-            "listeners:\n  - name: plain\n    address: 127.0.0.1\n    port: {port}\nroutes: []\n"
+            "listeners:\n  - name: plain\n    address: 127.0.0.1\n    port: {port}\nroutes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: dwara
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+\n"
         ),
     )
     .unwrap();

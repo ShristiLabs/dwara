@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use http_body_util::BodyExt as _;
 use hyper::body::Incoming;
-use hyper::{Request, Response, Uri};
+use hyper::{Request, Response, Uri, Version};
 use hyper_util::client::legacy::connect::{
     Connected, Connection as HyperConnection, HttpConnector,
 };
@@ -329,6 +329,18 @@ pub struct UpstreamHandle {
     >,
     endpoint: Option<crate::config::Endpoint>,
     scheme: &'static str,
+    http2_only: bool,
+}
+
+/// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
+/// parseable URI authority; `[::1]:8080` is.
+fn endpoint_authority(e: &crate::config::Endpoint) -> String {
+    let host = if e.address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]", e.address)
+    } else {
+        e.address.clone()
+    };
+    format!("{host}:{}", e.port)
 }
 
 impl UpstreamHandle {
@@ -362,6 +374,15 @@ impl UpstreamHandle {
         self.scheme
     }
 
+    /// `address:port` of the endpoint requests are sent to (the authority
+    /// the dataplane rebuilds the `Host` header with). IPv6 literals are
+    /// bracketed (`[::1]:8080`) so the value is a valid authority both in a
+    /// URI and in a `Host` header. None when the upstream has no endpoints
+    /// (unvalidated construction only).
+    pub fn endpoint_authority(&self) -> Option<String> {
+        self.endpoint.as_ref().map(endpoint_authority)
+    }
+
     /// Send a request through this upstream's pool. The request's URI is
     /// rewritten to `scheme://<first-endpoint><path-and-query>`; headers
     /// and body pass through untouched. The response body streams
@@ -380,13 +401,18 @@ impl UpstreamHandle {
         // Guard rather than dialing a fabricated address: empty endpoint
         // lists are only possible via unvalidated construction.
         let endpoint = self.endpoint.as_ref().ok_or(UpstreamError::NoEndpoints)?;
-        let uri: Uri = format!(
-            "{}://{}:{}{}",
-            self.scheme, endpoint.address, endpoint.port, path
-        )
-        .parse::<Uri>()
-        .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
+        let uri: Uri = format!("{}://{}{}", self.scheme, endpoint_authority(endpoint), path)
+            .parse::<Uri>()
+            .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
         *req.uri_mut() = uri;
+        // Normalize the HTTP version for the pool's protocol: an inbound h2
+        // request proxied to an h1 upstream must be downgraded to 1.1 (and
+        // vice versa); the pooled client speaks exactly one dialect.
+        *req.version_mut() = if self.http2_only {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
+        };
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
         let req =
             req.map(|b| http_body_util::combinators::UnsyncBoxBody::new(b.map_err(Into::into)));
@@ -472,6 +498,7 @@ fn build_handle(u: &Upstream, root_store: rustls::RootCertStore) -> Arc<Upstream
         client: builder.build(connector),
         endpoint: u.endpoints.first().cloned(),
         scheme,
+        http2_only,
     })
 }
 
@@ -552,6 +579,7 @@ mod tests {
     fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<crate::snapshot::Snapshot> {
         crate::tls::install_aws_lc_rs_provider();
         let gw = Gateway {
+            trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
@@ -883,6 +911,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         let issues = crate::snapshot::validate(&Gateway {
+            trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
@@ -951,6 +980,7 @@ mod tests {
         let state = ConfigState::new();
         state
             .compile_and_publish(&Gateway {
+                trusted_proxies: vec![],
                 listeners: vec![],
                 routes: vec![],
                 services: vec![],
