@@ -1,0 +1,18 @@
+[package]
+name = "dwara-bin"
+description = "Gateway server binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dwara-core = { path = "../dwara-core" }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+
+[[bin]]
+name = "dwara"
+path = "src/main.rs"

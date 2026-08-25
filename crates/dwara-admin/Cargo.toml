@@ -1,0 +1,10 @@
+[package]
+name = "dwara-admin"
+description = "Admin API and management-plane surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dwara-core = { path = "../dwara-core" }

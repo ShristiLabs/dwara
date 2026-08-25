@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dwara-core",
+    "crates/dwara-bin",
+    "crates/dwara-admin",
+    "crates/dwara-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.94"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = true
