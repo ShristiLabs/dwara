@@ -5,6 +5,7 @@
 pub mod balance;
 pub mod config;
 pub mod extensions;
+pub mod health;
 pub mod proxy;
 pub mod snapshot;
 pub mod tls;

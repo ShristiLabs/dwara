@@ -70,6 +70,7 @@ fn upstream(name: &str) -> Upstream {
         }],
         connection_cap: None,
         slow_start_ms: None,
+        health: None,
         timeouts: None,
     }
 }

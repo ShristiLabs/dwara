@@ -268,6 +268,8 @@ connection pool. Fields:
   TCP connect plus, for TLS upstreams, the handshake. Defaults to 5000.
 - `slow_start_ms`: slow-start window in milliseconds; absent or 0
   (default) disables the ramp. See below.
+- `health`: passive health / outlier detection block; absent (default)
+  disables it entirely. All keys inside the block default. See below.
 
 Each endpoint carries a `weight` (default 1, must be > 0). For
 `https`/`http2` upstreams, server certificates are verified against the
@@ -322,6 +324,41 @@ algorithm without a restart. Endpoints whose `address:port` is unchanged
 keep their in-flight counters, round-robin phase, and slow-start clock;
 new addresses start fresh. Removed endpoints drop their state —
 re-adding one later is a fresh entry.
+
+Passive health (`health` block, DW-012): ejection driven by real traffic
+outcomes — no synthetic probes are sent to endpoints in rotation. A
+failure is a transport error (connect timeout, refusal, reset) or an
+HTTP response status >= 500; 1xx-4xx count as successes (429 and 408
+describe the caller, not endpoint health). An endpoint is ejected from
+all load-balancing algorithms when EITHER it accumulates
+`consecutive_failures` (default 5) failures in a row, OR its failure
+share within the rolling `window_ms` (default 60000) is >=
+`failure_ratio` (default 0.5) with at least `failure_min_volume`
+(default 20) observations in the window — the volume gate keeps a brief
+blip from ejecting on a trickle of traffic. After `eject_ms` (default
+30000) the endpoint goes half-open: the next `half_open_probes` (default
+1) requests are trial probes; a successful probe restores it to healthy
+with a clean history, a failed probe re-ejects for another `eject_ms`.
+If EVERY endpoint of an upstream is ejected, the balancer fails open —
+picks fall back to the full endpoint set rather than blackholing traffic
+(so a fully degraded pool degrades, it does not become a guaranteed
+503). Health state is keyed by `address:port` and survives config
+reloads alongside in-flight counters; new health parameters apply to new
+observations.
+
+```yaml
+upstreams:
+  - name: echo-upstream
+    health:
+      window_ms: 60000          # rolling observation window
+      consecutive_failures: 5   # eject after N failures in a row
+      failure_ratio: 0.5        # or >= this failure share in-window
+      failure_min_volume: 20    # ... with at least this many observations
+      eject_ms: 30000           # time out of rotation before probing
+      half_open_probes: 1       # trial requests per recovery attempt
+```
+
+A `health:` block with no keys enables ejection with the defaults above.
 
 ### TLS
 

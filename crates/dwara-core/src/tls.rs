@@ -649,6 +649,7 @@ mod tests {
                 }],
                 connection_cap: None,
                 slow_start_ms: None,
+                health: None,
                 timeouts: None,
             }],
             consumers: vec![],

@@ -629,6 +629,46 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "slow_start_ms must be at most 10 minutes (600000)",
             ));
         }
+        if let Some(h) = &u.health {
+            // Every knob must be positive; the ratio additionally must be a
+            // real fraction (0, 1]. NaN/inf compare false everywhere and
+            // would silently disable ejection, so reject them explicitly.
+            for (field, v) in [
+                ("health.window_ms", h.window_ms),
+                ("health.eject_ms", h.eject_ms),
+            ] {
+                if v == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        field,
+                        "passive health value must be > 0",
+                    ));
+                }
+            }
+            for (field, v) in [
+                ("health.consecutive_failures", h.consecutive_failures),
+                ("health.failure_min_volume", h.failure_min_volume),
+                ("health.half_open_probes", h.half_open_probes),
+            ] {
+                if v == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        field,
+                        "passive health value must be > 0",
+                    ));
+                }
+            }
+            if !h.failure_ratio.is_finite() || h.failure_ratio <= 0.0 || h.failure_ratio > 1.0 {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "health.failure_ratio",
+                    format!("failure_ratio must be in (0, 1]; got {}", h.failure_ratio),
+                ));
+            }
+        }
         if let Some(t) = &u.timeouts {
             for (field, v) in [
                 ("connect_ms", t.connect_ms),
@@ -1191,6 +1231,7 @@ mod tests {
                 }],
                 connection_cap: None,
                 slow_start_ms: None,
+                health: None,
                 timeouts: None,
             }],
             consumers: vec![],

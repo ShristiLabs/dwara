@@ -330,8 +330,87 @@ pub struct Upstream {
     /// Validation bounds the value to at most 10 minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slow_start_ms: Option<u64>,
+    /// Passive health checking / outlier detection (DW-012): eject
+    /// endpoints that fail real traffic (transport errors and 5xx), let
+    /// them back via half-open trial probes after `eject_ms`. Absent
+    /// disables passive health entirely (no ejections).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<PassiveHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
+}
+
+/// Passive health / outlier detection knobs (DW-012). All fields default;
+/// a `health:` block with no keys enables ejection with the defaults.
+///
+/// Failure classification: transport errors (connect timeout, refusal,
+/// reset) and HTTP statuses >= 500 are failures; 1xx-4xx are successes.
+/// 429/408 are deliberately successes in v1 (they describe the caller or
+/// queueing, not endpoint health).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveHealth {
+    /// Rolling observation window for the failure ratio, in milliseconds
+    /// (default 60000).
+    #[serde(default = "default_health_window_ms")]
+    pub window_ms: u64,
+    /// Eject after this many consecutive failures (default 5).
+    #[serde(default = "default_health_consecutive_failures")]
+    pub consecutive_failures: u32,
+    /// Eject when the in-window failure share is >= this ratio AND volume
+    /// is >= `failure_min_volume`. Must be in (0, 1] (default 0.5).
+    #[serde(default = "default_health_failure_ratio")]
+    pub failure_ratio: f64,
+    /// Minimum observations in the window before `failure_ratio` applies
+    /// (default 20).
+    #[serde(default = "default_health_failure_min_volume")]
+    pub failure_min_volume: u32,
+    /// How long an ejected endpoint stays out of rotation, in milliseconds
+    /// (default 30000).
+    #[serde(default = "default_health_eject_ms")]
+    pub eject_ms: u64,
+    /// Trial requests allowed through per half-open recovery attempt
+    /// (default 1). A successful probe restores health; a failed probe
+    /// re-ejects for another `eject_ms`.
+    #[serde(default = "default_health_half_open_probes")]
+    pub half_open_probes: u32,
+}
+
+impl Default for PassiveHealth {
+    fn default() -> Self {
+        PassiveHealth {
+            window_ms: 60_000,
+            consecutive_failures: 5,
+            failure_ratio: 0.5,
+            failure_min_volume: 20,
+            eject_ms: 30_000,
+            half_open_probes: 1,
+        }
+    }
+}
+
+fn default_health_window_ms() -> u64 {
+    60_000
+}
+
+fn default_health_consecutive_failures() -> u32 {
+    5
+}
+
+fn default_health_failure_ratio() -> f64 {
+    0.5
+}
+
+fn default_health_failure_min_volume() -> u32 {
+    20
+}
+
+fn default_health_eject_ms() -> u64 {
+    30_000
+}
+
+fn default_health_half_open_probes() -> u32 {
+    1
 }
 
 fn default_load_balancer() -> LoadBalancer {

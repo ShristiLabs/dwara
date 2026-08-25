@@ -432,7 +432,6 @@ impl UpstreamHandle {
         let authority = endpoint_authority(&dispatch.address, dispatch.port);
         // Held (inside `dispatch`) until the response (headers) resolves;
         // see the doc comment.
-        let _dispatch = dispatch;
         let uri: Uri = format!("{}://{}{}", self.scheme, authority, path)
             .parse::<Uri>()
             .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
@@ -453,7 +452,22 @@ impl UpstreamHandle {
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
         let req =
             req.map(|b| http_body_util::combinators::UnsyncBoxBody::new(b.map_err(Into::into)));
-        Ok(self.client.request(req).await?)
+        // Observation wire (DW-012): the outcome is reported to the picked
+        // endpoint's health tracker when the response headers resolve —
+        // the same point the in-flight guard releases. Classification:
+        // transport errors (the Err arm: connect timeout, refusal, reset,
+        // framing) and statuses >= 500 are failures; 1xx-4xx (including
+        // 429/408; documented choice) are successes.
+        let outcome = self.client.request(req).await;
+        if let Some(health) = &dispatch.health {
+            let is_failure = match &outcome {
+                Ok(resp) => resp.status().as_u16() >= 500,
+                Err(_) => true,
+            };
+            health.report(self.lb.now_ms(), is_failure);
+        }
+        dispatch.release();
+        outcome.map_err(Into::into)
     }
 }
 
@@ -540,16 +554,25 @@ fn build_handle(
     builder.pool_timer(TokioTimer::new());
 
     // Hot-swap: an existing balancer for this upstream name keeps its
-    // live state (in-flight counters, WRR phase, slow-start clocks) for
-    // unchanged endpoint addresses; a fresh one starts clean.
+    // live state (in-flight counters, WRR phase, slow-start clocks,
+    // passive-health trackers) for unchanged endpoint addresses; a fresh
+    // one starts clean.
     let lb = match previous_lb {
         Some(prev) => {
-            prev.rebuild(&u.endpoints, u.load_balancer, effective_slow_start(u));
+            prev.rebuild_with_health(
+                &u.endpoints,
+                u.load_balancer,
+                effective_slow_start(u),
+                u.health.as_ref(),
+            );
             Arc::clone(prev)
         }
-        None => {
-            crate::balance::UpstreamLb::new(&u.endpoints, u.load_balancer, effective_slow_start(u))
-        }
+        None => crate::balance::UpstreamLb::new_with_health(
+            &u.endpoints,
+            u.load_balancer,
+            effective_slow_start(u),
+            u.health.as_ref(),
+        ),
     };
 
     Arc::new(UpstreamHandle {
@@ -699,6 +722,7 @@ mod tests {
             }],
             connection_cap: cap,
             slow_start_ms: None,
+            health: None,
             timeouts: connect_ms.map(|connect_ms| Timeouts {
                 connect_ms: Some(connect_ms),
                 read_ms: None,
@@ -1016,6 +1040,7 @@ mod tests {
                 }],
                 connection_cap: Some(0),
                 slow_start_ms: None,
+                health: None,
                 timeouts: Some(Timeouts {
                     connect_ms: Some(0),
                     read_ms: Some(0),
@@ -1057,6 +1082,7 @@ mod tests {
             endpoints: vec![],
             connection_cap: None,
             slow_start_ms: None,
+            health: None,
             timeouts: None,
         };
         let handle = build_handle(&up, webpki_root_store(), None);

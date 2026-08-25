@@ -75,12 +75,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
-use crate::config::{Endpoint, LoadBalancer};
+use crate::config::{Endpoint, LoadBalancer, PassiveHealth};
+use crate::health::{EndpointHealth, HealthDispatch, HealthParams};
 
 /// Ketama vnode count per unit of endpoint weight (a weight-1 endpoint
 /// gets 160 vnodes; a weight-w endpoint gets `160 * w` — footprint is
@@ -114,6 +115,12 @@ struct LbEndpoint {
     /// Smooth-WRR running weight (the nginx algorithm's per-endpoint
     /// accumulator). Carried across rebuilds for unchanged addresses.
     current_weight: AtomicI64,
+    /// Passive health tracker (DW-012); present only when the upstream
+    /// configures `health`. Carried across rebuilds for unchanged
+    /// addresses, exactly like `inflight`: the live tracker survives the
+    /// swap, so consecutive-failure streaks and the observation window
+    /// survive config reloads.
+    health: Option<Arc<EndpointHealth>>,
 }
 
 impl LbEndpoint {
@@ -125,6 +132,7 @@ impl LbEndpoint {
             entered: Instant::now(),
             inflight: Arc::new(AtomicU64::new(0)),
             current_weight: AtomicI64::new(0),
+            health: None,
         }
     }
 
@@ -138,6 +146,7 @@ impl LbEndpoint {
             entered: old.entered,
             inflight: Arc::clone(&old.inflight),
             current_weight: AtomicI64::new(old.current_weight.load(Ordering::Relaxed)),
+            health: old.health.clone(),
         }
     }
 
@@ -154,6 +163,9 @@ struct LbState {
     slow_start: Duration,
     /// Ketama ring (hash -> endpoint index); empty unless ip_hash.
     ring: BTreeMap<u64, usize>,
+    /// Resolved passive-health parameters for this generation (DW-012);
+    /// `None` = passive health disabled (no ejection, no filtering).
+    health: Option<Arc<HealthParams>>,
 }
 
 impl LbState {
@@ -179,6 +191,13 @@ impl LbState {
 pub struct UpstreamLb {
     state: ArcSwap<LbState>,
     rng: AtomicU64,
+    /// Millisecond clock for passive-health timing (DW-012). System clock
+    /// in production; swappable for deterministic clocks in tests
+    /// (`set_health_clock`). Read on every pick when health is enabled.
+    health_clock: RwLock<fn() -> u64>,
+    /// Picks that fell back to the full endpoint set because every
+    /// endpoint was ejected (fail-open; see `choose`). Observability.
+    fail_open_picks: AtomicU64,
 }
 
 fn xorshift(x: u64) -> u64 {
@@ -189,11 +208,20 @@ fn xorshift(x: u64) -> u64 {
     x.wrapping_mul(0x2545F4914F6CDD1D)
 }
 
+/// Default passive-health clock: Unix-epoch milliseconds.
+fn system_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn build_state(
     endpoints: &[Endpoint],
     algorithm: LoadBalancer,
     slow_start: Duration,
     previous: Option<&LbState>,
+    health: Option<Arc<HealthParams>>,
 ) -> LbState {
     let mut eps: Vec<LbEndpoint> = Vec::with_capacity(endpoints.len());
     for e in endpoints {
@@ -205,6 +233,17 @@ fn build_state(
         });
         eps.push(carried.unwrap_or_else(|| LbEndpoint::new(e)));
     }
+    // Passive health invariant: when this generation has health enabled,
+    // EVERY endpoint carries a tracker (fresh ones for new addresses, the
+    // carried live tracker for unchanged addresses; enabling health on a
+    // rebuild gives unchanged addresses a fresh tracker with no history).
+    if health.is_some() {
+        for e in &mut eps {
+            if e.health.is_none() {
+                e.health = Some(Arc::new(EndpointHealth::new()));
+            }
+        }
+    }
     let ring = if algorithm == LoadBalancer::IpHash {
         build_ring(&eps)
     } else {
@@ -215,6 +254,7 @@ fn build_state(
         algorithm,
         slow_start,
         ring,
+        health,
     }
 }
 
@@ -286,26 +326,34 @@ impl Fnv1a {
 }
 
 /// Smooth weighted round-robin pick (nginx algorithm) over effective
-/// weights. Period = sum of effective weights; over any full period each
-/// endpoint is picked exactly its effective-weight many times.
-fn smooth_weighted_rr(state: &LbState) -> usize {
+/// weights, restricted to the candidate indices. Period = sum of effective
+/// weights; over any full period each endpoint is picked exactly its
+/// effective-weight many times.
+///
+/// `cand == None` means "every endpoint index" and runs allocation-free
+/// (the passive-health-disabled / fail-open paths); `Some(slice)` restricts
+/// the walk to the filtered candidate set.
+fn smooth_weighted_rr(state: &LbState, cand: Option<&[usize]>) -> usize {
+    let n = cand.map_or(state.endpoints.len(), |c| c.len());
+    let resolve = |i: usize| cand.map_or(i, |c| c[i]);
     let mut total: i64 = 0;
-    let mut best: usize = 0;
+    let mut best: usize = resolve(0);
     let mut best_cw: i64 = i64::MIN;
-    for (i, e) in state.endpoints.iter().enumerate() {
+    for i in 0..n {
+        let e = &state.endpoints[resolve(i)];
         let w = state.effective_weight(e);
         total += w;
         let cw = e.current_weight.fetch_add(w, Ordering::Relaxed) + w;
         // Strict >: ties keep the lowest index (deterministic).
         if cw > best_cw {
             best_cw = cw;
-            best = i;
+            best = resolve(i);
         }
     }
     if total <= 0 {
         // Unreachable for validated sets (weights >= 1); degrade to the
-        // first endpoint rather than dividing by zero elsewhere.
-        return 0;
+        // first candidate rather than dividing by zero elsewhere.
+        return best;
     }
     state.endpoints[best]
         .current_weight
@@ -315,32 +363,91 @@ fn smooth_weighted_rr(state: &LbState) -> usize {
 
 impl UpstreamLb {
     /// Build a balancer with a fresh endpoint set (all slow-start clocks
-    /// start now).
+    /// start now) and passive health DISABLED. See [`UpstreamLb::new_with_health`].
     pub fn new(endpoints: &[Endpoint], algorithm: LoadBalancer, slow_start: Duration) -> Arc<Self> {
+        Self::new_with_health(endpoints, algorithm, slow_start, None)
+    }
+
+    /// `new` with passive health (DW-012): when `health` is `Some`, every
+    /// endpoint gets a fresh health tracker and picks skip ejected
+    /// endpoints (all-ejected falls back to the full set; see `choose`).
+    /// The config form is resolved via [`HealthParams::from_config`];
+    /// validation guarantees its bounds.
+    pub fn new_with_health(
+        endpoints: &[Endpoint],
+        algorithm: LoadBalancer,
+        slow_start: Duration,
+        health: Option<&PassiveHealth>,
+    ) -> Arc<Self> {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x853c49e6748fea9b)
             ^ (&endpoints as *const _ as u64)
             ^ std::process::id() as u64;
+        let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         Arc::new(UpstreamLb {
-            state: ArcSwap::from_pointee(build_state(endpoints, algorithm, slow_start, None)),
+            state: ArcSwap::from_pointee(build_state(
+                endpoints, algorithm, slow_start, None, health,
+            )),
             rng: AtomicU64::new(seed | 1),
+            health_clock: RwLock::new(system_now_ms),
+            fail_open_picks: AtomicU64::new(0),
         })
     }
 
-    /// Hot-swap the endpoint set and/or algorithm: unchanged addresses
-    /// keep their in-flight counters, WRR phase, and slow-start entry
-    /// instant; new addresses start fresh. Atomic; concurrent picks see
-    /// either the old or the new set, never a mix.
+    /// Hot-swap the endpoint set and/or algorithm (passive health
+    /// disabled; see [`UpstreamLb::rebuild_with_health`]). Unchanged
+    /// addresses keep their in-flight counters, WRR phase, slow-start
+    /// entry instant, and health trackers; new addresses start fresh.
+    /// Atomic; concurrent picks see either the old or the new set, never
+    /// a mix.
     pub fn rebuild(&self, endpoints: &[Endpoint], algorithm: LoadBalancer, slow_start: Duration) {
+        self.rebuild_with_health(endpoints, algorithm, slow_start, None);
+    }
+
+    /// `rebuild` with passive health parameters for the new generation
+    /// (DW-012). Unchanged addresses keep their LIVE trackers (streak and
+    /// observation window survive the reload); the new parameters apply
+    /// to NEW observations only. Health state is carried per
+    /// `address:port`, exactly like in-flight counters; removed endpoints
+    /// drop their trackers outright and re-added ones start healthy with
+    /// no history.
+    pub fn rebuild_with_health(
+        &self,
+        endpoints: &[Endpoint],
+        algorithm: LoadBalancer,
+        slow_start: Duration,
+        health: Option<&PassiveHealth>,
+    ) {
         let prev = self.state.load_full();
+        let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         self.state.store(Arc::new(build_state(
             endpoints,
             algorithm,
             slow_start,
             Some(&prev),
+            health,
         )));
+    }
+
+    /// Current passive-health clock reading (Unix-epoch ms).
+    pub fn now_ms(&self) -> u64 {
+        (*self.health_clock.read().expect("health clock poisoned"))()
+    }
+
+    /// Replace the passive-health clock (Unix-epoch milliseconds; must be
+    /// cheap). Intended for tests and other time-controlled setups — the
+    /// same injection pattern as the rate limiter's clock (DW-004).
+    /// Production code keeps the default system clock.
+    pub fn set_health_clock(&self, clock: fn() -> u64) {
+        *self.health_clock.write().expect("health clock poisoned") = clock;
+    }
+
+    /// Picks that served from the full endpoint set because every
+    /// endpoint was ejected (fail-open). See `choose`.
+    pub fn fail_open_picks(&self) -> u64 {
+        self.fail_open_picks.load(Ordering::Relaxed)
     }
 
     /// Number of endpoints in the current set.
@@ -411,66 +518,153 @@ impl UpstreamLb {
         let idx = self.choose(&state, key)?;
         let e = state.endpoints.get(idx)?;
         e.inflight.fetch_add(1, Ordering::Relaxed);
+        let health = match (&state.health, &e.health) {
+            (Some(params), Some(tracker)) => Some(HealthDispatch {
+                tracker: Arc::clone(tracker),
+                params: Arc::clone(params),
+            }),
+            _ => None,
+        };
         Some(Dispatch {
             idx,
             address: e.address.clone(),
             port: e.port,
+            health,
             guard: InflightGuard { state, idx },
         })
     }
 
     /// Algorithm choice over one pinned snapshot; returns an endpoint
     /// index valid in `state`.
+    ///
+    /// Passive health (DW-012): when the generation carries health
+    /// parameters, ejected endpoints leave the candidate set BEFORE the
+    /// algorithm runs (all algorithms respect the filtered set; ip_hash
+    /// walks the ring forward to the next healthy owner so keys stay as
+    /// sticky as ejection allows). When EVERY endpoint is ejected, the
+    /// candidate set falls back to the full set — fail-open rather than
+    /// blackhole: a fully-ejected pool serving degraded traffic beats a
+    /// gateway answering 503 for every request. Fail-open picks are
+    /// counted ([`UpstreamLb::fail_open_picks`]) so operators can see the
+    /// degraded state. Half-open endpoints join the candidate set and the
+    /// endpoint a pick actually SELECTS consumes one trial slot (see
+    /// `EndpointHealth::is_candidate` / `EndpointHealth::consume_probe`).
+    ///
+    /// Allocation discipline: the candidate set is `None` (= every
+    /// endpoint index, walked by index — no heap allocation) whenever
+    /// passive health is disabled or the pool fail-opens; only a genuinely
+    /// filtered health path materializes a candidate `Vec`. The selected
+    /// endpoint consumes its half-open probe slot on EVERY return path,
+    /// including the single-candidate shortcut.
     fn choose(&self, state: &Arc<LbState>, key: Option<&str>) -> Option<usize> {
         if state.endpoints.is_empty() {
             return None;
         }
-        if state.endpoints.len() == 1 {
-            return Some(0);
+        let (cand, filtered) = match &state.health {
+            Some(params) => {
+                let now = self.now_ms();
+                let avail: Vec<usize> = state
+                    .endpoints
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        e.health
+                            .as_ref()
+                            .is_none_or(|h| h.is_candidate(params, now))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if avail.is_empty() {
+                    self.fail_open_picks.fetch_add(1, Ordering::Relaxed);
+                    (None, false)
+                } else {
+                    let filtered = avail.len() < state.endpoints.len();
+                    (Some(avail), filtered)
+                }
+            }
+            None => (None, false),
+        };
+        // Single candidate: no algorithm to run (random-2 needs two), but
+        // a half-open selection still spends its probe slot.
+        let n = cand.as_ref().map_or(state.endpoints.len(), Vec::len);
+        if n == 1 {
+            let idx = cand.as_deref().map_or(0, |c| c[0]);
+            if let Some(h) = &state.endpoints[idx].health {
+                h.consume_probe();
+            }
+            return Some(idx);
         }
+        // Index view of the candidate set: `None` iterates 0..len
+        // directly (allocation-free); `Some` maps through the slice.
+        let resolve = |i: usize| cand.as_deref().map_or(i, |c| c[i]);
         let idx = match state.algorithm {
-            LoadBalancer::RoundRobin => smooth_weighted_rr(state),
-            LoadBalancer::LeastRequests => state
-                .endpoints
-                .iter()
-                .enumerate()
-                .min_by_key(|(i, e)| (e.inflight.load(Ordering::Relaxed), *i))
-                .map(|(i, _)| i)
-                .unwrap_or(0),
+            LoadBalancer::RoundRobin => smooth_weighted_rr(state, cand.as_deref()),
+            LoadBalancer::LeastRequests => (0..n)
+                .map(resolve)
+                .min_by_key(|&i| (state.endpoints[i].inflight.load(Ordering::Relaxed), i))
+                .unwrap_or_else(|| resolve(0)),
             LoadBalancer::Random => {
-                let n = state.endpoints.len();
                 let a = (self.next_rand() % n as u64) as usize;
                 let mut b = (self.next_rand() % (n as u64 - 1)) as usize;
                 if b >= a {
                     b += 1; // a != b, uniform over the rest
                 }
-                let (ia, ib) = (&state.endpoints[a], &state.endpoints[b]);
+                let (ia, ib) = (&state.endpoints[resolve(a)], &state.endpoints[resolve(b)]);
                 let (fa, fb) = (
                     ia.inflight.load(Ordering::Relaxed),
                     ib.inflight.load(Ordering::Relaxed),
                 );
                 if fa < fb {
-                    a
+                    resolve(a)
                 } else if fb < fa {
-                    b
+                    resolve(b)
                 } else {
-                    a.min(b) // ties: lower index, deterministic
+                    resolve(a).min(resolve(b)) // ties: lower index, deterministic
                 }
             }
             LoadBalancer::IpHash => match key {
                 Some(k) => {
                     let h = key_hash(k);
+                    // Membership set for the ring walk, built once per
+                    // choose() when filtering is active: O(1) lookups
+                    // instead of a linear scan per vnode visited.
+                    let eligible_set: Option<Vec<bool>> = filtered.then(|| {
+                        let mut set = vec![false; state.endpoints.len()];
+                        for &i in cand.as_deref().unwrap_or(&[]) {
+                            set[i] = true;
+                        }
+                        set
+                    });
+                    // Walk the ring from the key's hash; when filtering is
+                    // active, skip ejected owners (and wrap) so the key
+                    // lands on the next healthy endpoint instead of a
+                    // black hole.
+                    let eligible = |i: usize| eligible_set.as_ref().is_none_or(|set| set[i]);
                     state
                         .ring
                         .range(h..)
-                        .next()
-                        .or_else(|| state.ring.iter().next())
+                        .find(|(_, &i)| eligible(i))
                         .map(|(_, &i)| i)
-                        .unwrap_or_else(|| smooth_weighted_rr(state))
+                        .or_else(|| {
+                            state
+                                .ring
+                                .iter()
+                                .find(|(_, &i)| eligible(i))
+                                .map(|(_, &i)| i)
+                        })
+                        .unwrap_or_else(|| smooth_weighted_rr(state, cand.as_deref()))
                 }
-                None => smooth_weighted_rr(state),
+                None => smooth_weighted_rr(state, cand.as_deref()),
             },
         };
+        // The SELECTED endpoint spends a half-open probe slot (no-op for
+        // healthy endpoints; best-effort under races — see
+        // `EndpointHealth::consume_probe`).
+        if state.health.is_some() {
+            if let Some(h) = &state.endpoints[idx].health {
+                h.consume_probe();
+            }
+        }
         Some(idx)
     }
 
@@ -506,9 +700,10 @@ impl Drop for InflightGuard {
     }
 }
 
-/// One dispatch's pick: the endpoint chosen, its `address:port`, and the
-/// in-flight guard for the same snapshot the pick came from. Dropping the
-/// `Dispatch` (after the response headers resolve) releases the guard.
+/// One dispatch's pick: the endpoint chosen, its `address:port`, the
+/// passive-health report handle (DW-012), and the in-flight guard for the
+/// same snapshot the pick came from. Dropping the `Dispatch` (after the
+/// response headers resolve) releases the guard.
 pub struct Dispatch {
     /// Endpoint index in the snapshot the pick ran against (informational).
     pub idx: usize,
@@ -516,6 +711,11 @@ pub struct Dispatch {
     pub address: String,
     /// Picked endpoint's port.
     pub port: u16,
+    /// Passive health report handle for the picked endpoint, present only
+    /// when the upstream configures `health`. The send path reports the
+    /// outcome (transport error / status >= 500 = failure) when the
+    /// response headers resolve.
+    pub health: Option<HealthDispatch>,
     guard: InflightGuard,
 }
 
@@ -757,12 +957,14 @@ mod tests {
             LoadBalancer::RoundRobin,
             Duration::from_secs(10),
             None,
+            None,
         );
         assert_eq!(fresh.effective_weight(&fresh.endpoints[1]), 1);
         let mut aged = build_state(
             &spec,
             LoadBalancer::RoundRobin,
             Duration::from_secs(10),
+            None,
             None,
         );
         for e in &mut aged.endpoints {
@@ -773,7 +975,7 @@ mod tests {
 
         // Slow start disabled (window 0): effective weight is the raw
         // configured weight from the first pick on.
-        let off = build_state(&spec, LoadBalancer::RoundRobin, Duration::ZERO, None);
+        let off = build_state(&spec, LoadBalancer::RoundRobin, Duration::ZERO, None, None);
         assert_eq!(off.effective_weight(&off.endpoints[1]), 5);
     }
 
@@ -828,6 +1030,66 @@ mod tests {
         assert_eq!(lb.inflight(1), 0, "re-added endpoint starts fresh");
     }
 
+    // --- passive health: single-candidate half-open (reviewer pin) ---------
+
+    #[test]
+    fn single_candidate_half_open_consumes_probe_budget() {
+        use crate::config::PassiveHealth;
+        use std::sync::atomic::AtomicU64;
+
+        // Deterministic clock: the closure is a plain fn pointer, so the
+        // "now" lives in a test-local static.
+        static NOW_MS: AtomicU64 = AtomicU64::new(100_000);
+        let health = PassiveHealth {
+            window_ms: 60_000,
+            consecutive_failures: 2,
+            failure_ratio: 0.5,
+            failure_min_volume: 1000, // isolate the consecutive-failure path
+            eject_ms: 1_000,
+            half_open_probes: 2,
+        };
+        let lb = UpstreamLb::new_with_health(
+            &eps(&[("solo", 80, 1)]),
+            LoadBalancer::RoundRobin,
+            Duration::ZERO,
+            Some(&health),
+        );
+        lb.set_health_clock(|| NOW_MS.load(Ordering::Relaxed));
+        let now = || NOW_MS.load(Ordering::Relaxed);
+
+        // Eject the sole endpoint: two consecutive reported failures.
+        for _ in 0..2 {
+            let d = lb.pick_for_dispatch(None).unwrap();
+            d.health.as_ref().unwrap().report(now(), true);
+        }
+        // Inside the ejection window the single candidate is unavailable:
+        // the pick fail-opens to the full (sole-endpoint) set.
+        assert_eq!(lb.pick(None), Some(0));
+        assert_eq!(lb.fail_open_picks(), 1, "ejected sole endpoint fail-opens");
+
+        // Ejection expired: the endpoint re-enters half-open with a budget
+        // of 2 probes, and EVERY single-candidate pick consumes one slot.
+        NOW_MS.store(101_001, Ordering::Relaxed);
+        let probe1 = lb.pick_for_dispatch(None).unwrap();
+        assert_eq!(lb.fail_open_picks(), 1, "half-open pick is a real pick");
+        let _probe2 = lb.pick_for_dispatch(None).unwrap();
+        // Budget exhausted: both probes were consumed by the two picks, so
+        // the tracker gates further picks until one probe resolves.
+        assert!(!probe1
+            .health
+            .as_ref()
+            .unwrap()
+            .tracker()
+            .is_available(now()));
+        assert_eq!(lb.pick(None), Some(0));
+        assert_eq!(lb.fail_open_picks(), 2, "exhausted budget fail-opens");
+
+        // A successful probe restores health; picks return to normal.
+        probe1.health.as_ref().unwrap().report(now(), false);
+        assert_eq!(lb.pick(None), Some(0));
+        assert_eq!(lb.fail_open_picks(), 2, "healthy pick is not fail-open");
+    }
+
     // --- integration through DataPlane (weights change via publish) ---------
 
     fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
@@ -855,6 +1117,7 @@ mod tests {
                 write_ms: None,
             }),
             slow_start_ms: None,
+            health: None,
         }
     }
 
