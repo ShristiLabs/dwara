@@ -712,6 +712,8 @@ fn validation_rejects_terminate_without_cert_file() {
         mode: TlsMode::Terminate,
         cert_file: None,
         key_file: Some("/etc/certs/key.pem".into()),
+        certificates: vec![],
+        sni_routes: vec![],
     }));
     assert_single_issue(&gw, "listener", "l", "tls.cert_file");
 }
@@ -722,6 +724,8 @@ fn validation_rejects_terminate_without_key_file() {
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: None,
+        certificates: vec![],
+        sni_routes: vec![],
     }));
     assert_single_issue(&gw, "listener", "l", "tls.key_file");
 }
@@ -732,6 +736,8 @@ fn validation_accepts_terminate_with_cert_and_key() {
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),
+        certificates: vec![],
+        sni_routes: vec![],
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -742,6 +748,8 @@ fn validation_accepts_passthrough_without_cert_or_key() {
         mode: TlsMode::Passthrough,
         cert_file: None,
         key_file: None,
+        certificates: vec![],
+        sni_routes: vec![],
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -752,6 +760,8 @@ fn validation_rejects_passthrough_with_cert_and_key() {
         mode: TlsMode::Passthrough,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),
+        certificates: vec![],
+        sni_routes: vec![],
     }));
     assert_single_issue(&gw, "listener", "l", "tls");
 }
@@ -763,6 +773,8 @@ fn validation_rejects_http_listener_with_tls_block() {
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),
+        certificates: vec![],
+        sni_routes: vec![],
     });
     assert_single_issue(&gw, "listener", "l", "tls");
 }

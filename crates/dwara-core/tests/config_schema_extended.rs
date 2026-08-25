@@ -488,6 +488,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 mode: TlsMode::Passthrough,
                 cert_file: None,
                 key_file: None,
+                certificates: vec![],
+                sni_routes: vec![],
             }),
         }],
         routes: vec![Route {

@@ -92,12 +92,47 @@ pub enum ListenerProtocol {
 pub struct ListenerTls {
     #[serde(default = "default_tls_mode")]
     pub mode: TlsMode,
-    /// Path to the PEM certificate chain (termination mode only).
+    /// Path to the PEM certificate chain (termination mode only). Serves as
+    /// the default/fallback certificate when `certificates` is also set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_file: Option<String>,
     /// Path to the PEM private key (termination mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_file: Option<String>,
+    /// Additional SNI-scoped certificate pairs (termination mode only).
+    /// Each entry serves the listed `server_names`; the single
+    /// cert_file/key_file pair (if present) is the fallback for unmatched
+    /// or absent SNI. With no single pair, the first entry is the fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub certificates: Vec<TlsCertificate>,
+    /// SNI routing rules for passthrough mode: each entry maps its
+    /// `server_names` to an upstream (by name) that receives the raw TLS
+    /// bytes. Rejected in terminate mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sni_routes: Vec<SniRoute>,
+}
+
+/// One SNI-scoped certificate pair for TLS termination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TlsCertificate {
+    /// Server names (SNI values) this certificate answers. Exact match,
+    /// case-insensitive per rustls.
+    pub server_names: Vec<String>,
+    /// Path to the PEM certificate chain.
+    pub cert_file: String,
+    /// Path to the PEM private key.
+    pub key_file: String,
+}
+
+/// One SNI-to-upstream routing rule for TLS passthrough.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SniRoute {
+    /// Server names (SNI values) routed to `upstream`. Exact match.
+    pub server_names: Vec<String>,
+    /// Name of the upstream that receives the spliced TLS stream.
+    pub upstream: String,
 }
 
 fn default_tls_mode() -> TlsMode {

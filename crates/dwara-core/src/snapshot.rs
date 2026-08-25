@@ -191,21 +191,76 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 )),
                 Some(t) => match t.mode {
                     TlsMode::Terminate => {
-                        if t.cert_file.as_deref().unwrap_or("").trim().is_empty() {
+                        let has_pair = t.cert_file.is_some() || t.key_file.is_some();
+                        if t.certificates.is_empty() || has_pair {
+                            if t.cert_file.as_deref().unwrap_or("").trim().is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.cert_file",
+                                    "tls mode terminate requires a non-empty cert_file",
+                                ));
+                            }
+                            if t.key_file.as_deref().unwrap_or("").trim().is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.key_file",
+                                    "tls mode terminate requires a non-empty key_file",
+                                ));
+                            }
+                        }
+                        if !t.sni_routes.is_empty() {
                             issues.push(issue(
                                 "listener",
                                 &l.name,
-                                "tls.cert_file",
-                                "tls mode terminate requires a non-empty cert_file",
+                                "tls.sni_routes",
+                                "sni_routes only apply to tls mode passthrough",
                             ));
                         }
-                        if t.key_file.as_deref().unwrap_or("").trim().is_empty() {
-                            issues.push(issue(
-                                "listener",
-                                &l.name,
-                                "tls.key_file",
-                                "tls mode terminate requires a non-empty key_file",
-                            ));
+                        let mut seen_names = std::collections::BTreeSet::new();
+                        for (i, c) in t.certificates.iter().enumerate() {
+                            if c.server_names.is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    &format!("tls.certificates[{i}].server_names"),
+                                    "certificate entry lists no server_names",
+                                ));
+                            }
+                            for n in &c.server_names {
+                                if n.trim().is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.certificates[{i}].server_names"),
+                                        "server name is empty",
+                                    ));
+                                } else if !seen_names.insert(n.to_ascii_lowercase()) {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.certificates[{i}].server_names"),
+                                        format!("duplicate server name '{n}'"),
+                                    ));
+                                }
+                            }
+                            if c.cert_file.trim().is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    &format!("tls.certificates[{i}].cert_file"),
+                                    "certificate entry requires a non-empty cert_file",
+                                ));
+                            }
+                            if c.key_file.trim().is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    &format!("tls.certificates[{i}].key_file"),
+                                    "certificate entry requires a non-empty key_file",
+                                ));
+                            }
                         }
                     }
                     TlsMode::Passthrough => {
@@ -216,6 +271,42 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 "tls",
                                 "tls mode passthrough ignores cert_file/key_file; remove them or use mode terminate",
                             ));
+                        }
+                        if !t.certificates.is_empty() {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "tls.certificates",
+                                "tls mode passthrough does not terminate TLS; certificates do not apply",
+                            ));
+                        }
+                        let mut seen_names = std::collections::BTreeSet::new();
+                        for (i, r) in t.sni_routes.iter().enumerate() {
+                            if r.server_names.is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    &format!("tls.sni_routes[{i}].server_names"),
+                                    "sni route lists no server_names",
+                                ));
+                            }
+                            for n in &r.server_names {
+                                if n.trim().is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.sni_routes[{i}].server_names"),
+                                        "server name is empty",
+                                    ));
+                                } else if !seen_names.insert(n.to_ascii_lowercase()) {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.sni_routes[{i}].server_names"),
+                                        format!("duplicate server name '{n}'"),
+                                    ));
+                                }
+                            }
                         }
                     }
                 },
@@ -250,6 +341,20 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         gateway.upstreams.iter().map(|u| u.name.as_str()).collect();
     let policies: std::collections::BTreeSet<&str> =
         gateway.policies.iter().map(|p| p.name.as_str()).collect();
+
+    for l in &gateway.listeners {
+        let Some(tls) = &l.tls else { continue };
+        for (i, r) in tls.sni_routes.iter().enumerate() {
+            if !upstreams.contains(r.upstream.as_str()) {
+                issues.push(issue(
+                    "listener",
+                    &l.name,
+                    &format!("tls.sni_routes[{i}].upstream"),
+                    format!("references unknown upstream '{}'", r.upstream),
+                ));
+            }
+        }
+    }
 
     for s in &gateway.services {
         if !upstreams.contains(s.upstream.as_str()) {
