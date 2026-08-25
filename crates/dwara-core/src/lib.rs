@@ -8,6 +8,7 @@ pub mod breaker;
 pub mod config;
 pub mod extensions;
 pub mod health;
+pub mod migrations;
 pub mod proxy;
 pub mod retries;
 pub mod snapshot;

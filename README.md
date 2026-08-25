@@ -910,11 +910,23 @@ past the budget are force-closed.
 ## State store
 
 Set `DWARA_STATE_DB=/path/to/db` to enable the SQLite state store
-(WAL mode, schema v1). At startup the gateway opens (or creates) the
-database and idempotently seeds consumers and credentials from the
-config — re-syncing creates nothing new; an existing consumer only has
-its priority updated. Consumers, credential records, and quota
-counters persist across restarts.
+(WAL mode). At startup the gateway opens (or creates) the database,
+applies any pending schema migrations automatically, and idempotently
+seeds consumers and credentials from the config — re-syncing creates
+nothing new; an existing consumer only has its priority updated.
+Consumers, credential records, and quota counters persist across
+restarts.
+
+Schema migrations are forward-only and automatic. Before migrating an
+existing database the store writes a consistent snapshot
+(`<db>.bak-<old-version>-<unix-seconds>-<millis>`, via SQLite `VACUUM INTO`)
+next to the database file; if the backup cannot be written, startup
+aborts and no migration runs. There are no downgrades: a binary
+presented a database at a newer schema version than it supports exits
+1. To return to an older version, stop the gateway, replace the
+database file with the matching `.bak-*` snapshot, and restart — or,
+since schema-v1 content is fully re-derivable, recreate the file and
+let config seeding repopulate it.
 
 Honesty note: credential hashing lands with the authenticator (a later
 M1 release). Until then, seeded credential rows carry a placeholder

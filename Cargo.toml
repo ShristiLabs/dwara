@@ -48,7 +48,16 @@ proptest = "1"
 # SQLite state store (DW-018): rusqlite is MIT; the "bundled" feature
 # compiles the bundled SQLite (public domain, libsqlite3-sys is MIT) so no
 # system libsqlite3 is required at build or deploy time.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# Bumped 0.37 -> 0.38 (DW-115): rusqlite_migration 2.4 — the nearest
+# release supporting our pinned rustc 1.94 — requires rusqlite ^0.38.
+# The 0.37 -> 0.38 step is additive for the APIs this workspace uses.
+rusqlite = { version = "0.38", features = ["bundled"] }
+# Versioned SQLite schema migrations (DW-115): rusqlite_migration is
+# MIT OR Apache-2.0. Pinned to 2.4 because 2.5 pulls rusqlite 0.39 and
+# 2.6 requires rustc 1.95; the workspace pins 1.94. Applies migrations
+# transactionally and tracks state in PRAGMA user_version (matching the
+# DW-018 hand-rolled baseline).
+rusqlite_migration = "2.4"
 # Tempfile-backed on-disk store tests (DW-018 dev-only): MIT/Apache-2.0.
 tempfile = "3"
 

@@ -26,6 +26,7 @@ bytes = { workspace = true }
 tower-service = { workspace = true }
 webpki-roots = { workspace = true }
 rusqlite = { workspace = true }
+rusqlite_migration.workspace = true
 
 [dev-dependencies]
 rcgen = { workspace = true }
