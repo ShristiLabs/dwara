@@ -594,9 +594,12 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             retries: None,
             health: Some(health),
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -767,6 +770,8 @@ fn upstream_cfg(
         retries: None,
         health: Some(health),
         timeouts: None,
+        breaker: None,
+        max_pending: None,
     }
 }
 
@@ -779,6 +784,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         upstreams,
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1016,9 +1022,12 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             retries: None,
             health: Some(h),
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     }
 }
 

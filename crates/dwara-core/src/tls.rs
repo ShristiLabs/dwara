@@ -653,9 +653,12 @@ mod tests {
                 active_health: None,
                 retries: None,
                 timeouts: None,
+                breaker: None,
+                max_pending: None,
             }],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         };
         (gateway, tls)
     }

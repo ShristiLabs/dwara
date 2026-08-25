@@ -233,6 +233,23 @@ only: connect timeout or per-attempt read timeout (`timeouts.read_ms`)
 -> `504`; endpoint refused, pool failure, or no endpoints -> `502`;
 upstream TLS configuration errors -> `500`.
 
+### Global settings
+
+- `max_concurrent_requests` (top-level, DW-015): the maximum number of
+  requests admitted concurrently across the WHOLE gateway. Absent (the
+  default) is unlimited. A request over the cap is rejected immediately
+  (no queueing) with 503 "gateway saturated". A slot is reserved at
+  admission and held until the response BODY completes or the client
+  connection drops — a streaming response holds its slot for the whole
+  stream. The reserved `/healthz` and `/readyz` paths bypass the cap, so
+  liveness/readiness probes still answer under saturation. An explicit
+  `0` is rejected by validation (omit the field for unlimited). A reload
+  builds a new cap; requests already admitted keep their slots.
+
+```yaml
+max_concurrent_requests: 4096
+```
+
 ### Forwarded headers and trusted proxies
 
 Gateway-level `trusted_proxies` (a list of IP addresses or CIDR
@@ -281,6 +298,12 @@ connection pool. Fields:
   passive-health failure for the endpoint. Absent = unbounded.
 - `retries`: upstream retries block; absent (default) disables retries
   entirely. See below.
+- `breaker`: per-upstream circuit breaker block; absent (default)
+  disables the breaker entirely. See "Circuit breaking and capacity
+  limits" below.
+- `max_pending`: cap on requests WAITING for an outbound connection
+  slot; absent (default) queues without bound (the `connection_cap`
+  behavior). See "Circuit breaking and capacity limits" below.
 - `slow_start_ms`: slow-start window in milliseconds; absent or 0
   (default) disables the ramp. See below.
 - `health`: passive health / outlier detection block; absent (default)
@@ -509,6 +532,95 @@ upstreams:
 ```
 
 A `retries:` block with no keys is equivalent to retries off.
+
+### Circuit breaking and capacity limits
+
+Circuit breaking (`breaker` block, DW-015) gates an ENTIRE upstream —
+all endpoints — when the upstream is failing as a whole. It is a
+different layer from per-endpoint ejection (the `health` block above):
+ejection removes individual endpoints from rotation, the breaker stops
+sending ANY traffic to the upstream for a cooling-off period. The two
+never consume each other's state — a breaker-open period ejects nothing
+(passive health sees no traffic, hence no failures), and ejections never
+open the breaker. Even when every endpoint is ejected and the balancer
+fails open, that pick still flows THROUGH the breaker.
+
+The breaker OPENS when either trips:
+
+- the consecutive-failure streak reaches `consecutive_failures`
+  (default 5), or
+- the rolling 60-second window holds at least `error_volume` (default
+  20) observations AND failures/observations >= `error_ratio` (default
+  0.5) — the volume gate keeps a brief blip from tripping on a trickle
+  of traffic.
+
+Failure classification is identical to passive health: a transport
+error or an HTTP status >= 500, observed when an attempt's response
+HEADERS resolve. Every retry attempt reports too. A mid-BODY abort
+after headers resolved does not trip the breaker (it is still reported
+to endpoint health). While OPEN, every request fails fast with 503
+"upstream circuit open" and a `Retry-After` header carrying the seconds
+until half-open (rounded up, minimum 1) — no endpoint pick, no
+retries. Requests already in flight when the breaker opened complete
+normally. After `open_ms` (default 30000) the breaker goes half-open:
+the next `half_open_probes` (default 1) requests are admitted as trial
+probes; a successful probe CLOSES the breaker with all counters and the
+window reset, a failed probe re-OPENS it for another `open_ms`. While
+all probes are in flight, further requests fail fast with
+`Retry-After: 1`.
+
+Breaker state (state, streak, window) survives config reloads keyed by
+upstream name, like balancer state and the retry budget; breaker
+parameters apply from the new config. Fields (all default; zero values
+and an `error_ratio` outside (0, 1] are rejected by validation):
+
+- `consecutive_failures`: consecutive failures that open the breaker,
+  default 5.
+- `error_ratio`: in-window failure share that opens the breaker once
+  the volume gate is met, default 0.5.
+- `error_volume`: minimum observations in the 60 s window before the
+  ratio is evaluated, default 20.
+- `open_ms`: cooling-off period before a half-open probe is admitted,
+  default 30000.
+- `half_open_probes`: concurrent trial requests admitted in half-open,
+  default 1.
+
+```yaml
+upstreams:
+  - name: echo-upstream
+    breaker:
+      consecutive_failures: 5
+      error_ratio: 0.5
+      error_volume: 20
+      open_ms: 30000
+      half_open_probes: 1
+```
+
+A `breaker:` block with no keys enables the breaker with the defaults
+above.
+
+Pending cap (`max_pending`, DW-015): bounds how many requests may WAIT
+for an outbound `connection_cap` slot to this upstream. Absent (the
+default) queues without bound; a positive value rejects excess requests
+IMMEDIATELY with 503 "upstream saturated" instead of letting them wait.
+A pending slot is held only while the request is waiting; the moment a
+connection slot is acquired (the request is connecting, no longer
+pending) the pending slot frees for the next request. `max_pending: 0`
+is rejected by validation (omit the field for unbounded). The 503 is
+not retried — the upstream is saturated by definition; a retry would
+add load.
+
+The admission layers stack in a fixed order, outermost first:
+
+1. gateway concurrency cap (`max_concurrent_requests`, see Global
+   settings) — over-cap: 503 "gateway saturated";
+2. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
+   circuit open" + `Retry-After`;
+3. per-endpoint ejection (the `health` block) — an ejected endpoint is
+   skipped by the balancer;
+4. per-upstream pending cap (`max_pending`) — queue full: 503
+   "upstream saturated";
+5. connect (`connection_cap`, `timeouts.connect_ms`).
 
 ### TLS
 

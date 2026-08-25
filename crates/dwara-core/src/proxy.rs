@@ -67,6 +67,24 @@
 //! are off). Every retry is charged against the upstream's rolling-window
 //! retry budget; exhaustion fails requests through to the client.
 //!
+//! Circuit breaking and caps (DW-015): three independent admission
+//! layers wrap the send path. (1) The per-upstream BREAKER
+//! (`upstreams[].breaker`, see `breaker`) is checked BEFORE the endpoint
+//! pick and before every (re)attempt — an open upstream answers 503
+//! "upstream circuit open" with a `Retry-After` of the seconds until
+//! half-open; in-flight requests complete normally, and the breaker is a
+//! layer ABOVE endpoint ejection (a fail-open pick still flows through
+//! it; a breaker-open period ejects nothing, since health sees no
+//! traffic). (2) The per-upstream PENDING cap (`upstreams[].max_pending`)
+//! rejects requests that would have to WAIT for an outbound connection
+//! slot: 503 "upstream saturated", immediately, no queueing (the default
+//! is the DW-008 queue-forever behavior). (3) The GATEWAY concurrency cap
+//! (`gateway.max_concurrent_requests`) admits requests at `handle()`
+//! entry — after the reserved `/healthz`/`/readyz` paths, so probes
+//! answer under saturation — rejecting over-cap requests with 503
+//! "gateway saturated" immediately; a slot is released when the response
+//! body completes (or the client connection drops).
+//!
 //! Upgrade forwarding on non-tunnel requests: an `Upgrade` header arriving
 //! on an ordinary proxied request (no `101` ever comes back) is forwarded
 //! upstream, together with its `Connection` tokens, rather than stripped.
@@ -90,6 +108,7 @@ use hyper::header::{
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch};
 use crate::retries::RetryParams;
@@ -125,6 +144,22 @@ struct Generation {
 pub struct DataPlane {
     state: Arc<ConfigState>,
     current: ArcSwap<Generation>,
+    /// Gateway concurrency cap (DW-015): `gateway.max_concurrent_requests`
+    /// as a semaphore, rebuilt on every generation swap. None = unlimited
+    /// (the default). In-flight permits hold an `Arc` to the semaphore they
+    /// were drawn from, so a reload that changes (or removes) the cap never
+    /// invalidates live admissions — new requests are admitted against the
+    /// new cap.
+    global_cap: ArcSwap<Option<Arc<Semaphore>>>,
+}
+
+/// The gateway-level concurrency semaphore for a snapshot's config: None
+/// when `max_concurrent_requests` is absent or 0 (unlimited).
+fn global_cap_of(gateway: &Gateway) -> Option<Arc<Semaphore>> {
+    gateway
+        .max_concurrent_requests
+        .filter(|c| *c > 0)
+        .map(|c| Arc::new(Semaphore::new(c as usize)))
 }
 
 impl DataPlane {
@@ -132,8 +167,10 @@ impl DataPlane {
     pub fn new(state: Arc<ConfigState>) -> Arc<Self> {
         let snapshot = state.snapshot();
         let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
+        let global_cap = global_cap_of(snapshot.gateway());
         Arc::new(DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
+            global_cap: ArcSwap::from_pointee(global_cap),
             state,
         })
     }
@@ -150,6 +187,8 @@ impl DataPlane {
             &snapshot,
             &self.current().registry,
         ));
+        self.global_cap
+            .store(Arc::new(global_cap_of(snapshot.gateway())));
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
     }
@@ -217,6 +256,23 @@ where
         return resp;
     }
 
+    // Gateway concurrency cap (DW-015): admit at handle() entry, after the
+    // reserved paths (liveness/readiness probes must still answer while
+    // the gateway is saturated) and before any route work. Over-cap
+    // requests are rejected IMMEDIATELY (no queueing) with a dedicated
+    // 503. The permit lives until the response body completes: the proxy
+    // path attaches it to the streaming body, and complete bodies (errors,
+    // redirects, respond actions) release it when this scope ends.
+    let mut global_permit = match dp.global_cap.load_full().as_ref() {
+        Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return simple(StatusCode::SERVICE_UNAVAILABLE, "gateway saturated");
+            }
+        },
+        None => None,
+    };
+
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
         return simple(StatusCode::NOT_FOUND, "no route");
     };
@@ -230,7 +286,7 @@ where
 
     match &route.action {
         RouteAction::Proxy { .. } => {
-            proxy_request(&gen, gateway, peer, req, route, idx, &params).await
+            proxy_request(&gen, peer, req, route, idx, &params, &mut global_permit).await
         }
         RouteAction::Redirect {
             scheme,
@@ -464,17 +520,18 @@ fn resolve_ref<'a>(
 
 async fn proxy_request<B>(
     gen: &Generation,
-    gateway: &Gateway,
     peer: IpAddr,
     mut req: Request<B>,
     route: &Route,
     route_idx: usize,
     params: &[(String, String)],
+    global_permit: &mut Option<OwnedSemaphorePermit>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    let gateway = gen.snapshot.gateway();
     let Some(service) = gateway.services.iter().find(|s| s.name == route.service) else {
         // Validation rejects dangling references, so this is a generation
         // tear; keep it classified rather than panicking.
@@ -586,6 +643,14 @@ where
         && (idempotent || (rp.retry_post && out_req_parts.method == hyper::Method::POST));
 
     let budget = handle.retry_budget();
+    // Per-upstream circuit breaker (DW-015): evaluated BEFORE the endpoint
+    // pick and before every (re)attempt — an open breaker means NO attempts
+    // at all. The breaker gates the whole upstream; endpoint ejection
+    // (DW-012) gates endpoints within it, and even a fail-open pick (all
+    // endpoints ejected) still flows through this check. Requests already
+    // in flight when the breaker opened complete normally.
+    let breaker = handle.breaker();
+    let breaker_params = handle.breaker_params().copied();
     // One budget denominator per proxied request (not per attempt),
     // regardless of retry eligibility or upgrade status: the budget window
     // counts ALL proxied traffic to the upstream, so a POST-heavy upstream
@@ -622,6 +687,20 @@ where
     let mut first_body = Some(first_body);
     let mut done_tries: u32 = 0;
     loop {
+        // Breaker admission (DW-015) precedes every attempt: endpoint
+        // pick, dial, and any remaining retries. Checked per iteration so
+        // a breaker that trips mid-request (an earlier attempt's failure
+        // crossed the threshold) still short-circuits the retries.
+        if let Some(bp) = breaker_params {
+            if let crate::breaker::BreakerDecision::Reject { retry_after_ms } = breaker.check(&bp) {
+                eprintln!(
+                    "dwara: upstream '{}' circuit open; failing fast (service '{}')",
+                    handle.name(),
+                    service.name
+                );
+                return breaker_open(retry_after_ms);
+            }
+        }
         let body = match first_body.take() {
             Some(body) => body,
             None => {
@@ -643,6 +722,13 @@ where
         let may_retry = done_tries <= rp.attempts && replay.is_some();
         match result {
             Ok(resp) => {
+                // Breaker observation (DW-015): the same point passive
+                // health sees — headers resolved; status >= 500 is a
+                // failure, everything else a success. Each attempt (a
+                // retried one included) reports.
+                if let Some(bp) = breaker_params {
+                    breaker.report(&bp, resp.status().as_u16() >= 500);
+                }
                 // Retry when the upstream answered with a retryable status
                 // (headers resolved — the attempt is otherwise final).
                 if may_retry
@@ -657,9 +743,23 @@ where
                     .await;
                     continue;
                 }
-                return finish_proxy_response(resp, wants_upgrade, on_client_upgrade);
+                return finish_proxy_response(
+                    resp,
+                    wants_upgrade,
+                    on_client_upgrade,
+                    global_permit.take(),
+                );
             }
             Err(err) => {
+                // Breaker observation: transport-class failures count.
+                // Client-side admission rejections (Saturated — no upstream
+                // contact) and configuration-class errors say nothing about
+                // upstream health and must not drive the breaker.
+                if let Some(bp) = breaker_params {
+                    if breaker_reportable(&err) {
+                        breaker.report(&bp, true);
+                    }
+                }
                 // Retry on transport-class failures (connect/read timeout,
                 // refusal, reset, framing) when `retry_transport` is on.
                 if may_retry
@@ -694,12 +794,35 @@ where
     }
 }
 
+/// The fail-fast response for an open circuit (DW-015): 503 with the
+/// upstream named in the body and a `Retry-After` header carrying the
+/// whole seconds until a half-open probe may be admitted (rounded up,
+/// minimum 1 — a client honoring it retries neither too early nor
+/// needlessly late). While half-open probes are in flight the hint is 1
+/// second (the exact half-open time is unknowable until a probe resolves).
+fn breaker_open(retry_after_ms: u64) -> Response<ProxyBody> {
+    let seconds = retry_after_ms.div_ceil(1000);
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::RETRY_AFTER, seconds.max(1).to_string())
+        .body(Either::Left(Full::new(Bytes::from(
+            "upstream circuit open",
+        ))))
+        .expect("static breaker response is valid")
+}
+
 /// Finalize a proxied response: upgrade tunneling for 101s, hop-by-hop
-/// stripping, and the streaming body passthrough.
+/// stripping, and the streaming body passthrough. The gateway
+/// concurrency-cap permit (DW-015), when present, is attached to the
+/// streaming body so the global slot is held until the body completes or
+/// the response is dropped (client disconnect included); a tunneled 101
+/// releases it when the (empty) 101 response is dropped.
 fn finish_proxy_response(
     mut resp: Response<UpstreamBody>,
     wants_upgrade: bool,
     on_client_upgrade: Option<hyper::upgrade::OnUpgrade>,
+    global_permit: Option<OwnedSemaphorePermit>,
 ) -> Response<ProxyBody> {
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
         let on_upstream = hyper::upgrade::on(&mut resp);
@@ -722,10 +845,32 @@ fn finish_proxy_response(
         }
         // Keep the 101 headers (Connection/Upgrade must reach the
         // client to complete its handshake); body is empty.
+        if let Some(permit) = global_permit {
+            resp.body_mut().set_release_permit(permit);
+        }
         return resp.map(Either::Right);
     }
     let _ = strip_hop_by_hop(resp.headers_mut(), false);
+    if let Some(permit) = global_permit {
+        resp.body_mut().set_release_permit(permit);
+    }
     resp.map(Either::Right)
+}
+
+/// Whether an upstream error reflects a genuine transport/exchange
+/// outcome and therefore feeds the breaker. Client-side admission
+/// rejections (Saturated — the request never contacted the upstream) and
+/// configuration-class errors (NoEndpoints, InvalidRootCertificate,
+/// InvalidHost) would trip the breaker for reasons unrelated to upstream
+/// health, so they are not reported.
+fn breaker_reportable(err: &UpstreamError) -> bool {
+    !matches!(
+        err,
+        UpstreamError::Saturated
+            | UpstreamError::NoEndpoints
+            | UpstreamError::InvalidRootCertificate(_)
+            | UpstreamError::InvalidHost(_)
+    )
 }
 
 /// Whether an upstream transport error is safe to retry: genuine
@@ -850,6 +995,7 @@ where
 
 fn classify_upstream_error(err: &UpstreamError) -> (StatusCode, &'static str) {
     match err {
+        UpstreamError::Saturated => (StatusCode::SERVICE_UNAVAILABLE, "upstream saturated"),
         UpstreamError::ConnectTimeout { .. } => {
             (StatusCode::GATEWAY_TIMEOUT, "upstream connect timed out")
         }

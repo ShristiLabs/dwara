@@ -68,6 +68,17 @@ pub struct Gateway {
     /// exactly the direct peer, and inbound XFF values are discarded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_proxies: Vec<String>,
+    /// Gateway-level concurrency cap (DW-015): the maximum number of
+    /// requests admitted concurrently across the WHOLE gateway. Absent
+    /// (the default) is unlimited; 0 is invalid (validation rejects it —
+    /// omit the field for unlimited). Over-cap requests are rejected
+    /// immediately with 503 "gateway saturated" (no queueing). A slot is
+    /// reserved at request admission and released when the response body
+    /// completes (or the connection drops). The reserved paths
+    /// `/healthz` and `/readyz` bypass the cap so liveness/readiness
+    /// probes still answer under saturation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_requests: Option<u32>,
 }
 
 /// Entry point: bind address + port + TLS termination (or passthrough) config.
@@ -352,6 +363,20 @@ pub struct Upstream {
     /// one attempt and the proxy path keeps its zero-copy streaming body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<RetryConfig>,
+    /// Per-upstream circuit breaker (DW-015): opens the WHOLE upstream on
+    /// consecutive failures or a rolling error ratio, fails fast with 503
+    /// while open, probes half-open after `breaker.open_ms`. Absent
+    /// disables the breaker entirely (no fail-fast, behavior identical to
+    /// pre-DW-015).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breaker: Option<BreakerConfig>,
+    /// Maximum number of requests WAITING for an outbound connection slot
+    /// to this upstream (DW-015). 0/absent (the default) means unbounded
+    /// queueing — the DW-008 `connection_cap` behavior. A positive value
+    /// rejects excess requests IMMEDIATELY with 503 "upstream saturated"
+    /// instead of letting them wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
 }
@@ -457,6 +482,75 @@ fn default_retry_budget_percent() -> u32 {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Per-upstream circuit breaker knobs (DW-015). All fields default; a
+/// `breaker:` block with no keys enables the breaker with the defaults.
+///
+/// Frozen semantics (see the `breaker` module docs):
+/// - The breaker gates the WHOLE upstream (all endpoints); per-endpoint
+///   ejection (DW-012) is an independent layer beneath it.
+/// - It opens on `consecutive_failures` consecutive failures (5xx or
+///   transport) OR an in-window error ratio >= `error_ratio` once at least
+///   `error_volume` observations are in the 60 s window.
+/// - While open, requests fail fast with 503 and a `Retry-After` header
+///   (seconds until half-open); in-flight requests complete normally.
+/// - After `open_ms` a half-open probe (`half_open_probes` concurrent
+///   trials) closes the breaker on success or re-opens it on failure.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BreakerConfig {
+    /// Consecutive failures (5xx + transport) that open the breaker
+    /// (default 5).
+    #[serde(default = "default_breaker_consecutive_failures")]
+    pub consecutive_failures: u32,
+    /// In-window error ratio in (0, 1] that opens the breaker once
+    /// `error_volume` observations exist (default 0.5).
+    #[serde(default = "default_breaker_error_ratio")]
+    pub error_ratio: f64,
+    /// Minimum observations in the 60 s window before the ratio is
+    /// evaluated (default 20).
+    #[serde(default = "default_breaker_error_volume")]
+    pub error_volume: u32,
+    /// Cooling-off period in milliseconds before a half-open probe is
+    /// admitted (default 30000).
+    #[serde(default = "default_breaker_open_ms")]
+    pub open_ms: u64,
+    /// Concurrent trial requests admitted in half-open (default 1).
+    #[serde(default = "default_breaker_half_open_probes")]
+    pub half_open_probes: u32,
+}
+
+impl Default for BreakerConfig {
+    fn default() -> Self {
+        BreakerConfig {
+            consecutive_failures: default_breaker_consecutive_failures(),
+            error_ratio: default_breaker_error_ratio(),
+            error_volume: default_breaker_error_volume(),
+            open_ms: default_breaker_open_ms(),
+            half_open_probes: default_breaker_half_open_probes(),
+        }
+    }
+}
+
+fn default_breaker_consecutive_failures() -> u32 {
+    5
+}
+
+fn default_breaker_error_ratio() -> f64 {
+    0.5
+}
+
+fn default_breaker_error_volume() -> u32 {
+    20
+}
+
+fn default_breaker_open_ms() -> u64 {
+    30_000
+}
+
+fn default_breaker_half_open_probes() -> u32 {
+    1
 }
 
 fn is_true(b: &bool) -> bool {

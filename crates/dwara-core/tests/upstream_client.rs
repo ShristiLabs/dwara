@@ -40,6 +40,7 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         upstreams,
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -73,6 +74,8 @@ fn upstream(
             read_ms: None,
             write_ms: None,
         }),
+        breaker: None,
+        max_pending: None,
     }
 }
 
@@ -672,9 +675,12 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 active_health: None,
                 retries: None,
                 timeouts: Some(timeouts),
+                breaker: None,
+                max_pending: None,
             }],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert_eq!(fields, vec![field], "exactly {field} flagged");
@@ -707,9 +713,12 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
                 read_ms: Some(1),
                 write_ms: Some(1),
             }),
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     });
     assert!(issues.is_empty(), "positive values valid: {issues:?}");
 }

@@ -74,6 +74,8 @@ fn upstream(name: &str) -> Upstream {
         active_health: None,
         retries: None,
         timeouts: None,
+        breaker: None,
+        max_pending: None,
     }
 }
 
@@ -88,6 +90,7 @@ fn base_gateway() -> Gateway {
         upstreams: vec![upstream("pool")],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     }
 }
 

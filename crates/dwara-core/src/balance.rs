@@ -1134,6 +1134,8 @@ mod tests {
             health: None,
             active_health: None,
             retries: None,
+            breaker: None,
+            max_pending: None,
         }
     }
 
@@ -1148,6 +1150,7 @@ mod tests {
             upstreams: vec![upstream_with_weights((2, 1))],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         };
         st.compile_and_publish(&g).expect("publish A");
         let dp = DataPlane::new(Arc::clone(&st));

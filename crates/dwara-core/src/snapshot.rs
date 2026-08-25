@@ -140,6 +140,16 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
     }
 
+    if gateway.max_concurrent_requests == Some(0) {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "max_concurrent_requests",
+            "max_concurrent_requests must be > 0 (unlimited is expressed by \
+             omitting the field, so an explicit 0 is rejected as ambiguous)",
+        ));
+    }
+
     // Duplicate names within each entity kind.
     let mut check_dups = |kind: &str, field: &str, names: Vec<&str>| {
         let mut seen = std::collections::BTreeSet::new();
@@ -619,6 +629,43 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "connection_cap must be > 0",
             ));
         }
+        if u.max_pending == Some(0) {
+            issues.push(issue(
+                "upstream",
+                &u.name,
+                "max_pending",
+                "max_pending must be > 0 (unbounded is expressed by omitting \
+                 the field, so an explicit 0 is rejected as ambiguous)",
+            ));
+        }
+        if let Some(b) = &u.breaker {
+            for (field, v) in [
+                (
+                    "breaker.consecutive_failures",
+                    u64::from(b.consecutive_failures),
+                ),
+                ("breaker.error_volume", u64::from(b.error_volume)),
+                ("breaker.open_ms", b.open_ms),
+                ("breaker.half_open_probes", u64::from(b.half_open_probes)),
+            ] {
+                if v == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        field,
+                        "circuit breaker value must be > 0",
+                    ));
+                }
+            }
+            if !b.error_ratio.is_finite() || b.error_ratio <= 0.0 || b.error_ratio > 1.0 {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "breaker.error_ratio",
+                    format!("error_ratio must be in (0, 1]; got {}", b.error_ratio),
+                ));
+            }
+        }
         if u.slow_start_ms
             .is_some_and(|ms| ms > crate::balance::MAX_SLOW_START_MS)
         {
@@ -1090,6 +1137,7 @@ impl Snapshot {
                 upstreams: Vec::new(),
                 consumers: Vec::new(),
                 policies: Vec::new(),
+                max_concurrent_requests: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }
@@ -1352,9 +1400,12 @@ mod tests {
                 active_health: None,
                 retries: None,
                 timeouts: None,
+                breaker: None,
+                max_pending: None,
             }],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         }
     }
 

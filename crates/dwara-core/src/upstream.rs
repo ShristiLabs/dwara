@@ -44,6 +44,13 @@
 //!   the cap counts connections, not in-flight requests — HTTP/1.1
 //!   multiplexes several requests over one connection only sequentially,
 //!   and h2 pools share one connection per origin anyway.
+//! - **Pending cap** (DW-015): `max_pending` (default: absent = unbounded)
+//!   bounds how many requests may WAIT for a connection-cap slot. Over
+//!   that, the connector fails fast with [`UpstreamError::Saturated`]
+//!   (classified 503 "upstream saturated" by the proxy) instead of
+//!   queueing; a pending slot is held from the dial attempt until the
+//!   connection-cap permit is acquired, then released (the request is
+//!   connecting, no longer pending).
 //! - **TLS**: `https` upstreams negotiate TLS with ALPN `http/1.1`;
 //!   `http2` upstreams negotiate TLS with ALPN `h2` and lock the client to
 //!   HTTP/2; `http1` upstreams dial plaintext. Server certificates are
@@ -87,6 +94,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_service::Service;
 
+use crate::breaker::{Breaker, BreakerParams};
 use crate::config::{Timeouts, Upstream, UpstreamProtocol};
 use crate::health::HealthDispatch;
 use crate::retries::{RetryBudget, RetryParams};
@@ -116,6 +124,12 @@ pub enum UpstreamError {
     /// response headers resolved. Covers pool-queue wait + connect +
     /// request write + header read; see the module docs (DW-014).
     ReadTimeout { after: Duration },
+    /// The per-upstream pending cap (`max_pending`, DW-015) is full: the
+    /// request would have to WAIT for an outbound connection slot and the
+    /// config chose immediate rejection over queueing. Classified 503
+    /// ("upstream saturated") by the proxy; NOT retryable (the upstream is
+    /// saturated by definition — a retry adds load).
+    Saturated,
     /// Transport-level I/O failure while connecting.
     Io(std::io::Error),
     /// The hyper client failed to complete the request (broken pool
@@ -127,6 +141,9 @@ impl std::fmt::Display for UpstreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UpstreamError::NoEndpoints => write!(f, "upstream has no endpoints"),
+            UpstreamError::Saturated => {
+                write!(f, "upstream pending queue is saturated")
+            }
             UpstreamError::InvalidRootCertificate(e) => {
                 write!(f, "unusable root certificate: {e}")
             }
@@ -147,6 +164,36 @@ impl std::fmt::Display for UpstreamError {
 
 impl std::error::Error for UpstreamError {}
 
+/// Whether a send-path error reflects a genuine transport/exchange
+/// failure of the picked endpoint (and therefore feeds passive health).
+/// Client-side admission rejections (Saturated — the request never
+/// contacted the endpoint) and configuration-class errors (NoEndpoints,
+/// InvalidRootCertificate, InvalidHost) would eject the endpoint for
+/// reasons unrelated to its health, so they are not reported.
+fn health_reportable(err: &UpstreamError) -> bool {
+    !matches!(
+        err,
+        UpstreamError::Saturated
+            | UpstreamError::NoEndpoints
+            | UpstreamError::InvalidRootCertificate(_)
+            | UpstreamError::InvalidHost(_)
+    )
+}
+
+/// [`health_reportable`] over a legacy client error: our typed connector
+/// errors (Saturated, InvalidHost, ...) ride in its source chain, so walk
+/// it; anything else is a genuine transport failure of the exchange.
+fn health_reportable_legacy(err: &hyper_util::client::legacy::Error) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(s) = src {
+        if let Some(u) = s.downcast_ref::<UpstreamError>() {
+            return health_reportable(u);
+        }
+        src = s.source();
+    }
+    true
+}
+
 impl From<std::io::Error> for UpstreamError {
     fn from(e: std::io::Error) -> Self {
         UpstreamError::Io(e)
@@ -166,6 +213,7 @@ impl From<hyper_util::client::legacy::Error> for UpstreamError {
                         return UpstreamError::ConnectTimeout { after: *after }
                     }
                     UpstreamError::InvalidHost(h) => return UpstreamError::InvalidHost(h.clone()),
+                    UpstreamError::Saturated => return UpstreamError::Saturated,
                     _ => {}
                 }
             }
@@ -227,6 +275,11 @@ pub struct UpstreamBody {
     idle: Option<Duration>,
     sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     health: Option<(Arc<crate::balance::UpstreamLb>, HealthDispatch)>,
+    /// Gateway concurrency-cap permit (DW-015), attached by the proxy to
+    /// STREAMING responses so the global slot is held until the body
+    /// completes (or the response is dropped — client disconnect included).
+    /// Dropped with the body; no polling logic needed.
+    release: Option<OwnedSemaphorePermit>,
 }
 
 impl hyper::body::Body for UpstreamBody {
@@ -299,6 +352,13 @@ impl UpstreamBody {
         if let Some((lb, hd)) = &self.health.take() {
             hd.report(lb.now_ms(), true);
         }
+    }
+
+    /// Attach the gateway concurrency-cap permit (DW-015): it releases
+    /// when this body completes or is dropped, which is exactly the
+    /// "release at body completion" contract of the global cap.
+    pub fn set_release_permit(&mut self, permit: OwnedSemaphorePermit) {
+        self.release = Some(permit);
     }
 }
 
@@ -412,6 +472,11 @@ struct UpstreamConnector {
     /// TLS client config (ALPN already set) for https/http2 upstreams.
     tls: Option<Arc<rustls::ClientConfig>>,
     cap: Arc<Semaphore>,
+    /// Pending-request cap (`max_pending`, DW-015). None = unbounded
+    /// queueing (the DW-008 behavior). Some = at most this many requests
+    /// may WAIT for a connection-cap slot; further dials fail fast with
+    /// [`UpstreamError::Saturated`].
+    pending_cap: Option<Arc<Semaphore>>,
     connect_timeout: Duration,
     stats: Arc<UpstreamStats>,
 }
@@ -432,8 +497,25 @@ impl Service<Uri> for UpstreamConnector {
         let mut http = self.http.clone();
         let tls = self.tls.clone();
         let cap = Arc::clone(&self.cap);
+        let pending_cap = self.pending_cap.clone();
         let connect_timeout = self.connect_timeout;
         let stats = Arc::clone(&self.stats);
+        // Pending admission (DW-015) happens OUTSIDE the async block so a
+        // saturated upstream rejects immediately: a request that would
+        // have to queue behind more than `max_pending` waiters never even
+        // arms its dial. The pending permit is held only while the request
+        // is WAITING for a connection-cap slot and is dropped the moment
+        // the cap permit is acquired (the request is then connecting, no
+        // longer pending).
+        let _pending = match pending_cap {
+            Some(pc) => match pc.try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return Box::pin(async { Err(UpstreamError::Saturated) });
+                }
+            },
+            None => None,
+        };
         Box::pin(async move {
             // Acquire a cap slot BEFORE dialing. The semaphore is never
             // closed, so acquire cannot fail; waiting here is the cap's
@@ -442,6 +524,10 @@ impl Service<Uri> for UpstreamConnector {
                 .acquire_owned()
                 .await
                 .expect("connection-cap semaphore is never closed");
+            // Connection slot acquired: no longer pending. Dropping the
+            // permit here (before the dial) frees the pending slot for
+            // the next request.
+            drop(_pending);
             let host = uri.host().unwrap_or_default().to_string();
             let dial = async {
                 // HttpConnector (hyper-util 0.1.20) resolves + dials and
@@ -498,6 +584,15 @@ pub struct UpstreamHandle {
     /// Rolling-window retry budget, carried across reloads like the
     /// balancer.
     retry_budget: Arc<RetryBudget>,
+    /// Effective pending cap (`max_pending`, DW-015); 0 = unbounded.
+    max_pending: u32,
+    /// Per-upstream circuit breaker state (DW-015), carried across reloads
+    /// like the retry budget. Always present (state-only object); whether
+    /// the breaker is ENABLED is `breaker_params`.
+    breaker: Arc<Breaker>,
+    /// Resolved breaker parameters; None disables the breaker (the proxy
+    /// then never consults it — behavior identical to pre-DW-015).
+    breaker_params: Option<BreakerParams>,
     stats: Arc<UpstreamStats>,
     client: Client<
         UpstreamConnector,
@@ -559,6 +654,23 @@ impl UpstreamHandle {
     /// This upstream's rolling-window retry budget (DW-014).
     pub fn retry_budget(&self) -> &Arc<RetryBudget> {
         &self.retry_budget
+    }
+
+    /// Effective pending cap (DW-015); 0 = unbounded queueing.
+    pub fn max_pending(&self) -> u32 {
+        self.max_pending
+    }
+
+    /// This upstream's circuit breaker state (DW-015). Always present;
+    /// consult [`UpstreamHandle::breaker_params`] first — a None there
+    /// means the breaker is disabled and the state object is dormant.
+    pub fn breaker(&self) -> &Arc<Breaker> {
+        &self.breaker
+    }
+
+    /// Resolved breaker parameters (DW-015); None = breaker disabled.
+    pub fn breaker_params(&self) -> Option<&BreakerParams> {
+        self.breaker_params.as_ref()
     }
 
     /// Total connections established since the handle was built.
@@ -680,11 +792,16 @@ impl UpstreamHandle {
             },
             None => request.await,
         };
-        if let Some(health) = &dispatch.health {
-            let is_failure = match &outcome {
-                Ok(resp) => resp.status().as_u16() >= 500,
-                Err(_) => true,
-            };
+        // Client-side admission rejections (Saturated) and configuration-
+        // class errors say nothing about the PICKED endpoint's health and
+        // must not eject it; only genuine transport/exchange outcomes
+        // report (same classification as the breaker wire in the proxy).
+        let report = match &outcome {
+            Ok(resp) => Some(resp.status().as_u16() >= 500),
+            Err(err) if health_reportable_legacy(err) => Some(true),
+            Err(_) => None,
+        };
+        if let (Some(health), Some(is_failure)) = (&dispatch.health, report) {
             health.report(self.lb.now_ms(), is_failure);
         }
         dispatch.release();
@@ -694,6 +811,7 @@ impl UpstreamHandle {
                 idle: self.write_timeout,
                 sleep: None,
                 health: body_health,
+                release: None,
             })
         })
     }
@@ -790,6 +908,10 @@ fn build_handle(
         http,
         tls,
         cap: Arc::new(Semaphore::new(cap as usize)),
+        pending_cap: u
+            .max_pending
+            .filter(|p| *p > 0)
+            .map(|p| Arc::new(Semaphore::new(p as usize))),
         connect_timeout,
         stats: Arc::clone(&stats),
     };
@@ -827,6 +949,11 @@ fn build_handle(
     let retry_budget = previous
         .map(|h| Arc::clone(h.retry_budget()))
         .unwrap_or_else(|| Arc::new(RetryBudget::new()));
+    // Breaker state carries across reloads; PARAMETERS apply from the new
+    // config (the RetryBudget/RetryParams split, verbatim).
+    let breaker = previous
+        .map(|h| Arc::clone(h.breaker()))
+        .unwrap_or_else(|| Arc::new(Breaker::new()));
 
     Arc::new(UpstreamHandle {
         name: u.name.clone(),
@@ -836,6 +963,9 @@ fn build_handle(
         write_timeout: effective_write_timeout(u),
         retries: RetryParams::from_config(u.retries.as_ref()),
         retry_budget,
+        max_pending: u.max_pending.unwrap_or(0),
+        breaker,
+        breaker_params: u.breaker.as_ref().map(BreakerParams::from_config),
         stats,
         client: builder.build(connector),
         lb,
@@ -953,6 +1083,7 @@ mod tests {
             upstreams: vec![up],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         };
         let state = ConfigState::new();
         state.compile_and_publish(&gw).expect("publish");
@@ -985,6 +1116,8 @@ mod tests {
                 read_ms: None,
                 write_ms: None,
             }),
+            breaker: None,
+            max_pending: None,
         }
     }
 
@@ -1305,9 +1438,12 @@ mod tests {
                     read_ms: Some(0),
                     write_ms: None,
                 }),
+                breaker: None,
+                max_pending: None,
             }],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert!(fields.contains(&"connection_cap"));
@@ -1345,6 +1481,8 @@ mod tests {
             active_health: None,
             retries: None,
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         };
         let handle = build_handle(&up, webpki_root_store(), None);
         assert!(matches!(
@@ -1366,6 +1504,7 @@ mod tests {
                 upstreams: vec![],
                 consumers: vec![],
                 policies: vec![],
+                max_concurrent_requests: None,
             })
             .expect("publish");
         let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate

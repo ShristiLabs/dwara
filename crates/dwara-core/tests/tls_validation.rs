@@ -107,9 +107,12 @@ fn base_gateway(listener: Listener) -> Gateway {
             active_health: None,
             retries: None,
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     }
 }
 

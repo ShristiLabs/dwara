@@ -532,6 +532,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             active_health: None,
             retries: None,
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![Consumer {
             name: "c".into(),
@@ -548,6 +550,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             }),
             timeouts: None,
         }],
+        max_concurrent_requests: None,
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");

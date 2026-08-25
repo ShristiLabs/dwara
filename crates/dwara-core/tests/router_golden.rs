@@ -111,6 +111,8 @@ fn inject_default_services(gateway: &mut Gateway) {
         active_health: None,
         retries: None,
         timeouts: None,
+        breaker: None,
+        max_pending: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

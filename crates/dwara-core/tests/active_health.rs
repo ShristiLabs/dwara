@@ -93,9 +93,12 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             active_health: Some(active),
             retries: None,
             timeouts: None,
+            breaker: None,
+            max_pending: None,
         }],
         consumers: vec![],
         policies: vec![],
+        max_concurrent_requests: None,
     }
 }
 
@@ -406,6 +409,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             upstreams: vec![],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -486,9 +490,12 @@ async fn reserved_paths_shadow_configured_routes() {
                 active_health: None,
                 retries: None,
                 timeouts: None,
+                breaker: None,
+                max_pending: None,
             }],
             consumers: vec![],
             policies: vec![],
+            max_concurrent_requests: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

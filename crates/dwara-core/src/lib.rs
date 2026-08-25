@@ -4,6 +4,7 @@
 
 pub mod active;
 pub mod balance;
+pub mod breaker;
 pub mod config;
 pub mod extensions;
 pub mod health;
