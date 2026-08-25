@@ -469,6 +469,30 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        if u.connection_cap == Some(0) {
+            issues.push(issue(
+                "upstream",
+                &u.name,
+                "connection_cap",
+                "connection_cap must be > 0",
+            ));
+        }
+        if let Some(t) = &u.timeouts {
+            for (field, v) in [
+                ("connect_ms", t.connect_ms),
+                ("read_ms", t.read_ms),
+                ("write_ms", t.write_ms),
+            ] {
+                if v == Some(0) {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        &format!("timeouts.{field}"),
+                        "timeout must be > 0 milliseconds",
+                    ));
+                }
+            }
+        }
     }
 
     for c in &gateway.consumers {
@@ -852,6 +876,7 @@ mod tests {
                     port: 9001,
                     weight: 1,
                 }],
+                connection_cap: None,
                 timeouts: None,
             }],
             consumers: vec![],

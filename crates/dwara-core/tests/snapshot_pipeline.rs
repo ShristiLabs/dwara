@@ -66,6 +66,7 @@ fn upstream(name: &str) -> Upstream {
             port: 9001,
             weight: 1,
         }],
+        connection_cap: None,
         timeouts: None,
     }
 }

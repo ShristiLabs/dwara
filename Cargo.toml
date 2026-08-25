@@ -15,9 +15,15 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "http1", "http2", "server-auto"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "server", "server-graceful", "http1", "http2", "server-auto"] }
 http-body-util = "0.1"
+bytes = "1"
+# hyper-util's legacy client is generic over tower Service connectors.
+tower-service = "0.3"
+# Upstream TLS verification (DW-008): Mozilla webpki root set — small,
+# deterministic, no OS variance in tests; system roots can follow later.
+webpki-roots = "0.26"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_path_to_error = "0.1"

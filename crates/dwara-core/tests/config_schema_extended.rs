@@ -522,6 +522,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 port: 0,
                 weight: 0,
             }],
+            connection_cap: None,
             timeouts: None,
         }],
         consumers: vec![Consumer {

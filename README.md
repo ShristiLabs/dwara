@@ -88,6 +88,38 @@ parameters like `/users/{id}` supported), `regex`, or `prefix`. Lookup
 precedence is exact, then regex (first declared pattern wins), then
 longest prefix.
 
+### Upstreams
+
+Each upstream has its own connection pool. Optional tuning fields:
+
+- `protocol`: `http1` (plaintext, default), `https` (TLS, ALPN
+  `http/1.1`), or `http2` (TLS, ALPN `h2`, HTTP/2 only).
+- `connection_cap`: maximum concurrent outbound connections to the
+  upstream (active plus pooled idle). Excess connection attempts wait
+  for a slot rather than fail. Defaults to 64.
+- `timeouts.connect_ms`: connect timeout in milliseconds, covering the
+  TCP connect plus, for TLS upstreams, the handshake. Defaults to 5000.
+
+For `https`/`http2` upstreams, server certificates are verified against
+the Mozilla (webpki) public CA root set. Zero values for
+`connection_cap` and the timeout fields are rejected by validation.
+
+```yaml
+upstreams:
+  - name: echo-upstream
+    protocol: https
+    connection_cap: 32
+    timeouts:
+      connect_ms: 2000
+    endpoints:
+      - address: 10.0.0.5
+        port: 8443
+```
+
+Like passthrough routing, the upstream client sends requests to the
+FIRST endpoint of the upstream; load balancing across endpoints arrives
+later in M1.
+
 ### TLS
 
 Listeners are `http` (cleartext) or `https` (TLS). An `https` listener

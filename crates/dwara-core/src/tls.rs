@@ -635,6 +635,7 @@ mod tests {
                     port: 8443,
                     weight: 1,
                 }],
+                connection_cap: None,
                 timeouts: None,
             }],
             consumers: vec![],

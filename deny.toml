@@ -18,6 +18,9 @@ allow = [
   # notify (config file watcher) is CC0-1.0: public-domain dedication,
   # acceptable as a dependency license; dwara's own code is Apache-2.0.
   "CC0-1.0",
+  # webpki-roots (upstream TLS trust store, DW-008) ships the Mozilla root
+  # set under CDLA-Permissive-2.0: permissive data license, not code copyleft.
+  "CDLA-Permissive-2.0",
 ]
 
 [bans]

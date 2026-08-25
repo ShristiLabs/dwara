@@ -245,6 +245,12 @@ pub struct Upstream {
     #[serde(default = "default_upstream_protocol")]
     pub protocol: UpstreamProtocol,
     pub endpoints: Vec<Endpoint>,
+    /// Maximum number of concurrent outbound connections to this upstream
+    /// (active plus pooled idle). Defaults to 64 when absent. Enforced by
+    /// the upstream client (DW-008); excess connection attempts wait for a
+    /// slot rather than fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_cap: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
 }
