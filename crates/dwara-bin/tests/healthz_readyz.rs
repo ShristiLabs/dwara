@@ -110,9 +110,10 @@ fn healthz_and_readyz_served_on_cleartext_listener_and_shadow_routes() {
         healthz.starts_with("HTTP/1.1 200"),
         "healthz must be 200: {healthz}"
     );
+    // DW-021: reserved bodies are aligned to the JSON error envelope.
     assert!(
-        healthz.ends_with("ok"),
-        "healthz body must be the reserved 'ok': {healthz}"
+        healthz.contains("\"code\":\"ok\""),
+        "healthz body must carry code 'ok': {healthz}"
     );
 
     let readyz = http_get(&addr, "/readyz");
@@ -120,7 +121,7 @@ fn healthz_and_readyz_served_on_cleartext_listener_and_shadow_routes() {
         readyz.starts_with("HTTP/1.1 200"),
         "readyz must be 200 after the startup publish: {readyz}"
     );
-    assert!(readyz.ends_with("ready"), "{readyz}");
+    assert!(readyz.contains("\"code\":\"ready\""), "{readyz}");
 
     // The catch-all route still owns every other path (418 + body).
     let other = http_get(&addr, "/anything");
@@ -157,10 +158,10 @@ fn healthz_and_readyz_served_through_tls_terminated_listener() {
     // the sync harness style of the file.)
     let resp = tls_http_get(&addr, "/healthz");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-    assert!(resp.ends_with("ok"), "{resp}");
+    assert!(resp.contains("\"code\":\"ok\""), "{resp}");
     let resp = tls_http_get(&addr, "/readyz");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-    assert!(resp.ends_with("ready"), "{resp}");
+    assert!(resp.contains("\"code\":\"ready\""), "{resp}");
     std::fs::remove_file(&config).ok();
 }
 

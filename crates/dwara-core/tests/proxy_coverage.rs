@@ -28,6 +28,15 @@ use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// DW-021: gateway-generated error bodies are the JSON envelope; compare
+/// by its stable `code` field.
+fn envelope_code(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 // --- infrastructure (sibling style, self-contained) -----------------------
 
 fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
@@ -820,7 +829,10 @@ async fn upstream_mid_body_abort_yields_classified_error_without_hang() {
     .expect("no hang on mid-body upstream abort")
     .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(body_text(resp.into_body()).await, "upstream unavailable");
+    assert_eq!(
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "upstream_unavailable"
+    );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
@@ -844,7 +856,10 @@ async fn upstream_speaking_invalid_http_is_502() {
     let gw_port = spawn_gateway(dataplane_from(&proxy_yaml(port))).await;
     let resp = h1_client().get(uri(gw_port, "/v1/garbage")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(body_text(resp.into_body()).await, "upstream unavailable");
+    assert_eq!(
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "upstream_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -1485,7 +1500,10 @@ async fn non_matching_query_is_404_with_no_upstream_contact() {
         StatusCode::NOT_FOUND,
         "criteria miss must not fall through to any other route: 404"
     );
-    assert_eq!(body_text(resp.into_body()).await, "no route");
+    assert_eq!(
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "no_route"
+    );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         !hit.load(Ordering::SeqCst),

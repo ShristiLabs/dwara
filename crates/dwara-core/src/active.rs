@@ -351,15 +351,17 @@ async fn probe_loop(
                     .map(|s| (*s).to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
-                eprintln!(
-                    "dwara: active probe loop for {address}:{port} panicked \
-                     ({consecutive_panics}/{MAX_CONSECUTIVE_PANICS}): {detail}"
+                tracing::error!(
+                    code = "active_probe_panicked",
+                    endpoint = %format!("{address}:{port}"),
+                    "active probe loop panicked ({consecutive_panics}/{MAX_CONSECUTIVE_PANICS}): {detail}"
                 );
                 if consecutive_panics >= MAX_CONSECUTIVE_PANICS {
-                    eprintln!(
-                        "dwara: active probe loop for {address}:{port} giving up \
-                         after {MAX_CONSECUTIVE_PANICS} consecutive panics; \
-                         passive health continues for this endpoint"
+                    tracing::error!(
+                        code = "active_probe_abandoned",
+                        endpoint = %format!("{address}:{port}"),
+                        "active probe loop giving up after {MAX_CONSECUTIVE_PANICS} \
+                         consecutive panics; passive health continues for this endpoint"
                     );
                     return;
                 }

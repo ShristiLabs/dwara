@@ -26,6 +26,15 @@ use http_body_util::{BodyExt, Full};
 use hyper::header::{HeaderMap, RETRY_AFTER};
 use hyper::{Request, StatusCode};
 
+/// DW-021: gateway-generated error bodies are the JSON envelope; compare
+/// by its stable `code` field.
+fn envelope_code(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
     let gateway = parse_gateway(yaml).expect("test config parses");
     let state = Arc::new(ConfigState::new());
@@ -134,7 +143,7 @@ async fn burst_admits_then_429_with_retry_after_and_headers() {
     }
     let (status, headers, body) = status_body(send(&dp, peer, "/limited").await).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body, "rate limit exceeded");
+    assert_eq!(envelope_code(body.as_bytes()), "rate_limit_exceeded");
     let retry: u64 = headers
         .get(RETRY_AFTER)
         .and_then(|v| v.to_str().ok())

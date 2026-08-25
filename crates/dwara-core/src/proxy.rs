@@ -17,8 +17,9 @@
 //!   scheme/host/path; when no `path` is configured the inbound path AND
 //!   query are preserved verbatim (v1 semantics).
 //! - `respond`: fixed status/body straight from config.
-//! - no route / criteria miss: 404 plain-text error (v1 does not model 405;
-//!   a method or host mismatch reads as "no route for this request").
+//! - no route / criteria miss: 404 via the unified error envelope (v1
+//!   does not model 405; a method or host mismatch reads as "no route
+//!   for this request").
 //!
 //! Forwarded-header semantics (chosen and frozen here):
 //! - `X-Forwarded-For`: if the direct connection peer is inside
@@ -109,6 +110,20 @@
 //! GATEWAY is the source of truth for `X-RateLimit-*`: any upstream
 //! values are silently replaced.
 //!
+//! Observability (DW-021): every request opens a root `request` span
+//! (request id, method, path WITHOUT the query string, consumer, route,
+//! listener) with child spans per phase — authn, authz, ratelimit,
+//! admission, and one `upstream_attempt` per send (the balancer's pick
+//! runs inside it as `upstream_pick`). On completion the wrapper
+//! records `requests_total`/`request_duration_seconds`, echoes
+//! `X-Request-Id` (a valid inbound value respected, printable ASCII up
+//! to 128 bytes; anything else replaced), and emits the sampled
+//! `dwara::access` log line. `/metrics` is reserved on every HTTP(S)
+//! listener like `/healthz` (it shadows configured routes). All
+//! gateway-generated error bodies — including the reserved health
+//! endpoints — are the JSON envelope `{"error":{code,message,
+//! request_id}}` with classification-only messages (upstream internals
+//! never leak). See the `observability` module for the full surface.
 //! Load shedding by priority (DW-016): the gateway concurrency cap admits
 //! requests ROUTE-AWARE — route resolution happens BEFORE cap admission
 //! (so the request's priority class is known; 404s therefore never consume
@@ -128,7 +143,7 @@
 //! response). Sheds are 503, not 429 — 429 is reserved for rate limiting
 //! (DW-017); no `Retry-After` is set (immediate re-dispatch under a
 //! saturated gateway is not advised) and no shed marker header is added
-//! (the response stays a plain 503 + body text). Every admission and shed
+//! (the response stays a plain 503 status + the error envelope). Every admission and shed
 //! is counted per priority class in atomics on the dataplane
 //! (`DataPlane::priority_counters`; metrics exposure is DW-021).
 //!
@@ -176,12 +191,14 @@ use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::Instrument as _;
 
 use crate::authn::{AuthError, Authenticator, CompositeAuthenticator, Identity, JwksCacheEntry};
 use crate::config::{
     Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
 use crate::extensions::rate_limiter::{RateLimitEngine, RateLimitOutcome};
+use crate::observability::{self, AccessRecord, ListenerLabel, Observability};
 use crate::retries::RetryParams;
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
@@ -310,6 +327,10 @@ pub struct DataPlane {
     /// JWKS caches keyed by provider URL, carried ACROSS generation swaps
     /// so key rotation state survives reloads (DW-019).
     jwks_caches: std::sync::Mutex<HashMap<String, Arc<JwksCacheEntry>>>,
+    /// Observability state (DW-021): metrics families plus the access-log
+    /// sampling knob. Per-dataplane (not global) so parallel tests never
+    /// share a registry.
+    obs: Arc<Observability>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -373,6 +394,7 @@ impl DataPlane {
     /// Build from the state's currently published snapshot.
     pub fn new(state: Arc<ConfigState>) -> Arc<Self> {
         let snapshot = state.snapshot();
+        let generation = snapshot.generation();
         let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
         let global_cap = global_cap_of(snapshot.gateway());
         let rate_limits = RateLimitEngine::compile(snapshot.gateway());
@@ -384,8 +406,10 @@ impl DataPlane {
             authn: ArcSwap::from_pointee(CompositeAuthenticator::disabled()),
             state_store: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
+            obs: Arc::new(Observability::from_env()),
             state,
         };
+        dp.obs.set_config_generation(generation);
         dp.rebuild_authn();
         Arc::new(dp)
     }
@@ -409,7 +433,8 @@ impl DataPlane {
             .clone();
         let snapshot = self.state.snapshot();
         let mut caches = self.jwks_caches.lock().expect("jwks cache lock poisoned");
-        let authn = CompositeAuthenticator::build(snapshot.gateway(), store, &mut caches);
+        let authn =
+            CompositeAuthenticator::build(snapshot.gateway(), store, &mut caches, Some(&self.obs));
         self.authn.store(authn);
     }
 
@@ -421,6 +446,7 @@ impl DataPlane {
     /// restart and without resetting live counters (DW-011).
     pub fn refresh(&self) {
         let snapshot = self.state.snapshot();
+        let generation = snapshot.generation();
         let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous(
             &snapshot,
             &self.current().registry,
@@ -431,6 +457,7 @@ impl DataPlane {
             .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
+        self.obs.set_config_generation(generation);
         self.rebuild_authn();
     }
 
@@ -442,6 +469,12 @@ impl DataPlane {
     /// exposure (DW-021) reads these; tests read them directly.
     pub fn priority_counters(&self) -> &PriorityCounters {
         &self.priority_counters
+    }
+
+    /// This dataplane's observability state (DW-021): metric recording,
+    /// /metrics rendering, and the access-log sampling knob.
+    pub fn observability(&self) -> &Observability {
+        &self.obs
     }
 
     /// The current generation's upstream registry. Used by the
@@ -472,15 +505,34 @@ impl DataPlane {
 /// is accepted v1 behavior (documented; no conflict rejection). Applies
 /// regardless of listener protocol, so a TLS-terminated listener serves
 /// them too; TLS-passthrough listeners do not (they never speak HTTP).
-fn reserved_path(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
+fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<ProxyBody>> {
     match path {
-        "/healthz" => Some(simple(StatusCode::OK, "ok")),
+        "/healthz" => Some(simple(StatusCode::OK, "ok", "ok", rid)),
         "/readyz" => {
             if dp.ready() {
-                Some(simple(StatusCode::OK, "ready"))
+                Some(simple(StatusCode::OK, "ready", "ready", rid))
             } else {
-                Some(simple(StatusCode::SERVICE_UNAVAILABLE, "not ready"))
+                Some(simple(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "not_ready",
+                    "not ready",
+                    rid,
+                ))
             }
+        }
+        // Prometheus scrape endpoint (DW-021): reserved exactly like
+        // /healthz (shadows any configured route; served on every HTTP(S)
+        // listener; TLS-passthrough listeners never speak HTTP). The
+        // state-derived gauges (breaker/endpoint health/fail-open) are
+        // refreshed from the CURRENT generation at scrape time.
+        "/metrics" => {
+            let obs = &dp.obs;
+            obs.refresh_state_gauges(&dp.current().registry);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
+                .body(Either::Left(Full::new(Bytes::from(obs.render()))))
+                .ok()
         }
         _ => None,
     }
@@ -489,7 +541,65 @@ fn reserved_path(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
 /// Handle one request against the current generation. Never panics; every
 /// failure path is a classified response. Generic over the request body so
 /// tests and alternative frontends can drive it with any streaming body.
-pub async fn handle<B>(dp: &DataPlane, peer: IpAddr, mut req: Request<B>) -> Response<ProxyBody>
+///
+/// Observability wrapper (DW-021): resolves the request ID (valid inbound
+/// `X-Request-Id` respected, else generated), opens the root `request`
+/// span, tracks the active-requests gauge, and — on completion — records
+/// the request counter/latency histogram, echoes `X-Request-Id`, and
+/// emits the (sampled) access-log line. Reserved paths (`/healthz`,
+/// `/readyz`, `/metrics`) count under the "unrouted" route label like
+/// 404s (they are not routes).
+pub async fn handle<B>(dp: &DataPlane, peer: IpAddr, req: Request<B>) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let started = std::time::Instant::now();
+    let obs = &dp.obs;
+    // Path WITHOUT the query string everywhere it is recorded
+    // (redaction: query strings carry tokens).
+    let path = req.uri().path().to_string();
+    let method = req.method().as_str().to_string();
+    let listener = req
+        .extensions()
+        .get::<ListenerLabel>()
+        .map(|l| l.0.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let request_id = observability::resolve_request_id(req.headers());
+    let root = tracing::info_span!(
+        "request",
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+        listener = %listener,
+        consumer = tracing::field::Empty,
+        route = tracing::field::Empty
+    );
+    let mut rec = AccessRecord::new(request_id.clone(), method, path, listener);
+    obs.active_requests().inc();
+    let mut resp = handle_inner(dp, peer, req, &request_id, &mut rec, &root)
+        .instrument(root.clone())
+        .await;
+    obs.active_requests().dec();
+    let status = resp.status().as_u16();
+    rec.status = status;
+    rec.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
+    observability::stamp_request_id(resp.headers_mut(), &request_id);
+    if obs.should_log_access(status) {
+        observability::emit_access(&rec);
+    }
+    resp
+}
+
+async fn handle_inner<B>(
+    dp: &DataPlane,
+    peer: IpAddr,
+    mut req: Request<B>,
+    rid: &str,
+    rec: &mut AccessRecord,
+    root: &tracing::Span,
+) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -499,7 +609,7 @@ where
     let path = req.uri().path().to_string();
 
     // Reserved gateway paths first: they shadow any configured route.
-    if let Some(resp) = reserved_path(dp, &path) {
+    if let Some(resp) = reserved_path(dp, &path, rid) {
         return resp;
     }
 
@@ -510,15 +620,17 @@ where
     // admit-at-entry ordering — and unknown paths cost nothing under
     // saturation.
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
-        return simple(StatusCode::NOT_FOUND, "no route");
+        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
     };
     let Some(route) = gateway.routes.get(idx) else {
-        return simple(StatusCode::NOT_FOUND, "no route");
+        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
     };
 
     if !route_applies(&route.r#match, &req) {
-        return simple(StatusCode::NOT_FOUND, "no route");
+        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
     }
+    rec.route = route.name.clone();
+    root.record("route", route.name.as_str());
 
     // Authentication (DW-019): after route resolution, before rate
     // limiting and cap admission (the rate-limit `credential` selector
@@ -529,19 +641,36 @@ where
     // `auth_required`. Gateway-side failures (JWKS endpoint down) answer
     // 500 — the gateway cannot vouch for the caller either way.
     let authn = dp.authn.load_full();
-    let identity = match authn.authenticate(req.headers()).await {
+    // The authn phase span (DW-021): instrumented onto the authenticate
+    // future so the span covers exactly the phase (no guard is held
+    // across a poll boundary).
+    let identity = match authn
+        .authenticate(req.headers())
+        .instrument(tracing::info_span!("authn"))
+        .await
+    {
         Ok(id) => id,
-        Err(AuthError::Invalid(_)) => return unauthorized(&authn.challenge()),
+        Err(AuthError::Invalid(_)) => return unauthorized(&authn.challenge(), rid),
         Err(AuthError::Unavailable(msg)) => {
-            eprintln!("dwara: authentication backend unavailable: {msg}");
+            tracing::error!(
+                code = "authentication_unavailable",
+                request_id = %rid,
+                "authentication backend unavailable: {msg}"
+            );
             return simple(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "authentication_unavailable",
                 "authentication unavailable",
+                rid,
             );
         }
     };
     if route.auth_required && identity.is_none() {
-        return unauthorized(&authn.challenge());
+        return unauthorized(&authn.challenge(), rid);
+    }
+    if let Some(id) = &identity {
+        rec.consumer = id.consumer_name.clone();
+        root.record("consumer", id.consumer_name.as_str());
     }
     // Spoof prevention: any client-supplied X-Consumer-* header is
     // stripped here; the trusted identity header is injected on the
@@ -565,43 +694,53 @@ where
     // X-Forwarded-For-resolved client when the peer is a trusted proxy
     // (DW-009 chain), else the peer. No reason detail reaches the
     // client (generic 403 body).
-    if route.authorization.is_some() {
-        let inbound_xff = req
-            .headers()
-            .get(&X_FORWARDED_FOR)
-            .and_then(|v| v.to_str().ok());
-        let effective_ip =
-            crate::authz::effective_client_ip(&gateway.trusted_proxies, peer, inbound_xff);
-        let authz_ctx = crate::authz::AuthzContext {
-            identity: identity.as_ref(),
-            consumer_groups: consumer_cfg.map(|c| c.groups.as_slice()).unwrap_or(&[]),
-            peer_ip: peer,
-            effective_ip,
-        };
-        let chain = crate::authz::AuthzChain {
-            consumer: None,
-            route: route.authorization.as_ref(),
-            service: None,
-            listener: None,
-            global: None,
-        };
-        match crate::authz::authorize(&chain, &authz_ctx) {
-            crate::authz::Decision::Allow => {}
-            crate::authz::Decision::Deny {
-                unauthenticated: true,
-                ..
-            } => return unauthorized(&authn.challenge()),
-            crate::authz::Decision::Deny { reason, .. } => {
-                eprintln!(
-                    "dwara: authorization denied on route '{}' for consumer '{}': {reason}",
-                    route.name,
-                    identity
-                        .as_ref()
-                        .map(|id| id.consumer_name.as_str())
-                        .unwrap_or("<anonymous>")
-                );
-                return forbidden();
-            }
+    let authz_decision = {
+        let _authz_phase = tracing::info_span!("authz").entered();
+        if route.authorization.is_some() {
+            let inbound_xff = req
+                .headers()
+                .get(&X_FORWARDED_FOR)
+                .and_then(|v| v.to_str().ok());
+            let effective_ip =
+                crate::authz::effective_client_ip(&gateway.trusted_proxies, peer, inbound_xff);
+            let authz_ctx = crate::authz::AuthzContext {
+                identity: identity.as_ref(),
+                consumer_groups: consumer_cfg.map(|c| c.groups.as_slice()).unwrap_or(&[]),
+                peer_ip: peer,
+                effective_ip,
+            };
+            let chain = crate::authz::AuthzChain {
+                consumer: None,
+                route: route.authorization.as_ref(),
+                service: None,
+                listener: None,
+                global: None,
+            };
+            crate::authz::authorize(&chain, &authz_ctx)
+        } else {
+            crate::authz::Decision::Allow
+        }
+    };
+    match authz_decision {
+        crate::authz::Decision::Allow => {}
+        crate::authz::Decision::Deny {
+            unauthenticated: true,
+            ..
+        } => return unauthorized(&authn.challenge(), rid),
+        crate::authz::Decision::Deny { reason, .. } => {
+            // Reason is server-side only: which list matched, which claim
+            // was absent — none of it is the client's business.
+            tracing::warn!(
+                code = "authorization_denied",
+                request_id = %rid,
+                route = %route.name,
+                consumer = %identity
+                    .as_ref()
+                    .map(|id| id.consumer_name.as_str())
+                    .unwrap_or("<anonymous>"),
+                "authorization denied: {reason}"
+            );
+            return forbidden(rid);
         }
     }
 
@@ -614,7 +753,10 @@ where
     let service = gateway.services.iter().find(|s| s.name == route.service);
     let service_policies: &[String] = service.map(|s| s.policies.as_slice()).unwrap_or(&[]);
     let consumer_policies: &[String] = consumer_cfg.map(|c| c.policies.as_slice()).unwrap_or(&[]);
+    // The ratelimit phase span (DW-021); sync bookkeeping, so a plain
+    // entered guard is correct (nothing is awaited under it).
     let rate_headers = {
+        let _ratelimit_phase = tracing::info_span!("ratelimit").entered();
         let engine = dp.rate_limits.load_full();
         if engine.is_empty() {
             None
@@ -631,7 +773,9 @@ where
                     reset_epoch_s,
                     retry_after_s,
                 } => {
-                    return rate_limited(limit, remaining, reset_epoch_s, retry_after_s);
+                    rec.rate_limited = true;
+                    dp.obs.record_rate_limited(&route.name);
+                    return rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
                 }
                 RateLimitOutcome::Allowed {
                     limit,
@@ -657,37 +801,54 @@ where
     // the route's when the authenticated consumer declares one.
     let priority = resolve_priority(consumer_cfg, route);
     let cap = dp.global_cap.load_full();
-    let mut global_permit = match &cap.general {
-        None => {
-            // Unlimited: no admission decision, but still counted per
-            // priority class (the counters describe traffic mix, not only
-            // capped traffic).
-            dp.priority_counters.record_admitted(priority);
-            None
-        }
-        Some(general) => {
-            let admitted = Arc::clone(general).try_acquire_owned().ok().or_else(|| {
-                // General allowance full: high-priority traffic may
-                // draw from the reserved bucket; everything else is
-                // shed. This is reserved-capacity admission, NOT
-                // preemption — in-flight normal requests keep their
-                // slots until they complete.
-                if priority >= HIGH_PRIORITY {
-                    cap.reserved
-                        .as_ref()
-                        .and_then(|bucket| Arc::clone(bucket).try_acquire_owned().ok())
-                } else {
-                    None
-                }
-            });
-            match admitted {
-                Some(permit) => {
-                    dp.priority_counters.record_admitted(priority);
-                    Some(permit)
-                }
-                None => {
-                    dp.priority_counters.record_shed(priority);
-                    return simple(StatusCode::SERVICE_UNAVAILABLE, "gateway saturated");
+    // The admission phase span (DW-021); sync permit bookkeeping.
+    let mut global_permit = {
+        let _admission_phase = tracing::info_span!("admission").entered();
+        match &cap.general {
+            None => {
+                // Unlimited: no admission decision, but still counted per
+                // priority class (the counters describe traffic mix, not only
+                // capped traffic).
+                dp.priority_counters.record_admitted(priority);
+                None
+            }
+            Some(general) => {
+                let admitted = Arc::clone(general).try_acquire_owned().ok().or_else(|| {
+                    // General allowance full: high-priority traffic may
+                    // draw from the reserved bucket; everything else is
+                    // shed. This is reserved-capacity admission, NOT
+                    // preemption — in-flight normal requests keep their
+                    // slots until they complete.
+                    if priority >= HIGH_PRIORITY {
+                        cap.reserved
+                            .as_ref()
+                            .and_then(|bucket| Arc::clone(bucket).try_acquire_owned().ok())
+                    } else {
+                        None
+                    }
+                });
+                match admitted {
+                    Some(permit) => {
+                        dp.priority_counters.record_admitted(priority);
+                        Some(permit)
+                    }
+                    None => {
+                        dp.priority_counters.record_shed(priority);
+                        rec.shed = true;
+                        dp.obs.record_shed(priority);
+                        tracing::warn!(
+                            code = "gateway_saturated",
+                            request_id = %rid,
+                            priority = priority,
+                            "gateway concurrency cap saturated; request shed"
+                        );
+                        return simple(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "gateway_saturated",
+                            "gateway saturated",
+                            rid,
+                        );
+                    }
                 }
             }
         }
@@ -704,6 +865,9 @@ where
                 &params,
                 &mut global_permit,
                 identity.as_ref(),
+                rid,
+                rec,
+                &dp.obs,
             )
             .await
         }
@@ -718,6 +882,7 @@ where
             host.as_deref(),
             redirect_path.as_deref(),
             *status,
+            rid,
         ),
         RouteAction::Respond {
             status,
@@ -738,23 +903,31 @@ where
 /// The 403 response for a denied authorization (DW-020): deliberately a
 /// generic body — which list matched, which claim was absent, none of
 /// it is the client's business (the reason is logged server-side only).
-fn forbidden() -> Response<ProxyBody> {
+fn forbidden(rid: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
-        .body(Either::Left(Full::new(Bytes::from("forbidden"))))
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(Either::Left(Full::new(observability::envelope_body(
+            "forbidden",
+            "forbidden",
+            rid,
+        ))))
         .expect("static 403 response is valid")
 }
 
 /// The 401 response for an unauthenticated/invalid request (DW-019):
-/// plain body plus a `WWW-Authenticate` challenge built from the schemes
+/// error-envelope body plus a `WWW-Authenticate` challenge built from the schemes
 /// the current authenticator interprets.
-fn unauthorized(challenge: &str) -> Response<ProxyBody> {
+fn unauthorized(challenge: &str, rid: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(&WWW_AUTHENTICATE, challenge)
-        .body(Either::Left(Full::new(Bytes::from("unauthorized"))))
+        .body(Either::Left(Full::new(observability::envelope_body(
+            "unauthorized",
+            "unauthorized",
+            rid,
+        ))))
         .expect("static 401 response is valid")
 }
 
@@ -781,17 +954,22 @@ fn rate_limited(
     remaining: u32,
     reset_epoch_s: u64,
     retry_after_s: u32,
+    rid: &str,
 ) -> Response<ProxyBody> {
     let mut builder = Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::RETRY_AFTER, retry_after_s.max(1).to_string());
     builder = builder
         .header(X_RATELIMIT_LIMIT, limit.to_string())
         .header(X_RATELIMIT_REMAINING, remaining.to_string())
         .header(X_RATELIMIT_RESET, reset_epoch_s.to_string());
     builder
-        .body(Either::Left(Full::new(Bytes::from("rate limit exceeded"))))
+        .body(Either::Left(Full::new(observability::envelope_body(
+            "rate_limit_exceeded",
+            "rate limit exceeded",
+            rid,
+        ))))
         .expect("static 429 response is valid")
 }
 
@@ -1023,9 +1201,9 @@ fn resolve_ref<'a>(
         .unwrap_or("")
 }
 
-// Eight parameters is the price of keeping every input explicit on the
+// Eleven parameters is the price of keeping every input explicit on the
 // per-request proxy path (no per-request allocation of a context struct);
-// DW-019's identity is the newest.
+// DW-021's request id, access record, and metrics are the newest.
 #[allow(clippy::too_many_arguments)]
 async fn proxy_request<B>(
     gen: &Generation,
@@ -1036,6 +1214,9 @@ async fn proxy_request<B>(
     params: &[(String, String)],
     global_permit: &mut Option<OwnedSemaphorePermit>,
     identity: Option<&Identity>,
+    rid: &str,
+    rec: &mut AccessRecord,
+    obs: &Observability,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -1047,18 +1228,28 @@ where
         // tear; keep it classified rather than panicking.
         return simple(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "unknown_service",
             "route targets unknown service",
+            rid,
         );
     };
     let Some(handle) = gen.registry.get(&service.upstream) else {
-        return simple(StatusCode::INTERNAL_SERVER_ERROR, "unknown upstream");
+        return simple(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unknown_upstream",
+            "unknown upstream",
+            rid,
+        );
     };
+    rec.upstream = Some(handle.name().to_string());
 
     let wants_upgrade = req.headers().contains_key(UPGRADE);
     if wants_upgrade && req.version() == Version::HTTP_2 {
         return simple(
             StatusCode::NOT_IMPLEMENTED,
+            "upgrade_not_supported",
             "protocol upgrade is not supported over HTTP/2",
+            rid,
         );
     }
 
@@ -1212,12 +1403,14 @@ where
         // crossed the threshold) still short-circuits the retries.
         if let Some(bp) = breaker_params {
             if let crate::breaker::BreakerDecision::Reject { retry_after_ms } = breaker.check(&bp) {
-                eprintln!(
-                    "dwara: upstream '{}' circuit open; failing fast (service '{}')",
-                    handle.name(),
-                    service.name
+                tracing::warn!(
+                    code = "upstream_circuit_open",
+                    request_id = %rid,
+                    upstream = handle.name(),
+                    "upstream circuit open; failing fast"
                 );
-                return breaker_open(retry_after_ms);
+                rec.broken = true;
+                return breaker_open(retry_after_ms, rid);
             }
         }
         let body = match first_body.take() {
@@ -1230,9 +1423,38 @@ where
             }
         };
         let out_req = Request::from_parts(out_req_parts.clone(), body);
+        // One span per upstream attempt (DW-021); the balancer's pick
+        // runs inside it under its own `upstream_pick` span (see the
+        // upstream handle). Instrumented onto the send future — no span
+        // guard is held across a poll boundary.
+        let attempt_span = tracing::info_span!(
+            "upstream_attempt",
+            attempt = done_tries + 1,
+            upstream = handle.name()
+        );
+        let mut picked: Option<String> = None;
         let result = handle
-            .send_with_hash_key(out_req, Some(&peer.to_string()))
+            .send_with_hash_key_observed(out_req, Some(&peer.to_string()), &mut picked)
+            .instrument(attempt_span)
             .await;
+        rec.attempts = done_tries + 1;
+        if let Some(ep) = &picked {
+            rec.endpoint = Some(ep.clone());
+        }
+        // Attempt metric (DW-021): endpoint = "unpicked" when the dispatch
+        // never resolved one; error outcomes classify to 5xx (every
+        // upstream error maps to a 502/503/504/500 — see
+        // classify_upstream_error), so the class reflects the response
+        // the client ultimately receives for that attempt.
+        let attempt_status = match &result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(_) => 500,
+        };
+        obs.record_upstream_attempt(
+            handle.name(),
+            picked.as_deref().unwrap_or("unpicked"),
+            attempt_status,
+        );
         done_tries += 1;
         // An attempt is retryable only while attempts remain and the body
         // is replayable; the budget reservation is charged atomically
@@ -1254,6 +1476,15 @@ where
                     && rp.retries_status(resp.status().as_u16())
                     && budget.try_reserve_retry(rp.budget_percent)
                 {
+                    obs.record_retry(handle.name());
+                    tracing::warn!(
+                        code = "upstream_retry",
+                        request_id = %rid,
+                        upstream = handle.name(),
+                        attempt = done_tries,
+                        status = resp.status().as_u16(),
+                        "retryable upstream status; retrying"
+                    );
                     tokio::time::sleep(crate::retries::jitter_delay(
                         rp.backoff_base_ms,
                         rp.backoff_cap_ms,
@@ -1267,6 +1498,7 @@ where
                     wants_upgrade,
                     on_client_upgrade,
                     global_permit.take(),
+                    rid,
                 );
             }
             Err(err) => {
@@ -1286,11 +1518,13 @@ where
                     && transport_retryable(&err)
                     && budget.try_reserve_retry(rp.budget_percent)
                 {
-                    eprintln!(
-                        "dwara: upstream '{}' attempt {done_tries} failed: {err}; retrying \
-                         (service '{}')",
-                        handle.name(),
-                        service.name
+                    obs.record_retry(handle.name());
+                    tracing::warn!(
+                        code = "upstream_retry",
+                        request_id = %rid,
+                        upstream = handle.name(),
+                        attempt = done_tries,
+                        "upstream attempt failed: {err}; retrying"
                     );
                     tokio::time::sleep(crate::retries::jitter_delay(
                         rp.backoff_base_ms,
@@ -1300,33 +1534,37 @@ where
                     .await;
                     continue;
                 }
-                // Server-side detail, client-side classification only.
-                eprintln!(
-                    "dwara: upstream '{}' request failed: {err} (service '{}')",
-                    handle.name(),
-                    service.name
+                // Server-side detail stays in the log (classification only
+                // reaches the client — no hyper error text leaks).
+                tracing::error!(
+                    code = "upstream_failed",
+                    request_id = %rid,
+                    upstream = handle.name(),
+                    "upstream request failed: {err}"
                 );
-                let (status, msg) = classify_upstream_error(&err);
-                return simple(status, msg);
+                let (status, code, msg) = classify_upstream_error(&err);
+                return simple(status, code, msg, rid);
             }
         }
     }
 }
 
 /// The fail-fast response for an open circuit (DW-015): 503 with the
-/// upstream named in the body and a `Retry-After` header carrying the
+/// error-envelope body and a `Retry-After` header carrying the
 /// whole seconds until a half-open probe may be admitted (rounded up,
 /// minimum 1 — a client honoring it retries neither too early nor
 /// needlessly late). While half-open probes are in flight the hint is 1
 /// second (the exact half-open time is unknowable until a probe resolves).
-fn breaker_open(retry_after_ms: u64) -> Response<ProxyBody> {
+fn breaker_open(retry_after_ms: u64, rid: &str) -> Response<ProxyBody> {
     let seconds = retry_after_ms.div_ceil(1000);
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::RETRY_AFTER, seconds.max(1).to_string())
-        .body(Either::Left(Full::new(Bytes::from(
+        .body(Either::Left(Full::new(observability::envelope_body(
+            "upstream_circuit_open",
             "upstream circuit open",
+            rid,
         ))))
         .expect("static breaker response is valid")
 }
@@ -1342,6 +1580,7 @@ fn finish_proxy_response(
     wants_upgrade: bool,
     on_client_upgrade: Option<hyper::upgrade::OnUpgrade>,
     global_permit: Option<OwnedSemaphorePermit>,
+    rid: &str,
 ) -> Response<ProxyBody> {
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
         let on_upstream = hyper::upgrade::on(&mut resp);
@@ -1352,14 +1591,16 @@ fn finish_proxy_response(
                         tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await
                     }
                     Err(err) => {
-                        eprintln!("dwara: upgrade handshake failed: {err}");
+                        tracing::warn!("upgrade handshake failed: {err}");
                     }
                 }
             });
         } else {
             return simple(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "upgrades_unsupported",
                 "listener does not support upgrades",
+                rid,
             );
         }
         // Keep the 101 headers (Connection/Upgrade must reach the
@@ -1512,23 +1753,40 @@ where
     }
 }
 
-fn classify_upstream_error(err: &UpstreamError) -> (StatusCode, &'static str) {
+/// (status, envelope code, envelope message) for an upstream error. The
+/// message is a classification string — never the underlying error text
+/// (no hyper/io internals leak to the client; the full error is logged
+/// server-side at the call site).
+fn classify_upstream_error(err: &UpstreamError) -> (StatusCode, &'static str, &'static str) {
     match err {
-        UpstreamError::Saturated => (StatusCode::SERVICE_UNAVAILABLE, "upstream saturated"),
-        UpstreamError::ConnectTimeout { .. } => {
-            (StatusCode::GATEWAY_TIMEOUT, "upstream connect timed out")
-        }
-        UpstreamError::ReadTimeout { .. } => {
-            (StatusCode::GATEWAY_TIMEOUT, "upstream response timed out")
-        }
-        UpstreamError::InvalidHost(_) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "invalid upstream host")
-        }
-        UpstreamError::NoEndpoints | UpstreamError::Io(_) | UpstreamError::Client(_) => {
-            (StatusCode::BAD_GATEWAY, "upstream unavailable")
-        }
+        UpstreamError::Saturated => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_saturated",
+            "upstream saturated",
+        ),
+        UpstreamError::ConnectTimeout { .. } => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_connect_timeout",
+            "upstream connect timed out",
+        ),
+        UpstreamError::ReadTimeout { .. } => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_response_timeout",
+            "upstream response timed out",
+        ),
+        UpstreamError::InvalidHost(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_upstream_host",
+            "invalid upstream host",
+        ),
+        UpstreamError::NoEndpoints | UpstreamError::Io(_) | UpstreamError::Client(_) => (
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
+            "upstream unavailable",
+        ),
         UpstreamError::InvalidRootCertificate(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_upstream_configuration",
             "invalid upstream configuration",
         ),
     }
@@ -1543,7 +1801,7 @@ where
 {
     match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
         Ok(_) => {}
-        Err(err) => eprintln!("dwara: upgrade tunnel ended with error: {err}"),
+        Err(err) => tracing::warn!("upgrade tunnel ended with error: {err}"),
     }
 }
 
@@ -1553,6 +1811,7 @@ fn redirect<B>(
     host: Option<&str>,
     path: Option<&str>,
     status: u16,
+    rid: &str,
 ) -> Response<ProxyBody> {
     // Default preserves the inbound path AND query verbatim.
     let path_part = path.map(str::to_string).unwrap_or_else(|| {
@@ -1579,7 +1838,14 @@ fn redirect<B>(
     // HeaderValue construction, answer 500 rather than panicking the task.
     let location = match HeaderValue::from_str(&location) {
         Ok(v) => v,
-        Err(_) => return simple(StatusCode::INTERNAL_SERVER_ERROR, "invalid redirect target"),
+        Err(_) => {
+            return simple(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_redirect_target",
+                "invalid redirect target",
+                rid,
+            )
+        }
     };
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND))
@@ -1612,11 +1878,13 @@ fn respond(
         .expect("static respond body is valid")
 }
 
-fn simple(status: StatusCode, msg: &str) -> Response<ProxyBody> {
+fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
-        .body(Either::Left(Full::new(Bytes::from(msg.to_string()))))
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(Either::Left(Full::new(observability::envelope_body(
+            code, msg, rid,
+        ))))
         .expect("static error body is valid")
 }
 
@@ -1722,4 +1990,40 @@ pub fn peer_is_trusted(trusted: &[String], peer: IpAddr) -> bool {
     trusted.iter().any(|entry| {
         parse_ip_or_cidr(entry).is_some_and(|(net, prefix)| ip_in_net(peer, net, prefix))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// DW-021 review fix: the invalid-redirect-target 500 envelope must
+    /// carry the request's correlation id, not an empty string, so a
+    /// misconfigured redirect route stays correlatable against the
+    /// `x-request-id` response header and access logs. Config validation
+    /// (snapshot.rs) already rejects header-hostile redirect targets, so
+    /// this defensive branch is pinned at the unit level: the DEL byte in
+    /// the host is exactly the kind of validation gap the branch guards.
+    #[tokio::test]
+    async fn invalid_redirect_target_envelope_carries_request_id() {
+        let req = Request::builder()
+            .uri("/v1/old?x=1")
+            .body(())
+            .expect("test request builds");
+        let rid = "req-0000000000000000-000001";
+        let resp = redirect(&req, Some("https"), Some("bad\u{7f}host"), None, 302, rid);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .expect("static error body collects")
+            .to_bytes();
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&body).expect("error body is the JSON envelope");
+        assert_eq!(
+            envelope["error"]["code"].as_str().unwrap(),
+            "invalid_redirect_target"
+        );
+        let got = envelope["error"]["request_id"].as_str().unwrap();
+        assert!(!got.is_empty(), "request_id must not be empty");
+        assert_eq!(got, rid, "envelope request_id must match the request");
+    }
 }

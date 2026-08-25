@@ -26,6 +26,18 @@
 //! - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on SIGTERM/SIGINT,
 //!   default 10. In-flight requests that exceed the budget are dropped when
 //!   the process exits.
+//! - `DWARA_LOG` (DW-021): RUST_LOG-syntax filter for the tracing
+//!   subscriber, default `dwara=info`. Output is JSON on STDOUT (spans,
+//!   structured logs, and the per-request `dwara::access` access-log
+//!   lines).
+//! - `DWARA_ACCESS_LOG_SAMPLE` (DW-021): fraction of non-error access
+//!   lines emitted, 0.0-1.0, default 1.0; 5xx responses are always
+//!   logged (see dwara-core's observability docs).
+//! - `DWARA_OTLP_ENDPOINT` (DW-021): RESERVED but inert in v1 — the
+//!   opentelemetry exporter was deliberately not linked (dep weight vs
+//!   the DW-026 musl size budget); the span structure it would export
+//!   ships today and is verified in-process by dwara-core's span-capture
+//!   test. See dwara-core::observability for the full decision.
 //!
 //! Listener modes (DW-007, feature analysis 4.10 / 4.13):
 //! - `http` listener: cleartext; hyper-util's auto builder sniffs the
@@ -80,6 +92,7 @@ use notify::Watcher;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
+use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_CONFIG_PATH: &str = "dwara.yaml";
@@ -125,9 +138,13 @@ async fn reload(
     match source.load().await {
         Ok(gateway) => match state.compile_and_publish(&gateway) {
             Ok(info) => {
-                println!(
-                    "config reloaded ({trigger}): generation {} -> {} content_hash={:#x} routes={} \
-                     [retiring generation {}; freed when its last in-flight request completes]",
+                tracing::info!(
+                    code = "config_reloaded",
+                    trigger,
+                    from_generation = old.generation(),
+                    generation = info.generation,
+                    routes = info.route_count,
+                    "config reloaded: generation {} -> {} content_hash={:#x} routes={} [retiring generation {}; freed when its last in-flight request completes]",
                     old.generation(),
                     info.generation,
                     info.content_hash,
@@ -145,8 +162,14 @@ async fn reload(
             }
             Err(err) => {
                 // CompileError::Validation's Display lists every issue.
-                eprintln!("config reload rejected ({trigger}): {err}");
-                eprintln!(
+                tracing::error!(
+                    code = "config_reload_rejected",
+                    trigger,
+                    "config reload rejected: {err}"
+                );
+                tracing::error!(
+                    code = "config_reload_kept_previous",
+                    generation = old.generation(),
                     "keeping running generation {} (content_hash={:#x})",
                     old.generation(),
                     old.content_hash()
@@ -154,8 +177,14 @@ async fn reload(
             }
         },
         Err(err) => {
-            eprintln!("config reload failed to read source ({trigger}): {err}");
-            eprintln!(
+            tracing::error!(
+                code = "config_reload_read_failed",
+                trigger,
+                "config reload failed to read source: {err}"
+            );
+            tracing::error!(
+                code = "config_reload_kept_previous",
+                generation = old.generation(),
                 "keeping running generation {} (content_hash={:#x})",
                 old.generation(),
                 old.content_hash()
@@ -187,9 +216,14 @@ fn refresh_tls_states(
             continue;
         };
         match term.reload(tls_cfg) {
-            Ok(()) => println!("tls config reloaded ({trigger}) for listener {name}"),
-            Err(err) => eprintln!(
-                "tls reload rejected ({trigger}) for listener {name}: {err}; keeping previous certificates"
+            Ok(()) => {
+                tracing::info!(code = "tls_reloaded", trigger, listener = %name, "tls config reloaded")
+            }
+            Err(err) => tracing::warn!(
+                code = "tls_reload_rejected",
+                trigger,
+                listener = %name,
+                "tls reload rejected: {err}; keeping previous certificates"
             ),
         }
     }
@@ -281,16 +315,20 @@ async fn run_listener(
             accepted = listener.accept() => match accepted {
                 Ok(conn) => conn,
                 Err(err) => {
-                    eprintln!("accept error on {}: {err}", bound.addr);
+                    tracing::warn!(code = "accept_error", listener = %bound.name, "accept error on {}: {err}", bound.addr);
                     continue;
                 }
             },
             _ = shutdown.changed() => break,
         };
         match &bound.mode {
-            ListenerMode::Cleartext => {
-                serve_http_tls(graceful.watcher(), Arc::clone(&dp), stream, peer)
-            }
+            ListenerMode::Cleartext => serve_http_tls(
+                graceful.watcher(),
+                Arc::clone(&dp),
+                stream,
+                peer,
+                std::sync::Arc::from(bound.name.as_str()),
+            ),
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
                 // Passthrough splices are not part of hyper graceful
@@ -316,11 +354,16 @@ async fn run_listener(
                             )
                             .await
                             {
-                                eprintln!("passthrough error: {err}");
+                                tracing::warn!(
+                                    code = "passthrough_error",
+                                    "passthrough error: {err}"
+                                );
                             }
                         }
-                        None => eprintln!(
-                            "passthrough listener '{name}' missing from current config; closing connection"
+                        None => tracing::warn!(
+                            code = "passthrough_listener_missing",
+                            listener = %name,
+                            "passthrough listener missing from current config; closing connection"
                         ),
                     }
                 });
@@ -331,12 +374,13 @@ async fn run_listener(
                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                 let watcher = graceful.watcher();
                 let dp = Arc::clone(&dp);
+                let listener: std::sync::Arc<str> = std::sync::Arc::from(bound.name.as_str());
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
-                            serve_http_tls(watcher, dp, tls_stream, peer);
+                            serve_http_tls(watcher, dp, tls_stream, peer, listener);
                         }
-                        Err(err) => eprintln!("tls handshake error: {err}"),
+                        Err(err) => tracing::warn!("tls handshake error: {err}"),
                     }
                 });
             }
@@ -368,17 +412,27 @@ async fn run_listener(
                     };
                     match &bound.mode {
                         ListenerMode::Passthrough => {}
-                        ListenerMode::Cleartext => {
-                            serve_http_tls(graceful.watcher(), Arc::clone(&dp), stream, peer);
-                        }
+                        ListenerMode::Cleartext => serve_http_tls(
+                            graceful.watcher(),
+                            Arc::clone(&dp),
+                            stream,
+                            peer,
+                            std::sync::Arc::from(bound.name.as_str()),
+                        ),
                         ListenerMode::Terminate(term) => {
                             let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                             let watcher = graceful.watcher();
                             let dp = Arc::clone(&dp);
+                            let listener: std::sync::Arc<str> =
+                                std::sync::Arc::from(bound.name.as_str());
                             tokio::spawn(async move {
                                 match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => serve_http_tls(watcher, dp, tls_stream, peer),
-                                    Err(err) => eprintln!("tls handshake error: {err}"),
+                                    Ok(tls_stream) => {
+                                        serve_http_tls(watcher, dp, tls_stream, peer, listener)
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!("tls handshake error: {err}")
+                                    }
                                 }
                             });
                         }
@@ -387,7 +441,10 @@ async fn run_listener(
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(err) => {
-                    eprintln!("accept error during backlog flush: {err}");
+                    tracing::warn!(
+                        code = "accept_error_flush",
+                        "accept error during backlog flush: {err}"
+                    );
                     break;
                 }
             }
@@ -413,6 +470,7 @@ fn serve_http_tls<S>(
     dp: Arc<DataPlane>,
     stream: S,
     peer: SocketAddr,
+    listener: std::sync::Arc<str>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -423,22 +481,38 @@ fn serve_http_tls<S>(
         let conn =
             watcher.watch(auto.serve_connection_with_upgrades(
                 TokioIo::new(stream),
-                service_fn(move |req| {
+                service_fn(move |mut req| {
                     let dp = Arc::clone(&dp);
                     let peer_ip = peer.ip();
+                    let listener = Arc::clone(&listener);
+                    // The listener label rides the request extensions so
+                    // the per-request metrics/logs can attribute traffic
+                    // to the accepting listener (DW-021).
+                    req.extensions_mut()
+                        .insert(dwara_core::observability::ListenerLabel(listener));
                     async move {
                         Ok::<_, std::convert::Infallible>(proxy::handle(&dp, peer_ip, req).await)
                     }
                 }),
             ));
         if let Err(err) = conn.await {
-            eprintln!("connection error: {err}");
+            tracing::warn!("connection error: {err}");
         }
     });
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Observability init (DW-021): JSON on STDOUT, filtered by DWARA_LOG
+    // (RUST_LOG syntax; default dwara=info). Installed FIRST so startup
+    // logs flow through the same pipeline as request logs.
+    let filter =
+        EnvFilter::new(std::env::var("DWARA_LOG").unwrap_or_else(|_| "dwara=info".to_string()));
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_target(true)
+        .init();
     tls::install_aws_lc_rs_provider();
     let config_path = PathBuf::from(
         std::env::var("DWARA_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
@@ -452,8 +526,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let gateway = match source.load().await {
         Ok(g) => g,
         Err(err) => {
-            eprintln!(
-                "dwara: startup config load failed for {}: {err}",
+            tracing::error!(
+                code = "startup_config_load_failed",
+                "startup config load failed for {}: {err}",
                 config_path.display()
             );
             std::process::exit(1);
@@ -462,8 +537,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let info = match state.compile_and_publish(&gateway) {
         Ok(info) => info,
         Err(err) => {
-            eprintln!(
-                "dwara: startup config invalid for {}: {err}",
+            tracing::error!(
+                code = "startup_config_invalid",
+                "startup config invalid for {}: {err}",
                 config_path.display()
             );
             std::process::exit(1);
@@ -491,20 +567,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             {
                 Ok(inner) => inner,
                 Err(err) => {
-                    eprintln!("dwara: state store task failed for {path}: {err}");
+                    tracing::error!(
+                        code = "state_store_task_failed",
+                        "state store task failed for {path}: {err}"
+                    );
                     std::process::exit(1);
                 }
             };
             match store {
                 Ok(store) => {
-                    println!(
-                        "dwara: state store opened at {path} (schema v1, seeded {} consumer(s) from config)",
-                        gateway.consumers.len()
+                    tracing::info!(
+                        code = "state_store_opened",
+                        consumers = gateway.consumers.len(),
+                        "state store opened at {path} (schema v1, seeded consumers from config)"
                     );
                     Some(Arc::new(store))
                 }
                 Err(err) => {
-                    eprintln!("dwara: state store init failed for {path}: {err}");
+                    tracing::error!(
+                        code = "state_store_init_failed",
+                        "state store init failed for {path}: {err}"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -537,7 +620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None => state.snapshot().gateway().listeners.clone(),
     };
     if configured.is_empty() {
-        eprintln!("dwara: config defines no listeners and DWARA_BIND is unset; nothing to serve");
+        tracing::error!("config defines no listeners and DWARA_BIND is unset; nothing to serve");
         std::process::exit(1);
     }
 
@@ -548,19 +631,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let ListenerMode::Terminate(term) = &bound.mode {
             tls_states.insert(bound.name.clone(), Arc::clone(term));
         }
-        println!(
-            "dwara listening on {} (listener {}, mode {}) [config {} generation {} content_hash={:#x} routes={}]",
-            bound.addr,
-            bound.name,
-            match bound.mode {
+        tracing::info!(
+            code = "listening",
+            addr = %bound.addr,
+            listener = %bound.name,
+            mode = match bound.mode {
                 ListenerMode::Cleartext => "cleartext http/1.1+h2c",
                 ListenerMode::Terminate(_) => "tls terminate",
                 ListenerMode::Passthrough => "tls passthrough",
             },
-            config_path.display(),
-            info.generation,
-            info.content_hash,
-            info.route_count
+            config = %config_path.display().to_string(),
+            generation = info.generation,
+            routes = info.route_count,
+            "dwara listening"
         );
         bound_listeners.push((bound, tcp));
     }
@@ -575,7 +658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ) {
         Ok(rx) => rx,
         Err(err) => {
-            eprintln!("dwara: config file watch unavailable ({err}); SIGHUP reload still active");
+            tracing::warn!("config file watch unavailable ({err}); SIGHUP reload still active");
             mpsc::unbounded_channel().1
         }
     };
@@ -602,7 +685,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match spawn_file_watcher(cert_dirs, cert_names) {
             Ok(rx) => rx,
             Err(err) => {
-                eprintln!("dwara: certificate watch unavailable ({err}); config reload still refreshes TLS");
+                tracing::warn!(
+                    "certificate watch unavailable ({err}); config reload still refreshes TLS"
+                );
                 mpsc::unbounded_channel().1
             }
         }
@@ -683,8 +768,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let signal_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::select! {
-            _ = sigterm.recv() => println!("dwara: SIGTERM received, draining connections"),
-            _ = sigint.recv() => println!("dwara: SIGINT received, draining connections"),
+            _ = sigterm.recv() => tracing::info!("SIGTERM received, draining connections"),
+            _ = sigint.recv() => tracing::info!("SIGINT received, draining connections"),
         }
         let _ = signal_shutdown_tx.send(());
     });
@@ -708,14 +793,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shutdown_deadline = tokio::time::Instant::now() + timeout;
     for t in tasks {
         if let Err(err) = t.await {
-            eprintln!("dwara: listener task ended with an error: {err}");
+            tracing::warn!("listener task ended with an error: {err}");
         }
     }
 
-    println!(
-        "dwara: graceful shutdown ({} live connection(s), timeout {}s)",
-        graceful.count(),
-        timeout.as_secs()
+    tracing::info!(
+        live_connections = graceful.count(),
+        timeout_s = timeout.as_secs(),
+        "graceful shutdown"
     );
     reload_task.abort();
     cert_task.abort();
@@ -733,9 +818,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         _ = tokio::time::sleep_until(deadline) => false,
     };
     if !drained {
-        eprintln!("dwara: shutdown timeout with connection(s) still draining; forcing exit");
+        tracing::warn!("shutdown timeout with connection(s) still draining; forcing exit");
     } else {
-        println!("dwara: drained, exiting");
+        tracing::info!("drained, exiting");
     }
     std::process::exit(0);
 }

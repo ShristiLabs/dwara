@@ -396,7 +396,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
 
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body_of(resp).await, "not ready");
+    assert!(body_of(resp).await.contains("\"code\":\"not_ready\""));
     // Liveness does not depend on readiness.
     let resp = proxy::handle(&dp, peer(), get("/healthz")).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -416,7 +416,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_of(resp).await, "ready");
+    assert!(body_of(resp).await.contains("\"code\":\"ready\""));
 }
 
 #[tokio::test]
@@ -512,11 +512,11 @@ async fn reserved_paths_shadow_configured_routes() {
     // Exact route on /healthz is shadowed by the reserved path.
     let resp = proxy::handle(&dp, peer(), get("/healthz")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_of(resp).await, "ok");
+    assert!(body_of(resp).await.contains("\"code\":\"ok\""));
     // Regex catch-all does not capture /readyz.
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_of(resp).await, "ready");
+    assert!(body_of(resp).await.contains("\"code\":\"ready\""));
     // Ordinary paths still route normally.
     let resp = proxy::handle(&dp, peer(), get("/anything")).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1187,7 +1187,7 @@ async fn reserved_paths_survive_query_strings_and_total_ejection() {
     assert!(wait_available(&dp, 0, false, Duration::from_millis(600)).await);
     let resp = proxy::handle(&dp, peer(), get("/healthz")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_of(resp).await, "ok");
+    assert!(body_of(resp).await.contains("\"code\":\"ok\""));
 
     // Query strings keep the reserved handling.
     for (path, want) in [
@@ -1196,7 +1196,13 @@ async fn reserved_paths_survive_query_strings_and_total_ejection() {
     ] {
         let resp = proxy::handle(&dp, peer(), get(path)).await;
         assert_eq!(resp.status(), want.1, "{path}");
-        assert_eq!(body_of(resp).await, want.0, "{path}");
+        // DW-021: reserved bodies are aligned to the JSON envelope.
+        assert!(
+            body_of(resp)
+                .await
+                .contains(&format!("\"code\":\"{}\"", want.0)),
+            "{path}"
+        );
     }
 }
 

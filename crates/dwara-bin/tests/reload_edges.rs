@@ -269,7 +269,7 @@ fn config_deleted_while_running_keeps_serving_last_snapshot() {
         "expected keep-running log in:\n{text}"
     );
     assert_eq!(
-        count_occurrences(&text, "config reloaded"),
+        count_occurrences(&text, r#""code":"config_reloaded""#),
         0,
         "a deleted config must not produce a successful reload:\n{text}"
     );
@@ -307,7 +307,8 @@ fn config_replaced_via_atomic_rename_triggers_reload() {
     assert!(status.success(), "expected clean exit, got {status}");
     let text = out.read_all();
     assert!(
-        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        text.contains("config reloaded: generation 1 -> 2")
+            && text.contains(r#""trigger":"file-watch""#),
         "atomic rename replace must trigger a file-watch reload:\n{text}"
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -347,11 +348,12 @@ fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
     assert!(status.success(), "expected clean exit, got {status}");
     let text = out.read_all();
     assert!(
-        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        text.contains("config reloaded: generation 1 -> 2")
+            && text.contains(r#""trigger":"file-watch""#),
         "empty doc must reload (valid empty Gateway) in:\n{text}"
     );
     assert!(
-        text.contains("routes=0"),
+        text.contains(r#""routes":0"#),
         "empty config reload must report zero routes:\n{text}"
     );
     assert!(
@@ -390,7 +392,7 @@ fn rapid_write_burst_within_debounce_window_coalesces_to_one_reload() {
     let status = wait_exit(&mut guard.0, Duration::from_secs(15));
     assert!(status.success(), "expected clean exit, got {status}");
     let text = out.read_all();
-    let reloads = count_occurrences(&text, "config reloaded (file-watch)");
+    let reloads = count_occurrences(&text, r#""code":"config_reloaded","trigger":"file-watch""#);
     assert_eq!(
         reloads, 1,
         "3 writes inside the debounce window must coalesce to exactly 1 reload, got {reloads}:\n{text}"
@@ -539,7 +541,12 @@ fn single_keepalive_connection_survives_reload() {
     let dir = unique_temp_dir("keepalive");
     let config = dir.join("dwara.yaml");
     std::fs::write(&config, config_v1()).unwrap();
-    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    // DW-021: 200 requests emit 200 JSON access-log lines — more than a
+    // piped stdout's kernel buffer holds. Sample access logs down to
+    // zero (this test asserts connection survival, not logging; the
+    // reload events it greps are error/info events, always emitted).
+    let (mut guard, mut out) =
+        spawn_server(&addr, &config, &[("DWARA_ACCESS_LOG_SAMPLE", "0.0")], None);
     assert!(
         wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
         "dwara did not become ready on {addr}"
@@ -575,7 +582,8 @@ fn single_keepalive_connection_survives_reload() {
     assert!(status.success(), "expected clean exit, got {status}");
     let text = out.read_all();
     assert!(
-        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        text.contains("config reloaded: generation 1 -> 2")
+            && text.contains(r#""trigger":"file-watch""#),
         "expected the mid-burst write to reload:\n{text}"
     );
     std::fs::remove_dir_all(&dir).ok();

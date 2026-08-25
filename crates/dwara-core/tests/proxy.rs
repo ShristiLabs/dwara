@@ -32,6 +32,15 @@ use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// DW-021: gateway-generated error bodies are the JSON envelope; compare
+/// by its stable `code` field.
+fn envelope_code(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 // --- infrastructure -----------------------------------------------------
 
 fn state_from(yaml: &str) -> Arc<ConfigState> {
@@ -483,8 +492,8 @@ async fn upgrade_over_h2_is_rejected_501() {
     let resp = proxy::handle(&dp, "127.0.0.1".parse().unwrap(), req).await;
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     assert_eq!(
-        body_text(resp.into_body()).await,
-        "protocol upgrade is not supported over HTTP/2"
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "upgrade_not_supported"
     );
 }
 
@@ -726,7 +735,10 @@ async fn refused_backend_is_502_with_short_message() {
     let port = spawn_gateway(dataplane_from(&proxy_yaml(1))).await;
     let resp = h1_client().get(uri(port, "/v1/x")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(body_text(resp.into_body()).await, "upstream unavailable");
+    assert_eq!(
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "upstream_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -737,8 +749,8 @@ async fn connect_timeout_is_504() {
     let resp = h1_client().get(uri(port, "/v1/x")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
-        body_text(resp.into_body()).await,
-        "upstream connect timed out"
+        envelope_code(&body_text(resp.into_body()).await.into_bytes()),
+        "upstream_connect_timeout"
     );
     assert!(started.elapsed() < Duration::from_secs(3));
 }

@@ -5,8 +5,9 @@ A high-performance API gateway written in Rust.
 Status: pre-alpha. The core reverse-proxy dataplane works — routing,
 streaming proxying, TLS termination/passthrough, upstream load
 balancing, hot config reload, request authentication (API keys, Basic,
-JWT Bearer), and local rate limiting — with more traffic policy still
-to come in M1.
+JWT Bearer), local rate limiting, and observability (structured JSON
+logs, request IDs, Prometheus `/metrics`, uniform error envelope) —
+with more traffic policy still to come in M1.
 
 ## Quickstart
 
@@ -45,6 +46,11 @@ Environment variables (all optional):
   SIGTERM/SIGINT, default 10.
 - `DWARA_STATE_DB`: path to a SQLite state store (default unset = no
   store). See "State store" under Operations.
+- `DWARA_LOG`: log filter in `RUST_LOG` syntax, default `dwara=info`.
+- `DWARA_ACCESS_LOG_SAMPLE`: fraction of non-error access-log lines
+  emitted, 0.0-1.0, default 1.0. See "Observability".
+- `DWARA_OTLP_ENDPOINT`: reserved for future OTLP trace export;
+  currently inert (see "Observability").
 
 ## Configuration
 
@@ -172,8 +178,8 @@ routes:
       body: ok
 ```
 
-Requests that match no route (path or criteria miss) get a plain-text
-`404`. A route may also carry a `priority` (0-10, default 5) — see
+Requests that match no route (path or criteria miss) get a `404` in
+the uniform JSON error envelope (see "Observability"). A route may also carry a `priority` (0-10, default 5) — see
 "Load shedding and priority" under Global settings.
 
 ### Path rewrite (proxy)
@@ -287,7 +293,7 @@ anything above 10. Priority shapes how the gateway concurrency cap
 - A shed is a 503, not a 429 (429 is reserved for rate limiting),
   carries no `Retry-After` (immediate re-dispatch against a saturated
   gateway is not advisable), and no marker header — the response is a
-  plain 503 with "gateway saturated" as the body.
+  plain 503 with "gateway saturated" as the envelope message.
 
 ```yaml
 routes:
@@ -772,8 +778,9 @@ rejected by the hourly window has still spent its second-window token
 — slightly stricter than an atomic all-windows check, never more
 permissive, and the waste replenishes with the fastest window.
 
-**429 contract.** A request over the limit is answered `429` with body
-`rate limit exceeded` and these headers from the BINDING constraint
+**429 contract.** A request over the limit is answered `429` whose error
+envelope message is `rate limit exceeded`, with these headers from the
+BINDING constraint
 (the window that denied; on success, the window with the least
 remaining budget):
 
@@ -1109,13 +1116,16 @@ restart; only route/config changes and certificate material reload
 live. Passthrough splices are also not drained on graceful shutdown;
 they run until the process exits.
 
-Health endpoints: dwara reserves `/healthz` and `/readyz` and serves
+Health endpoints: dwara reserves `/healthz`, `/readyz`, and `/metrics`
+and serves
 them on every terminate and cleartext listener BEFORE route resolution.
 `/healthz` answers 200 whenever the process is up (liveness);
 `/readyz` answers 200 once a config generation has been published
 successfully and 503 before that (readiness — it tracks the gateway's
-own state, not upstream health). Caveat: these paths are not routable —
-a configured route matching `/healthz` or `/readyz` (exact, regex, or
+own state, not upstream health); `/metrics` serves Prometheus text
+format (see "Observability"). Caveat: these paths are not routable —
+a configured route matching `/healthz`, `/readyz`, or `/metrics`
+(exact, regex, or
 prefix) is permanently shadowed by the reserved handlers; this is
 accepted v1 behavior, not a validation error. TLS-passthrough listeners
 never serve them (they do not speak HTTP).
@@ -1124,6 +1134,97 @@ Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 (including ones still in the kernel accept backlog) within
 `DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
 past the budget are force-closed.
+
+## Observability
+
+Logs, request IDs, metrics, and error bodies (DW-021) share one goal:
+an operator can correlate any client complaint to exactly one gateway
+request.
+
+### Logs
+
+The binary emits structured JSON on STDOUT via `tracing`, filtered by
+`DWARA_LOG` (`RUST_LOG` syntax, default `dwara=info`). One access-log
+line per completed request (target `dwara::access`) carries: timestamp,
+`request_id`, `method`, `path`, `status`, `duration_ms`, `route`,
+`consumer`, `upstream`, `endpoint`, `attempts`, and the
+`rate_limited`/`broken`/`shed` flags. `route` is `unrouted` for 404s
+and reserved paths; `consumer` is `anonymous` without authentication.
+
+Access-log sampling: `DWARA_ACCESS_LOG_SAMPLE` (0.0-1.0, default 1.0)
+sets the fraction of non-error lines emitted; responses with status
+>= 500 are ALWAYS logged regardless of sampling, and a malformed value
+falls back to 1.0 (a broken knob must never silence logs). Request
+phases (authn, authz, ratelimit, admission, upstream pick/attempts)
+open `tracing` spans under the root `request` span, all carrying the
+request ID.
+
+Redaction guarantees: paths are logged WITHOUT query strings (query
+strings carry tokens), and no credential material — `Authorization`,
+`Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-API-Key` values,
+keys, or JWKS bodies — is ever logged.
+
+### Request IDs
+
+An inbound `X-Request-Id` is respected when it is printable ASCII of
+at most 128 bytes (anything else — control bytes, multibyte UTF-8,
+overlong — is replaced, so a hostile ID cannot smuggle control
+characters into logs); otherwise the gateway generates one
+(`req-<hex nanoseconds>-<counter>`). The resolved ID is echoed on
+every response as `X-Request-Id` and appears in every span, access
+line, and error body.
+
+### Metrics
+
+`/metrics` serves the Prometheus text format, reserved on every
+terminate and cleartext listener exactly like `/healthz`. Metric
+families:
+
+- `requests_total{route,listener,status_class}` — counter
+- `request_duration_seconds{route}` — histogram (route resolution to
+  response headers; buckets 5 ms to 10 s)
+- `upstream_attempts_total{upstream,endpoint,status_class}` — counter
+- `retries_total{upstream}` — counter
+- `rate_limited_total{route}` — counter (429 denials)
+- `shed_total{priority}` — counter (gateway-cap 503s by priority class)
+- `breaker_state{upstream}` — gauge: 0 closed, 1 open, 2 half-open
+- `endpoint_health{upstream,endpoint}` — gauge: 1 available, 0 ejected
+- `upstream_fail_open_picks{upstream}` — gauge (scrape-time snapshot
+  of the balancer's fail-open counter)
+- `active_requests` — gauge (requests between entry and header
+  completion)
+- `config_generation` — gauge (currently published generation)
+- `jwks_refresh_total{provider}` — counter (JWKS fetch attempts)
+
+Breaker, endpoint-health, and fail-open series are refreshed at scrape
+time from live state; series for upstreams/endpoints removed by a
+reload linger until process restart (a Prometheus caveat, not a leak
+in the gateway's own state).
+
+A starter Grafana dashboard (`grafana/dwara-overview.json`, metric
+names matching the list above) ships in the repo: in Grafana, import
+the JSON file via Dashboards -> New -> Import and point the dashboard's
+datasource at a Prometheus instance scraping the gateway's `/metrics`.
+
+### Error envelope
+
+Every gateway-generated non-success body — including reserved
+`/healthz`/`/readyz` responses, which use the same shape — is:
+
+```json
+{"error":{"code":"no_route","message":"no route","request_id":"req-..."}}
+```
+
+`code` is a stable machine token, `message` a human string that never
+leaks upstream internals (classification strings only), and
+`request_id` ties the response to the trace and access log.
+
+### OTLP (deferred)
+
+`DWARA_OTLP_ENDPOINT` is reserved but inert: the OTLP exporter was
+deliberately not linked in v1 (dependency weight against the binary
+size budget). The span structure it would export ships today; export
+itself is deferred to the first feature that needs a collector.
 
 ## State store
 

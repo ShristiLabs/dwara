@@ -43,6 +43,15 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::TcpListener;
 
+/// DW-021: gateway-generated error bodies are the JSON envelope; compare
+/// by its stable `code` field.
+fn envelope_code(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 // --- infrastructure (mirrors retries_timeouts.rs) ------------------------
 
 fn state_from(yaml: &str) -> Arc<ConfigState> {
@@ -228,7 +237,7 @@ async fn breaker_opens_on_consecutive_5xx_and_fails_fast() {
     let started = Instant::now();
     let (status, body, headers) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     let retry_after: u64 = headers
         .get("retry-after")
         .expect("Retry-After present")
@@ -277,7 +286,7 @@ async fn breaker_opens_on_error_ratio_with_volume() {
     }
     let (status, body, _) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     assert_eq!(count.load(Ordering::SeqCst), 5);
 }
 
@@ -341,7 +350,7 @@ async fn half_open_probe_failure_reopens() {
     // The failed probe re-opened the breaker: fail fast again.
     let (status, body, _) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
 }
 
 // --- 5. max_pending --------------------------------------------------------
@@ -370,7 +379,7 @@ async fn max_pending_rejects_excess_requests_immediately() {
     let started = Instant::now();
     let (status, body, _) = body_of(third_request(&c2, gw).await).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream saturated");
+    assert_eq!(envelope_code(&body), "upstream_saturated");
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "rejection must be immediate, took {:?}",
@@ -419,7 +428,7 @@ async fn global_cap_admits_two_and_rejects_the_third_instantly() {
         let (elapsed, resp) = t.await.unwrap();
         let (status, body, _) = body_of(resp).await;
         if status == StatusCode::SERVICE_UNAVAILABLE {
-            assert_eq!(&body[..], b"gateway saturated");
+            assert_eq!(envelope_code(&body), "gateway_saturated");
             rejected_elapsed = Some(elapsed);
         }
         statuses.push(status);
@@ -639,7 +648,7 @@ async fn half_open_admits_at_most_half_open_probes_concurrently() {
         match status {
             StatusCode::OK => ok += 1,
             StatusCode::SERVICE_UNAVAILABLE => {
-                assert_eq!(&body[..], b"upstream circuit open");
+                assert_eq!(envelope_code(&body), "upstream_circuit_open");
                 // Probing hint while probes are in flight.
                 assert_eq!(headers.get("retry-after").unwrap(), "1");
                 assert!(
@@ -694,7 +703,7 @@ async fn open_breaker_makes_no_attempts_and_consumes_no_retry_budget() {
         let c = h1_client();
         let (status, body, _) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(&body[..], b"upstream circuit open");
+        assert_eq!(envelope_code(&body), "upstream_circuit_open");
     }
     assert_eq!(count.load(Ordering::SeqCst), 2, "zero attempts while open");
     assert_eq!(budget.totals(), 5, "denominator grows (by design)");
@@ -756,7 +765,7 @@ async fn breaker_gates_upstream_even_after_endpoints_recover_from_ejection() {
     let c = h1_client();
     let (status, body, _) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     assert_eq!(c1.load(Ordering::SeqCst) + c2.load(Ordering::SeqCst), 6);
 
     // eject_ms (300 ms) elapses: endpoints are candidates again, but the
@@ -766,7 +775,7 @@ async fn breaker_gates_upstream_even_after_endpoints_recover_from_ejection() {
     let c = h1_client();
     let (status, body, _) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     assert_eq!(
         c1.load(Ordering::SeqCst) + c2.load(Ordering::SeqCst),
         6,
@@ -880,7 +889,7 @@ async fn global_cap_releases_slot_on_stream_body_completion_not_headers() {
     let started = Instant::now();
     let (status, body, _) = body_of(c3.get(uri(gw, "/api/s")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"gateway saturated");
+    assert_eq!(envelope_code(&body), "gateway_saturated");
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "rejection must be immediate, took {:?}",
@@ -941,7 +950,7 @@ async fn breaker_state_survives_config_reload() {
     let c = h1_client();
     let (status, body, _) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     assert_eq!(
         count.load(Ordering::SeqCst),
         2,
@@ -991,7 +1000,7 @@ async fn global_cap_reload_admits_new_generation_permits() {
     let c6 = h1_client();
     let (status, body, _) = body_of(c6.get(uri(gw, "/api/s")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"gateway saturated");
+    assert_eq!(envelope_code(&body), "gateway_saturated");
 
     // Cleanup: complete all held streams (releases permits).
     senders.lock().unwrap().clear();
@@ -1045,7 +1054,7 @@ async fn saturated_rejections_do_not_trip_the_breaker() {
     for t in rejected {
         let (status, body, _) = body_of(t.await.unwrap()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(&body[..], b"upstream saturated");
+        assert_eq!(envelope_code(&body), "upstream_saturated");
     }
     // The admitted pair completes normally.
     let (sa, _, _) = body_of(a.await.unwrap()).await;
@@ -1065,7 +1074,7 @@ async fn saturated_rejections_do_not_trip_the_breaker() {
         let (status, body, headers) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
         if status == StatusCode::SERVICE_UNAVAILABLE {
             assert!(
-                headers.get("retry-after").is_none() && &body[..] == b"upstream saturated",
+                headers.get("retry-after").is_none() && envelope_code(&body) == "upstream_saturated",
                 "breaker must not trip on Saturated: got {status} with Retry-After/breaker-open body"
             );
             assert!(
@@ -1121,7 +1130,7 @@ async fn saturated_rejections_do_not_eject_endpoints() {
         let c = h1_client();
         let (status, body, _) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(&body[..], b"upstream saturated");
+        assert_eq!(envelope_code(&body), "upstream_saturated");
     }
     let _ = body_of(a.await.unwrap()).await;
     let _ = body_of(b.await.unwrap()).await;
@@ -1181,7 +1190,7 @@ async fn read_timeouts_trip_the_breaker_and_fail_fast() {
     let started = Instant::now();
     let (status, body, headers) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
     assert!(
         headers.get("retry-after").is_some(),
         "breaker-open responses carry Retry-After"
@@ -1221,10 +1230,10 @@ async fn connection_refusals_still_trip_the_breaker() {
     for _ in 0..3 {
         let (status, body, headers) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "refusal surfaces as 502");
-        assert_ne!(&body[..], b"upstream circuit open");
+        assert_ne!(envelope_code(&body), "upstream_circuit_open");
         assert!(headers.get("retry-after").is_none());
     }
     let (status, body, _) = body_of(client.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"upstream circuit open");
+    assert_eq!(envelope_code(&body), "upstream_circuit_open");
 }

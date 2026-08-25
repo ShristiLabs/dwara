@@ -107,9 +107,20 @@ impl CapturedOutput {
 }
 
 fn spawn_server(addr: &str, config: &PathBuf) -> (ServerGuard, CapturedOutput) {
-    let child = Command::new(env!("CARGO_BIN_EXE_dwara"))
-        .env("DWARA_BIND", addr)
-        .env("DWARA_CONFIG", config)
+    spawn_server_with_env(addr, config, &[])
+}
+
+fn spawn_server_with_env(
+    addr: &str,
+    config: &PathBuf,
+    extra_env: &[(&str, &str)],
+) -> (ServerGuard, CapturedOutput) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_BIND", addr).env("DWARA_CONFIG", config);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -245,7 +256,13 @@ fn reload_under_load_keeps_generation_safe_and_shuts_down_cleanly() {
     let addr = format!("127.0.0.1:{}", free_port());
     let config = unique_temp_config("e2e");
     std::fs::write(&config, config_v1()).unwrap();
-    let (mut guard, mut stdout) = spawn_server(&addr, &config);
+    // DW-021: the load loop runs thousands of requests; with per-request
+    // JSON access logs the piped stdout would fill its kernel buffer and
+    // block the server's log writes mid-loop. The events this test
+    // asserts (reload accept/reject) are info/error events, always
+    // emitted regardless of the access-log sample.
+    let (mut guard, mut stdout) =
+        spawn_server_with_env(&addr, &config, &[("DWARA_ACCESS_LOG_SAMPLE", "0.0")]);
     assert!(
         wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
         "dwara did not become ready on {addr}"
@@ -292,7 +309,8 @@ fn reload_under_load_keeps_generation_safe_and_shuts_down_cleanly() {
         "route hot-swap must be visible: {v1_count} pre-reload and {v2_count} post-reload bodies"
     );
     assert!(
-        out.contains("config reloaded (file-watch): generation 1 -> 2"),
+        out.contains("config reloaded: generation 1 -> 2")
+            && out.contains(r#""trigger":"file-watch""#),
         "expected file-watch reload log advancing to generation 2 in:\n{out}"
     );
     assert!(
@@ -300,7 +318,7 @@ fn reload_under_load_keeps_generation_safe_and_shuts_down_cleanly() {
         "expected rejected-reload log in:\n{out}"
     );
     assert!(
-        out.contains("config reloaded (sighup): generation 2 -> 3"),
+        out.contains("config reloaded: generation 2 -> 3") && out.contains(r#""trigger":"sighup""#),
         "expected SIGHUP reload to generation 3 in:\n{out}"
     );
     assert!(

@@ -73,6 +73,13 @@ sha2 = "0.10"
 argon2 = "0.5"
 base64 = "0.22"
 jsonwebtoken = "9"
+# Observability (DW-021): all MIT. tracing provides the span/event
+# substrate used across dwara-core; tracing-subscriber (binary/dev only)
+# renders JSON logs with env filtering; prometheus with default features
+# OFF keeps the protobuf exporter out of the tree (text format only).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
+prometheus = { version = "0.14", default-features = false }
 
 [profile.release]
 lto = true

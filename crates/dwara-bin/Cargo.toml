@@ -15,6 +15,8 @@ http-body-util = { workspace = true }
 notify = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }

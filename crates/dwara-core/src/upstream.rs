@@ -720,9 +720,47 @@ impl UpstreamHandle {
     /// it without buffering.
     pub async fn send_with_hash_key<B>(
         &self,
-        mut req: Request<B>,
+        req: Request<B>,
         hash_key: Option<&str>,
     ) -> Result<Response<UpstreamBody>, UpstreamError>
+    where
+        B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let mut picked = None;
+        self.send_inner(req, hash_key, &mut picked)
+            .await
+            .map(|(resp, ())| resp)
+    }
+
+    /// [`UpstreamHandle::send_with_hash_key`] with observability
+    /// (DW-021): the load-balancer pick runs under an `upstream_pick`
+    /// span (child of the caller's `upstream_attempt` span) and the
+    /// picked endpoint's `address:port` is written to `picked` when a
+    /// dispatch resolved (left None on the NoEndpoints guard), so the
+    /// proxy can attribute the attempt in its access log and the
+    /// `upstream_attempts_total` metric.
+    pub async fn send_with_hash_key_observed<B>(
+        &self,
+        req: Request<B>,
+        hash_key: Option<&str>,
+        picked: &mut Option<String>,
+    ) -> Result<Response<UpstreamBody>, UpstreamError>
+    where
+        B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.send_inner(req, hash_key, picked)
+            .await
+            .map(|(resp, ())| resp)
+    }
+
+    async fn send_inner<B>(
+        &self,
+        mut req: Request<B>,
+        hash_key: Option<&str>,
+        picked: &mut Option<String>,
+    ) -> Result<(Response<UpstreamBody>, ()), UpstreamError>
     where
         B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -737,11 +775,24 @@ impl UpstreamHandle {
         // endpoint resolution, and in-flight acquisition all run against
         // ONE state snapshot (pick_for_dispatch), so a concurrent reload
         // cannot detach the guard from the picked endpoint.
-        let dispatch = self
-            .lb
-            .pick_for_dispatch(hash_key)
-            .ok_or(UpstreamError::NoEndpoints)?;
-        let authority = endpoint_authority(&dispatch.address, dispatch.port);
+        let (dispatch, authority) = {
+            // DW-021: the pick phase is its own span so a full trace
+            // shows pick separately from the attempt that contains it.
+            let span = tracing::info_span!(
+                "upstream_pick",
+                upstream = self.name,
+                endpoint = tracing::field::Empty
+            );
+            let _guard = span.enter();
+            let dispatch = self
+                .lb
+                .pick_for_dispatch(hash_key)
+                .ok_or(UpstreamError::NoEndpoints)?;
+            let authority = endpoint_authority(&dispatch.address, dispatch.port);
+            span.record("endpoint", authority.as_str());
+            *picked = Some(authority.clone());
+            (dispatch, authority)
+        };
         // Held (inside `dispatch`) until the response (headers) resolves;
         // see the doc comment.
         let uri: Uri = format!("{}://{}{}", self.scheme, authority, path)
@@ -806,13 +857,16 @@ impl UpstreamHandle {
         }
         dispatch.release();
         outcome.map_err(Into::into).map(|resp| {
-            resp.map(|inner| UpstreamBody {
-                inner,
-                idle: self.write_timeout,
-                sleep: None,
-                health: body_health,
-                release: None,
-            })
+            (
+                resp.map(|inner| UpstreamBody {
+                    inner,
+                    idle: self.write_timeout,
+                    sleep: None,
+                    health: body_health,
+                    release: None,
+                }),
+                (),
+            )
         })
     }
 }

@@ -103,6 +103,7 @@ use subtle::ConstantTimeEq;
 use tower_service::Service;
 
 use crate::config::{Credential, Gateway, JwtProvider as JwtProviderConfig};
+use crate::observability::Observability;
 use crate::store::{CredentialKind, CredentialRecord, StateStore};
 
 const X_API_KEY: hyper::header::HeaderName = hyper::header::HeaderName::from_static("x-api-key");
@@ -493,16 +494,24 @@ pub struct JwtVerifier {
     algorithms: Vec<Algorithm>,
     http: Client<JwksConnector, http_body_util::Full<bytes::Bytes>>,
     cache: Arc<JwksCacheEntry>,
+    /// jwks_refresh_total{provider} child (DW-021), incremented on every
+    /// JWKS fetch attempt (stale-path and rotation-triggered alike).
+    jwks_refresh: Option<prometheus::IntCounter>,
 }
 
 impl JwtVerifier {
-    fn build(cfg: JwtProviderConfig, cache: Arc<JwksCacheEntry>) -> Result<Self, AuthError> {
+    fn build(
+        cfg: JwtProviderConfig,
+        cache: Arc<JwksCacheEntry>,
+        obs: Option<&Observability>,
+    ) -> Result<Self, AuthError> {
         let algorithms = parse_algorithms(&cfg.algorithms).ok_or_else(|| {
             AuthError::Unavailable(format!(
                 "jwt provider '{}' lists an unsupported or disallowed algorithm",
                 cfg.name
             ))
         })?;
+        let jwks_refresh = obs.map(|o| o.jwks_refresh_counter(cfg.name.as_str()));
         let mut builder = Client::builder(TokioExecutor::new());
         builder.pool_timer(TokioTimer::new());
         Ok(JwtVerifier {
@@ -510,10 +519,17 @@ impl JwtVerifier {
             algorithms,
             http: builder.build(JwksConnector::new()),
             cache,
+            jwks_refresh,
         })
     }
 
     async fn fetch(&self) -> Result<Arc<JwkSet>, AuthError> {
+        // Every fetch (stale-path or rotation-triggered) counts in the
+        // jwks_refresh_total metric (DW-021) — attempts, not successes, so
+        // a flapping endpoint is visible.
+        if let Some(counter) = &self.jwks_refresh {
+            counter.inc();
+        }
         // Record the outcome for the stale-path failed-refresh backoff: a
         // failed fetch arms it, a successful one clears it (see
         // [`JwksCacheEntry::last_failed_refresh`]).
@@ -816,6 +832,7 @@ impl CompositeAuthenticator {
         gateway: &Gateway,
         store: Option<Arc<StateStore>>,
         jwks_caches: &mut HashMap<String, Arc<JwksCacheEntry>>,
+        obs: Option<&Observability>,
     ) -> Arc<Self> {
         let registry = match store {
             Some(store) => CredentialRegistry::Store(store),
@@ -827,9 +844,11 @@ impl CompositeAuthenticator {
                 .entry(cfg.jwks_url.clone())
                 .or_insert_with(|| Arc::new(JwksCacheEntry::new()))
                 .clone();
-            match JwtVerifier::build(cfg.clone(), cache) {
+            match JwtVerifier::build(cfg.clone(), cache, obs) {
                 Ok(v) => jwt.push(Arc::new(v)),
-                Err(e) => eprintln!("dwara: jwt provider disabled: {e}"),
+                Err(e) => {
+                    tracing::error!(code = "jwt_provider_disabled", "jwt provider disabled: {e}")
+                }
             }
         }
         let mut jwt_consumer_index = HashMap::new();
@@ -1166,7 +1185,7 @@ mod tests {
     async fn disabled_composite_is_anonymous_for_anything() {
         use hyper::header::HeaderValue;
         let gateway = crate::config::parse_gateway("routes:\n").unwrap();
-        let auth = CompositeAuthenticator::build(&gateway, None, &mut HashMap::new());
+        let auth = CompositeAuthenticator::build(&gateway, None, &mut HashMap::new(), None);
         let mut headers = HeaderMap::new();
         headers.insert(
             hyper::header::AUTHORIZATION,

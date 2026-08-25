@@ -33,6 +33,15 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::TcpListener;
 
+/// DW-021: gateway-generated error bodies are the JSON envelope; compare
+/// by its stable `code` field.
+fn envelope_code(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 // --- infrastructure (mirrors breaker_caps.rs) ------------------------
 
 fn state_from(yaml: &str) -> Arc<ConfigState> {
@@ -238,7 +247,7 @@ async fn high_priority_survives_while_normal_traffic_sheds() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!resp.headers().contains_key("retry-after"));
     let (status, body) = body_of(resp).await;
-    assert_eq!(&body[..], b"gateway saturated");
+    assert_eq!(envelope_code(&body), "gateway_saturated");
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "shed must be immediate, took {:?}",
@@ -291,7 +300,7 @@ async fn reserved_bucket_exhaustion_sheds_even_high_priority() {
             StatusCode::OK => oks += 1,
             StatusCode::SERVICE_UNAVAILABLE => {
                 sheds += 1;
-                assert_eq!(&body[..], b"gateway saturated");
+                assert_eq!(envelope_code(&body), "gateway_saturated");
             }
             s => panic!("unexpected status {s}"),
         }
@@ -327,7 +336,7 @@ async fn default_config_sheds_identically_to_dw015() {
             oks += 1;
         } else {
             sheds += 1;
-            assert_eq!(&body[..], b"gateway saturated");
+            assert_eq!(envelope_code(&body), "gateway_saturated");
         }
     }
     assert_eq!(oks, 2);
@@ -356,7 +365,7 @@ async fn unrouted_requests_never_consume_cap_slots() {
     let c1 = h1_client();
     let (status, body) = body_of(c1.get(uri(gw, "/nope")).await.unwrap()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(&body[..], b"no route");
+    assert_eq!(envelope_code(&body), "no_route");
 
     let _ = body_of(busy.await.unwrap()).await;
 }
@@ -380,7 +389,7 @@ async fn cap_one_with_high_priority_gives_normal_traffic_zero_slots() {
     let c = h1_client();
     let (status, body) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"gateway saturated");
+    assert_eq!(envelope_code(&body), "gateway_saturated");
     assert_eq!(dp.priority_counters().shed_at(DEFAULT_PRIORITY), 1);
 
     // High priority takes the whole (only) slot.
@@ -436,7 +445,7 @@ async fn consumer_only_high_priority_carves_nothing() {
     let c = h1_client();
     let (status, body) = body_of(c.get(uri(gw, "/api/x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(&body[..], b"gateway saturated");
+    assert_eq!(envelope_code(&body), "gateway_saturated");
     assert_eq!(dp.priority_counters().shed_at(DEFAULT_PRIORITY), 1);
     let (status, _) = body_of(busy.await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
@@ -742,7 +751,7 @@ async fn healthz_and_404_served_when_cap_and_bucket_are_fully_held() {
     let started = Instant::now();
     let (status, body) = body_of(c.get(uri(gw, "/healthz")).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body[..], b"ok");
+    assert_eq!(envelope_code(&body), "ok");
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "healthz must not queue behind the cap"
@@ -751,7 +760,7 @@ async fn healthz_and_404_served_when_cap_and_bucket_are_fully_held() {
     let c = h1_client();
     let (status, body) = body_of(c.get(uri(gw, "/nope")).await.unwrap()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(&body[..], b"no route");
+    assert_eq!(envelope_code(&body), "no_route");
 
     // Nothing above consumed a slot or was counted as admitted/shed.
     assert_eq!(dp.priority_counters().admitted_at(DEFAULT_PRIORITY), 0);
