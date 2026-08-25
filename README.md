@@ -674,17 +674,20 @@ The admission layers stack in a fixed order, outermost first:
 
 1. authentication (see Authentication) — invalid credential or missing
    on an `auth_required` route: 401 + `WWW-Authenticate`;
-2. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
+2. authorization (`authorization`, see "Authorization and IP access
+   control") — forbidden caller or IP: 403 (401 when identity rules hit
+   an anonymous request);
+3. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
    429 + `Retry-After`;
-3. gateway concurrency cap (`max_concurrent_requests`, see Global
+4. gateway concurrency cap (`max_concurrent_requests`, see Global
    settings) — over-cap: 503 "gateway saturated";
-4. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
+5. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
    circuit open" + `Retry-After`;
-5. per-endpoint ejection (the `health` block) — an ejected endpoint is
+6. per-endpoint ejection (the `health` block) — an ejected endpoint is
    skipped by the balancer;
-6. per-upstream pending cap (`max_pending`) — queue full: 503
+7. per-upstream pending cap (`max_pending`) — queue full: 503
    "upstream saturated";
-7. connect (`connection_cap`, `timeouts.connect_ms`).
+8. connect (`connection_cap`, `timeouts.connect_ms`).
 
 ### Rate limiting
 
@@ -913,6 +916,100 @@ The authenticated consumer also drives behavior elsewhere: its
 `policies` join rate limiting with consumer precedence (see "Rate
 limiting"), and its `priority` overrides the route's for load shedding
 (see "Load shedding and priority").
+
+### Authorization and IP access control
+
+Authorization (DW-020) runs after authentication and before rate
+limiting: authentication answers "who is this caller?", authorization
+answers "is this caller allowed here?". Rules attach to a route via its
+`authorization` block:
+
+```yaml
+consumers:
+  - name: acme
+    groups: [gold]            # group memberships for group rules
+routes:
+  - name: admin
+    service: echo
+    match:
+      path: { type: prefix, value: /admin }
+    action:
+      type: proxy
+    authorization:
+      allowed_groups: [gold]
+      denied_consumers: [blocked-co]
+      required_scopes: [read, write]
+      required_claims:
+        tenant: acme          # exact stringified-value match
+      ip_acl:
+        allow: [10.0.0.0/8]
+        deny: [10.0.0.99]
+        default: deny         # only allow-listed IPs pass
+```
+
+All fields are optional; an `authorization` block with no rules imposes
+nothing, and so does an absent one. Within one block the rules evaluate
+in a fixed order — IP gate, consumers, groups, scopes, claims — and
+every rule must pass.
+
+**Deny wins.** Within one rule set, `denied_consumers`/`denied_groups`
+beat `allowed_*`: a consumer both allowed and denied is denied, and in
+the IP ACL the deny list is checked before the allow list. An empty
+rule set allows — `allowed_consumers: []` is "any authenticated
+consumer", and `allowed_groups: []` imposes no group constraint. The
+empty `authorization: {}` block is therefore transparent.
+
+**Consumers and groups.** `allowed_consumers`, when non-empty, is a
+closed set: the authenticated consumer must be listed. Groups come from
+the CONFIG consumer's `groups` field; consumers that exist only in the
+state store (`DWARA_STATE_DB` deployments with no config entry) have no
+groups and never satisfy an `allowed_groups` rule.
+
+**Scopes and claims** apply to JWT identities. Every `required_scopes`
+entry must appear in the token's `scope` claim, which may be a
+space-separated string (`"read write"`, the OAuth convention) or a JSON
+array of strings (flattened to the same form). `required_claims` is
+exact string equality on the stringified claim value — a listed claim
+absent from the token fails. API-key and Basic identities carry no
+claims and never satisfy scope or claim rules.
+
+**IP ACL** matches against the EFFECTIVE client IP: when the direct
+connection peer is inside `trusted_proxies`, the `X-Forwarded-For`
+chain is walked right-to-left and the rightmost address that is not
+itself a trusted proxy is the client (the DW-009 chain, the same
+resolution as XFF handling — see "Forwarded headers and trusted
+proxies"); otherwise the effective IP is the direct peer, so a spoofed
+XFF from an untrusted client never influences the decision. Entries are
+IP addresses or CIDRs. `default` (`allow`, the default, or `deny`)
+decides IPs matched by neither list: with `default: allow` the lists are
+exceptions; with `default: deny` the gate is closed and only the allow
+list passes.
+
+**403 vs 401.** A denied AUTHENTICATED request — or a denied anonymous
+request whose IP failed the ACL — is answered `403` `forbidden` with no
+rule detail (which list matched is server-side information only). An
+anonymous request on a route whose authorization carries any identity
+rule (consumer, group, scope, or claim) is answered `401` with the
+authenticator's `WWW-Authenticate` challenge: identity rules imply
+authentication. `auth_required: true` on the route still independently
+forces authentication.
+
+**The one anonymous-permitting shape.** An `ip_acl`-ONLY authorization
+block (no identity rules) can admit anonymous callers from allowed IPs —
+an operator writing just an IP gate wants a gate, not a login wall.
+Combined with `default: allow` and `allow: [0.0.0.0/0]` this would open
+the route to the entire internet without any credential; never do that —
+an IP gate with an allow-everything list is no gate at all.
+
+**Precedence.** Authorization levels stack with the frozen gateway
+chain consumer > route > service > listener > global. A deny at ANY
+level wins absolutely (a consumer-level deny beats a route-level allow
+and vice versa); otherwise the most specific level WITH rules governs
+and less-specific levels are not consulted. Today only the ROUTE link
+(`routes[].authorization`) has a config attachment point — the
+consumer, service, listener, and global links activate when their
+config fields land; until then the chain effectively resolves the route
+block alone.
 
 ### TLS
 

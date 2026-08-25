@@ -124,8 +124,9 @@ pub struct Identity {
     pub consumer_name: String,
     pub credential_kind: CredentialKind,
     /// JWT only: a subset of the token's claims (string- and
-    /// number-valued top-level claims, capped at 32 entries). Never
-    /// contains the raw token.
+    /// number-valued top-level claims, plus arrays of strings flattened
+    /// to their space-separated form — the OAuth `scope` convention,
+    /// DW-020 — capped at 32 entries). Never contains the raw token.
     pub claims: BTreeMap<String, String>,
 }
 
@@ -978,6 +979,25 @@ impl CompositeAuthenticator {
                     }
                     serde_json::Value::Number(n) => {
                         identity_claims.insert(k.clone(), n.to_string());
+                    }
+                    // Array-of-strings claims are flattened to their
+                    // space-separated form (the OAuth `scope` convention,
+                    // which authorization's required_scopes matches either
+                    // way — DW-020). NOTE: the map stores the flattened
+                    // string, so ANY future consumer of identity claims
+                    // sees arrays as space-joined strings, never as lists.
+                    // Arrays holding non-strings are dropped, like every
+                    // other non-scalar claim.
+                    serde_json::Value::Array(a)
+                        if !a.is_empty() && a.iter().all(|v| v.is_string()) =>
+                    {
+                        identity_claims.insert(
+                            k.clone(),
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        );
                     }
                     _ => {}
                 }

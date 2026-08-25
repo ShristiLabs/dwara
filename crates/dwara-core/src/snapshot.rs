@@ -446,6 +446,13 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         gateway.upstreams.iter().map(|u| u.name.as_str()).collect();
     let policies: std::collections::BTreeSet<&str> =
         gateway.policies.iter().map(|p| p.name.as_str()).collect();
+    let consumers: std::collections::BTreeSet<&str> =
+        gateway.consumers.iter().map(|c| c.name.as_str()).collect();
+    let consumer_groups: std::collections::BTreeSet<&str> = gateway
+        .consumers
+        .iter()
+        .flat_map(|c| c.groups.iter().map(String::as_str))
+        .collect();
 
     for l in &gateway.listeners {
         let Some(tls) = &l.tls else { continue };
@@ -509,6 +516,94 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "policies",
                     format!("references unknown policy '{p}'"),
                 ));
+            }
+        }
+        // Route authorization (DW-020): every IP ACL entry must parse as
+        // an IP/CIDR (the trusted-proxies parser), and consumer/group
+        // references must resolve against the configured consumers. An
+        // authorization block carrying NO rules at all (empty lists, no
+        // ip_acl) is rejected: it is always an authoring mistake (a rule
+        // block with no rules) — omit the block instead. A `/0` entry in
+        // the ALLOW list is likewise always a mistake (allow-all filters
+        // nothing; the intended shape is `default: allow`) and is
+        // rejected; `/0` in the DENY list is meaningful (deny-all).
+        if let Some(authz) = &r.authorization {
+            let field_prefix = "authorization".to_string();
+            let empty = authz.allowed_consumers.is_empty()
+                && authz.denied_consumers.is_empty()
+                && authz.allowed_groups.is_empty()
+                && authz.denied_groups.is_empty()
+                && authz.required_scopes.is_empty()
+                && authz.required_claims.is_empty()
+                && authz.ip_acl.is_none();
+            if empty {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "authorization",
+                    "carries no rules (no consumers, groups, scopes, claims, or ip_acl) \
+                     and is always a mistake: omit the authorization block entirely",
+                ));
+            }
+            for (side, entries) in [
+                ("allowed_consumers", &authz.allowed_consumers),
+                ("denied_consumers", &authz.denied_consumers),
+            ] {
+                for name in entries.iter() {
+                    if !consumers.contains(name.as_str()) {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            &format!("{field_prefix}.{side}"),
+                            format!("references unknown consumer '{name}'"),
+                        ));
+                    }
+                }
+            }
+            for (side, entries) in [
+                ("allowed_groups", &authz.allowed_groups),
+                ("denied_groups", &authz.denied_groups),
+            ] {
+                for group in entries.iter() {
+                    if !consumer_groups.contains(group.as_str()) {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            &format!("{field_prefix}.{side}"),
+                            format!("references group '{group}' that no consumer is a member of"),
+                        ));
+                    }
+                }
+            }
+            if let Some(acl) = &authz.ip_acl {
+                for (side, entries) in [("ip_acl.allow", &acl.allow), ("ip_acl.deny", &acl.deny)] {
+                    for (i, entry) in entries.iter().enumerate() {
+                        if crate::proxy::parse_ip_or_cidr(entry).is_none() {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                &format!("{field_prefix}.{side}[{i}]"),
+                                format!(
+                                    "'{entry}' is not an IP address or CIDR (e.g. 10.0.0.0/8 \
+                                     or 2001:db8::/32)"
+                                ),
+                            ));
+                        } else if side == "ip_acl.allow"
+                            && crate::proxy::parse_ip_or_cidr(entry)
+                                .is_some_and(|(_, prefix)| prefix == 0)
+                        {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                &format!("{field_prefix}.{side}[{i}]"),
+                                format!(
+                                    "'{entry}' allows every address and filters nothing; \
+                                     use 'default: allow' instead of an allow-all entry"
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
         }
         let m = &r.r#match.path;
@@ -1502,6 +1597,7 @@ mod tests {
                     policies: vec![],
                     priority: None,
                     auth_required: false,
+                    authorization: None,
                 },
                 Route {
                     name: "static".into(),
@@ -1521,6 +1617,7 @@ mod tests {
                     policies: vec![],
                     priority: None,
                     auth_required: false,
+                    authorization: None,
                 },
                 Route {
                     name: "legacy".into(),
@@ -1540,6 +1637,7 @@ mod tests {
                     policies: vec![],
                     priority: None,
                     auth_required: false,
+                    authorization: None,
                 },
             ],
             services: vec![Service {

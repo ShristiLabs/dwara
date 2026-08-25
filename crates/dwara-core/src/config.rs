@@ -267,6 +267,140 @@ pub struct Route {
     /// regardless of this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub auth_required: bool,
+    /// Route-level authorization rules (DW-020, feature analysis 4.7).
+    /// Absent (the default) imposes no authorization on the route. A
+    /// PRESENT-but-entirely-empty block (no consumers, groups, scopes,
+    /// claims, or `ip_acl`) is likewise a no-op at evaluation time —
+    /// it imposes nothing, exactly like an absent one — but it is
+    /// always a config-authoring mistake (a rule block with no rules),
+    /// so validation REJECTS it: omit the block instead of emptying it.
+    /// When present (and non-empty), the rules are evaluated after
+    /// authentication and BEFORE
+    /// rate limiting; see [`Authz`] for the rule semantics. Presence of
+    /// any identity rule implies authentication (an anonymous request is
+    /// rejected 401); an `ip_acl`-only block is the one case that can
+    /// permit anonymous access (from an allowed IP). Precedence across
+    /// levels (consumer > route > service > listener > global) is
+    /// resolved by the `authz` module's resolver; today only the route
+    /// link has a config attachment point — the other links activate
+    /// when their config fields land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authz>,
+}
+
+/// Route-level authorization rules (DW-020, feature analysis 4.7).
+///
+/// Rule semantics (frozen here; evaluation lives in the `authz` module):
+///
+/// - `denied_consumers` / `denied_groups` beat `allowed_*` at the SAME
+///   level: within one [`Authz`], a deny always wins a tie.
+/// - `allowed_consumers`, when non-empty, is a closed set: the
+///   authenticated consumer must be listed. Empty = any authenticated
+///   consumer passes the consumer rule.
+/// - `allowed_groups`, when non-empty, requires the consumer to be a
+///   member of at least one listed group. Group membership comes from
+///   the CONFIG consumer's `groups` field; store-only consumers
+///   (DWARA_STATE_DB deployments whose consumer has no config entry)
+///   have no groups and therefore never satisfy an `allowed_groups`
+///   rule (documented limitation until the state store carries groups).
+/// - `required_scopes`: every listed scope must appear in the JWT
+///   `scope` claim. The claim may be a space-separated string
+///   (`"read write"`, the OAuth convention) or a JSON array of strings
+///   (`["read", "write"]`, joined to its space-separated form when the
+///   identity's claims are captured in `authn`); non-JWT identities
+///   (API key / Basic) carry no claims and never satisfy scope rules.
+/// - `required_claims`: exact string equality on the stringified claim
+///   value; a claim absent from the token fails the match. Only
+///   string- and number-valued claims are captured on the identity
+///   (see `authn`), so a claim that is a JSON `true`/`false`, `null`,
+///   object, or nested structure can NEVER satisfy a `required_claims`
+///   entry — there is no stringified form to compare. Comparisons are
+///   CASE-SENSITIVE throughout: consumer names, groups, scopes, and
+///   claim values must match byte-for-byte.
+/// - `ip_acl`: evaluated against the EFFECTIVE client IP — the
+///   `X-Forwarded-For`-resolved client when the direct peer is inside
+///   `gateway.trusted_proxies` (DW-009 chain), otherwise the direct
+///   peer. See [`IpAcl`].
+///
+/// Authentication implication: an [`Authz`] carrying ANY identity rule
+/// (consumer/group/scope/claim) rejects anonymous requests with 401; an
+/// `ip_acl`-only [`Authz`] is the one authorization shape that can
+/// ADMIT anonymous traffic (from an IP the ACL allows). A denial of an
+/// AUTHENTICATED request is 403 (forbidden), never 401.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Authz {
+    /// Consumers allowed to call the route (empty = any authenticated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_consumers: Vec<String>,
+    /// Consumers explicitly rejected, even when otherwise allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_consumers: Vec<String>,
+    /// Groups allowed to call the route (empty = no group constraint).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_groups: Vec<String>,
+    /// Groups explicitly rejected, even when otherwise allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_groups: Vec<String>,
+    /// JWT scopes (from the `scope` claim) every request must carry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_scopes: Vec<String>,
+    /// Claims (name -> exact stringified value) every request must
+    /// carry. A listed claim absent from the token's claims fails.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub required_claims: std::collections::BTreeMap<String, String>,
+    /// IP allow/deny gate on the effective client IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_acl: Option<IpAcl>,
+}
+
+/// IP access control on the effective client IP (DW-020, feature
+/// analysis 4.15). Entries are IP addresses (e.g. `10.1.2.3`) or CIDRs
+/// (e.g. `10.0.0.0/8`); anything else fails config validation (the same
+/// parser as `gateway.trusted_proxies`). Evaluation order: the `deny`
+/// list first (a match rejects with 403 regardless of the allow list),
+/// then the `allow` list, then `default` for IPs matched by neither.
+///
+/// A `/0` (all-addresses) entry such as `0.0.0.0/0` or `::/0` is
+/// REJECTED by validation in the `allow` list: an allow-all entry
+/// filters nothing and is always a mistake — the intended shape is an
+/// empty allow list with `default: allow` (the ACL's default mode).
+/// A `/0` in the `deny` list is meaningful (deny-all) and is accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IpAcl {
+    /// CIDRs/IPs allowed through the gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// CIDRs/IPs rejected; a deny match wins over any allow match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// What happens to an IP matched by NEITHER list: `allow` (the
+    /// default — the lists are exceptions) or `deny` (closed mode — only
+    /// allow-listed IPs pass).
+    #[serde(
+        default = "default_ip_acl_default",
+        skip_serializing_if = "is_default_ip_acl_default"
+    )]
+    pub default: IpAclDefault,
+}
+
+/// Fallback decision of an [`IpAcl`] for IPs matched by neither list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum IpAclDefault {
+    /// Unmatched IPs pass the IP gate (the default).
+    Allow,
+    /// Unmatched IPs are rejected: only the allow list passes.
+    Deny,
+}
+
+fn default_ip_acl_default() -> IpAclDefault {
+    IpAclDefault::Allow
+}
+
+fn is_default_ip_acl_default(d: &IpAclDefault) -> bool {
+    *d == IpAclDefault::Allow
 }
 
 /// Matching rules for incoming requests.
@@ -904,6 +1038,14 @@ pub struct Consumer {
     /// high-priority route does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// Consumer group memberships (DW-020): group names this consumer
+    /// belongs to, consulted by authorization `allowed_groups` /
+    /// `denied_groups` rules. Empty (the default) = no groups. Group
+    /// names are free-form strings; validation checks that authorization
+    /// rules referencing groups resolve against at least one consumer's
+    /// membership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience

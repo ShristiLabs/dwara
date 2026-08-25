@@ -4,6 +4,7 @@
 
 pub mod active;
 pub mod authn;
+pub mod authz;
 pub mod balance;
 pub mod breaker;
 pub mod config;

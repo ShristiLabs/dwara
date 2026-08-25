@@ -517,6 +517,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             policies: vec![],
             priority: None,
             auth_required: false,
+            authorization: None,
         }],
         services: vec![],
         upstreams: vec![Upstream {
@@ -542,6 +543,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             credentials: vec![Credential::Mtls {
                 fingerprint: "f".into(),
             }],
+            groups: vec![],
             policies: vec![],
             priority: None,
         }],
@@ -602,4 +604,43 @@ fn json_schema_defines_all_collection_types_and_tagged_enums() {
     ] {
         assert!(text.contains(tag), "schema missing enum tag {tag}");
     }
+}
+
+// --- Authorization validation (DW-020 reviewer advisories) ---------------------
+
+#[test]
+fn validation_rejects_empty_authorization_block_and_allow_all_cidr() {
+    let base = "listeners: []\nroutes:\n  - name: r\n    service: s\n    match:\n      path: { type: regex, value: /.* }\n    action: { type: respond, status: 200 }\n";
+    // An authorization block with zero rules is always an authoring
+    // mistake: rejected even though evaluation treats it as a no-op.
+    let gw = parse_ok(&format!("{base}    authorization: {{}}\n"));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "authorization" && i.message.contains("no rules")),
+        "empty authorization block must be rejected: {issues:?}"
+    );
+    // 0.0.0.0/0 in the allow list filters nothing: rejected with a
+    // pointer to `default: allow`.
+    let gw = parse_ok(&format!(
+        "{base}    authorization:\n      ip_acl:\n        allow: ['0.0.0.0/0']\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "authorization.ip_acl.allow[0]"
+                && i.message.contains("default: allow")),
+        "/0 in the allow list must be rejected: {issues:?}"
+    );
+    // /0 in the DENY list is meaningful (deny-all) and passes.
+    let gw = parse_ok(&format!(
+        "{base}    authorization:\n      ip_acl:\n        deny: ['::/0']\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.contains("authorization")),
+        "/0 in the deny list is legitimate: {issues:?}"
+    );
 }

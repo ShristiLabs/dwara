@@ -67,6 +67,18 @@
 //! are off). Every retry is charged against the upstream's rolling-window
 //! retry budget; exhaustion fails requests through to the client.
 //!
+//! Authorization (DW-020): immediately after authN (and before rate
+//! limiting), a route carrying an `authorization` block is checked by
+//! the `authz` module — consumer/group/scope/claim rules against the
+//! authenticated identity, IP ACLs against the EFFECTIVE client IP
+//! (XFF-resolved behind a trusted proxy, see DW-009). Denials answer
+//! 403 (generic body, reason logged server-side only); identity rules
+//! imply authentication, so an anonymous caller gets 401. An `ip_acl`-
+//! only block is the one authorization shape that can admit anonymous
+//! traffic. Precedence chain (consumer > route > service > listener >
+//! global) lives in `authz::AuthzChain`; only the route link has a
+//! config attachment today.
+//!
 //! Local rate limiting (DW-017): after route resolution (and its
 //! criteria checks) but BEFORE cap admission, the request runs through
 //! the rate-limit engine (`RateLimitEngine`, built from the generation's
@@ -542,6 +554,57 @@ where
             .find(|c| c.name == id.consumer_name)
     });
 
+    // Authorization (DW-020): after authN, before rate limiting. The
+    // precedence chain is consumer > route > service > listener >
+    // global; today only the ROUTE link has a config attachment
+    // (`routes[].authorization`) — the others are documented-pending and
+    // activate when their config fields land. Denials of authenticated
+    // (or IP-gated anonymous) requests are 403; identity rules imply
+    // authentication (anonymous -> 401 with the challenge). The IP ACL
+    // is evaluated against the EFFECTIVE client IP: the
+    // X-Forwarded-For-resolved client when the peer is a trusted proxy
+    // (DW-009 chain), else the peer. No reason detail reaches the
+    // client (generic 403 body).
+    if route.authorization.is_some() {
+        let inbound_xff = req
+            .headers()
+            .get(&X_FORWARDED_FOR)
+            .and_then(|v| v.to_str().ok());
+        let effective_ip =
+            crate::authz::effective_client_ip(&gateway.trusted_proxies, peer, inbound_xff);
+        let authz_ctx = crate::authz::AuthzContext {
+            identity: identity.as_ref(),
+            consumer_groups: consumer_cfg.map(|c| c.groups.as_slice()).unwrap_or(&[]),
+            peer_ip: peer,
+            effective_ip,
+        };
+        let chain = crate::authz::AuthzChain {
+            consumer: None,
+            route: route.authorization.as_ref(),
+            service: None,
+            listener: None,
+            global: None,
+        };
+        match crate::authz::authorize(&chain, &authz_ctx) {
+            crate::authz::Decision::Allow => {}
+            crate::authz::Decision::Deny {
+                unauthenticated: true,
+                ..
+            } => return unauthorized(&authn.challenge()),
+            crate::authz::Decision::Deny { reason, .. } => {
+                eprintln!(
+                    "dwara: authorization denied on route '{}' for consumer '{}': {reason}",
+                    route.name,
+                    identity
+                        .as_ref()
+                        .map(|id| id.consumer_name.as_str())
+                        .unwrap_or("<anonymous>")
+                );
+                return forbidden();
+            }
+        }
+    }
+
     // Local rate limiting (DW-017): BEFORE cap admission — a 429 is the
     // cheapest rejection the gateway can emit, so it precedes the permit
     // acquisition below (rate-limited requests never hold a cap slot).
@@ -670,6 +733,17 @@ where
         apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
     }
     resp
+}
+
+/// The 403 response for a denied authorization (DW-020): deliberately a
+/// generic body — which list matched, which claim was absent, none of
+/// it is the client's business (the reason is logged server-side only).
+fn forbidden() -> Response<ProxyBody> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .body(Either::Left(Full::new(Bytes::from("forbidden"))))
+        .expect("static 403 response is valid")
 }
 
 /// The 401 response for an unauthenticated/invalid request (DW-019):
@@ -1623,7 +1697,10 @@ pub fn parse_ip_or_cidr(s: &str) -> Option<(IpAddr, u8)> {
     Some((ip, prefix))
 }
 
-fn ip_in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
+/// Whether `ip` falls inside `net/prefix` (same-family only). Public so
+/// authorization (DW-020) matches IP ACL entries with the exact
+/// DW-009 trusted-proxy semantics.
+pub fn ip_in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
     match (ip, net) {
         (IpAddr::V4(a), IpAddr::V4(b)) => {
             let (a, b) = (u32::from(a), u32::from(b));

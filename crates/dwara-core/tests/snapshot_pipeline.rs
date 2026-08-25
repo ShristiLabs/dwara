@@ -47,6 +47,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         policies: vec![],
         priority: None,
         auth_required: false,
+        authorization: None,
     }
 }
 
@@ -151,12 +152,14 @@ fn validation_rejects_duplicate_consumer_name() {
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![],
         policies: vec![],
     });
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![],
         policies: vec![],
     });
@@ -296,6 +299,7 @@ fn validation_rejects_empty_api_key_credential() {
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![Credential::ApiKey { key: String::new() }],
         policies: vec![],
     });
@@ -308,6 +312,7 @@ fn validation_rejects_empty_jwt_issuer() {
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![Credential::Jwt {
             issuer: String::new(),
             audiences: vec![],
@@ -323,6 +328,7 @@ fn validation_rejects_empty_mtls_fingerprint() {
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![Credential::Mtls {
             fingerprint: String::new(),
         }],
@@ -337,6 +343,7 @@ fn validation_rejects_dangling_consumer_policy_reference() {
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
         priority: None,
+        groups: vec![],
         credentials: vec![],
         policies: vec!["ghost".into()],
     });

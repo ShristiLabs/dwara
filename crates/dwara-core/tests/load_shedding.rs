@@ -786,6 +786,7 @@ fn resolve_priority_prefers_consumer_then_route_then_default() {
         credentials: Vec::new(),
         policies: Vec::new(),
         priority: Some(9),
+        groups: Vec::new(),
     };
     assert_eq!(
         dwara_core::proxy::resolve_priority(Some(&consumer), &route),
@@ -797,6 +798,7 @@ fn resolve_priority_prefers_consumer_then_route_then_default() {
         credentials: Vec::new(),
         policies: Vec::new(),
         priority: None,
+        groups: Vec::new(),
     };
     assert_eq!(
         dwara_core::proxy::resolve_priority(Some(&consumer), &route),
