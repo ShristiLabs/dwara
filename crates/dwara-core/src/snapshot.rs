@@ -755,6 +755,53 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        if let Some(r) = &u.retries {
+            if r.attempts > crate::retries::MAX_RETRY_ATTEMPTS {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "retries.attempts",
+                    format!(
+                        "retries.attempts must be at most {} (retries beyond the first attempt)",
+                        crate::retries::MAX_RETRY_ATTEMPTS
+                    ),
+                ));
+            }
+            if r.backoff_base_ms == 0 {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "retries.backoff_base_ms",
+                    "backoff_base_ms must be > 0",
+                ));
+            }
+            if r.backoff_cap_ms < r.backoff_base_ms {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "retries.backoff_cap_ms",
+                    "backoff_cap_ms must be >= backoff_base_ms",
+                ));
+            }
+            if r.budget_percent == 0 || r.budget_percent > 100 {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "retries.budget_percent",
+                    "budget_percent must be in (0, 100]",
+                ));
+            }
+            for (i, status) in r.retry_statuses.iter().enumerate() {
+                if !(400..=599).contains(status) {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        &format!("retries.retry_statuses[{i}]"),
+                        format!("retry status {status} is not a 4xx/5xx status"),
+                    ));
+                }
+            }
+        }
     }
 
     for c in &gateway.consumers {
@@ -1303,6 +1350,7 @@ mod tests {
                 slow_start_ms: None,
                 health: None,
                 active_health: None,
+                retries: None,
                 timeouts: None,
             }],
             consumers: vec![],

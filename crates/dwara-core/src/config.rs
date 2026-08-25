@@ -345,8 +345,122 @@ pub struct Upstream {
     /// otherwise. Absent disables active probing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_health: Option<ActiveHealth>,
+    /// Upstream retries (DW-014): bounded per-request retry attempts with
+    /// exponential backoff + full jitter, a retry budget, and opt-in
+    /// size-capped request-body buffering. Absent (or `attempts` left at
+    /// its default 0) disables retries entirely: every request gets exactly
+    /// one attempt and the proxy path keeps its zero-copy streaming body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
+}
+
+/// Upstream retry knobs (DW-014). All fields default; a `retries:` block
+/// with no keys is equivalent to retries off (`attempts` defaults to 0).
+///
+/// Frozen semantics (see `upstream`/`proxy`/`retries` module docs):
+/// - `attempts` is the maximum number of RETRIES beyond the first attempt
+///   (0 = off). Validation caps it at 10.
+/// - Only requests whose body was fully buffered within `buffer_max_bytes`
+///   may be retried; an over-cap body streams without retry. Buffering is
+///   opt-in: the default (0) buffers only empty bodies, so the default
+///   proxy path stays unbuffered.
+/// - Retries happen strictly BEFORE response headers arrive on the final
+///   attempt; a response body that dies mid-stream is never retried (its
+///   failure is reported to passive health instead).
+/// - Every retried attempt is charged against the upstream's rolling-window
+///   retry budget (`budget_percent`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryConfig {
+    /// Maximum retries beyond the first attempt (default 0 = off).
+    #[serde(default = "default_retry_attempts")]
+    pub attempts: u32,
+    /// Retry non-idempotent POST requests. Default false: POST is never
+    /// retried unless an operator explicitly opts in here (a retried POST
+    /// may replay a body the upstream already partially processed).
+    #[serde(default = "default_retry_post", skip_serializing_if = "is_false")]
+    pub retry_post: bool,
+    /// Exponential backoff base in milliseconds (default 25): the nominal
+    /// delay before retry n is `min(base * 2^(n-1), backoff_cap_ms)`.
+    #[serde(default = "default_retry_backoff_base_ms")]
+    pub backoff_base_ms: u64,
+    /// Exponential backoff ceiling in milliseconds (default 250). Must be
+    /// >= `backoff_base_ms`.
+    #[serde(default = "default_retry_backoff_cap_ms")]
+    pub backoff_cap_ms: u64,
+    /// Response statuses that trigger a retry when received as the upstream
+    /// response status (default `[502, 503, 504]`). Each entry must be a
+    /// valid 4xx/5xx status. An empty list disables status-based retries.
+    #[serde(default = "default_retry_statuses")]
+    pub retry_statuses: Vec<u16>,
+    /// Retry on transport errors (connect timeout/refusal/reset/framing)
+    /// and per-attempt read timeouts (default true).
+    #[serde(default = "default_retry_transport", skip_serializing_if = "is_true")]
+    pub retry_transport: bool,
+    /// Retry budget: the maximum percentage of requests to this upstream,
+    /// in a rolling window, that may be retries (default 10). Must be in
+    /// (0, 100]. When the budget is exhausted, failing requests fail
+    /// through to the client instead of retrying.
+    #[serde(default = "default_retry_budget_percent")]
+    pub budget_percent: u32,
+    /// Request-body buffering cap in bytes (default 0 = no buffering). A
+    /// request body is buffered (and becomes replayable) only while it fits
+    /// within this cap; larger bodies stream and are never retried.
+    #[serde(default)]
+    pub buffer_max_bytes: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        RetryConfig {
+            attempts: default_retry_attempts(),
+            retry_post: default_retry_post(),
+            backoff_base_ms: default_retry_backoff_base_ms(),
+            backoff_cap_ms: default_retry_backoff_cap_ms(),
+            retry_statuses: default_retry_statuses(),
+            retry_transport: default_retry_transport(),
+            budget_percent: default_retry_budget_percent(),
+            buffer_max_bytes: 0,
+        }
+    }
+}
+
+fn default_retry_attempts() -> u32 {
+    0
+}
+
+fn default_retry_post() -> bool {
+    false
+}
+
+fn default_retry_backoff_base_ms() -> u64 {
+    25
+}
+
+fn default_retry_backoff_cap_ms() -> u64 {
+    250
+}
+
+fn default_retry_statuses() -> Vec<u16> {
+    vec![502, 503, 504]
+}
+
+fn default_retry_transport() -> bool {
+    true
+}
+
+fn default_retry_budget_percent() -> u32 {
+    10
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// Passive health / outlier detection knobs (DW-012). All fields default;

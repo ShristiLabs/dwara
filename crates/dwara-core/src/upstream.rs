@@ -6,6 +6,28 @@
 //!
 //! - **Connect timeout**: `timeouts.connect_ms` (default 5 s) wraps the
 //!   whole dial: TCP connect plus, for TLS upstreams, the TLS handshake.
+//! - **Read timeout (per-attempt)**: `timeouts.read_ms` wraps each pooled
+//!   request/response-header exchange (DW-014) — from the moment the
+//!   request is handed to the pool (including any connection-cap queue
+//!   wait and the dial) until the response HEADERS resolve. It is
+//!   therefore also the per-attempt total bound: pool wait + connect +
+//!   write request + read headers, all inside one `read_ms` deadline.
+//!   A request whose headers do not arrive in time fails with
+//!   [`UpstreamError::ReadTimeout`] (classified 504 by the proxy, and a
+//!   retryable transport-class failure when retries are enabled). The
+//!   response BODY is not covered by `read_ms`.
+//! - **Write timeout (body idle)**: `timeouts.write_ms` bounds the
+//!   response body stream as an INACTIVITY timeout (DW-014): the body
+//!   wrapper [`UpstreamBody`] errors with [`UpstreamBodyError::WriteTimeout`]
+//!   when the gap between two body frames exceeds `write_ms`. It is not a
+//!   total streaming budget — a body that keeps trickling frames never
+//!   trips it. The wrapper also reports a mid-stream abort (transport
+//!   error or idle timeout after headers resolved) as a passive-health
+//!   FAILURE for the picked endpoint, closing the DW-012 gap where
+//!   mid-body deaths were invisible to ejection. Requires a body wrapper:
+//!   the handle's response type is `Response<UpstreamBody>`, not
+//!   `Response<Incoming>` (documented; the wrapper is a thin frame
+//!   passthrough when both knobs are unset).
 //! - **Connection cap**: `connection_cap` (default 64) bounds concurrent
 //!   outbound connections to the upstream — active AND pooled-idle — via a
 //!   semaphore permit acquired before dialing and stored inside the
@@ -37,6 +59,12 @@
 //! new snapshot while carrying balancer state (see
 //! [`UpstreamRegistry::from_snapshot_with_previous`]), mirroring how
 //! `TlsTermination` is reloaded.
+//!
+//! Retries (DW-014) are driven from the proxy (which owns the request
+//! body replay decision); the handle exposes the resolved
+//! [`crate::retries::RetryParams`] and the per-upstream
+//! [`crate::retries::RetryBudget`] for that loop, and every `send` call is
+//! one ATTEMPT (fresh load-balancer pick, fresh per-attempt deadlines).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -47,7 +75,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http_body_util::BodyExt as _;
-use hyper::body::Incoming;
+use hyper::body::{Bytes, Frame, Incoming};
 use hyper::{Request, Response, Uri, Version};
 use hyper_util::client::legacy::connect::{
     Connected, Connection as HyperConnection, HttpConnector,
@@ -60,6 +88,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_service::Service;
 
 use crate::config::{Timeouts, Upstream, UpstreamProtocol};
+use crate::health::HealthDispatch;
+use crate::retries::{RetryBudget, RetryParams};
 use crate::snapshot::Snapshot;
 
 /// Default connection cap when `connection_cap` is absent.
@@ -82,6 +112,10 @@ pub enum UpstreamError {
     InvalidHost(String),
     /// Dialing (TCP or TLS handshake) exceeded the connect timeout.
     ConnectTimeout { after: Duration },
+    /// The per-attempt deadline (`timeouts.read_ms`) expired before the
+    /// response headers resolved. Covers pool-queue wait + connect +
+    /// request write + header read; see the module docs (DW-014).
+    ReadTimeout { after: Duration },
     /// Transport-level I/O failure while connecting.
     Io(std::io::Error),
     /// The hyper client failed to complete the request (broken pool
@@ -101,6 +135,9 @@ impl std::fmt::Display for UpstreamError {
             }
             UpstreamError::ConnectTimeout { after } => {
                 write!(f, "upstream connect timed out after {after:?}")
+            }
+            UpstreamError::ReadTimeout { after } => {
+                write!(f, "upstream response headers timed out after {after:?}")
             }
             UpstreamError::Io(e) => write!(f, "upstream connect failed: {e}"),
             UpstreamError::Client(e) => write!(f, "upstream request failed: {e}"),
@@ -135,6 +172,133 @@ impl From<hyper_util::client::legacy::Error> for UpstreamError {
             src = std::error::Error::source(s);
         }
         UpstreamError::Client(e)
+    }
+}
+
+/// Error surfaced by a streamed upstream response body
+/// ([`UpstreamBody`], DW-014).
+#[derive(Debug)]
+pub enum UpstreamBodyError {
+    /// The underlying transport errored mid-stream (connection reset,
+    /// framing error, ...).
+    Upstream(hyper::Error),
+    /// The gap between two body frames exceeded `timeouts.write_ms`
+    /// (inactivity timeout; see the module docs).
+    WriteTimeout { after: Duration },
+}
+
+impl std::fmt::Display for UpstreamBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamBodyError::Upstream(e) => write!(f, "upstream body failed: {e}"),
+            UpstreamBodyError::WriteTimeout { after } => {
+                write!(f, "upstream body stalled for more than {after:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UpstreamBodyError {}
+
+/// Streaming upstream response body: the pooled `Incoming` wrapped with the
+/// DW-014 response-side knobs. A thin frame passthrough when both knobs
+/// are unset; otherwise:
+///
+/// - `idle` (from `timeouts.write_ms`): an inactivity timeout — if the gap
+///   between two consecutive body frames exceeds the duration, the body
+///   errors with [`UpstreamBodyError::WriteTimeout`]. Implemented by
+///   arming a `tokio::time::Sleep` on every `Pending` poll and clearing it
+///   on every frame; the timer is only alive while the stream is idle, so
+///   an actively-trickling body never trips it (documented: it bounds
+///   stalls, not total streaming time).
+/// - `health`: when the dispatch carried passive health, a mid-stream
+///   failure (transport error or idle timeout — either way the endpoint
+///   died AFTER headers resolved) is reported as a health FAILURE to the
+///   picked endpoint's tracker, closing the DW-012 gap where mid-body
+///   aborts were invisible to ejection. A clean end-of-stream reports
+///   nothing: the header-resolution report already classified the
+///   exchange, and doubling successes would dilute failure ratios.
+///
+/// The error is terminal for the stream: frames already forwarded to the
+/// client end abruptly (HTTP/1.1 truncation semantics); it is never
+/// retried (an attempt is final once its headers resolved).
+pub struct UpstreamBody {
+    inner: Incoming,
+    idle: Option<Duration>,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    health: Option<(Arc<crate::balance::UpstreamLb>, HealthDispatch)>,
+}
+
+impl hyper::body::Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = UpstreamBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, UpstreamBodyError>>> {
+        let this = self.get_mut();
+        loop {
+            // Idle deadline armed: check it before (and after) polling the
+            // inner stream so an elapsed stall errors even when the inner
+            // stream is still Pending.
+            if let Some(sleep) = &mut this.sleep {
+                if sleep.as_mut().poll(cx).is_ready() {
+                    this.report_health_failure();
+                    return Poll::Ready(Some(Err(UpstreamBodyError::WriteTimeout {
+                        after: this.idle.unwrap_or_default(),
+                    })));
+                }
+            }
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    // Activity: clear any armed deadline.
+                    this.sleep = None;
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    this.report_health_failure();
+                    return Poll::Ready(Some(Err(UpstreamBodyError::Upstream(e))));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => {
+                    if this.idle.is_some() && this.sleep.is_none() {
+                        this.sleep =
+                            Some(Box::pin(tokio::time::sleep(this.idle.unwrap_or_default())));
+                        // Loop once more so the fresh timer registers its
+                        // waker with the executor before we return Pending.
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+}
+
+impl std::fmt::Debug for UpstreamBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamBody")
+            .field("idle_timeout", &self.idle)
+            .field("health_reporting", &self.health.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl UpstreamBody {
+    /// Report a mid-stream failure to the dispatch's health tracker, if any.
+    fn report_health_failure(&mut self) {
+        if let Some((lb, hd)) = &self.health.take() {
+            hd.report(lb.now_ms(), true);
+        }
     }
 }
 
@@ -322,6 +486,18 @@ pub struct UpstreamHandle {
     name: String,
     cap: u32,
     connect_timeout: Duration,
+    /// Per-attempt deadline over pool wait + connect + request write +
+    /// response headers (`timeouts.read_ms`; DW-014). None = unbounded.
+    read_timeout: Option<Duration>,
+    /// Response-body inactivity timeout (`timeouts.write_ms`; DW-014).
+    /// None = unbounded.
+    write_timeout: Option<Duration>,
+    /// Resolved retry parameters (`upstreams[].retries`; DW-014).
+    /// `attempts == 0` means retries off.
+    retries: RetryParams,
+    /// Rolling-window retry budget, carried across reloads like the
+    /// balancer.
+    retry_budget: Arc<RetryBudget>,
     stats: Arc<UpstreamStats>,
     client: Client<
         UpstreamConnector,
@@ -364,6 +540,27 @@ impl UpstreamHandle {
         self.connect_timeout
     }
 
+    /// Per-attempt read timeout (`timeouts.read_ms`), if configured.
+    pub fn read_timeout(&self) -> Option<Duration> {
+        self.read_timeout
+    }
+
+    /// Response-body inactivity timeout (`timeouts.write_ms`), if
+    /// configured.
+    pub fn write_timeout(&self) -> Option<Duration> {
+        self.write_timeout
+    }
+
+    /// Resolved retry parameters (DW-014). `attempts == 0` = retries off.
+    pub fn retry_params(&self) -> &RetryParams {
+        &self.retries
+    }
+
+    /// This upstream's rolling-window retry budget (DW-014).
+    pub fn retry_budget(&self) -> &Arc<RetryBudget> {
+        &self.retry_budget
+    }
+
     /// Total connections established since the handle was built.
     pub fn connections_opened(&self) -> u64 {
         self.stats.connections_opened.load(Ordering::Relaxed)
@@ -388,7 +585,7 @@ impl UpstreamHandle {
 
     /// Send a request through this upstream's pool without a hash key
     /// (algorithms other than `ip_hash` ignore the key anyway).
-    pub async fn send<B>(&self, req: Request<B>) -> Result<Response<Incoming>, UpstreamError>
+    pub async fn send<B>(&self, req: Request<B>) -> Result<Response<UpstreamBody>, UpstreamError>
     where
         B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -405,12 +602,15 @@ impl UpstreamHandle {
     /// endpoint's in-flight counter is held for the request/response-header
     /// exchange (documented approximation: released when headers resolve,
     /// not when the streaming body completes). The response body streams
-    /// (`Incoming`), so proxying (DW-009) can forward it without buffering.
+    /// (wrapped in [`UpstreamBody`] for the DW-014 write-timeout /
+    /// mid-body health reporting knobs; the wrapper is a frame-for-frame
+    /// passthrough when both are unset), so proxying (DW-009) can forward
+    /// it without buffering.
     pub async fn send_with_hash_key<B>(
         &self,
         mut req: Request<B>,
         hash_key: Option<&str>,
-    ) -> Result<Response<Incoming>, UpstreamError>
+    ) -> Result<Response<UpstreamBody>, UpstreamError>
     where
         B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -456,9 +656,30 @@ impl UpstreamHandle {
         // endpoint's health tracker when the response headers resolve —
         // the same point the in-flight guard releases. Classification:
         // transport errors (the Err arm: connect timeout, refusal, reset,
-        // framing) and statuses >= 500 are failures; 1xx-4xx (including
-        // 429/408; documented choice) are successes.
-        let outcome = self.client.request(req).await;
+        // framing, and the DW-014 read timeout) and statuses >= 500 are
+        // failures; 1xx-4xx (including 429/408; documented choice) are
+        // successes. Mid-BODY aborts are reported later, by `UpstreamBody`.
+        let request = self.client.request(req);
+        // Captured before release(): the body wrapper reports mid-stream
+        // failures into the same tracker (DW-014 closing the DW-012 gap).
+        let body_health = dispatch.health.clone().map(|hd| (Arc::clone(&self.lb), hd));
+        let outcome = match self.read_timeout {
+            // Per-attempt deadline (DW-014): pool-queue wait + connect +
+            // request write + response headers, one bound. Dropping the
+            // request future cancels the attempt (the pooled connection,
+            // if one was involved, is discarded by the pool).
+            Some(after) => match tokio::time::timeout(after, request).await {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    if let Some(health) = &dispatch.health {
+                        health.report(self.lb.now_ms(), true);
+                    }
+                    dispatch.release();
+                    return Err(UpstreamError::ReadTimeout { after });
+                }
+            },
+            None => request.await,
+        };
         if let Some(health) = &dispatch.health {
             let is_failure = match &outcome {
                 Ok(resp) => resp.status().as_u16() >= 500,
@@ -467,7 +688,14 @@ impl UpstreamHandle {
             health.report(self.lb.now_ms(), is_failure);
         }
         dispatch.release();
-        outcome.map_err(Into::into)
+        outcome.map_err(Into::into).map(|resp| {
+            resp.map(|inner| UpstreamBody {
+                inner,
+                idle: self.write_timeout,
+                sleep: None,
+                health: body_health,
+            })
+        })
     }
 }
 
@@ -498,6 +726,25 @@ fn effective_connect_timeout(u: &Upstream) -> Duration {
     )
 }
 
+/// `timeouts.read_ms`, resolved to a Duration. None leaves the
+/// request/headers exchange unbounded (DW-014 enforcement is opt-in by
+/// configuring the knob).
+fn effective_read_timeout(u: &Upstream) -> Option<Duration> {
+    u.timeouts
+        .as_ref()
+        .and_then(|t| t.read_ms)
+        .map(Duration::from_millis)
+}
+
+/// `timeouts.write_ms`, resolved to a Duration (response-body inactivity
+/// bound; DW-014).
+fn effective_write_timeout(u: &Upstream) -> Option<Duration> {
+    u.timeouts
+        .as_ref()
+        .and_then(|t| t.write_ms)
+        .map(Duration::from_millis)
+}
+
 fn effective_slow_start(u: &Upstream) -> Duration {
     Duration::from_millis(
         u.slow_start_ms
@@ -509,7 +756,7 @@ fn effective_slow_start(u: &Upstream) -> Duration {
 fn build_handle(
     u: &Upstream,
     root_store: rustls::RootCertStore,
-    previous_lb: Option<&Arc<crate::balance::UpstreamLb>>,
+    previous: Option<&Arc<UpstreamHandle>>,
 ) -> Arc<UpstreamHandle> {
     let cap = effective_cap(u);
     let connect_timeout = effective_connect_timeout(u);
@@ -556,7 +803,10 @@ fn build_handle(
     // Hot-swap: an existing balancer for this upstream name keeps its
     // live state (in-flight counters, WRR phase, slow-start clocks,
     // passive-health trackers) for unchanged endpoint addresses; a fresh
-    // one starts clean.
+    // one starts clean. The retry budget is carried the same way (the
+    // rolling window survives a reload), while the retry PARAMETERS apply
+    // from the new config.
+    let previous_lb = previous.map(|h| h.lb());
     let lb = match previous_lb {
         Some(prev) => {
             prev.rebuild_with_health(
@@ -574,11 +824,18 @@ fn build_handle(
             u.health.as_ref(),
         ),
     };
+    let retry_budget = previous
+        .map(|h| Arc::clone(h.retry_budget()))
+        .unwrap_or_else(|| Arc::new(RetryBudget::new()));
 
     Arc::new(UpstreamHandle {
         name: u.name.clone(),
         cap,
         connect_timeout,
+        read_timeout: effective_read_timeout(u),
+        write_timeout: effective_write_timeout(u),
+        retries: RetryParams::from_config(u.retries.as_ref()),
+        retry_budget,
         stats,
         client: builder.build(connector),
         lb,
@@ -653,10 +910,8 @@ impl UpstreamRegistry {
                 .upstreams
                 .iter()
                 .map(|u| {
-                    let prev_lb = previous
-                        .and_then(|p| p.handles.get(&u.name))
-                        .map(|h| h.lb());
-                    (u.name.clone(), build_handle(u, roots.clone(), prev_lb))
+                    let prev = previous.and_then(|p| p.handles.get(&u.name));
+                    (u.name.clone(), build_handle(u, roots.clone(), prev))
                 })
                 .collect(),
         })
@@ -724,6 +979,7 @@ mod tests {
             slow_start_ms: None,
             health: None,
             active_health: None,
+            retries: None,
             timeouts: connect_ms.map(|connect_ms| Timeouts {
                 connect_ms: Some(connect_ms),
                 read_ms: None,
@@ -1043,6 +1299,7 @@ mod tests {
                 slow_start_ms: None,
                 health: None,
                 active_health: None,
+                retries: None,
                 timeouts: Some(Timeouts {
                     connect_ms: Some(0),
                     read_ms: Some(0),
@@ -1086,6 +1343,7 @@ mod tests {
             slow_start_ms: None,
             health: None,
             active_health: None,
+            retries: None,
             timeouts: None,
         };
         let handle = build_handle(&up, webpki_root_store(), None);

@@ -8,6 +8,7 @@ pub mod config;
 pub mod extensions;
 pub mod health;
 pub mod proxy;
+pub mod retries;
 pub mod snapshot;
 pub mod tls;
 pub mod upstream;

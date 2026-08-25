@@ -105,6 +105,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             slow_start_ms: None,
             health: None,
             active_health: None,
+            retries: None,
             timeouts: None,
         }],
         consumers: vec![],

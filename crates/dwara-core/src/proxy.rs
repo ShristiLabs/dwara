@@ -42,12 +42,30 @@
 //! out of scope for v1).
 //!
 //! Upstream error classification (details are logged server-side, never
-//! leaked to the client): connect timeout -> 504; endpoint refused / pool
-//! failure / no endpoints -> 502; invalid TLS host -> 500. A mid-body
-//! upstream abort (connection torn down partway through a response body)
-//! surfaces as the same classified 502, and any frames already forwarded
-//! to the client end abruptly — HTTP/1.1 truncation semantics, no
-//! synthesized tail.
+//! leaked to the client): connect timeout / per-attempt read timeout ->
+//! 504; endpoint refused / pool failure / no endpoints -> 502; invalid TLS
+//! host -> 500. A mid-body upstream abort (connection torn down partway
+//! through a response body, or the DW-014 body-idle timeout firing) is NOT
+//! retryable — the attempt was final once its headers resolved — and any
+//! frames already forwarded to the client end abruptly (HTTP/1.1
+//! truncation semantics, no synthesized tail). The abort IS reported as a
+//! passive-health failure for the picked endpoint (DW-014 closing the
+//! DW-012 gap), so chronically dying streams eject the endpoint.
+//!
+//! Retries, timeouts, budgets (DW-014): per-upstream `retries` config
+//! drives a bounded retry loop around the send — per attempt the balancer
+//! re-picks the endpoint (health ejection applies naturally), the
+//! per-attempt `read_ms` deadline is enforced by the upstream handle, and
+//! backoff is exponential with full jitter. Idempotency:
+//! GET/HEAD/OPTIONS/TRACE/PUT are retry-eligible by method; POST is
+//! retried ONLY when the upstream sets `retries.retry_post` (the opt-in
+//! governs POST exclusively — DELETE, PATCH, and every other
+//! non-idempotent method are never retried). A request
+//! body is replayed only when it was buffered within
+//! `retries.buffer_max_bytes` (opt-in; the default proxy path never
+//! buffers — zero-copy streaming is preserved byte-for-byte when retries
+//! are off). Every retry is charged against the upstream's rolling-window
+//! retry budget; exhaustion fails requests through to the client.
 //!
 //! Upgrade forwarding on non-tunnel requests: an `Upgrade` header arriving
 //! on an ordinary proxied request (no `101` ever comes back) is forwarded
@@ -60,11 +78,12 @@
 //! upgrade transparency, and the behavior is pinned by the coverage suite.
 
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use http_body_util::{Either, Full};
-use hyper::body::{Bytes, Incoming};
+use hyper::body::Bytes;
 use hyper::header::{
     HeaderMap, HeaderName, HeaderValue, CONNECTION, COOKIE, HOST, LOCATION, UPGRADE,
 };
@@ -73,14 +92,16 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::config::{Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch};
+use crate::retries::RetryParams;
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
-use crate::upstream::{UpstreamError, UpstreamRegistry};
+use crate::upstream::{UpstreamBody, UpstreamError, UpstreamRegistry};
 
 /// Body type of every proxied/gateway-generated response: either a small
 /// fully-buffered gateway message (`Full`) or the untouched streaming
-/// upstream body (`Incoming`).
-pub type ProxyBody = Either<Full<Bytes>, Incoming>;
+/// upstream body ([`UpstreamBody`]: the pooled stream wrapped with the
+/// DW-014 write-timeout / mid-body health-report knobs).
+pub type ProxyBody = Either<Full<Bytes>, UpstreamBody>;
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
@@ -540,49 +561,289 @@ where
         parts.headers.insert(&X_REAL_IP, v);
     }
 
-    let out_req = Request::from_parts(parts, body);
+    let out_req_parts = parts;
     // The peer IP is the ip_hash key (X-Real-IP peer; other algorithms
-    // ignore it).
-    match handle
-        .send_with_hash_key(out_req, Some(&peer.to_string()))
-        .await
-    {
-        Ok(mut resp) => {
-            if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
-                let on_upstream = hyper::upgrade::on(&mut resp);
-                if let Some(client) = on_client_upgrade {
-                    tokio::spawn(async move {
-                        match tokio::try_join!(client, on_upstream) {
-                            Ok((client_io, upstream_io)) => {
-                                tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await
-                            }
-                            Err(err) => {
-                                eprintln!("dwara: upgrade handshake failed: {err}");
-                            }
-                        }
-                    });
-                } else {
-                    return simple(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "listener does not support upgrades",
-                    );
-                }
-                // Keep the 101 headers (Connection/Upgrade must reach the
-                // client to complete its handshake); body is empty.
-                return resp.map(Either::Right);
+    // ignore it); every attempt re-picks the endpoint through the
+    // balancer (so health ejection and weights apply per attempt).
+    //
+    // ---- DW-014: retry wiring ------------------------------------------
+    // Idempotency: GET/HEAD/OPTIONS/TRACE/PUT are retry-eligible by
+    // method; POST only when the upstream opts in via `retries.retry_post`.
+    // A request whose body was not fully buffered within
+    // `buffer_max_bytes` is never retried (its body is partially consumed
+    // and cannot be replayed). Upgrade requests are never retried.
+    let rp: RetryParams = handle.retry_params().clone();
+    let idempotent = matches!(
+        out_req_parts.method,
+        hyper::Method::GET
+            | hyper::Method::HEAD
+            | hyper::Method::OPTIONS
+            | hyper::Method::TRACE
+            | hyper::Method::PUT
+    );
+    let retries_enabled = rp.attempts > 0
+        && !wants_upgrade
+        && (idempotent || (rp.retry_post && out_req_parts.method == hyper::Method::POST));
+
+    let budget = handle.retry_budget();
+    // One budget denominator per proxied request (not per attempt),
+    // regardless of retry eligibility or upgrade status: the budget window
+    // counts ALL proxied traffic to the upstream, so a POST-heavy upstream
+    // still accumulates denominator headroom for its idempotent share.
+    budget.record_request();
+    let mut replay: Option<Bytes> = None;
+    let first_body: AttemptBody<B> = if retries_enabled {
+        match buffer_request_body(body, rp.buffer_max_bytes).await {
+            Ok(bytes) => {
+                replay = Some(bytes.clone());
+                AttemptBody::Replay(bytes)
             }
-            let _ = strip_hop_by_hop(resp.headers_mut(), false);
-            resp.map(Either::Right)
+            Err((prefix, rest)) => {
+                // Over-cap (or errored) body: stream the buffered prefix
+                // plus the remainder, single attempt. Documented choice:
+                // over-cap bodies are NOT retried (fail through) rather
+                // than erroring the request.
+                AttemptBody::OneShot {
+                    prefix: Some(prefix),
+                    rest,
+                }
+            }
         }
-        Err(err) => {
-            // Server-side detail, client-side classification only.
-            eprintln!(
-                "dwara: upstream '{}' request failed: {err} (service '{}')",
-                handle.name(),
-                service.name
+    } else {
+        // Retries off (the default): the original streaming body is
+        // forwarded untouched — zero-copy, no buffering, byte-identical
+        // to the pre-DW-014 path.
+        AttemptBody::OneShot {
+            prefix: None,
+            rest: Box::pin(body),
+        }
+    };
+
+    let mut first_body = Some(first_body);
+    let mut done_tries: u32 = 0;
+    loop {
+        let body = match first_body.take() {
+            Some(body) => body,
+            None => {
+                // Unreachable: the only `continue` into this branch requires
+                // `may_retry`, which requires `replay.is_some()`.
+                debug_assert!(replay.is_some(), "retry requires a replayable body");
+                AttemptBody::Replay(replay.clone().expect("retry requires a replayable body"))
+            }
+        };
+        let out_req = Request::from_parts(out_req_parts.clone(), body);
+        let result = handle
+            .send_with_hash_key(out_req, Some(&peer.to_string()))
+            .await;
+        done_tries += 1;
+        // An attempt is retryable only while attempts remain and the body
+        // is replayable; the budget reservation is charged atomically
+        // BEFORE a retry runs (and only when one actually will — a charged
+        // but unused reservation would undercount future headroom).
+        let may_retry = done_tries <= rp.attempts && replay.is_some();
+        match result {
+            Ok(resp) => {
+                // Retry when the upstream answered with a retryable status
+                // (headers resolved — the attempt is otherwise final).
+                if may_retry
+                    && rp.retries_status(resp.status().as_u16())
+                    && budget.try_reserve_retry(rp.budget_percent)
+                {
+                    tokio::time::sleep(crate::retries::jitter_delay(
+                        rp.backoff_base_ms,
+                        rp.backoff_cap_ms,
+                        done_tries,
+                    ))
+                    .await;
+                    continue;
+                }
+                return finish_proxy_response(resp, wants_upgrade, on_client_upgrade);
+            }
+            Err(err) => {
+                // Retry on transport-class failures (connect/read timeout,
+                // refusal, reset, framing) when `retry_transport` is on.
+                if may_retry
+                    && rp.retry_transport
+                    && transport_retryable(&err)
+                    && budget.try_reserve_retry(rp.budget_percent)
+                {
+                    eprintln!(
+                        "dwara: upstream '{}' attempt {done_tries} failed: {err}; retrying \
+                         (service '{}')",
+                        handle.name(),
+                        service.name
+                    );
+                    tokio::time::sleep(crate::retries::jitter_delay(
+                        rp.backoff_base_ms,
+                        rp.backoff_cap_ms,
+                        done_tries,
+                    ))
+                    .await;
+                    continue;
+                }
+                // Server-side detail, client-side classification only.
+                eprintln!(
+                    "dwara: upstream '{}' request failed: {err} (service '{}')",
+                    handle.name(),
+                    service.name
+                );
+                let (status, msg) = classify_upstream_error(&err);
+                return simple(status, msg);
+            }
+        }
+    }
+}
+
+/// Finalize a proxied response: upgrade tunneling for 101s, hop-by-hop
+/// stripping, and the streaming body passthrough.
+fn finish_proxy_response(
+    mut resp: Response<UpstreamBody>,
+    wants_upgrade: bool,
+    on_client_upgrade: Option<hyper::upgrade::OnUpgrade>,
+) -> Response<ProxyBody> {
+    if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
+        let on_upstream = hyper::upgrade::on(&mut resp);
+        if let Some(client) = on_client_upgrade {
+            tokio::spawn(async move {
+                match tokio::try_join!(client, on_upstream) {
+                    Ok((client_io, upstream_io)) => {
+                        tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await
+                    }
+                    Err(err) => {
+                        eprintln!("dwara: upgrade handshake failed: {err}");
+                    }
+                }
+            });
+        } else {
+            return simple(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "listener does not support upgrades",
             );
-            let (status, msg) = classify_upstream_error(&err);
-            simple(status, msg)
+        }
+        // Keep the 101 headers (Connection/Upgrade must reach the
+        // client to complete its handshake); body is empty.
+        return resp.map(Either::Right);
+    }
+    let _ = strip_hop_by_hop(resp.headers_mut(), false);
+    resp.map(Either::Right)
+}
+
+/// Whether an upstream transport error is safe to retry: genuine
+/// transport-class failures only. Configuration errors (no endpoints,
+/// invalid TLS host, invalid root certificate) are not transient and
+/// would fail identically on every attempt.
+fn transport_retryable(err: &UpstreamError) -> bool {
+    matches!(
+        err,
+        UpstreamError::Io(_)
+            | UpstreamError::Client(_)
+            | UpstreamError::ConnectTimeout { .. }
+            | UpstreamError::ReadTimeout { .. }
+    )
+}
+
+/// The request body of one attempt (DW-014). `OneShot` streams an optional
+/// buffered prefix followed by the original remainder (used for the first
+/// and only attempt of a non-replayable body — retries off, over-cap
+/// bodies, or unbuffered defaults). `Replay` is a fully buffered body
+/// cloned per attempt, byte-exact.
+enum AttemptBody<B> {
+    OneShot {
+        prefix: Option<Bytes>,
+        rest: Pin<Box<B>>,
+    },
+    Replay(Bytes),
+}
+
+impl<B> hyper::body::Body for AttemptBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        match this {
+            AttemptBody::Replay(bytes) => {
+                if bytes.is_empty() {
+                    return std::task::Poll::Ready(None);
+                }
+                let frame = Ok(hyper::body::Frame::data(std::mem::take(bytes)));
+                std::task::Poll::Ready(Some(frame))
+            }
+            AttemptBody::OneShot { prefix, rest } => {
+                if let Some(prefix) = prefix.take() {
+                    if !prefix.is_empty() {
+                        return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(prefix))));
+                    }
+                }
+                rest.as_mut()
+                    .poll_frame(cx)
+                    .map(|opt| opt.map(|res| res.map_err(Into::into)))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            AttemptBody::Replay(bytes) => {
+                let mut hint = hyper::body::SizeHint::default();
+                hint.set_exact(bytes.len() as u64);
+                hint
+            }
+            // Delegate to the wrapped body (preserving its exact/unknown
+            // hint so the retry-off path forwards the same framing, e.g.
+            // content-length). With a buffered prefix the remainder's own
+            // hint no longer describes the stream (bytes were consumed),
+            // so the composition reports unknown — the bytes still arrive
+            // in order via prefix + remainder frames.
+            AttemptBody::OneShot { prefix, rest } => match prefix {
+                Some(p) if !p.is_empty() => hyper::body::SizeHint::default(),
+                _ => rest.size_hint(),
+            },
+        }
+    }
+}
+
+/// Buffer a request body up to `cap` bytes (DW-014 opt-in). `Ok` = the
+/// whole body fit (possibly empty — an empty body is trivially
+/// replayable) and may be replayed on retries. `Err((prefix, body))` =
+/// the body exceeded the cap (prefix = the bytes already consumed; the
+/// caller streams prefix + remainder without retrying). Request TRAILER
+/// frames are dropped: the hop-by-hop `Trailer`/`TE` headers are already
+/// stripped from the forwarded request, so v1 forwards no trailers
+/// anywhere (documented; consistent with the no-trailer stance).
+async fn buffer_request_body<B>(body: B, cap: u64) -> Result<Bytes, (Bytes, Pin<Box<B>>)>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use http_body_util::BodyExt as _;
+    let mut body = Box::pin(body);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue; // trailer frame: dropped (see doc comment)
+                };
+                if buf.len() as u64 + data.len() as u64 > cap {
+                    // Over cap: the frame that broke the camel's back is
+                    // already consumed, so it must ride in the streamed
+                    // prefix (the caller streams prefix + remainder — the
+                    // full body still reaches the upstream byte-exact).
+                    buf.extend_from_slice(&data);
+                    return Err((Bytes::from(buf), body));
+                }
+                buf.extend_from_slice(&data);
+            }
+            Some(Err(_)) => return Err((Bytes::from(buf), body)),
+            None => return Ok(Bytes::from(buf)),
         }
     }
 }
@@ -591,6 +852,9 @@ fn classify_upstream_error(err: &UpstreamError) -> (StatusCode, &'static str) {
     match err {
         UpstreamError::ConnectTimeout { .. } => {
             (StatusCode::GATEWAY_TIMEOUT, "upstream connect timed out")
+        }
+        UpstreamError::ReadTimeout { .. } => {
+            (StatusCode::GATEWAY_TIMEOUT, "upstream response timed out")
         }
         UpstreamError::InvalidHost(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "invalid upstream host")

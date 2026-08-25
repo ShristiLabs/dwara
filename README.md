@@ -229,8 +229,9 @@ closes. An `Upgrade` request received over HTTP/2 or h2c is answered
 `501 Not Implemented`.
 
 Upstream failures are classified, and details are logged server-side
-only: connect timeout -> `504`; endpoint refused, pool failure, or no
-endpoints -> `502`; upstream TLS configuration errors -> `500`.
+only: connect timeout or per-attempt read timeout (`timeouts.read_ms`)
+-> `504`; endpoint refused, pool failure, or no endpoints -> `502`;
+upstream TLS configuration errors -> `500`.
 
 ### Forwarded headers and trusted proxies
 
@@ -266,6 +267,20 @@ connection pool. Fields:
   for a slot rather than fail. Defaults to 64.
 - `timeouts.connect_ms`: connect timeout in milliseconds, covering the
   TCP connect plus, for TLS upstreams, the handshake. Defaults to 5000.
+- `timeouts.read_ms`: per-attempt deadline in milliseconds covering the
+  whole exchange up to the response HEADERS: connection-cap queue wait,
+  connect, request write, and header read. When the deadline expires
+  before headers resolve, the attempt fails `504` (and is
+  retryable as a transport failure when retries are on). The response
+  BODY is not covered by `read_ms`. Absent = unbounded.
+- `timeouts.write_ms`: response-body INACTIVITY timeout in milliseconds
+  — the maximum gap between two consecutive body frames, not a total
+  streaming budget (a body that keeps trickling frames never trips it).
+  A longer stall terminates the stream (frames already forwarded to the
+  client end abruptly; no synthesized tail) and is reported as a
+  passive-health failure for the endpoint. Absent = unbounded.
+- `retries`: upstream retries block; absent (default) disables retries
+  entirely. See below.
 - `slow_start_ms`: slow-start window in milliseconds; absent or 0
   (default) disables the ramp. See below.
 - `health`: passive health / outlier detection block; absent (default)
@@ -426,6 +441,74 @@ upstreams:
 
 An `active_health:` block with no keys enables HTTP probes with the
 defaults above.
+
+Retries (`retries` block, DW-014): a failing proxied request is re-sent
+to the upstream, up to `attempts` additional times with exponential
+backoff and full jitter. All knobs live on the upstream (there is no
+per-route retry configuration). Absent — or `attempts` left at its
+default 0 — disables retries entirely: every request gets exactly one
+attempt and the proxy path keeps its zero-copy streaming body.
+
+Fields (all default; `attempts` is capped at 10, `backoff_base_ms`
+must be > 0, `backoff_cap_ms` >= `backoff_base_ms`, `budget_percent`
+must be in (0, 100], and every `retry_statuses` entry must be a valid
+4xx/5xx status — all rejected by validation):
+
+- `attempts`: maximum retries beyond the first attempt, default 0 (off).
+- `retry_post`: retry non-idempotent POST requests, default false. POST
+  is never retried unless explicitly opted in — a retried POST may
+  replay a body the upstream already partially processed.
+- `backoff_base_ms` / `backoff_cap_ms`: the nominal delay before retry
+  n is `min(base * 2^(n-1), cap)`; the actual sleep is a uniform random
+  duration in `[0, nominal]` (full jitter), avoiding thundering-herd
+  synchronization. Defaults 25 / 250.
+- `retry_statuses`: response statuses that trigger a retry, default
+  `[502, 503, 504]`. An empty list disables status-based retries.
+- `retry_transport`: retry on transport-class failures (connect or
+  per-attempt read timeout, refusal, reset, framing), default true.
+  Configuration errors (no endpoints, invalid TLS host) are never
+  retried — they would fail identically on every attempt.
+- `budget_percent`: maximum share of requests to this upstream, in a
+  rolling 10-second window, that may be retries, default 10. The retry
+  is charged before it runs, so a fresh window with little volume
+  grants few or no retries; when the budget is exhausted, failing
+  requests fail through to the client instead of retrying. Budget
+  state survives config reloads.
+- `buffer_max_bytes`: request-body buffering cap in bytes, default 0
+  (no buffering). A body is replayable on retries only when it was
+  fully buffered within this cap; a body that exceeds the cap streams
+  (the already-buffered prefix plus the remainder, in order) with
+  exactly one attempt — over-cap requests are never retried, they do
+  not error.
+
+Rules:
+
+- Idempotency: GET, HEAD, OPTIONS, TRACE, and PUT are retry-eligible by
+  method; POST only with `retry_post: true`.
+- Headers-final: retries happen strictly before response headers arrive
+  on the final attempt. A response body that dies mid-stream (transport
+  error or `write_ms` stall) is NEVER retried — the attempt was final
+  once its headers resolved — and the abort is reported as a
+  passive-health failure for the endpoint instead.
+- Protocol upgrade requests (`Upgrade` header) are never retried.
+- Each retry re-picks the endpoint through the load balancer, so health
+  ejection and weights apply per attempt.
+
+```yaml
+upstreams:
+  - name: echo-upstream
+    retries:
+      attempts: 2
+      retry_post: false
+      backoff_base_ms: 25
+      backoff_cap_ms: 250
+      retry_statuses: [502, 503, 504]
+      retry_transport: true
+      budget_percent: 10
+      buffer_max_bytes: 1048576
+```
+
+A `retries:` block with no keys is equivalent to retries off.
 
 ### TLS
 

@@ -530,6 +530,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             slow_start_ms: None,
             health: None,
             active_health: None,
+            retries: None,
             timeouts: None,
         }],
         consumers: vec![Consumer {

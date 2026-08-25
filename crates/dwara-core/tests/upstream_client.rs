@@ -67,6 +67,7 @@ fn upstream(
         slow_start_ms: None,
         health: None,
         active_health: None,
+        retries: None,
         timeouts: connect_ms.map(|connect_ms| Timeouts {
             connect_ms: Some(connect_ms),
             read_ms: None,
@@ -206,7 +207,7 @@ async fn serve_stall(listener: TcpListener, accepted: Arc<AtomicU64>) {
 async fn bound_send(
     handle: &dwara_core::upstream::UpstreamHandle,
     path: &str,
-) -> Result<Response<Incoming>, UpstreamError> {
+) -> Result<Response<dwara_core::upstream::UpstreamBody>, UpstreamError> {
     match tokio::time::timeout(SEND_BOUND, handle.send(get_request(path))).await {
         Ok(r) => r,
         Err(_) => panic!(
@@ -669,6 +670,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 slow_start_ms: None,
                 health: None,
                 active_health: None,
+                retries: None,
                 timeouts: Some(timeouts),
             }],
             consumers: vec![],
@@ -699,6 +701,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             slow_start_ms: None,
             health: None,
             active_health: None,
+            retries: None,
             timeouts: Some(Timeouts {
                 connect_ms: Some(1),
                 read_ms: Some(1),

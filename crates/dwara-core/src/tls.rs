@@ -651,6 +651,7 @@ mod tests {
                 slow_start_ms: None,
                 health: None,
                 active_health: None,
+                retries: None,
                 timeouts: None,
             }],
             consumers: vec![],

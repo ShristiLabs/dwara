@@ -91,6 +91,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
                 ..PassiveHealth::default()
             }),
             active_health: Some(active),
+            retries: None,
             timeouts: None,
         }],
         consumers: vec![],
@@ -483,6 +484,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 slow_start_ms: None,
                 health: None,
                 active_health: None,
+                retries: None,
                 timeouts: None,
             }],
             consumers: vec![],
