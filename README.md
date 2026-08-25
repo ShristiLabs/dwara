@@ -170,7 +170,8 @@ routes:
 ```
 
 Requests that match no route (path or criteria miss) get a plain-text
-`404`.
+`404`. A route may also carry a `priority` (0-10, default 5) — see
+"Load shedding and priority" under Global settings.
 
 ### Path rewrite (proxy)
 
@@ -249,6 +250,57 @@ upstream TLS configuration errors -> `500`.
 ```yaml
 max_concurrent_requests: 4096
 ```
+
+### Load shedding and priority
+
+Routes and consumers carry an optional `priority` — an integer 0
+(lowest) to 10 (highest), default 5 when omitted; validation rejects
+anything above 10. Priority shapes how the gateway concurrency cap
+(`max_concurrent_requests`) behaves under saturation:
+
+- Route resolution happens BEFORE cap admission, so the request's
+  priority class is known when the shed decision is made. A side
+  effect: requests that match no route (plain `404`) never consume a
+  cap slot, and neither do the reserved `/healthz` and `/readyz`
+  paths.
+- When ANY route or consumer is configured at priority >= 8
+  ("high"), 10% of the cap (minimum 1) is carved out as a reserved
+  sub-allowance that only high-priority requests may draw from once
+  the general allowance is full. Under overload, normal traffic is
+  shed first — 503 "gateway saturated" as soon as the general
+  allowance fills — while high-priority traffic survives until the
+  reserved bucket fills too.
+- This is reserved capacity, NOT preemption: requests already in
+  flight keep their slots until they complete; the gateway cannot
+  displace a running normal request to make room for a high-priority
+  one.
+- Consequence of the minimum-1 carve: a cap of 1 with any high
+  priority configured reserves the entire cap — the general allowance
+  becomes 0 and ONLY high-priority requests are ever admitted. Use a
+  cap of 1 only for high-priority-only traffic.
+- With no route or consumer at priority >= 8, nothing is carved and
+  every request draws from the full cap exactly as before —
+  priority-free configs behave identically to the plain cap.
+- A shed is a 503, not a 429 (429 is reserved for rate limiting),
+  carries no `Retry-After` (immediate re-dispatch against a saturated
+  gateway is not advisable), and no marker header — the response is a
+  plain 503 with "gateway saturated" as the body.
+
+```yaml
+routes:
+  - name: critical
+    service: billing
+    priority: 9          # survives overload; shed last
+    match:
+      path: { type: prefix, value: /billing }
+    action:
+      type: proxy
+```
+
+Consumers also accept a `priority`; it takes effect only once request
+authentication identifies the consumer (a later M1 release) — until
+then, shedding priority comes from the matched route. When known, the
+consumer's priority overrides the route's.
 
 ### Forwarded headers and trusted proxies
 

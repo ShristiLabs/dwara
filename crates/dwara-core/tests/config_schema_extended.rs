@@ -515,6 +515,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 status: 308,
             },
             policies: vec![],
+            priority: None,
         }],
         services: vec![],
         upstreams: vec![Upstream {
@@ -541,6 +542,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 fingerprint: "f".into(),
             }],
             policies: vec![],
+            priority: None,
         }],
         policies: vec![Policy {
             name: "p".into(),

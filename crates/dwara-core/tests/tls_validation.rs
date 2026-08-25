@@ -84,6 +84,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             },
             action: RouteAction::Proxy { rewrite: None },
             policies: vec![],
+            priority: None,
         }],
         services: vec![Service {
             name: "svc".into(),

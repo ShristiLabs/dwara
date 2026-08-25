@@ -67,6 +67,29 @@
 //! are off). Every retry is charged against the upstream's rolling-window
 //! retry budget; exhaustion fails requests through to the client.
 //!
+//! Load shedding by priority (DW-016): the gateway concurrency cap admits
+//! requests ROUTE-AWARE — route resolution happens BEFORE cap admission
+//! (so the request's priority class is known; 404s therefore never consume
+//! cap slots, a deliberate change from DW-015's admit-at-entry ordering).
+//! Priority classes are 0 (lowest) to 10 (highest); 5 is the default. The
+//! design is a RESERVED BUCKET, not preemption — HTTP requests already in
+//! flight cannot be displaced, so under saturation the gateway sheds
+//! lower-priority ADMISSIONS first: requests at `high_priority` (>= 8) may
+//! draw from a reserved sub-allowance of the cap (10% of the cap, minimum
+//! one permit) that lower-priority traffic cannot use. Normal traffic is
+//! shed (503 "gateway saturated") as soon as the general allowance fills;
+//! high-priority traffic survives until the reserved bucket fills too.
+//! The bucket is carved only when a high-priority ROUTE is configured
+//! (priority >= 8; consumer priorities are inert until authN — DW-019 —
+//! and never trigger carving), so priority-free configs behave
+//! byte-identically to DW-015 (full cap for everyone, same shed
+//! response). Sheds are 503, not 429 — 429 is reserved for rate limiting
+//! (DW-017); no `Retry-After` is set (immediate re-dispatch under a
+//! saturated gateway is not advised) and no shed marker header is added
+//! (the response stays a plain 503 + body text). Every admission and shed
+//! is counted per priority class in atomics on the dataplane
+//! (`DataPlane::priority_counters`; metrics exposure is DW-021).
+//!
 //! Circuit breaking and caps (DW-015): three independent admission
 //! layers wrap the send path. (1) The per-upstream BREAKER
 //! (`upstreams[].breaker`, see `breaker`) is checked BEFORE the endpoint
@@ -97,6 +120,7 @@
 
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -110,7 +134,9 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::config::{Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch};
+use crate::config::{
+    Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
+};
 use crate::retries::RetryParams;
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
@@ -124,6 +150,68 @@ pub type ProxyBody = Either<Full<Bytes>, UpstreamBody>;
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+
+/// The default priority class (DW-016): requests on routes without an
+/// explicit `priority` shed and are shed as class 5.
+pub const DEFAULT_PRIORITY: u8 = 5;
+
+/// The priority class at or above which a request may draw from the
+/// gateway cap's reserved sub-allowance (DW-016).
+pub const HIGH_PRIORITY: u8 = 8;
+
+/// Per-priority-class admission/shed counters (DW-016). Plain atomics on
+/// the dataplane — they survive config reloads (unlike the cap semaphores)
+/// and are never reset. Exposure through the admin/metrics surface is
+/// DW-021; tests read them directly.
+#[derive(Debug, Default)]
+pub struct PriorityCounters {
+    admitted: [AtomicU64; 11],
+    shed: [AtomicU64; 11],
+}
+
+impl PriorityCounters {
+    fn record_admitted(&self, priority: u8) {
+        self.admitted[priority as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_shed(&self, priority: u8) {
+        self.shed[priority as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Requests admitted (against the global cap, or with no cap
+    /// configured) at the given priority class so far. Note for future
+    /// metrics consumers (DW-021): the admitted counters CONFLATE
+    /// capped and uncapped generations — a reload that toggles the cap
+    /// changes which admissions are counted here mid-stream, and the
+    /// counters are never reset to separate the eras.
+    pub fn admitted_at(&self, priority: u8) -> u64 {
+        self.admitted[priority as usize].load(Ordering::Relaxed)
+    }
+
+    /// Requests shed (rejected with 503 by the global cap) at the given
+    /// priority class so far.
+    pub fn shed_at(&self, priority: u8) -> u64 {
+        self.shed[priority as usize].load(Ordering::Relaxed)
+    }
+}
+
+/// Resolve a request's load-shedding priority class (DW-016). This is the
+/// documented PRIORITY-RESOLVER seam: consumer (once known) overrides the
+/// route, the route overrides the default. Today authentication is not
+/// wired (DW-019/DW-020), so the caller passes `None` and priority is
+/// purely route-level; once authN identifies the consumer, pass
+/// `Some(consumer)` here and its `priority` wins over the route's — no
+/// other change to the shedding path is needed.
+pub fn resolve_priority(consumer: Option<&Consumer>, route: &Route) -> u8 {
+    let p = consumer
+        .and_then(|c| c.priority)
+        .or(route.priority)
+        .unwrap_or(DEFAULT_PRIORITY);
+    // Validation rejects out-of-range values at compile time; this clamp
+    // keeps the per-priority counters (11 slots) index-safe even for a
+    // hand-built Route that never went through validation.
+    p.min(10)
+}
 
 /// One configuration generation coupled with the upstream pools built from
 /// it. Requests resolve routes AND upstreams from the same pair, so a
@@ -150,16 +238,67 @@ pub struct DataPlane {
     /// were drawn from, so a reload that changes (or removes) the cap never
     /// invalidates live admissions — new requests are admitted against the
     /// new cap.
-    global_cap: ArcSwap<Option<Arc<Semaphore>>>,
+    global_cap: ArcSwap<GlobalCap>,
+    /// Per-priority admission/shed counters (DW-016). Lives on the
+    /// dataplane (not the generation) so reloads never reset them.
+    priority_counters: PriorityCounters,
 }
 
-/// The gateway-level concurrency semaphore for a snapshot's config: None
-/// when `max_concurrent_requests` is absent or 0 (unlimited).
-fn global_cap_of(gateway: &Gateway) -> Option<Arc<Semaphore>> {
+/// The gateway-level concurrency admission for one generation (DW-015 +
+/// DW-016). `general: None` means unlimited (`max_concurrent_requests`
+/// absent or 0). When set, `general` holds the permits available to ALL
+/// traffic; `reserved` (when carved) holds a small sub-allowance of the
+/// same cap usable ONLY by high-priority requests (>= [`HIGH_PRIORITY`])
+/// once the general allowance is full.
+#[derive(Clone, Default)]
+struct GlobalCap {
+    general: Option<Arc<Semaphore>>,
+    reserved: Option<Arc<Semaphore>>,
+}
+
+/// Whether any ROUTE is high-priority (priority at or above
+/// [`HIGH_PRIORITY`]). The reserved bucket is carved only when this holds,
+/// so priority-free configs keep the full cap for everyone — behavior
+/// identical to DW-015.
+///
+/// Consumer priorities deliberately contribute NOTHING to the carve
+/// decision: consumer priority is inert until authN (DW-019/DW-020)
+/// identifies the consumer on a request, so a config whose only
+/// high-priority entry is a consumer would otherwise carve the general
+/// allowance down (to the point of blackholing everything at a cap of 1)
+/// while no traffic could ever draw from the reserved bucket.
+/// DW-019 SEAM: when authN wires `Some(consumer)` into
+/// [`resolve_priority`], extend this check with consumers as well.
+fn has_high_priority(gateway: &Gateway) -> bool {
     gateway
-        .max_concurrent_requests
-        .filter(|c| *c > 0)
-        .map(|c| Arc::new(Semaphore::new(c as usize)))
+        .routes
+        .iter()
+        .any(|r| r.priority.is_some_and(|p| p >= HIGH_PRIORITY))
+}
+
+/// The gateway-level concurrency admission for a snapshot's config: None
+/// when `max_concurrent_requests` is absent or 0 (unlimited). With
+/// high-priority traffic configured, 10% of the cap (minimum 1, capped at
+/// the cap itself) is reserved: the general allowance shrinks to
+/// `cap - bucket` and high-priority requests may draw from either.
+fn global_cap_of(gateway: &Gateway) -> GlobalCap {
+    let Some(cap) = gateway.max_concurrent_requests.filter(|c| *c > 0) else {
+        return GlobalCap::default();
+    };
+    let cap = cap as usize;
+    let bucket = if has_high_priority(gateway) {
+        (cap / 10).max(1).min(cap)
+    } else {
+        0
+    };
+    GlobalCap {
+        general: Some(Arc::new(Semaphore::new(cap - bucket))),
+        reserved: if bucket > 0 {
+            Some(Arc::new(Semaphore::new(bucket)))
+        } else {
+            None
+        },
+    }
 }
 
 impl DataPlane {
@@ -171,6 +310,7 @@ impl DataPlane {
         Arc::new(DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             global_cap: ArcSwap::from_pointee(global_cap),
+            priority_counters: PriorityCounters::default(),
             state,
         })
     }
@@ -195,6 +335,12 @@ impl DataPlane {
 
     fn current(&self) -> Arc<Generation> {
         self.current.load_full()
+    }
+
+    /// The per-priority admission/shed counters (DW-016). Metrics
+    /// exposure (DW-021) reads these; tests read them directly.
+    pub fn priority_counters(&self) -> &PriorityCounters {
+        &self.priority_counters
     }
 
     /// The current generation's upstream registry. Used by the
@@ -256,23 +402,12 @@ where
         return resp;
     }
 
-    // Gateway concurrency cap (DW-015): admit at handle() entry, after the
-    // reserved paths (liveness/readiness probes must still answer while
-    // the gateway is saturated) and before any route work. Over-cap
-    // requests are rejected IMMEDIATELY (no queueing) with a dedicated
-    // 503. The permit lives until the response body completes: the proxy
-    // path attaches it to the streaming body, and complete bodies (errors,
-    // redirects, respond actions) release it when this scope ends.
-    let mut global_permit = match dp.global_cap.load_full().as_ref() {
-        Some(sem) => match Arc::clone(sem).try_acquire_owned() {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                return simple(StatusCode::SERVICE_UNAVAILABLE, "gateway saturated");
-            }
-        },
-        None => None,
-    };
-
+    // Route resolution BEFORE cap admission (DW-016): the request's
+    // priority class comes from the matched route, so the cap can shed
+    // route-aware. Two consequences: 404s (no route / criteria miss) never
+    // consume a cap slot — a deliberate change from DW-015's
+    // admit-at-entry ordering — and unknown paths cost nothing under
+    // saturation.
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
         return simple(StatusCode::NOT_FOUND, "no route");
     };
@@ -283,6 +418,56 @@ where
     if !route_applies(&route.r#match, &req) {
         return simple(StatusCode::NOT_FOUND, "no route");
     }
+
+    // Gateway concurrency cap with priority-aware load shedding
+    // (DW-015 + DW-016). Admission is two-tier: every request tries the
+    // general allowance; a request at or above HIGH_PRIORITY may then try
+    // the reserved bucket (when one is carved). No permits anywhere ->
+    // 503 "gateway saturated" immediately (no queueing, no Retry-After —
+    // see the module docs for the 503-vs-429 and header choices). The
+    // permit lives until the response body completes: the proxy path
+    // attaches it to the streaming body, and complete bodies (errors,
+    // redirects, respond actions) release it when this scope ends.
+    //
+    // AuthN (DW-019/020) will identify the consumer here; until then the
+    // resolver runs route-only (see `resolve_priority`).
+    let priority = resolve_priority(None, route);
+    let cap = dp.global_cap.load_full();
+    let mut global_permit = match &cap.general {
+        None => {
+            // Unlimited: no admission decision, but still counted per
+            // priority class (the counters describe traffic mix, not only
+            // capped traffic).
+            dp.priority_counters.record_admitted(priority);
+            None
+        }
+        Some(general) => {
+            let admitted = Arc::clone(general).try_acquire_owned().ok().or_else(|| {
+                // General allowance full: high-priority traffic may
+                // draw from the reserved bucket; everything else is
+                // shed. This is reserved-capacity admission, NOT
+                // preemption — in-flight normal requests keep their
+                // slots until they complete.
+                if priority >= HIGH_PRIORITY {
+                    cap.reserved
+                        .as_ref()
+                        .and_then(|bucket| Arc::clone(bucket).try_acquire_owned().ok())
+                } else {
+                    None
+                }
+            });
+            match admitted {
+                Some(permit) => {
+                    dp.priority_counters.record_admitted(priority);
+                    Some(permit)
+                }
+                None => {
+                    dp.priority_counters.record_shed(priority);
+                    return simple(StatusCode::SERVICE_UNAVAILABLE, "gateway saturated");
+                }
+            }
+        }
+    };
 
     match &route.action {
         RouteAction::Proxy { .. } => {

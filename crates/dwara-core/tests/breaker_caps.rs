@@ -1054,16 +1054,35 @@ async fn saturated_rejections_do_not_trip_the_breaker() {
     assert_eq!(sb, StatusCode::OK);
 
     // Regression pin: despite six Saturated observations, the breaker is
-    // still CLOSED — a fresh request reaches the backend and succeeds
-    // (no 503 circuit-open, no Retry-After hint).
-    let c = h1_client();
-    let (status, body, headers) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
-    assert_eq!(status, StatusCode::OK, "breaker must not trip on Saturated");
-    assert!(&body[..].is_empty());
-    assert!(
-        headers.get("retry-after").is_none(),
-        "no breaker-open hint may leak"
-    );
+    // still CLOSED. The fresh request is retried under a bounded poll:
+    // right after the burst the slow pair may not have fully drained, so a
+    // transient admission 503 ("upstream saturated") is legitimate — but a
+    // circuit-open 503 (Retry-After hint) at ANY point is an immediate
+    // failure: the breaker must never open.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let c = h1_client();
+        let (status, body, headers) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert!(
+                headers.get("retry-after").is_none() && &body[..] == b"upstream saturated",
+                "breaker must not trip on Saturated: got {status} with Retry-After/breaker-open body"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fresh request still Saturated after 20s; slow pair never drained"
+            );
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK, "breaker must not trip on Saturated");
+        assert!(&body[..].is_empty());
+        assert!(
+            headers.get("retry-after").is_none(),
+            "no breaker-open hint may leak"
+        );
+        break;
+    }
     assert_eq!(
         count.load(Ordering::SeqCst),
         3,

@@ -179,6 +179,15 @@ pub struct Route {
     /// > listener > global).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
+    /// Request priority class for load shedding (DW-016): 0 (lowest) to 10
+    /// (highest); absent means the default 5. When the gateway concurrency
+    /// cap is saturated, requests at `high_priority` (>= 8) draw from a
+    /// small reserved sub-allowance of the cap that lower-priority traffic
+    /// cannot use (see `proxy` module docs); preemption is impossible, so
+    /// normal traffic is shed first rather than displaced. Validation
+    /// rejects values above 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 /// Matching rules for incoming requests.
@@ -807,6 +816,15 @@ pub struct Consumer {
     pub credentials: Vec<Credential>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
+    /// Consumer priority class for load shedding (DW-016): 0 (lowest) to 10
+    /// (highest). Stored and validated now; it takes effect only once
+    /// authentication (DW-019/DW-020) identifies the consumer on a request —
+    /// until then, shedding priority comes from the matched route (or the
+    /// default 5). Consumer priority overrides the route's when known, but
+    /// it does NOT trigger reserved-bucket carving today — only a
+    /// high-priority route does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience

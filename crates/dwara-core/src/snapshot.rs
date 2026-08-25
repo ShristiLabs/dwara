@@ -401,6 +401,16 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     }
 
     for r in &gateway.routes {
+        if let Some(p) = r.priority {
+            if p > 10 {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "priority",
+                    format!("priority {p} is out of range: must be 0 (lowest) to 10 (highest)"),
+                ));
+            }
+        }
         if !services.contains(r.service.as_str()) {
             issues.push(issue(
                 "route",
@@ -852,6 +862,16 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     }
 
     for c in &gateway.consumers {
+        if let Some(p) = c.priority {
+            if p > 10 {
+                issues.push(issue(
+                    "consumer",
+                    &c.name,
+                    "priority",
+                    format!("priority {p} is out of range: must be 0 (lowest) to 10 (highest)"),
+                ));
+            }
+        }
         for (i, cred) in c.credentials.iter().enumerate() {
             let field = format!("credentials[{i}]");
             let problem = match cred {
@@ -1342,6 +1362,7 @@ mod tests {
                     },
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
+                    priority: None,
                 },
                 Route {
                     name: "static".into(),
@@ -1359,6 +1380,7 @@ mod tests {
                     },
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
+                    priority: None,
                 },
                 Route {
                     name: "legacy".into(),
@@ -1376,6 +1398,7 @@ mod tests {
                     },
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
+                    priority: None,
                 },
             ],
             services: vec![Service {

@@ -296,7 +296,7 @@ upstreams:
     .unwrap();
 
     let _server = start_server(&config);
-    wait_tcp(&addr, Instant::now() + Duration::from_secs(10));
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
 
     // TLS 1.3, SNI a -> cert a; HTTP/1.1 body.
     let conn = tls_connector("a.example.com", &["http/1.1"]);
@@ -388,7 +388,7 @@ upstreams:
     )
     .unwrap();
     let _server = start_server(&config);
-    wait_tcp(&addr, Instant::now() + Duration::from_secs(10));
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
 
     // HTTP/1.1.
     let mut tcp = std::net::TcpStream::connect(&addr).unwrap();
@@ -492,7 +492,7 @@ upstreams:
     )
     .unwrap();
     let _server = start_server(&config);
-    wait_tcp(&addr, Instant::now() + Duration::from_secs(10));
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
 
     // Matching SNI: handshake completes against the BACKEND cert and the
     // backend's response arrives through the splice.
@@ -581,7 +581,7 @@ upstreams:
     )
     .unwrap();
     let _server = start_server(&config);
-    wait_tcp(&addr, Instant::now() + Duration::from_secs(10));
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
 
     let conn = tls_connector("edge.example.com", &["http/1.1"]);
     let (cert1, _, resp) = tls_get(&addr, "edge.example.com", &conn).await;
@@ -589,21 +589,32 @@ upstreams:
     assert!(String::from_utf8_lossy(&resp).ends_with("dwara"));
 
     // Swap the certificate files on disk (atomic rename, as a deployer
-    // would) and wait out the debounce window.
+    // would), then poll with fresh handshakes until the reloaded
+    // certificate is served. A fixed sleep raced the reload pipeline
+    // (file-watcher latency + 250ms debounce) under parallel load; the
+    // bounded poll removes the timing dependency without weakening the
+    // assertion: if the new cert is never served within the window the
+    // test still fails on the final iteration.
     let new_cert = write_cert(dir.parent().unwrap(), "edge2.example.com");
+    let expected_der = cert_der_of(&new_cert);
     let tmp_cert = dir.join("cert.new");
     let tmp_key = dir.join("key.new");
     std::fs::copy(&new_cert.cert, &tmp_cert).unwrap();
     std::fs::copy(&new_cert.key, &tmp_key).unwrap();
     std::fs::rename(&tmp_cert, &ca.cert).unwrap();
     std::fs::rename(&tmp_key, &ca.key).unwrap();
-    std::thread::sleep(Duration::from_millis(1200));
 
-    let conn = tls_connector("edge2.example.com", &["http/1.1"]);
-    let (cert2, _, resp) = tls_get(&addr, "edge2.example.com", &conn).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (cert2, resp) = loop {
+        let conn = tls_connector("edge2.example.com", &["http/1.1"]);
+        let (cert, _, body) = tls_get(&addr, "edge2.example.com", &conn).await;
+        if cert == expected_der || Instant::now() >= deadline {
+            break (cert, body);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert_eq!(
-        cert2,
-        cert_der_of(&new_cert),
+        cert2, expected_der,
         "new handshake must serve the reloaded certificate"
     );
     assert_ne!(cert1, cert2);

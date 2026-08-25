@@ -445,6 +445,7 @@ async fn reserved_paths_shadow_configured_routes() {
                         headers: Default::default(),
                     },
                     policies: vec![],
+                    priority: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -466,6 +467,7 @@ async fn reserved_paths_shadow_configured_routes() {
                         headers: Default::default(),
                     },
                     policies: vec![],
+                    priority: None,
                 },
             ],
             services: vec![Service {
