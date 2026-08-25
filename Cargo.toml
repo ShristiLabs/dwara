@@ -45,6 +45,12 @@ rcgen = "0.13"
 # GCRA rate limiting (DW-017): MIT; dashmap feature gives sharded keyed state.
 governor = { version = "0.10", features = ["dashmap"] }
 proptest = "1"
+# SQLite state store (DW-018): rusqlite is MIT; the "bundled" feature
+# compiles the bundled SQLite (public domain, libsqlite3-sys is MIT) so no
+# system libsqlite3 is required at build or deploy time.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Tempfile-backed on-disk store tests (DW-018 dev-only): MIT/Apache-2.0.
+tempfile = "3"
 
 [profile.release]
 lto = true

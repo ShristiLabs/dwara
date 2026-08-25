@@ -25,9 +25,11 @@ http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower-service = { workspace = true }
 webpki-roots = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
+tempfile = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

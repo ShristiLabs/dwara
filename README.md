@@ -42,6 +42,8 @@ Environment variables (all optional):
   default unset = bind every configured listener).
 - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on
   SIGTERM/SIGINT, default 10.
+- `DWARA_STATE_DB`: path to a SQLite state store (default unset = no
+  store). See "State store" under Operations.
 
 ## Configuration
 
@@ -904,6 +906,30 @@ Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 (including ones still in the kernel accept backlog) within
 `DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
 past the budget are force-closed.
+
+## State store
+
+Set `DWARA_STATE_DB=/path/to/db` to enable the SQLite state store
+(WAL mode, schema v1). At startup the gateway opens (or creates) the
+database and idempotently seeds consumers and credentials from the
+config — re-syncing creates nothing new; an existing consumer only has
+its priority updated. Consumers, credential records, and quota
+counters persist across restarts.
+
+Honesty note: credential hashing lands with the authenticator (a later
+M1 release). Until then, seeded credential rows carry a placeholder
+hash and config credentials keep authenticating (once authentication
+exists) from config — the rows exist to exercise the schema, seeding,
+and cache paths, not to authorize traffic. Nothing on the request path
+reads the store yet; behavior with the variable set is otherwise
+identical to unset.
+
+The store keeps an in-memory hot cache: credential lookups by selector
+avoid disk after their first lookup (unknown selectors are cached as
+empty). The cache is coherent for writes made through the same process
+only — a second process writing the same file is not seen until
+restart. Unset (the default), the gateway runs purely from config. A
+startup failure (unwritable path, newer schema version) exits 1.
 
 ## Crates
 

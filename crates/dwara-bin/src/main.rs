@@ -16,6 +16,13 @@
 //! - `DWARA_CONFIG`: path to the gateway YAML config, default `./dwara.yaml`.
 //!   Startup fails (exit code 1) if the file cannot be read or does not
 //!   validate; every validation issue is printed.
+//! - `DWARA_STATE_DB`: path to a SQLite state store (DW-018). When set,
+//!   the gateway opens/creates the store at startup and seeds consumers
+//!   and credentials from the config into it (see `store::sync_consumers_from_config`
+//!   for the interim config-credential hashing story). When unset (the
+//!   default), the gateway runs purely on config — behavior identical to
+//!   pre-DW-018. Nothing on the request path reads the store yet; the
+//!   authenticator (DW-019) wires it in.
 //! - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on SIGTERM/SIGINT,
 //!   default 10. In-flight requests that exceed the budget are dropped when
 //!   the process exits.
@@ -64,6 +71,7 @@ use dwara_core::config::{Listener, ListenerProtocol, TlsMode};
 use dwara_core::extensions::config_source::{ConfigSource, FileConfigSource};
 use dwara_core::proxy::{self, DataPlane};
 use dwara_core::snapshot::{ConfigState, Snapshot};
+use dwara_core::store::{sync_consumers_from_config, StateStore};
 use dwara_core::tls::{self, TlsTermination};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -460,6 +468,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             std::process::exit(1);
         }
+    };
+
+    // Optional SQLite state store (DW-018): opened and seeded from the
+    // config when DWARA_STATE_DB is set. Held alive for the process
+    // lifetime; the request path does not touch it yet (DW-019 wires the
+    // authenticator against it). Unset = pure-config operation (default).
+    let _state_store = match std::env::var("DWARA_STATE_DB") {
+        Ok(path) if !path.is_empty() => {
+            let store = match tokio::task::spawn_blocking({
+                let path = path.clone();
+                let gateway = gateway.clone();
+                move || {
+                    StateStore::open(std::path::Path::new(&path)).and_then(|s| {
+                        sync_consumers_from_config(&s, &gateway)?;
+                        Ok(s)
+                    })
+                }
+            })
+            .await
+            {
+                Ok(inner) => inner,
+                Err(err) => {
+                    eprintln!("dwara: state store task failed for {path}: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match store {
+                Ok(store) => {
+                    println!(
+                        "dwara: state store opened at {path} (schema v1, seeded {} consumer(s) from config)",
+                        gateway.consumers.len()
+                    );
+                    Some(Arc::new(store))
+                }
+                Err(err) => {
+                    eprintln!("dwara: state store init failed for {path}: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
     };
 
     // Listener set: DWARA_BIND overrides with one cleartext listener;

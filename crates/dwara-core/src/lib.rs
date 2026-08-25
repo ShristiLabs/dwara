@@ -11,5 +11,6 @@ pub mod health;
 pub mod proxy;
 pub mod retries;
 pub mod snapshot;
+pub mod store;
 pub mod tls;
 pub mod upstream;
