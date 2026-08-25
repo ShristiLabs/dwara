@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 dwara-core = { path = "../dwara-core" }
+dwara-admin = { path = "../dwara-admin" }
 tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -20,6 +21,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
+serde_json = { workspace = true }
 
 [[bin]]
 name = "dwara"

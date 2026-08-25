@@ -46,6 +46,9 @@ pub enum TlsError {
         what: &'static str,
     },
     Rustls(rustls::Error),
+    /// The admin mTLS client-CA verifier could not be built (root
+    /// loading or verifier construction failed).
+    ClientAuth(String),
     /// No certificate material at all in a terminate block.
     NoCertificates,
     /// The private key does not match the leaf certificate (public keys
@@ -65,6 +68,7 @@ impl std::fmt::Display for TlsError {
                 write!(f, "no {what} found in PEM file {}", path.display())
             }
             TlsError::Rustls(e) => write!(f, "tls error: {e}"),
+            TlsError::ClientAuth(m) => write!(f, "admin client-auth setup failed: {m}"),
             TlsError::NoCertificates => {
                 write!(f, "tls terminate block has no certificate material")
             }
@@ -330,6 +334,60 @@ impl TlsTermination {
         self.config.store(Arc::new(built));
         Ok(())
     }
+}
+
+/// Cert resolver that always answers with the one configured key: the
+/// admin listener serves a single identity (no SNI selection).
+struct SingleCertResolver(Arc<CertifiedKey>);
+
+impl std::fmt::Debug for SingleCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleCertResolver").finish_non_exhaustive()
+    }
+}
+
+impl ResolvesServerCert for SingleCertResolver {
+    fn resolve(&self, _client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.0))
+    }
+}
+
+/// Build the mTLS-ONLY `rustls::ServerConfig` for the admin listener
+/// (DW-022, decision 6). Client certificates are REQUIRED and must chain
+/// to the CA in `client_ca_file` (`WebPkiClientVerifier` over a root
+/// store loaded from that PEM); the server presents the single
+/// cert/key pair. The key is checked against the leaf exactly like
+/// dataplane termination, so a torn pair cannot boot. ALPN advertises
+/// HTTP/1.1 only — the admin API is a small request/response surface.
+pub fn admin_mtls_server_config(
+    tls: &crate::config::AdminTlsConfig,
+) -> Result<ServerConfig, TlsError> {
+    let certified = load_certified_key(&tls.cert_file, &tls.key_file)?;
+    let ca_path = PathBuf::from(&tls.client_ca_file);
+    let ca_certs = CertificateDer::pem_file_iter(&ca_path)
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
+    if ca_certs.is_empty() {
+        return Err(TlsError::EmptyPem {
+            path: ca_path,
+            what: "client CA certificates",
+        });
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for c in ca_certs {
+        roots
+            .add(c)
+            .map_err(|e| TlsError::ClientAuth(format!("adding root for admin verifier: {e}")))?;
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;
+    let mut config = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 /// Parse the SNI server name out of a TLS ClientHello record.
@@ -660,6 +718,7 @@ mod tests {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         };
         (gateway, tls)
     }

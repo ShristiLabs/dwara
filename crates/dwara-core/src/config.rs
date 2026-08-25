@@ -89,6 +89,54 @@ pub struct Gateway {
     /// tokens and forwards `Authorization` upstream untouched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jwt_providers: Vec<JwtProvider>,
+    /// Admin API listener (DW-022, decision 6): mTLS-ONLY management
+    /// endpoint. Absent (the default): no admin listener is started at
+    /// all — the gateway is admin-silent until an operator configures
+    /// one. When present, `tls` must carry all three files (server
+    /// cert, key, and the CA that client certificates must chain to);
+    /// a missing `client_ca_file` is rejected by validation — plaintext
+    /// admin is not a supported production shape. The dev fallback
+    /// (`DWARA_ADMIN_DEV=1`, dwara-bin) allows loopback-only plaintext
+    /// and is loudly dev-only. The admin listener's bind set is fixed
+    /// at startup; changes take effect on restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin: Option<AdminConfig>,
+}
+
+/// Admin listener configuration (DW-022).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Bind address of the admin listener. Default `127.0.0.1:2019`
+    /// (loopback-only; frozen decision 6) — override only to place the
+    /// admin API on a dedicated management interface, and rely on mTLS
+    /// for access control: there is no token layer in v1 (the client
+    /// certificate IS the auth).
+    #[serde(default = "default_admin_bind")]
+    pub bind: String,
+    /// mTLS material for the admin listener; all three files are
+    /// required.
+    pub tls: AdminTlsConfig,
+}
+
+/// mTLS material for the admin listener (DW-022). Unlike dataplane
+/// listeners there is no mode: the admin listener always terminates TLS
+/// and always requires a client certificate chaining to `client_ca_file`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminTlsConfig {
+    /// Path to the PEM certificate chain the admin server presents.
+    pub cert_file: String,
+    /// Path to the PEM private key for `cert_file`.
+    pub key_file: String,
+    /// Path to the PEM CA bundle client certificates must chain to.
+    /// Required (mTLS-only): validation rejects an admin block without
+    /// it rather than silently serving no-auth TLS.
+    pub client_ca_file: String,
+}
+
+fn default_admin_bind() -> String {
+    "127.0.0.1:2019".to_string()
 }
 
 /// One JWT verification provider (DW-019).

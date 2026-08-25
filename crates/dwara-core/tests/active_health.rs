@@ -100,6 +100,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         policies: vec![],
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
+        admin: None,
     }
 }
 
@@ -412,6 +413,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -505,6 +507,7 @@ async fn reserved_paths_shadow_configured_routes() {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

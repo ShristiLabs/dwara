@@ -423,6 +423,16 @@ impl DataPlane {
         self.rebuild_authn();
     }
 
+    /// The DWARA_STATE_DB store when one is attached (None = pure-config
+    /// credentials). Admin surface seam (DW-022): `/stats` reports the
+    /// store's schema version when present.
+    pub fn state_store(&self) -> Option<Arc<StateStore>> {
+        self.state_store
+            .read()
+            .expect("state store lock poisoned")
+            .clone()
+    }
+
     /// Rebuild the authenticator from the CURRENT snapshot and the
     /// attached state store (if any), reusing JWKS caches by URL.
     fn rebuild_authn(&self) {

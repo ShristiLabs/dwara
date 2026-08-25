@@ -1139,6 +1139,7 @@ mod tests {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         };
         let state = ConfigState::new();
         state.compile_and_publish(&gw).expect("publish");
@@ -1500,6 +1501,7 @@ mod tests {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert!(fields.contains(&"connection_cap"));
@@ -1562,6 +1564,7 @@ mod tests {
                 policies: vec![],
                 max_concurrent_requests: None,
                 jwt_providers: Vec::new(),
+                admin: None,
             })
             .expect("publish");
         let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate

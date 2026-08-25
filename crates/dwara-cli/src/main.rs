@@ -1,6 +1,195 @@
-//! CLI crate: M1 role is to provide the operator command-line client that
-//! talks to the dwara admin API.
+//! dwara-cli (DW-022): the operator command line.
+//!
+//! Subcommands:
+//!
+//! - `run [ARGS]...` — run the gateway SERVER: spawns the `dwara`
+//!   binary with the given arguments (environment passes through;
+//!   `DWARA_CONFIG`, `DWARA_BIND`, ... control it). Documented v1
+//!   shape: the CLI does not embed the server; it requires the `dwara`
+//!   binary on PATH and propagates its exit status.
+//! - `validate <file>` — parse + validate + compile-dry-run; prints
+//!   EVERY issue; exit 1 on any (0 on success, printing the route
+//!   count).
+//! - `fmt <file>` — normalize the file in place (stable field order,
+//!   defaulted-empty collections dropped). Prints nothing on success.
+//! - `diff <a> <b>` — compile both configs and print route/upstream/
+//!   consumer deltas (`+ kind name` / `- kind name`).
+//! - `lint <file>` — advisory rules BEYOND validation; exit 2 on
+//!   warnings (distinct from validation's 1; see the lib docs), 1 if
+//!   the file cannot be parsed/validated.
+
+use clap::{Parser, Subcommand};
+
+/// dwara gateway operator CLI.
+#[derive(Parser)]
+#[command(name = "dwara-cli", version, about = "dwara gateway operator CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the gateway server (spawns the `dwara` binary).
+    Run {
+        /// Arguments passed verbatim to the dwara binary.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Validate a config file; exit 1 on any issue.
+    Validate {
+        /// Path to the gateway YAML config.
+        file: String,
+    },
+    /// Normalize a config file in place.
+    Fmt {
+        /// Path to the gateway YAML config (rewritten).
+        file: String,
+    },
+    /// Show route/upstream/consumer deltas between two configs.
+    Diff {
+        /// Baseline config.
+        a: String,
+        /// Changed config.
+        b: String,
+    },
+    /// Advisory lint rules; exit 2 on warnings.
+    Lint {
+        /// Path to the gateway YAML config.
+        file: String,
+    },
+}
+
+fn read(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))
+}
+
+/// Write `contents` to `path` atomically: named temp file in the same
+/// directory (same filesystem, so the rename is atomic), fsync, rename
+/// over the destination. A crash mid-`fmt` leaves the operator's config
+/// as either the old or the new document, never a truncated one.
+fn write_atomic(path: &str, contents: &str) -> Result<(), String> {
+    let dir = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| format!("cannot create temp file near {path}: {e}"))?;
+    use std::io::Write as _;
+    tmp.write_all(contents.as_bytes())
+        .and_then(|_| tmp.flush())
+        .map_err(|e| format!("cannot write temp file for {path}: {e}"))?;
+    tmp.reopen()
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("cannot fsync temp file for {path}: {e}"))?;
+    tmp.persist(path)
+        .map_err(|e| format!("cannot replace {path}: {e}"))?;
+    Ok(())
+}
 
 fn main() {
-    println!("dwara-cli: not yet implemented (M1 scaffold)");
+    let cli = Cli::parse();
+    let code = match cli.command {
+        Command::Run { args } => run_server(&args),
+        Command::Validate { file } => match read(&file) {
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+            Ok(text) => match dwara_cli::validate_config_text(&text) {
+                dwara_cli::ValidateOutcome::Valid { routes } => {
+                    println!("ok: {routes} routes");
+                    0
+                }
+                dwara_cli::ValidateOutcome::Invalid(issues) => {
+                    for i in issues {
+                        eprintln!("{i}");
+                    }
+                    1
+                }
+            },
+        },
+        Command::Fmt { file } => match read(&file) {
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+            Ok(text) => match dwara_cli::format_config_text(&text) {
+                Ok(normalized) => match write_atomic(&file, &normalized) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+        },
+        Command::Diff { a, b } => {
+            let both = read(&a).and_then(|ta| read(&b).map(|tb| (ta, tb)));
+            match both {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok((ta, tb)) => match dwara_cli::diff_configs(&ta, &tb) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+            }
+        }
+        Command::Lint { file } => match read(&file) {
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+            Ok(text) => match dwara_cli::validate_config_text(&text) {
+                dwara_cli::ValidateOutcome::Invalid(issues) => {
+                    for i in issues {
+                        eprintln!("{i}");
+                    }
+                    eprintln!("config is invalid; fix validation before linting");
+                    1
+                }
+                dwara_cli::ValidateOutcome::Valid { .. } => {
+                    let gateway =
+                        dwara_core::config::parse_gateway(&text).expect("validated above");
+                    let warnings = dwara_cli::lint_config(&gateway);
+                    for w in &warnings {
+                        eprintln!("warning: {w}");
+                    }
+                    if warnings.is_empty() {
+                        0
+                    } else {
+                        eprintln!("{} lint warning(s)", warnings.len());
+                        2
+                    }
+                }
+            },
+        },
+    };
+    std::process::exit(code);
+}
+
+/// Spawn the `dwara` server binary with argument passthrough. The
+/// environment passes through unchanged (DWARA_CONFIG etc.); the
+/// CLI stays a thin operator front-end, not a second server host.
+fn run_server(args: &[String]) -> i32 {
+    let mut cmd = std::process::Command::new("dwara");
+    cmd.args(args);
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("cannot spawn the dwara binary: {e} (is it installed and on PATH?)");
+            1
+        }
+    }
 }

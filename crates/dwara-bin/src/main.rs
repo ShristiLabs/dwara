@@ -38,6 +38,11 @@
 //!   the DW-026 musl size budget); the span structure it would export
 //!   ships today and is verified in-process by dwara-core's span-capture
 //!   test. See dwara-core::observability for the full decision.
+//! - `DWARA_ADMIN_DEV` (DW-022): "1" serves the admin API as PLAINTEXT
+//!   on 127.0.0.1 — DEV ONLY, refuses to start for a non-loopback
+//!   admin bind, and must never be set in production (mTLS is the
+//!   admin surface's only authentication). Default: unset = mTLS-only.
+//!   See the `dwara-admin` crate docs for the endpoint set.
 //!
 //! Listener modes (DW-007, feature analysis 4.10 / 4.13):
 //! - `http` listener: cleartext; hyper-util's auto builder sniffs the
@@ -711,6 +716,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // and Basic-auth records).
     if let Some(store) = &state_store {
         dp.set_state_store(Arc::clone(store));
+    }
+
+    // Admin listener (DW-022): started ONLY when the config carries an
+    // `admin` block (default: no admin block, no admin listener). The
+    // production shape is mTLS-only (decision 6); DWARA_ADMIN_DEV=1 is
+    // the plaintext loopback escape hatch for developer machines and is
+    // refused outright for non-loopback binds.
+    if let Some(admin_cfg) = state.snapshot().gateway().admin.clone() {
+        let dev_mode = std::env::var("DWARA_ADMIN_DEV").ok().as_deref() == Some("1");
+        let mode = if dev_mode {
+            dwara_admin::ListenMode::dev(&admin_cfg)?
+        } else {
+            dwara_admin::ListenMode::mtls(&admin_cfg)?
+        };
+        let admin_tcp = tokio::net::TcpListener::bind(&admin_cfg.bind).await?;
+        let admin_ctx = Arc::new(dwara_admin::AdminContext::new(
+            Arc::clone(&state),
+            Arc::clone(&dp),
+            config_path.clone(),
+        ));
+        let admin_shutdown = shutdown_rx.clone();
+        let bind_label = admin_cfg.bind.clone();
+        tracing::info!(
+            code = "admin_listening",
+            bind = %bind_label,
+            mode = if dev_mode { "DEV PLAINTEXT (loopback only)" } else { "mTLS (client certificate required)" },
+            "admin API listening on {bind_label}"
+        );
+        tokio::spawn(async move {
+            if let Err(err) = dwara_admin::serve(admin_ctx, admin_tcp, mode, admin_shutdown).await {
+                tracing::error!(code = "admin_server_failed", "admin server ended: {err}");
+            }
+        });
     }
     let reload_dp = Arc::clone(&dp);
     let reload_tls = tls_states.clone();

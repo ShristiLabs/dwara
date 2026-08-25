@@ -272,6 +272,46 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
     }
 
+    // Admin block (DW-022): when configured, the bind must parse as a
+    // socket address and the mTLS material must be present and non-empty.
+    // A client CA is REQUIRED (mTLS-only, decision 6): an admin block
+    // without one is rejected here rather than serving no-auth TLS.
+    if let Some(admin) = &gateway.admin {
+        if admin.bind.trim().is_empty() {
+            issues.push(issue(
+                "admin",
+                "(root)",
+                "bind",
+                "admin bind is empty (default 127.0.0.1:2019)",
+            ));
+        } else if admin.bind.parse::<std::net::SocketAddr>().is_err() {
+            issues.push(issue(
+                "admin",
+                "(root)",
+                "bind",
+                format!(
+                    "admin bind '{}' is not a valid address:port (e.g. 127.0.0.1:2019)",
+                    admin.bind
+                ),
+            ));
+        }
+        let t = &admin.tls;
+        for (field, value) in [
+            ("tls.cert_file", &t.cert_file),
+            ("tls.key_file", &t.key_file),
+            ("tls.client_ca_file", &t.client_ca_file),
+        ] {
+            if value.trim().is_empty() {
+                issues.push(issue(
+                    "admin",
+                    "(root)",
+                    field,
+                    format!("{field} is required (mTLS-only admin: server cert, key, and client CA must all be set)"),
+                ));
+            }
+        }
+    }
+
     // Listener sanity and bind conflicts.
     let mut binds = std::collections::BTreeSet::new();
     for l in &gateway.listeners {
@@ -1391,6 +1431,7 @@ impl Snapshot {
                 policies: Vec::new(),
                 max_concurrent_requests: None,
                 jwt_providers: Vec::new(),
+                admin: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }
@@ -1669,6 +1710,7 @@ mod tests {
             policies: vec![],
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
+            admin: None,
         }
     }
 

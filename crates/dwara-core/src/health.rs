@@ -275,6 +275,25 @@ impl EndpointHealth {
         self.ejections.load(Ordering::Relaxed)
     }
 
+    /// Human state label for observability surfaces (admin `/health`,
+    /// DW-022): `healthy`, `ejected`, or `half_open`. An ejection whose
+    /// window has expired but not yet transitioned reports `half_open`
+    /// (the next pick arms the probe budget), mirroring
+    /// [`Self::is_available`]'s view of expiry.
+    pub fn state_label(&self, now: u64) -> &'static str {
+        match self.status.load(Ordering::Acquire) {
+            HEALTHY => "healthy",
+            EJECTED => {
+                if now >= self.ejected_until_ms.load(Ordering::Acquire) {
+                    "half_open"
+                } else {
+                    "ejected"
+                }
+            }
+            _ => "half_open",
+        }
+    }
+
     /// Report one observation for this endpoint at `now` (Unix-epoch ms):
     /// `is_failure` = transport error or HTTP status >= 500 (see the
     /// module docs for the 1xx-4xx policy). Applies the ejection rules

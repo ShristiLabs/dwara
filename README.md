@@ -51,6 +51,9 @@ Environment variables (all optional):
   emitted, 0.0-1.0, default 1.0. See "Observability".
 - `DWARA_OTLP_ENDPOINT`: reserved for future OTLP trace export;
   currently inert (see "Observability").
+- `DWARA_ADMIN_DEV`: `"1"` serves the admin API as plaintext on the
+  configured admin bind, which must be loopback — DEV ONLY, see
+  "Admin API". Default unset = mTLS only.
 
 ## Configuration
 
@@ -1134,6 +1137,131 @@ Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 (including ones still in the kernel accept backlog) within
 `DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
 past the budget are force-closed.
+
+## Admin API
+
+The admin API (DW-022) is a separate, small operator surface served by
+the `dwara-admin` crate. It is DEFAULT-OFF: no `admin` block in the
+config means no admin listener is started at all — the gateway is
+admin-silent until an operator configures one.
+
+```yaml
+admin:
+  bind: 127.0.0.1:2019     # default; loopback-only out of the box
+  tls:
+    cert_file: /etc/dwara/admin.crt.pem
+    key_file: /etc/dwara/admin.key.pem
+    client_ca_file: /etc/dwara/admin-clients.ca.pem
+```
+
+**Authentication is the TLS layer.** The admin listener always
+terminates TLS and REQUIRES a client certificate chaining to
+`client_ca_file`; there is no token layer in v1 — possession of a valid
+client certificate IS the authorization. All three TLS files are
+mandatory; validation rejects an `admin` block missing `client_ca_file`
+rather than silently serving no-auth TLS. Override `bind` only to place
+the admin API on a dedicated management interface, and rely on mTLS for
+access control. The admin bind set is fixed at startup — changes to
+`admin.bind` take effect on restart. A sketch of the certificate setup:
+
+```sh
+# CA for admin clients
+openssl req -x509 -newkey rsa:2048 -nodes -keyout admin-clients.ca.key \
+  -out admin-clients.ca.pem -days 3650 -subj "/CN=dwara-admin-clients"
+# server certificate the admin listener presents
+openssl req -x509 -newkey rsa:2048 -nodes -keyout admin.key.pem \
+  -out admin.crt.pem -days 365 -subj "/CN=dwara-admin"
+# one client certificate per operator
+openssl req -newkey rsa:2048 -nodes -keyout operator.key \
+  -out operator.csr -subj "/CN=operator"
+openssl x509 -req -in operator.csr -CA admin-clients.ca.pem \
+  -CAkey admin-clients.ca.key -CAcreateserial -out operator.crt -days 365
+```
+
+Then call the API with the client certificate, e.g.
+`curl --cert operator.crt --key operator.key \
+https://127.0.0.1:2019/config`. A connection without a client
+certificate (or one from the wrong CA) fails the TLS handshake.
+
+### Endpoints
+
+- `GET /config` — the CURRENT published gateway config as normalized
+  YAML. The `x-dwara-config-generation` and `x-dwara-config-hash`
+  headers identify the generation.
+- `PATCH /config` — FULL-document YAML replacement: the body must be
+  the complete config (v1 has no partial merge — silent merging of
+  unknown subtrees is a footgun). The body is parsed, validated, and
+  compiled as a dry run FIRST; on any issue the response is 400
+  carrying EVERY problem, in the same JSON error envelope as the
+  dataplane. On success the new config is written ATOMICALLY to the
+  config file (temp file + rename in the same directory, so a crash
+  leaves either the old or the new document, never a torn one, and
+  restarts observe exactly what was published) and then published to
+  the running dataplane. Consequences: the config watcher also
+  observes the rename and re-publishes the identical content
+  (generation advances once more, harmlessly), and the response
+  carries the new generation, content hash, and route count. A body
+  over 4 MiB is rejected 413; concurrent PATCHes are serialized.
+- `GET /health` — readiness (at least one published generation), the
+  current config generation, and per-upstream per-endpoint health
+  labels from the live balancer state (`healthy`/`ejected`/...).
+- `GET /stats` — cheap live state only: the state store's schema
+  version (null when no store is attached), per-upstream breaker
+  states (`closed`/`open`/`half_open`, or `disabled` when the upstream
+  configures no breaker), the `active_requests` gauge, and the config
+  generation. Anything more expensive belongs on `/metrics`.
+
+Errors use the dataplane's error envelope shape
+(`{"error":{"code","message","request_id"}}`), including 405 for a
+known path with the wrong method and 404 for unknown admin paths, so
+operators can grep one shape across both surfaces. The admin listener
+drains gracefully on shutdown alongside the gateway.
+
+### Dev fallback (never in production)
+
+`DWARA_ADMIN_DEV=1` serves the admin API as PLAINTEXT, refusing to
+start unless the admin bind is loopback. It exists purely for
+developer machines (curl without certificates) and removes the admin
+surface's only authentication — never set it in production or on a
+shared host.
+
+## CLI
+
+`dwara-cli` is the operator command line. Subcommands:
+
+- `dwara-cli run [ARGS]...` — run the gateway server. The CLI does not
+  embed the server: it spawns the `dwara` binary (which must be on
+  PATH) with the given arguments passed verbatim, the environment
+  passes through (`DWARA_CONFIG`, ...), and the binary's exit status is
+  propagated.
+- `dwara-cli validate <file>` — parse + validate + compile dry-run,
+  the same pipeline the gateway runs at startup and reload. Prints
+  every issue (validation reports all problems at once, never
+  fail-fast). Exit codes: 0 on success (printing the route count), 1
+  on ANY parse/validation/compile issue.
+- `dwara-cli fmt <file>` — normalize the config file in place: parse,
+  then re-serialize with stable field order and defaulted-empty
+  collections omitted. Round-trip guarantee: the output parses back to
+  the same typed value. Prints nothing on success; exit 1 on failure.
+- `dwara-cli diff <a> <b>` — compile both configs and print
+  route/upstream/consumer deltas as `+ kind name` / `- kind name`
+  lines (or "no route/upstream/consumer differences"). Exit 1 if
+  either side is invalid.
+- `dwara-cli lint <file>` — advisory rules BEYOND validation: findings
+  about config that compiles and routes traffic but likely does not do
+  what the author meant. Rules: `prefix-duplicate` (two prefix routes
+  with the identical pattern; the earlier-declared one wins
+  equal-length ties, so the later can never match),
+  `regex-shadowed-by-exact` (an exact route fully matching a regex
+  route's pattern shadows those paths),
+  `consumer-unused` (referenced by no route authorization and bound to
+  no JWT provider — advisory, runtime credential use is not statically
+  visible), `policy-unused` (attached to no route, service, or
+  consumer), `upstream-unreferenced` (no service targets it). Exit
+  codes: 0 = clean, 2 = warnings found, 1 = the file could not be
+  parsed/validated at all (fix that first — linting an invalid config
+  would report noise). The distinct 2 keeps "your config is wrong" and
+  "your config compiles but smells" separable in scripts.
 
 ## Observability
 

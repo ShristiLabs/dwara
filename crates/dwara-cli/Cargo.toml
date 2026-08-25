@@ -8,3 +8,12 @@ rust-version.workspace = true
 
 [dependencies]
 dwara-core = { path = "../dwara-core" }
+clap = { workspace = true }
+# Lint rule "regex shadowed by exact" compiles route regexes (DW-022);
+# already a workspace dependency (route matching).
+regex = { workspace = true }
+# Atomic fmt writes (temp file + rename, mirroring dwara-admin's
+# config writer): already a workspace dependency.
+tempfile = { workspace = true }
+
+[dev-dependencies]

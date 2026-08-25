@@ -601,6 +601,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         policies: vec![],
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
+        admin: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -787,6 +788,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         policies: vec![],
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
+        admin: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1031,6 +1033,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         policies: vec![],
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
+        admin: None,
     }
 }
 
