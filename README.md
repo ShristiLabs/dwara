@@ -66,6 +66,15 @@ schema stabilizes. The schema still churns during M1.
 | `dwara-admin` | Admin / management-plane API |
 | `dwara-cli` | Operator command-line client |
 
+## Extension points
+
+State-holding subsystems are defined as swappable traits in
+`dwara-core::extensions`: `RateLimiter`, `ConfigSource`, `CacheStore`,
+`AnalyticsSink`, and `SecretSource`. Each trait's rustdoc states its
+contract (purpose, semantics, failure model). Local in-memory, file, and
+environment-variable implementations ship today; alternative backends
+plug in by implementing the same traits.
+
 ## Development
 
 CI runs on pushes and pull requests to `main` (when Rust sources,
