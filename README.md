@@ -4,8 +4,8 @@ A high-performance API gateway written in Rust.
 
 Status: pre-alpha. The core reverse-proxy dataplane works — routing,
 streaming proxying, TLS termination/passthrough, upstream load
-balancing, and hot config reload — with traffic policy still to come in
-M1.
+balancing, hot config reload, and local rate limiting — with more
+traffic policy still to come in M1.
 
 ## Quickstart
 
@@ -662,17 +662,134 @@ is rejected by validation (omit the field for unbounded). The 503 is
 not retried — the upstream is saturated by definition; a retry would
 add load.
 
+Local rate limiting (DW-017) runs BEFORE every layer below — after
+route resolution but before the gateway concurrency cap — so a rejected
+request is the cheapest thing the gateway can do with a request and
+never holds a cap slot. See "Rate limiting" below.
+
 The admission layers stack in a fixed order, outermost first:
 
-1. gateway concurrency cap (`max_concurrent_requests`, see Global
+1. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
+   429 + `Retry-After`;
+2. gateway concurrency cap (`max_concurrent_requests`, see Global
    settings) — over-cap: 503 "gateway saturated";
-2. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
+3. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
    circuit open" + `Retry-After`;
-3. per-endpoint ejection (the `health` block) — an ejected endpoint is
+4. per-endpoint ejection (the `health` block) — an ejected endpoint is
    skipped by the balancer;
-4. per-upstream pending cap (`max_pending`) — queue full: 503
+5. per-upstream pending cap (`max_pending`) — queue full: 503
    "upstream saturated";
-5. connect (`connection_cap`, `timeouts.connect_ms`).
+6. connect (`connection_cap`, `timeouts.connect_ms`).
+
+### Rate limiting
+
+Local, in-gateway rate limiting (DW-017) is configured on **policies**
+(top-level `policies` list) and applies to requests on routes and
+services that reference the policy by name via their `policies` list.
+Precedence follows the frozen chain consumer > route > service >
+listener > global, but limiting does NOT pick one winner: rules from
+every applicable policy ALL apply and are AND-ed — a request denied by
+any rule is denied. The consumer link goes live with authentication
+(a later M1 release); listener- and global-attached policies have no
+config attachment point yet. Today: route- and service-attached
+policies limit; a request whose route and service reference no policy
+with rate rules is not limited and carries no rate headers.
+
+A policy carries a list of rules under `rate_limits`; each rule has
+these fields:
+
+- `name`: optional label, documentation only.
+- `selector`: the key components the limit is counted over — one or
+  more of `ip` (the direct connection peer, the same IP used for
+  `X-Real-IP`), `credential` (the authenticated consumer), and `route`
+  (the matched route's name). Order does not matter.
+- `requests_per`: the sustained rate — any combination of `s`
+  (per second), `minute`, and `hour`. At least one must be set and each
+  set value must be > 0 (validation rejects otherwise).
+- `burst`: bucket size, defaulting to the window's request count.
+  Must be >= 1 when present.
+
+```yaml
+policies:
+  - name: api-limits
+    rate_limits:
+      - name: per-client-burst
+        selector: [ip, route]
+        requests_per: { s: 10, minute: 600 }
+        burst: 20
+      - name: route-wide
+        selector: [route]
+        requests_per: { hour: 100000 }
+routes:
+  - name: api
+    service: echo
+    policies: [api-limits]
+    match:
+      path: { type: prefix, value: /api }
+    action:
+      type: proxy
+```
+
+**Selector semantics.** All listed selectors are joined into ONE
+counter key, which decides whether buckets are shared or independent:
+
+- `selector: [ip]` — one bucket per client IP. Attached at a service,
+  this is a per-client budget shared across every route of the service.
+- `selector: [route]` — ONE bucket for the whole route: every client
+  draws from the same budget (a global cap on the route).
+- `selector: [ip, route]` — one bucket per (client IP, route) pair:
+  each client gets an independent budget per route.
+- `credential` falls back to the client IP until authentication
+  identifies consumers, so anonymous traffic limits per client rather
+  than sharing one global "anonymous" bucket. `selector: [credential,
+  route]` becomes per-(client, route) until then.
+
+**Burst and sustained rate.** Windows are GCRA buckets: `requests_per`
+is the sustained replenishment rate and `burst` is the bucket size. A
+window of `s: 10` with `burst: 20` admits 20 rapid requests up front
+(the burst), then sustains 10 r/s; traffic above the sustained rate
+starts drawing 429s once the bucket empties. With the default burst
+(= the window's request count) the very first window can admit up to
+`burst + replenished` requests, the standard GCRA shape.
+
+**Stacked windows.** Setting several windows in one rule (`s` AND
+`minute` AND `hour`) stacks them: a request is admitted only if EVERY
+window allows it — 10 r/s AND 600 r/min means a client can spend the
+minute budget no faster than 10 r/s. Windows are evaluated
+shortest-first and evaluation stops at the first denial, so a request
+rejected by the hourly window has still spent its second-window token
+— slightly stricter than an atomic all-windows check, never more
+permissive, and the waste replenishes with the fastest window.
+
+**429 contract.** A request over the limit is answered `429` with body
+`rate limit exceeded` and these headers from the BINDING constraint
+(the window that denied; on success, the window with the least
+remaining budget):
+
+- `Retry-After`: whole seconds until the next conforming retry,
+  rounded up, minimum 1.
+- `X-RateLimit-Limit`: the binding window's burst size.
+- `X-RateLimit-Remaining`: budget left in the binding window
+  (`0` on a 429).
+- `X-RateLimit-Reset`: Unix epoch seconds of the binding window's
+  estimated full replenishment.
+
+Admitted requests under a matched policy carry the same three
+`X-RateLimit-*` headers on their response (including streaming proxy
+responses and `respond`/`redirect` actions); requests no policy
+matched carry none.
+
+**Reload caveat.** Rate-limit state lives inside the config
+generation: every config reload rebuilds the engine and RESETS all
+buckets — a reload is a fresh budget for everyone.
+
+**Legacy field.** A policy's older `rate_limit` field
+(`{requests, window_seconds}`) still applies and compiles to one rule
+with `selector: [route]`, a single window of `requests` per
+`window_seconds`, and `burst = requests`. Both fields may be set on
+one policy; both apply. Use `rate_limits` for new configs.
+
+
 
 ### TLS
 

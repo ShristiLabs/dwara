@@ -21,6 +21,9 @@ allow = [
   # webpki-roots (upstream TLS trust store, DW-008) ships the Mozilla root
   # set under CDLA-Permissive-2.0: permissive data license, not code copyleft.
   "CDLA-Permissive-2.0",
+  # foldhash (hasher pulled in by governor's keyed state, DW-017) is
+  # Zlib-licensed: short permissive MIT-style license, not copyleft.
+  "Zlib",
 ]
 
 [bans]

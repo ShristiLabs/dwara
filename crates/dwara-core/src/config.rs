@@ -855,8 +855,69 @@ pub struct Policy {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimit>,
+    /// Stacked GCRA rate-limit rules (DW-017). Each rule stacks one or
+    /// more windows (e.g. `s` AND `hour`); a request is admitted only if
+    /// EVERY window of EVERY applicable rule allows it. The legacy
+    /// single-window `rate_limit` field above still applies when set (see
+    /// its mapping in the rate-limiter module docs); use `rate_limits`
+    /// for new configs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<RateLimitRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
+}
+
+/// One rate-limit rule (DW-017): a key selector plus one or more stacked
+/// windows. `selector` names the request attributes that form the
+/// counter key (all listed attributes are joined into ONE key, so
+/// `[ip, route]` limits each (client IP, route) pair independently);
+/// `requests_per` carries the sustained rates per window (at least one
+/// window must be present); `burst` is the bucket size (defaults to the
+/// window's request count).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitRule {
+    /// Optional label (documentation only; not part of the key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Key components: `ip`, `credential`, and/or `route` (at least one;
+    /// order does not matter). `credential` falls back to the client IP
+    /// until authentication (DW-019) identifies consumers.
+    pub selector: Vec<RateLimitSelector>,
+    pub requests_per: RateRequestsPer,
+    /// Bucket size (burst capacity); must be >= 1 when present. Defaults
+    /// to the window's request count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+}
+
+/// One attribute of a rate-limit key (DW-017).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RateLimitSelector {
+    /// The direct connection peer (the same IP used for X-Real-IP).
+    Ip,
+    /// The authenticated consumer; until DW-019 this falls back to `ip`.
+    Credential,
+    /// The matched route's name.
+    Route,
+}
+
+/// Sustained rates per window (DW-017). At least one field must be set
+/// and every set field must be > 0; each set field becomes one stacked
+/// GCRA cell (a request must satisfy ALL set windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RateRequestsPer {
+    /// Requests per second.
+    #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
+    pub per_second: Option<u32>,
+    /// Requests per minute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minute: Option<u32>,
+    /// Requests per hour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hour: Option<u32>,
 }
 
 /// Local GCRA-style rate limit.

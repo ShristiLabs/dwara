@@ -550,6 +550,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 requests: 0,
                 window_seconds: 0,
             }),
+            rate_limits: vec![],
             timeouts: None,
         }],
         max_concurrent_requests: None,

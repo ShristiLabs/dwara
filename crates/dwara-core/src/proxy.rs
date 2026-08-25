@@ -67,6 +67,36 @@
 //! are off). Every retry is charged against the upstream's rolling-window
 //! retry budget; exhaustion fails requests through to the client.
 //!
+//! Local rate limiting (DW-017): after route resolution (and its
+//! criteria checks) but BEFORE cap admission, the request runs through
+//! the rate-limit engine (`RateLimitEngine`, built from the generation's
+//! policies). Ordering rationale: rejecting early with a 429 is the
+//! cheapest thing the gateway can do with a request, so it precedes the
+//! more expensive admission layers; a 429 is emitted before any permit is
+//! acquired, so rate-limited requests never hold a cap slot (though the
+//! connection itself is held for the length of the response — accepted).
+//! A denied request answers 429 with `Retry-After` (whole seconds,
+//! rounded up, minimum 1) and `X-RateLimit-Limit` / `-Remaining` /
+//! `-Reset` headers from the BINDING constraint (the window that denied;
+//! see the rate_limiter module docs for stacked-window semantics).
+//! Admitted requests whose policies matched carry the same three
+//! `X-RateLimit-*` headers on their final response (only when a policy
+//! actually applied — a no-match request carries no rate headers).
+//! `X-RateLimit-Reset` is Unix epoch seconds of the binding window's
+//! estimated full replenishment. Policy resolution follows the frozen
+//! precedence chain consumer > route > service > listener > global; the
+//! consumer link goes live with authN (DW-019), listener/global links
+//! with their (future) config attachment points — today route- and
+//! service-attached policies apply. When several rules deny, Retry-After
+//! is the maximum wait across denying rules while the Limit/Remaining
+//! headers come from the first binding one (see the rate_limiter module
+//! docs for multi-rule denial semantics). Known gap: because route
+//! resolution precedes the rate check, 404/unrouted requests bypass
+//! rate limiting entirely; the gap closes when listener/global policy
+//! attachment gets its config fields. When rate headers are applied the
+//! GATEWAY is the source of truth for `X-RateLimit-*`: any upstream
+//! values are silently replaced.
+//!
 //! Load shedding by priority (DW-016): the gateway concurrency cap admits
 //! requests ROUTE-AWARE — route resolution happens BEFORE cap admission
 //! (so the request's priority class is known; 404s therefore never consume
@@ -137,6 +167,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::config::{
     Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
+use crate::extensions::rate_limiter::{RateLimitEngine, RateLimitOutcome};
 use crate::retries::RetryParams;
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
@@ -150,6 +181,9 @@ pub type ProxyBody = Either<Full<Bytes>, UpstreamBody>;
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+const X_RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
+const X_RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
+const X_RATELIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit-reset");
 
 /// The default priority class (DW-016): requests on routes without an
 /// explicit `priority` shed and are shed as class 5.
@@ -242,6 +276,12 @@ pub struct DataPlane {
     /// Per-priority admission/shed counters (DW-016). Lives on the
     /// dataplane (not the generation) so reloads never reset them.
     priority_counters: PriorityCounters,
+    /// Rate-limit engine (DW-017), rebuilt on every generation swap.
+    /// Governor's GCRA state lives inside it, so a reload resets all
+    /// rate-limit buckets — accepted and documented: reloads are rare,
+    /// and coupling buckets to the (rule-shaped) generation avoids
+    /// lifetime questions when rules change or disappear.
+    rate_limits: ArcSwap<RateLimitEngine>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -307,10 +347,12 @@ impl DataPlane {
         let snapshot = state.snapshot();
         let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
         let global_cap = global_cap_of(snapshot.gateway());
+        let rate_limits = RateLimitEngine::compile(snapshot.gateway());
         Arc::new(DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
+            rate_limits: ArcSwap::from_pointee(rate_limits),
             state,
         })
     }
@@ -329,6 +371,8 @@ impl DataPlane {
         ));
         self.global_cap
             .store(Arc::new(global_cap_of(snapshot.gateway())));
+        self.rate_limits
+            .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
     }
@@ -419,6 +463,43 @@ where
         return simple(StatusCode::NOT_FOUND, "no route");
     }
 
+    // Local rate limiting (DW-017): BEFORE cap admission — a 429 is the
+    // cheapest rejection the gateway can emit, so it precedes the permit
+    // acquisition below (rate-limited requests never hold a cap slot).
+    // Policy resolution: consumer (DW-019) > route > service; all
+    // applicable rules AND together. The `credential` selector falls
+    // back to the peer IP until authN identifies consumers.
+    let service = gateway.services.iter().find(|s| s.name == route.service);
+    let service_policies: &[String] = service.map(|s| s.policies.as_slice()).unwrap_or(&[]);
+    let rate_headers = {
+        let engine = dp.rate_limits.load_full();
+        if engine.is_empty() {
+            None
+        } else {
+            let ctx = crate::extensions::rate_limiter::RateLimitKeyContext {
+                peer,
+                consumer: None, // DW-019 seam: authN fills this in
+                route: &route.name,
+            };
+            match engine.check(&ctx, &route.policies, service_policies) {
+                RateLimitOutcome::Denied {
+                    limit,
+                    remaining,
+                    reset_epoch_s,
+                    retry_after_s,
+                } => {
+                    return rate_limited(limit, remaining, reset_epoch_s, retry_after_s);
+                }
+                RateLimitOutcome::Allowed {
+                    limit,
+                    remaining,
+                    reset_epoch_s,
+                } => Some((limit, remaining, reset_epoch_s)),
+                RateLimitOutcome::NotLimited => None,
+            }
+        }
+    };
+
     // Gateway concurrency cap with priority-aware load shedding
     // (DW-015 + DW-016). Admission is two-tier: every request tries the
     // general allowance; a request at or above HIGH_PRIORITY may then try
@@ -469,7 +550,7 @@ where
         }
     };
 
-    match &route.action {
+    let mut resp = match &route.action {
         RouteAction::Proxy { .. } => {
             proxy_request(&gen, peer, req, route, idx, &params, &mut global_permit).await
         }
@@ -490,7 +571,55 @@ where
             body,
             headers,
         } => respond(*status, body.as_deref(), headers),
+    };
+    // Admitted requests carry the binding constraint's rate headers (only
+    // when a policy actually matched — see DW-017 module docs). Applied
+    // after the action so every action (including streaming proxy bodies
+    // and 101 upgrades) reports identically.
+    if let Some((limit, remaining, reset_epoch_s)) = rate_headers {
+        apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
     }
+    resp
+}
+
+/// The 429 response for a denied rate limit (DW-017): `Retry-After` in
+/// whole seconds (already rounded up, minimum 1) plus the binding
+/// window's `X-RateLimit-*` headers.
+fn rate_limited(
+    limit: u32,
+    remaining: u32,
+    reset_epoch_s: u64,
+    retry_after_s: u32,
+) -> Response<ProxyBody> {
+    let mut builder = Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(hyper::header::RETRY_AFTER, retry_after_s.max(1).to_string());
+    builder = builder
+        .header(X_RATELIMIT_LIMIT, limit.to_string())
+        .header(X_RATELIMIT_REMAINING, remaining.to_string())
+        .header(X_RATELIMIT_RESET, reset_epoch_s.to_string());
+    builder
+        .body(Either::Left(Full::new(Bytes::from("rate limit exceeded"))))
+        .expect("static 429 response is valid")
+}
+
+/// Stamp the gateway's rate headers onto a response. Uses `insert`, so
+/// any upstream-sent `X-RateLimit-*` values are silently REPLACED: the
+/// gateway is the source of truth for rate accounting its clients see.
+fn apply_rate_headers(headers: &mut HeaderMap, limit: u32, remaining: u32, reset_epoch_s: u64) {
+    headers.insert(
+        X_RATELIMIT_LIMIT,
+        HeaderValue::from_str(&limit.to_string()).expect("u32 header"),
+    );
+    headers.insert(
+        X_RATELIMIT_REMAINING,
+        HeaderValue::from_str(&remaining.to_string()).expect("u32 header"),
+    );
+    headers.insert(
+        X_RATELIMIT_RESET,
+        HeaderValue::from_str(&reset_epoch_s.to_string()).expect("u64 header"),
+    );
 }
 
 /// Apply the route's non-path criteria. All criteria are AND-ed. Empty

@@ -168,11 +168,13 @@ fn validation_rejects_duplicate_policy_name() {
         name: "p".into(),
         rate_limit: None,
         timeouts: None,
+        rate_limits: vec![],
     });
     gw.policies.push(dwara_core::config::Policy {
         name: "p".into(),
         rate_limit: None,
         timeouts: None,
+        rate_limits: vec![],
     });
     assert_single_issue(&gw, "policy", "p", "name");
 }
@@ -868,6 +870,7 @@ fn policy_gateway(rl: RateLimit) -> Gateway {
         name: "p".into(),
         rate_limit: Some(rl),
         timeouts: None,
+        rate_limits: vec![],
     });
     gw
 }

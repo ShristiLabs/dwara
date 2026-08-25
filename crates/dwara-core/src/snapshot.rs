@@ -917,6 +917,48 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        for (i, rule) in p.rate_limits.iter().enumerate() {
+            let field = format!("rate_limits[{i}]");
+            if rule.selector.is_empty() {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    &format!("{field}.selector"),
+                    "rate limit selector must name at least one key component",
+                ));
+            }
+            let rp = &rule.requests_per;
+            if rp.per_second.is_none() && rp.minute.is_none() && rp.hour.is_none() {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    &format!("{field}.requests_per"),
+                    "rate limit rule must set at least one window (s, minute, hour)",
+                ));
+            }
+            for (window, value) in [
+                ("s", rp.per_second),
+                ("minute", rp.minute),
+                ("hour", rp.hour),
+            ] {
+                if value == Some(0) {
+                    issues.push(issue(
+                        "policy",
+                        &p.name,
+                        &format!("{field}.requests_per.{window}"),
+                        "rate limit window rate must be > 0 (0 would block every request)",
+                    ));
+                }
+            }
+            if rule.burst == Some(0) {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    &format!("{field}.burst"),
+                    "rate limit burst must be >= 1 when present (omit for the default)",
+                ));
+            }
+        }
     }
 
     issues
@@ -1533,6 +1575,82 @@ mod tests {
             headers: [("bad header".to_string(), "v".to_string())].into(),
         };
         assert!(validate(&gw).iter().any(|i| i.field == "action.headers"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_rate_limit_rules() {
+        use super::super::config::{RateLimitRule, RateLimitSelector, RateRequestsPer};
+        fn rule(
+            selector: Vec<RateLimitSelector>,
+            requests_per: RateRequestsPer,
+            burst: Option<u32>,
+        ) -> RateLimitRule {
+            RateLimitRule {
+                name: None,
+                selector,
+                requests_per,
+                burst,
+            }
+        }
+        let full = || RateRequestsPer {
+            per_second: Some(10),
+            minute: Some(100),
+            hour: Some(1_000),
+        };
+        fn with_policy(mut gw: super::super::config::Gateway) -> super::super::config::Gateway {
+            gw.policies = vec![super::super::config::Policy {
+                name: "p".into(),
+                rate_limit: None,
+                rate_limits: vec![],
+                timeouts: None,
+            }];
+            gw
+        }
+        // Baseline: a well-formed rule adds no issues.
+        let mut gw = with_policy(good_gateway());
+        gw.policies[0].rate_limits = vec![rule(vec![RateLimitSelector::Ip], full(), Some(20))];
+        assert!(!validate(&gw)
+            .iter()
+            .any(|i| i.field.contains("rate_limits")));
+
+        // Empty selector.
+        let mut gw = with_policy(good_gateway());
+        gw.policies[0].rate_limits = vec![rule(vec![], full(), None)];
+        assert!(validate(&gw)
+            .iter()
+            .any(|i| i.field == "rate_limits[0].selector"));
+
+        // No window at all.
+        let mut gw = with_policy(good_gateway());
+        gw.policies[0].rate_limits = vec![rule(
+            vec![RateLimitSelector::Route],
+            RateRequestsPer::default(),
+            None,
+        )];
+        assert!(validate(&gw)
+            .iter()
+            .any(|i| i.field == "rate_limits[0].requests_per"));
+
+        // A zero window rate.
+        let mut gw = with_policy(good_gateway());
+        gw.policies[0].rate_limits = vec![rule(
+            vec![RateLimitSelector::Route],
+            RateRequestsPer {
+                per_second: Some(0),
+                ..RateRequestsPer::default()
+            },
+            None,
+        )];
+        assert!(validate(&gw)
+            .iter()
+            .any(|i| i.field == "rate_limits[0].requests_per.s"));
+
+        // Burst of zero.
+        let mut gw = with_policy(good_gateway());
+        gw.policies[0].rate_limits = vec![rule(vec![RateLimitSelector::Ip], full(), Some(0))];
+        assert!(validate(&gw)
+            .iter()
+            .any(|i| i.field == "rate_limits[0].burst"));
     }
 
     #[test]

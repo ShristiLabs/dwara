@@ -13,6 +13,7 @@ serde_path_to_error = { workspace = true }
 serde_yaml_ng = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
+governor = { workspace = true }
 matchit = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
