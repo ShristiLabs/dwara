@@ -8,8 +8,12 @@ Status: pre-alpha. The workspace scaffolds the gateway; proxying arrives in M1.
 
 Requires Rust 1.94 (pinned in `rust-toolchain.toml`).
 
+The binary requires a config file at startup: it exits with code 1,
+printing every validation issue, if the config is missing or invalid. A
+sample config ships in the `dwara-bin` crate, so from the repo root:
+
 ```sh
-cargo run -p dwara-bin
+DWARA_CONFIG=crates/dwara-bin/dwara.yaml cargo run -p dwara-bin
 ```
 
 Starts a hello listener on `http://127.0.0.1:8080` (proxying arrives in
@@ -21,6 +25,13 @@ curl http://127.0.0.1:8080
 ```
 
 Stop it with Ctrl-C.
+
+Environment variables (all optional):
+
+- `DWARA_CONFIG`: path to the gateway YAML config, default `./dwara.yaml`.
+- `DWARA_BIND`: listen address, default `127.0.0.1:8080`.
+- `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on
+  SIGTERM/SIGINT, default 10.
 
 ## Configuration
 
@@ -76,6 +87,21 @@ Route paths match one of three ways: `exact` (a full template, path
 parameters like `/users/{id}` supported), `regex`, or `prefix`. Lookup
 precedence is exact, then regex (first declared pattern wins), then
 longest prefix.
+
+## Operations
+
+Reload: the config file is watched (the file's directory, so atomic
+write-temp-plus-rename replacement is observed; events are debounced)
+and `SIGHUP` also triggers a reload. A reload re-reads the file,
+validates, and publishes a new generation atomically. A rejected
+reload (unreadable, parse, or validation failure) logs every issue and
+keeps serving the running generation — the process never exits on a
+bad reload. If the file watch cannot start, SIGHUP reload still works.
+
+Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
+(including ones still in the kernel accept backlog) within
+`DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
+past the budget are force-closed.
 
 ## Crates
 

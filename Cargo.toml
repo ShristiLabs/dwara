@@ -16,7 +16,7 @@ rust-version = "1.94"
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "http1"] }
 http-body-util = "0.1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +27,7 @@ async-trait = "0.1"
 arc-swap = "1"
 matchit = "0.9"
 regex = "1"
+notify = "8"
 
 [profile.release]
 lto = true

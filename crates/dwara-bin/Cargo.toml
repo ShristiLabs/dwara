@@ -12,6 +12,7 @@ tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+notify = { workspace = true }
 
 [[bin]]
 name = "dwara"

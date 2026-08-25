@@ -1,0 +1,556 @@
+//! Boundary-condition tests for the DW-006 reload and shutdown paths that
+//! the load-bearing e2e (`reload_shutdown.rs`) does not exercise:
+//!
+//! - watcher edge cases: config DELETED, config replaced via atomic
+//!   rename (write tmp + rename), config truncated to empty mid-write
+//!   (empty doc is a valid empty Gateway per DW-003 — pin what happens),
+//! - debounce correctness: a burst of writes inside the 250 ms window
+//!   must coalesce to ONE reload,
+//! - shutdown edge: a half-open connection (partial request, held) with
+//!   `DWARA_SHUTDOWN_TIMEOUT_SECS=1` must not prevent exit,
+//! - startup matrix: no config anywhere, config path pointing at a
+//!   directory, and a relative config path,
+//! - single keepalive connection issuing sequential requests across a
+//!   reload (connection reuse under generation swap).
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+struct ServerGuard(Child);
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+    listener.local_addr().expect("no local addr").port()
+}
+
+fn unique_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "dwara-dw006-edges-{}-{}-{tag}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn config_v1() -> String {
+    "\
+listeners:
+  - name: main
+    address: 127.0.0.1
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+      type: proxy
+services:
+  - name: echo
+    upstream: echo-upstream
+upstreams:
+  - name: echo-upstream
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000
+"
+    .to_string()
+}
+
+fn config_v2() -> String {
+    config_v1().replace("value: /v1", "value: /v2")
+}
+
+struct Output {
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+}
+
+impl Output {
+    fn read_all(&mut self) -> String {
+        let mut out = String::new();
+        if let Some(mut s) = self.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+        let mut err = String::new();
+        if let Some(mut s) = self.stderr.take() {
+            let _ = s.read_to_string(&mut err);
+        }
+        out.push_str(&err);
+        out
+    }
+}
+
+fn spawn_server(
+    addr: &str,
+    config: &PathBuf,
+    extra_env: &[(&str, &str)],
+    cwd: Option<&PathBuf>,
+) -> (ServerGuard, Output) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_BIND", addr)
+        .env("DWARA_CONFIG", config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let child = cmd.spawn().expect("failed to spawn dwara binary");
+    let mut guard = ServerGuard(child);
+    let out = Output {
+        stdout: guard.0.stdout.take(),
+        stderr: guard.0.stderr.take(),
+    };
+    (guard, out)
+}
+
+fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
+    while Instant::now() < deadline {
+        if let Ok(mut s) = TcpStream::connect(addr) {
+            if one_shot_request(&mut s) {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// One GET with `Connection: close`; true iff HTTP 200 and body "dwara".
+fn one_shot_request(stream: &mut TcpStream) -> bool {
+    if stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if stream.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    (text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200"))
+        && text.ends_with("dwara")
+}
+
+/// One keepalive GET (no `Connection: close`): read headers until the
+/// blank line, then exactly Content-Length body bytes. The response body
+/// is a fixed "dwara" (5 bytes).
+fn keepalive_request(stream: &mut TcpStream) -> bool {
+    if stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut header = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => return false,
+            Ok(_) => {
+                header.push(byte[0]);
+                if header.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    let head = String::from_utf8_lossy(&header);
+    if !(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")) {
+        return false;
+    }
+    let mut body = [0u8; 5];
+    stream.read_exact(&mut body).is_ok() && &body == b"dwara"
+}
+
+fn kill_signal(pid: u32, sig: &str) {
+    let status = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("failed to run kill");
+    assert!(status.success(), "kill -{sig} {pid} failed");
+}
+
+fn wait_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(status) => return status,
+            None if Instant::now() > deadline => {
+                panic!("dwara did not exit within {:?}", timeout)
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.match_indices(needle).count()
+}
+
+#[test]
+fn config_deleted_while_running_keeps_serving_last_snapshot() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("deleted");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    std::fs::remove_file(&config).unwrap();
+    // Generous margin for watcher delivery + 250 ms debounce.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Running snapshot is kept: still serving.
+    let mut stream = TcpStream::connect(&addr).expect("connect after config deletion");
+    assert!(
+        one_shot_request(&mut stream),
+        "server must keep serving after config deletion"
+    );
+
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    assert!(
+        text.contains("config reload failed to read source"),
+        "expected read-failure log for deleted config in:\n{text}"
+    );
+    assert!(
+        text.contains("keeping running generation"),
+        "expected keep-running log in:\n{text}"
+    );
+    assert_eq!(
+        count_occurrences(&text, "config reloaded"),
+        0,
+        "a deleted config must not produce a successful reload:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_replaced_via_atomic_rename_triggers_reload() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("rename");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    // Atomic-save pattern: write a sibling temp file, rename over the
+    // config. The watched inode is never mutated; only the directory
+    // entry changes — the directory watch must observe it.
+    let tmp = dir.join("dwara.yaml.tmp");
+    std::fs::write(&tmp, config_v2()).unwrap();
+    std::fs::rename(&tmp, &config).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let mut stream = TcpStream::connect(&addr).expect("connect after rename");
+    assert!(
+        one_shot_request(&mut stream),
+        "server must keep serving after atomic config replace"
+    );
+
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    assert!(
+        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        "atomic rename replace must trigger a file-watch reload:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
+    // Pins the implemented behavior: an empty document is a valid empty
+    // Gateway (DW-003 serde defaults), so truncating the config
+    // mid-write advances the generation to an empty config rather than
+    // rejecting the reload. Documented as a finding for the reviewer —
+    // a torn write would transiently publish an empty gateway.
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("empty");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    std::fs::write(&config, "").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let mut stream = TcpStream::connect(&addr).expect("connect after empty reload");
+    assert!(
+        one_shot_request(&mut stream),
+        "server must keep serving after empty-config reload"
+    );
+
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    assert!(
+        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        "empty doc must reload (valid empty Gateway) in:\n{text}"
+    );
+    assert!(
+        text.contains("routes=0"),
+        "empty config reload must report zero routes:\n{text}"
+    );
+    assert!(
+        !text.contains("config reload rejected"),
+        "empty doc is valid per DW-003; rejection would be a contract change:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rapid_write_burst_within_debounce_window_coalesces_to_one_reload() {
+    // Contract: the reload driver waits out the 250 ms debounce window
+    // from the FIRST event, drains the queue, then reloads exactly once.
+    // Three writes at ~0/50/100 ms all land inside the window (>=100 ms
+    // of slack against event-delivery latency), so exactly one
+    // "config reloaded (file-watch)" line must appear.
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("debounce");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    for _ in 0..3 {
+        std::fs::write(&config, config_v2()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Wait well past the debounce window before shutting down so all
+    // pending events have been drained.
+    std::thread::sleep(Duration::from_millis(2000));
+
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    let reloads = count_occurrences(&text, "config reloaded (file-watch)");
+    assert_eq!(
+        reloads, 1,
+        "3 writes inside the debounce window must coalesce to exactly 1 reload, got {reloads}:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shutdown_with_half_open_connection_exits_within_short_timeout() {
+    // A slow CLIENT: connect, send a partial request (no terminating
+    // blank line), and hold the connection open. With a 1 s shutdown
+    // budget the process must still exit (forced if necessary), quickly
+    // and with its documented exit code 0.
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("halfopen");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(
+        &addr,
+        &config,
+        &[("DWARA_SHUTDOWN_TIMEOUT_SECS", "1")],
+        None,
+    );
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    let mut held = TcpStream::connect(&addr).expect("connect for half-open request");
+    held.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n") // no final CRLF
+        .unwrap();
+    held.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    std::thread::sleep(Duration::from_millis(200));
+
+    kill_signal(guard.0.id(), "TERM");
+    let started = Instant::now();
+    let status = wait_exit(&mut guard.0, Duration::from_secs(10));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "process must exit promptly (well under 5 s) despite a half-open connection; took {elapsed:?}"
+    );
+    assert!(
+        status.success(),
+        "documented forced-exit path uses exit code 0, got {status}"
+    );
+    drop(held);
+    let text = out.read_all();
+    assert!(
+        text.contains("forcing exit"),
+        "a held half-open connection should hit the timeout-forced-exit log:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn no_config_anywhere_in_clean_cwd_exits_nonzero() {
+    // No DWARA_CONFIG and no ./dwara.yaml in the process cwd: startup
+    // must fail with exit 1 (verified placement of the default-path
+    // failure — the cwd is forced to an empty temp dir because the
+    // repo's crates/dwara-bin contains a sample dwara.yaml).
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("nocfg");
+    let child = Command::new(env!("CARGO_BIN_EXE_dwara"))
+        .env("DWARA_BIND", &addr)
+        .env_remove("DWARA_CONFIG")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn dwara binary");
+    let mut guard = ServerGuard(child);
+    let mut out = Output {
+        stdout: guard.0.stdout.take(),
+        stderr: guard.0.stderr.take(),
+    };
+    let status = wait_exit(&mut guard.0, Duration::from_secs(10));
+    assert!(
+        !status.success(),
+        "missing default config must exit non-zero, got {status}"
+    );
+    let text = out.read_all();
+    assert!(
+        text.contains("startup config load failed"),
+        "missing startup log in:\n{text}"
+    );
+    assert!(
+        text.contains("dwara.yaml"),
+        "failure log should name the default config path in:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_path_pointing_at_directory_exits_nonzero() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("dircfg");
+    let (mut guard, mut out) = spawn_server(&addr, &dir, &[], None);
+    let status = wait_exit(&mut guard.0, Duration::from_secs(10));
+    assert!(
+        !status.success(),
+        "DWARA_CONFIG pointing at a directory must exit non-zero, got {status}"
+    );
+    let text = out.read_all();
+    assert!(
+        text.contains("startup config load failed"),
+        "expected startup load failure for directory path in:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn relative_config_path_boots_and_serves() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("relcfg");
+    std::fs::write(dir.join("dwara.yaml"), config_v1()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_dwara"))
+        .env("DWARA_BIND", &addr)
+        .env("DWARA_CONFIG", "dwara.yaml") // relative to cwd
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn dwara binary");
+    let mut guard = ServerGuard(child);
+    let _out = Output {
+        stdout: guard.0.stdout.take(),
+        stderr: guard.0.stderr.take(),
+    };
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara must boot with a relative config path (cwd = temp dir)"
+    );
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn single_keepalive_connection_survives_reload() {
+    // The single-connection case the 4-thread e2e can mask: ONE
+    // keepalive connection issuing sequential requests across a config
+    // generation swap, with zero failures and no connection reset.
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("keepalive");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    let mut stream = TcpStream::connect(&addr).expect("keepalive connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut served = 0usize;
+    let mut failed = 0usize;
+    for i in 0..200 {
+        if keepalive_request(&mut stream) {
+            served += 1;
+        } else {
+            failed += 1;
+        }
+        // Trigger the reload partway through the keepalive burst.
+        if i == 50 {
+            std::fs::write(&config, config_v2()).unwrap();
+        }
+    }
+    assert_eq!(
+        failed, 0,
+        "keepalive connection must survive the reload ({served} served)"
+    );
+    assert!(served > 100, "expected a full burst, served {served}");
+
+    // Let the debounce window elapse before signaling shutdown: the
+    // reload driver is aborted on SIGTERM, so a pending (debouncing)
+    // reload would legitimately never fire.
+    std::thread::sleep(Duration::from_millis(1500));
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    assert!(
+        text.contains("config reloaded (file-watch): generation 1 -> 2"),
+        "expected the mid-burst write to reload:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

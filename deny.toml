@@ -15,6 +15,9 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
+  # notify (config file watcher) is CC0-1.0: public-domain dedication,
+  # acceptable as a dependency license; dwara's own code is Apache-2.0.
+  "CC0-1.0",
 ]
 
 [bans]
