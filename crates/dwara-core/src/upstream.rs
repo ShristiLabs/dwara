@@ -29,10 +29,13 @@
 //!   system roots for determinism in tests; system roots are a follow-up).
 //!   Private-CA upstreams work via [`UpstreamRegistry::with_root_certificates`].
 //!
-//! Documented v1 limitation (same family as TLS-passthrough routing):
-//! requests are sent to the FIRST endpoint of the upstream; load balancing
-//! across endpoints is DW-011. Config lifecycle: build a registry from a
-//! published snapshot; DW-009 rebuilds it on snapshot swap, mirroring how
+//! Load balancing (DW-011): every dispatch picks its endpoint through the
+//! upstream's [`crate::balance::UpstreamLb`] (smooth weighted round-robin,
+//! least-connections, random-2, or ketama ip-hash; slow-start ramps; hot
+//! endpoint-set swaps that carry per-address state). Config lifecycle:
+//! build a registry from a published snapshot; reloads rebuild it from the
+//! new snapshot while carrying balancer state (see
+//! [`UpstreamRegistry::from_snapshot_with_previous`]), mirroring how
 //! `TlsTermination` is reloaded.
 
 use std::collections::BTreeMap;
@@ -327,20 +330,22 @@ pub struct UpstreamHandle {
             Box<dyn std::error::Error + Send + Sync>,
         >,
     >,
-    endpoint: Option<crate::config::Endpoint>,
+    /// Load balancer over this upstream's endpoint set (DW-011); picks
+    /// the endpoint per dispatch and tracks in-flight counts.
+    lb: Arc<crate::balance::UpstreamLb>,
     scheme: &'static str,
     http2_only: bool,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
 /// parseable URI authority; `[::1]:8080` is.
-fn endpoint_authority(e: &crate::config::Endpoint) -> String {
-    let host = if e.address.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{}]", e.address)
+fn endpoint_authority(address: &str, port: u16) -> String {
+    let host = if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{address}]")
     } else {
-        e.address.clone()
+        address.to_string()
     };
-    format!("{host}:{}", e.port)
+    format!("{host}:{port}")
 }
 
 impl UpstreamHandle {
@@ -374,21 +379,38 @@ impl UpstreamHandle {
         self.scheme
     }
 
-    /// `address:port` of the endpoint requests are sent to (the authority
-    /// the dataplane rebuilds the `Host` header with). IPv6 literals are
-    /// bracketed (`[::1]:8080`) so the value is a valid authority both in a
-    /// URI and in a `Host` header. None when the upstream has no endpoints
-    /// (unvalidated construction only).
-    pub fn endpoint_authority(&self) -> Option<String> {
-        self.endpoint.as_ref().map(endpoint_authority)
+    /// This upstream's load balancer (endpoint set, algorithm, in-flight
+    /// counters). Exposed for the TLS-passthrough path (which picks an
+    /// endpoint the same way) and for tests.
+    pub fn lb(&self) -> &Arc<crate::balance::UpstreamLb> {
+        &self.lb
     }
 
-    /// Send a request through this upstream's pool. The request's URI is
-    /// rewritten to `scheme://<first-endpoint><path-and-query>`; headers
-    /// and body pass through untouched. The response body streams
-    /// (`Incoming`), so proxying (DW-009) can forward it without
-    /// buffering.
-    pub async fn send<B>(&self, mut req: Request<B>) -> Result<Response<Incoming>, UpstreamError>
+    /// Send a request through this upstream's pool without a hash key
+    /// (algorithms other than `ip_hash` ignore the key anyway).
+    pub async fn send<B>(&self, req: Request<B>) -> Result<Response<Incoming>, UpstreamError>
+    where
+        B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.send_with_hash_key(req, None).await
+    }
+
+    /// Send a request through this upstream's pool, dispatching via the
+    /// upstream's load balancer (DW-011). `hash_key` is the client IP as a
+    /// string (used by `ip_hash`; ignored by the other algorithms). The
+    /// picked endpoint's `address:port` becomes both the dialed URI's
+    /// authority and the outbound `Host` header (replacing whatever the
+    /// caller set); the path and query are preserved verbatim. The picked
+    /// endpoint's in-flight counter is held for the request/response-header
+    /// exchange (documented approximation: released when headers resolve,
+    /// not when the streaming body completes). The response body streams
+    /// (`Incoming`), so proxying (DW-009) can forward it without buffering.
+    pub async fn send_with_hash_key<B>(
+        &self,
+        mut req: Request<B>,
+        hash_key: Option<&str>,
+    ) -> Result<Response<Incoming>, UpstreamError>
     where
         B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -399,12 +421,27 @@ impl UpstreamHandle {
             .map(|pq| pq.as_str().to_string())
             .unwrap_or_else(|| "/".to_string());
         // Guard rather than dialing a fabricated address: empty endpoint
-        // lists are only possible via unvalidated construction.
-        let endpoint = self.endpoint.as_ref().ok_or(UpstreamError::NoEndpoints)?;
-        let uri: Uri = format!("{}://{}{}", self.scheme, endpoint_authority(endpoint), path)
+        // lists are only possible via unvalidated construction. The pick,
+        // endpoint resolution, and in-flight acquisition all run against
+        // ONE state snapshot (pick_for_dispatch), so a concurrent reload
+        // cannot detach the guard from the picked endpoint.
+        let dispatch = self
+            .lb
+            .pick_for_dispatch(hash_key)
+            .ok_or(UpstreamError::NoEndpoints)?;
+        let authority = endpoint_authority(&dispatch.address, dispatch.port);
+        // Held (inside `dispatch`) until the response (headers) resolves;
+        // see the doc comment.
+        let _dispatch = dispatch;
+        let uri: Uri = format!("{}://{}{}", self.scheme, authority, path)
             .parse::<Uri>()
             .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
         *req.uri_mut() = uri;
+        // The gateway, not the client, names the origin it dials: the
+        // picked endpoint's authority replaces any Host the caller set.
+        if let Ok(v) = hyper::header::HeaderValue::from_str(&authority) {
+            req.headers_mut().insert(hyper::header::HOST, v);
+        }
         // Normalize the HTTP version for the pool's protocol: an inbound h2
         // request proxied to an h1 upstream must be downgraded to 1.1 (and
         // vice versa); the pooled client speaks exactly one dialect.
@@ -447,7 +484,19 @@ fn effective_connect_timeout(u: &Upstream) -> Duration {
     )
 }
 
-fn build_handle(u: &Upstream, root_store: rustls::RootCertStore) -> Arc<UpstreamHandle> {
+fn effective_slow_start(u: &Upstream) -> Duration {
+    Duration::from_millis(
+        u.slow_start_ms
+            .unwrap_or(0)
+            .min(crate::balance::MAX_SLOW_START_MS),
+    )
+}
+
+fn build_handle(
+    u: &Upstream,
+    root_store: rustls::RootCertStore,
+    previous_lb: Option<&Arc<crate::balance::UpstreamLb>>,
+) -> Arc<UpstreamHandle> {
     let cap = effective_cap(u);
     let connect_timeout = effective_connect_timeout(u);
     let stats = Arc::new(UpstreamStats::default());
@@ -490,13 +539,26 @@ fn build_handle(u: &Upstream, root_store: rustls::RootCertStore) -> Arc<Upstream
     }
     builder.pool_timer(TokioTimer::new());
 
+    // Hot-swap: an existing balancer for this upstream name keeps its
+    // live state (in-flight counters, WRR phase, slow-start clocks) for
+    // unchanged endpoint addresses; a fresh one starts clean.
+    let lb = match previous_lb {
+        Some(prev) => {
+            prev.rebuild(&u.endpoints, u.load_balancer, effective_slow_start(u));
+            Arc::clone(prev)
+        }
+        None => {
+            crate::balance::UpstreamLb::new(&u.endpoints, u.load_balancer, effective_slow_start(u))
+        }
+    };
+
     Arc::new(UpstreamHandle {
         name: u.name.clone(),
         cap,
         connect_timeout,
         stats,
         client: builder.build(connector),
-        endpoint: u.endpoints.first().cloned(),
+        lb,
         scheme,
         http2_only,
     })
@@ -525,6 +587,17 @@ impl UpstreamRegistry {
             .expect("registry build without extra roots cannot fail")
     }
 
+    /// Build from a snapshot, carrying over per-upstream load-balancer
+    /// state from `previous` (in-flight counters, WRR phase, slow-start
+    /// clocks for unchanged endpoint addresses). This is the reload path:
+    /// weight and endpoint changes take effect without a restart, and
+    /// in-flight requests holding old handles are unaffected.
+    pub fn from_snapshot_with_previous(snapshot: &Snapshot, previous: &UpstreamRegistry) -> Self {
+        // No extra roots are supplied, so the build cannot fail.
+        Self::with_root_certificates_and_previous(snapshot, &[], Some(previous))
+            .expect("registry build without extra roots cannot fail")
+    }
+
     /// Build from a snapshot with EXTRA trusted root certificates (e.g. a
     /// private CA signing upstream certificates), added on top of the
     /// webpki roots. Fails if any extra root is malformed, so operators
@@ -533,6 +606,17 @@ impl UpstreamRegistry {
     pub fn with_root_certificates(
         snapshot: &Snapshot,
         extra_roots: &[CertificateDer<'_>],
+    ) -> Result<Self, UpstreamError> {
+        Self::with_root_certificates_and_previous(snapshot, extra_roots, None)
+    }
+
+    /// `with_root_certificates` with optional balancer-state carry-over
+    /// from a previous registry build (see
+    /// [`UpstreamRegistry::from_snapshot_with_previous`]).
+    pub fn with_root_certificates_and_previous(
+        snapshot: &Snapshot,
+        extra_roots: &[CertificateDer<'_>],
+        previous: Option<&UpstreamRegistry>,
     ) -> Result<Self, UpstreamError> {
         let mut roots = webpki_root_store();
         for c in extra_roots {
@@ -545,7 +629,12 @@ impl UpstreamRegistry {
                 .gateway()
                 .upstreams
                 .iter()
-                .map(|u| (u.name.clone(), build_handle(u, roots.clone())))
+                .map(|u| {
+                    let prev_lb = previous
+                        .and_then(|p| p.handles.get(&u.name))
+                        .map(|h| h.lb());
+                    (u.name.clone(), build_handle(u, roots.clone(), prev_lb))
+                })
                 .collect(),
         })
     }
@@ -609,6 +698,7 @@ mod tests {
                 weight: 1,
             }],
             connection_cap: cap,
+            slow_start_ms: None,
             timeouts: connect_ms.map(|connect_ms| Timeouts {
                 connect_ms: Some(connect_ms),
                 read_ms: None,
@@ -925,6 +1015,7 @@ mod tests {
                     weight: 1,
                 }],
                 connection_cap: Some(0),
+                slow_start_ms: None,
                 timeouts: Some(Timeouts {
                     connect_ms: Some(0),
                     read_ms: Some(0),
@@ -965,9 +1056,10 @@ mod tests {
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![],
             connection_cap: None,
+            slow_start_ms: None,
             timeouts: None,
         };
-        let handle = build_handle(&up, webpki_root_store());
+        let handle = build_handle(&up, webpki_root_store(), None);
         assert!(matches!(
             handle.send(get_request("/x")).await,
             Err(UpstreamError::NoEndpoints)

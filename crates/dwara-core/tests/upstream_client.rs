@@ -64,6 +64,7 @@ fn upstream(
             weight: 1,
         }],
         connection_cap: cap,
+        slow_start_ms: None,
         timeouts: connect_ms.map(|connect_ms| Timeouts {
             connect_ms: Some(connect_ms),
             read_ms: None,
@@ -663,6 +664,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                     weight: 1,
                 }],
                 connection_cap: Some(8),
+                slow_start_ms: None,
                 timeouts: Some(timeouts),
             }],
             consumers: vec![],
@@ -690,6 +692,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
                 weight: 1,
             }],
             connection_cap: Some(1),
+            slow_start_ms: None,
             timeouts: Some(Timeouts {
                 connect_ms: Some(1),
                 read_ms: Some(1),

@@ -106,6 +106,7 @@ fn inject_default_services(gateway: &mut Gateway) {
             weight: 1,
         }],
         connection_cap: None,
+        slow_start_ms: None,
         timeouts: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {

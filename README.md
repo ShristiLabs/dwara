@@ -3,8 +3,9 @@
 A high-performance API gateway written in Rust.
 
 Status: pre-alpha. The core reverse-proxy dataplane works — routing,
-streaming proxying, TLS termination/passthrough, and hot config reload —
-with load balancing and traffic policy still to come in M1.
+streaming proxying, TLS termination/passthrough, upstream load
+balancing, and hot config reload — with traffic policy still to come in
+M1.
 
 ## Quickstart
 
@@ -253,8 +254,11 @@ trusted_proxies:
 
 ### Upstreams
 
-Each upstream has its own connection pool. Optional tuning fields:
+Each upstream is a load-balanced pool of endpoints with its own
+connection pool. Fields:
 
+- `load_balancer`: the pick algorithm, one of `round_robin` (default),
+  `least_requests`, `random`, or `ip_hash` — see below.
 - `protocol`: `http1` (plaintext, default), `https` (TLS, ALPN
   `http/1.1`), or `http2` (TLS, ALPN `h2`, HTTP/2 only).
 - `connection_cap`: maximum concurrent outbound connections to the
@@ -262,26 +266,62 @@ Each upstream has its own connection pool. Optional tuning fields:
   for a slot rather than fail. Defaults to 64.
 - `timeouts.connect_ms`: connect timeout in milliseconds, covering the
   TCP connect plus, for TLS upstreams, the handshake. Defaults to 5000.
+- `slow_start_ms`: slow-start window in milliseconds; absent or 0
+  (default) disables the ramp. See below.
 
-For `https`/`http2` upstreams, server certificates are verified against
-the Mozilla (webpki) public CA root set. Zero values for
-`connection_cap` and the timeout fields are rejected by validation.
+Each endpoint carries a `weight` (default 1, must be > 0). For
+`https`/`http2` upstreams, server certificates are verified against the
+Mozilla (webpki) public CA root set. Zero values for `connection_cap`
+and the timeout fields are rejected by validation.
 
 ```yaml
 upstreams:
   - name: echo-upstream
+    load_balancer: round_robin
     protocol: https
     connection_cap: 32
+    slow_start_ms: 30000
     timeouts:
       connect_ms: 2000
     endpoints:
       - address: 10.0.0.5
         port: 8443
+        weight: 3
+      - address: 10.0.0.6
+        port: 8443
 ```
 
-Like passthrough routing, the upstream client sends requests to the
-FIRST endpoint of the upstream; load balancing across endpoints arrives
-later in M1.
+Load-balancing algorithms:
+
+- `round_robin` — smooth weighted round-robin (the nginx algorithm)
+  over per-endpoint weights: picks interleave deterministically in
+  proportion to weight, and over any full period (sum of weights) each
+  endpoint is picked exactly its weight many times.
+- `least_requests` — the endpoint with the fewest in-flight requests
+  wins; ties break to the first-declared endpoint. In-flight is counted
+  from dispatch until response headers resolve (long streaming bodies
+  count as one request).
+- `random` — power of two choices: two distinct endpoints are drawn at
+  random and the one with fewer in-flight requests wins.
+- `ip_hash` — consistent hashing (ketama) on the client's connection
+  IP: the same client IP maps to the same endpoint (sticky), vnode
+  count is proportional to endpoint weight, and adding or removing an
+  endpoint remaps only about 1/(n+1) of keys. On the TLS-passthrough
+  path there is no per-request IP key, so `ip_hash` degrades to smooth
+  weighted round-robin there.
+
+Slow start (`slow_start_ms`, at most 600000): an endpoint entering the
+set ramps its effective weight from a floor of 1 up to its configured
+weight over the window, measured from when it entered the set. The ramp
+applies to `round_robin`; `least_requests` needs no ramp (it already
+balances on observed load) and `ip_hash` ring weights stay fixed to
+preserve key stability.
+
+Hot swap: a config reload swaps the endpoint set, weights, and
+algorithm without a restart. Endpoints whose `address:port` is unchanged
+keep their in-flight counters, round-robin phase, and slow-start clock;
+new addresses start fresh. Removed endpoints drop their state —
+re-adding one later is a fresh entry.
 
 ### TLS
 
@@ -341,10 +381,14 @@ upstreams:
     endpoints:
       - address: 10.0.0.5
         port: 8443
+      - address: 10.0.0.6
+        port: 8443
 ```
 
-v1 limitation: a passthrough route forwards to the FIRST endpoint of
-its upstream; load balancing across endpoints arrives later in M1.
+A passthrough route's connection is forwarded to an endpoint of its
+upstream chosen by that upstream's load balancer (for `ip_hash`, the
+smooth round-robin fallback — a byte splice has no per-connection IP
+key); picks follow config reloads live.
 
 Cleartext `http` listeners accept HTTP/1.1 and h2c (HTTP/2 prior
 knowledge) — the connection preface is sniffed, no upgrade or ALPN
@@ -357,7 +401,8 @@ write-temp-plus-rename replacement is observed; events are debounced)
 and `SIGHUP` also triggers a reload. A reload re-reads the file,
 validates, and publishes a new generation atomically; the route table
 and the upstream connection pools hot-swap together, so a new route
-never runs against old pools. In-flight requests keep the generation
+never runs against old pools; upstream endpoint sets, weights, and
+load-balancer settings swap in the same atomic publish. In-flight requests keep the generation
 they started with until they complete. A rejected
 reload (unreadable, parse, or validation failure) logs every issue and
 keeps serving the running generation — the process never exits on a

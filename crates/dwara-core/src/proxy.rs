@@ -90,7 +90,7 @@ const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
 /// reload can never mix a new route table with old pools.
 struct Generation {
     snapshot: Arc<Snapshot>,
-    registry: UpstreamRegistry,
+    registry: Arc<UpstreamRegistry>,
 }
 
 /// The proxy dataplane: reads config generations from [`ConfigState`] and
@@ -110,7 +110,7 @@ impl DataPlane {
     /// Build from the state's currently published snapshot.
     pub fn new(state: Arc<ConfigState>) -> Arc<Self> {
         let snapshot = state.snapshot();
-        let registry = UpstreamRegistry::from_snapshot(&snapshot);
+        let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
         Arc::new(DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             state,
@@ -119,15 +119,29 @@ impl DataPlane {
 
     /// Rebuild the (snapshot, registry) pair from the state's current
     /// snapshot and swap it in. Call after every successful publish.
+    /// Balancer state (in-flight counters, WRR phase, slow-start clocks
+    /// for unchanged endpoint addresses) carries over from the previous
+    /// generation, so weight/endpoint changes take effect without a
+    /// restart and without resetting live counters (DW-011).
     pub fn refresh(&self) {
         let snapshot = self.state.snapshot();
-        let registry = UpstreamRegistry::from_snapshot(&snapshot);
+        let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous(
+            &snapshot,
+            &self.current().registry,
+        ));
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
     }
 
     fn current(&self) -> Arc<Generation> {
         self.current.load_full()
+    }
+
+    /// The current generation's upstream registry. Used by the
+    /// TLS-passthrough path (which picks endpoints through the same
+    /// balancers) and by tests.
+    pub fn registry(&self) -> Arc<UpstreamRegistry> {
+        Arc::clone(&self.current().registry)
     }
 }
 
@@ -477,11 +491,9 @@ where
             parts.headers.insert(CONNECTION, v);
         }
     }
-    if let Some(authority) = handle.endpoint_authority() {
-        if let Ok(v) = HeaderValue::from_str(&authority) {
-            parts.headers.insert(HOST, v);
-        }
-    }
+    // Host is rebuilt by the upstream handle from the load-balancer pick
+    // (the gateway, not the client, names the origin it dials); see
+    // UpstreamHandle::send_with_hash_key.
     if let Ok(v) = HeaderValue::from_str(&xff) {
         parts.headers.insert(&X_FORWARDED_FOR, v);
     }
@@ -490,7 +502,12 @@ where
     }
 
     let out_req = Request::from_parts(parts, body);
-    match handle.send(out_req).await {
+    // The peer IP is the ip_hash key (X-Real-IP peer; other algorithms
+    // ignore it).
+    match handle
+        .send_with_hash_key(out_req, Some(&peer.to_string()))
+        .await
+    {
         Ok(mut resp) => {
             if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
                 let on_upstream = hyper::upgrade::on(&mut resp);

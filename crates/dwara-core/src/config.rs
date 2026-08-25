@@ -322,6 +322,14 @@ pub struct Upstream {
     /// slot rather than fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_cap: Option<u32>,
+    /// Slow-start window in milliseconds (DW-011): an endpoint entering the
+    /// upstream's set ramps its effective load-balancing weight from ~0 up
+    /// to its configured weight over this window. Absent (or 0) disables
+    /// the ramp. Applies to the weighted algorithms (round_robin; ip_hash
+    /// vnode counts stay fixed so ring consistency is preserved).
+    /// Validation bounds the value to at most 10 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_start_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
 }

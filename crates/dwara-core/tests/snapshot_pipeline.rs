@@ -4,7 +4,7 @@
 //! `src/snapshot.rs`, which cover the happy path and the basic
 //! rollback case.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dwara_core::config::{
@@ -69,6 +69,7 @@ fn upstream(name: &str) -> Upstream {
             weight: 1,
         }],
         connection_cap: None,
+        slow_start_ms: None,
         timeouts: None,
     }
 }
@@ -604,17 +605,38 @@ fn publish_snapshot_reads_are_never_torn_during_concurrent_publishes() {
     let reader = Arc::clone(&state);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_r = Arc::clone(&stop);
+    // Ordered samples so invariants can be asserted over the reader's
+    // actual observation window (from its FIRST sample onward).
+    let samples: Arc<std::sync::Mutex<Vec<(u64, u64)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reader_samples = Arc::clone(&samples);
     let reader = std::thread::spawn(move || {
-        let mut seen: HashSet<(u64, u64)> = HashSet::new();
         while !stop_r.load(std::sync::atomic::Ordering::Relaxed) {
             let snap = reader.snapshot();
-            // Torn state would pair a generation with a foreign hash: any
-            // observed (generation, hash) must be self-consistent — here we
-            // simply record pairs and assert uniqueness per generation below.
-            seen.insert((snap.generation(), snap.content_hash()));
+            // Torn state would pair a generation with a foreign hash; the
+            // recorded (generation, hash) pairs are checked for
+            // self-consistency below.
+            reader_samples
+                .lock()
+                .expect("samples lock")
+                .push((snap.generation(), snap.content_hash()));
+            std::thread::yield_now();
         }
-        seen
     });
+    // Determinism: wait (bounded) until the reader has recorded at least one
+    // sample BEFORE any publisher runs, so the observation window is
+    // guaranteed to start at generation 0 without relying on scheduler
+    // timing. Bounded wait, not sleep-as-synchronization: publishers only
+    // start after the first sample exists or the 2s budget expires (in
+    // which case the first-recorded-sample assertions below still hold).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while samples.lock().expect("samples lock").is_empty() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        !samples.lock().expect("samples lock").is_empty(),
+        "reader must record at least one sample within 2s"
+    );
     let mut handles = Vec::new();
     for i in 0..THREADS {
         let state = Arc::clone(&state);
@@ -627,18 +649,56 @@ fn publish_snapshot_reads_are_never_torn_during_concurrent_publishes() {
     for h in handles {
         h.join().expect("publisher thread must not panic").unwrap();
     }
+    // All publishes are done; wait (bounded) until the reader has actually
+    // sampled the final generation before signalling stop — otherwise the
+    // reader could exit between the last publish and its next sample,
+    // turning "final generation observed" into a scheduling assumption.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while samples
+        .lock()
+        .expect("samples lock")
+        .iter()
+        .map(|&(g, _)| g)
+        .max()
+        != Some(THREADS as u64)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let seen = reader.join().expect("reader must not panic");
-    assert!(
-        seen.contains(&(0, 0)),
-        "generation 0 (empty) must be readable"
+    reader.join().expect("reader must not panic");
+    let samples = Arc::try_unwrap(samples)
+        .expect("sole samples ref")
+        .into_inner()
+        .expect("samples lock");
+    // Invariants hold from the reader's FIRST recorded sample onward; the
+    // bounded wait above guarantees that sample is generation 0, but the
+    // assertions below never depend on that scheduling fact.
+    let first = samples[0];
+    assert_eq!(
+        first,
+        (0, 0),
+        "first recorded sample is generation 0 (empty)"
     );
-    // Each generation must map to exactly one hash (no torn pair observed).
-    let mut gens: Vec<u64> = seen.iter().map(|(g, _)| *g).collect();
-    gens.sort_unstable();
-    gens.dedup();
-    assert_eq!(seen.len(), gens.len(), "one hash per generation observed");
-    assert_eq!(*gens.last().unwrap(), THREADS as u64);
+    // Generations only move forward: no earlier generation after a later
+    // one was observed.
+    let mut max_gen = first.0;
+    for &(g, _) in &samples[1..] {
+        assert!(g >= max_gen, "generation must be non-decreasing");
+        max_gen = g;
+    }
+    // Each generation must map to exactly one hash (no torn pair
+    // observed). Repeated identical samples are fine.
+    let mut hash_by_gen: HashMap<u64, u64> = HashMap::new();
+    for &(g, h) in &samples {
+        if let Some(prev) = hash_by_gen.insert(g, h) {
+            assert_eq!(
+                prev, h,
+                "generation {g} observed with two different hashes (torn read)"
+            );
+        }
+    }
+    assert_eq!(max_gen, THREADS as u64, "final generation must be observed");
 }
 
 // ---------------------------------------------------------------------------

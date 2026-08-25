@@ -102,6 +102,7 @@ fn base_gateway(listener: Listener) -> Gateway {
                 weight: 1,
             }],
             connection_cap: None,
+            slow_start_ms: None,
             timeouts: None,
         }],
         consumers: vec![],

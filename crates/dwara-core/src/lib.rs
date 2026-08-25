@@ -2,6 +2,7 @@
 //! swappable trait definitions, and listener/TLS machinery consumed by the
 //! dataplane and admin crates.
 
+pub mod balance;
 pub mod config;
 pub mod extensions;
 pub mod proxy;

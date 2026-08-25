@@ -563,6 +563,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "upstream has no endpoints",
             ));
         }
+        let mut seen_targets = std::collections::BTreeSet::new();
+        let mut total_vnodes: u64 = 0;
         for (i, e) in u.endpoints.iter().enumerate() {
             if e.address.trim().is_empty() {
                 issues.push(issue(
@@ -580,6 +582,34 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "endpoint weight must be > 0",
                 ));
             }
+            // Duplicate address:port corrupts shared balancer state (both
+            // entries carry to the same live counter; guards would
+            // double-decrement). Reject at validation time.
+            if !seen_targets.insert((e.address.clone(), e.port)) {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    &format!("endpoints[{i}].address"),
+                    format!(
+                        "duplicate endpoint {}/{}: address:port must be unique within an upstream",
+                        e.address, e.port
+                    ),
+                ));
+            }
+            total_vnodes += crate::balance::KETAMA_VNODES * e.weight.max(1) as u64;
+        }
+        if u.load_balancer == crate::config::LoadBalancer::IpHash
+            && total_vnodes > crate::balance::MAX_RING_VNODES
+        {
+            issues.push(issue(
+                "upstream",
+                &u.name,
+                "endpoints.weight",
+                format!(
+                    "ip_hash ring too large: total vnodes (160 * sum of weights) must be at most {}",
+                    crate::balance::MAX_RING_VNODES
+                ),
+            ));
         }
         if u.connection_cap == Some(0) {
             issues.push(issue(
@@ -587,6 +617,16 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 &u.name,
                 "connection_cap",
                 "connection_cap must be > 0",
+            ));
+        }
+        if u.slow_start_ms
+            .is_some_and(|ms| ms > crate::balance::MAX_SLOW_START_MS)
+        {
+            issues.push(issue(
+                "upstream",
+                &u.name,
+                "slow_start_ms",
+                "slow_start_ms must be at most 10 minutes (600000)",
             ));
         }
         if let Some(t) = &u.timeouts {
@@ -1150,6 +1190,7 @@ mod tests {
                     weight: 1,
                 }],
                 connection_cap: None,
+                slow_start_ms: None,
                 timeouts: None,
             }],
             consumers: vec![],

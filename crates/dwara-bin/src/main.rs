@@ -287,11 +287,17 @@ async fn run_listener(
                     .find(|l| l.name == bound.name)
                     .and_then(|l| l.tls.clone());
                 let name = bound.name.clone();
+                let dp = Arc::clone(&dp);
                 tokio::spawn(async move {
                     match tls_cfg {
                         Some(tls_cfg) => {
-                            if let Err(err) =
-                                tls::handle_passthrough(&mut stream, &tls_cfg, snapshot.gateway()).await
+                            if let Err(err) = tls::handle_passthrough(
+                                &mut stream,
+                                &tls_cfg,
+                                snapshot.gateway(),
+                                Some(&dp.registry()),
+                            )
+                            .await
                             {
                                 eprintln!("passthrough error: {err}");
                             }

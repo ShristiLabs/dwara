@@ -411,30 +411,40 @@ pub enum PassthroughAction {
 /// Resolve a passthrough SNI route against the gateway config.
 ///
 /// Routing rule (v1, documented): the SNI server name is matched exactly
-/// against the `sni_routes` entries of the listener; a hit forwards to
-/// the FIRST endpoint of the referenced upstream (load balancing across
-/// endpoints is DW-011). No match, no SNI, or a non-TLS client closes
-/// the connection.
+/// against the `sni_routes` entries of the listener. A hit forwards to an
+/// endpoint of the referenced upstream chosen by that upstream's load
+/// balancer (DW-011; `registry` is the dataplane's current registry, so
+/// passthrough picks follow config reloads too). The pick carries no hash
+/// key — a byte splice has no per-request client-IP semantics to weight
+/// beyond stickiness, so `ip_hash` degrades to its smooth-RR fallback.
+/// Without a registry (callers without a dataplane) the FIRST configured
+/// endpoint is used. No match, no SNI, or a non-TLS client closes the
+/// connection.
 pub fn resolve_passthrough(
     sni: Option<&str>,
     routes: &[SniRoute],
     gateway: &Gateway,
+    registry: Option<&crate::upstream::UpstreamRegistry>,
 ) -> PassthroughAction {
     let Some(name) = sni else {
         return PassthroughAction::Close;
     };
     for r in routes {
         if r.server_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-            if let Some(up) = gateway
-                .upstreams
-                .iter()
-                .find(|u| u.name == r.upstream)
-                .and_then(|u| u.endpoints.first())
-            {
-                return PassthroughAction::Forward {
-                    host: up.address.clone(),
-                    port: up.port,
-                };
+            let upstream = gateway.upstreams.iter().find(|u| u.name == r.upstream);
+            let endpoint = upstream.and_then(|u| {
+                // Prefer the live balancer; fall back to the first
+                // configured endpoint.
+                // Single-load pick: index and address:port come from the
+                // same state snapshot, so a concurrent reload cannot pair
+                // an index from one set with an address from another.
+                registry
+                    .and_then(|reg| reg.get(&u.name))
+                    .and_then(|h| h.lb().pick_endpoint(None).map(|(_, a, p)| (a, p)))
+                    .or_else(|| u.endpoints.first().map(|e| (e.address.clone(), e.port)))
+            });
+            if let Some((host, port)) = endpoint {
+                return PassthroughAction::Forward { host, port };
             }
             return PassthroughAction::Close;
         }
@@ -457,6 +467,7 @@ pub async fn handle_passthrough(
     stream: &mut TcpStream,
     tls: &ListenerTls,
     gateway: &Gateway,
+    registry: Option<&crate::upstream::UpstreamRegistry>,
 ) -> std::io::Result<PassthroughAction> {
     let mut scratch = vec![0u8; PEEK_LIMIT];
     let started = std::time::Instant::now();
@@ -491,7 +502,7 @@ pub async fn handle_passthrough(
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     };
 
-    match resolve_passthrough(sni.as_deref(), &tls.sni_routes, gateway) {
+    match resolve_passthrough(sni.as_deref(), &tls.sni_routes, gateway, registry) {
         PassthroughAction::Forward { host, port } => {
             let mut upstream = TcpStream::connect((host.as_str(), port)).await?;
             let _ = stream.set_nodelay(true);
@@ -637,6 +648,7 @@ mod tests {
                     weight: 1,
                 }],
                 connection_cap: None,
+                slow_start_ms: None,
                 timeouts: None,
             }],
             consumers: vec![],
@@ -649,7 +661,7 @@ mod tests {
     fn passthrough_routes_sni_to_first_endpoint() {
         let (gw, tls) = passthrough_gateway();
         assert_eq!(
-            resolve_passthrough(Some("a.example.com"), &tls.sni_routes, &gw),
+            resolve_passthrough(Some("a.example.com"), &tls.sni_routes, &gw, None),
             PassthroughAction::Forward {
                 host: "10.0.0.5".into(),
                 port: 8443
@@ -657,7 +669,7 @@ mod tests {
         );
         // Case-insensitive server-name match.
         assert_eq!(
-            resolve_passthrough(Some("A.EXAMPLE.COM"), &tls.sni_routes, &gw),
+            resolve_passthrough(Some("A.EXAMPLE.COM"), &tls.sni_routes, &gw, None),
             PassthroughAction::Forward {
                 host: "10.0.0.5".into(),
                 port: 8443
@@ -669,11 +681,11 @@ mod tests {
     fn passthrough_closes_unmatched_sni_or_missing() {
         let (gw, tls) = passthrough_gateway();
         assert_eq!(
-            resolve_passthrough(None, &tls.sni_routes, &gw),
+            resolve_passthrough(None, &tls.sni_routes, &gw, None),
             PassthroughAction::Close
         );
         assert_eq!(
-            resolve_passthrough(Some("other.example.com"), &tls.sni_routes, &gw),
+            resolve_passthrough(Some("other.example.com"), &tls.sni_routes, &gw, None),
             PassthroughAction::Close
         );
     }
