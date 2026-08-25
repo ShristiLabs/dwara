@@ -41,6 +41,7 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         consumers: vec![],
         policies: vec![],
         max_concurrent_requests: None,
+        jwt_providers: Vec::new(),
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -681,6 +682,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             consumers: vec![],
             policies: vec![],
             max_concurrent_requests: None,
+            jwt_providers: Vec::new(),
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert_eq!(fields, vec![field], "exactly {field} flagged");
@@ -719,6 +721,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         consumers: vec![],
         policies: vec![],
         max_concurrent_requests: None,
+        jwt_providers: Vec::new(),
     });
     assert!(issues.is_empty(), "positive values valid: {issues:?}");
 }

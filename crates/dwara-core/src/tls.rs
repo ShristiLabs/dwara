@@ -659,6 +659,7 @@ mod tests {
             consumers: vec![],
             policies: vec![],
             max_concurrent_requests: None,
+            jwt_providers: Vec::new(),
         };
         (gateway, tls)
     }

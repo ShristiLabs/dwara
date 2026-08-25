@@ -114,6 +114,7 @@ fn empty_document_is_valid() {
             consumers: vec![],
             policies: vec![],
             max_concurrent_requests: None,
+            jwt_providers: Vec::new(),
         }
     );
 }

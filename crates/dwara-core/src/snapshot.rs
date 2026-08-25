@@ -33,6 +33,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -189,6 +190,87 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         "name",
         gateway.policies.iter().map(|p| p.name.as_str()).collect(),
     );
+    check_dups(
+        "jwt_provider",
+        "name",
+        gateway
+            .jwt_providers
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect(),
+    );
+
+    // JWT providers (DW-019): url shape, algorithm allowlist, refresh
+    // cadence, and consumer references are compile-time checked — a
+    // gateway must not boot (or reload) into an unverifiable provider.
+    for p in &gateway.jwt_providers {
+        match p.jwks_url.parse::<hyper::Uri>() {
+            Ok(uri) => {
+                if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none()
+                {
+                    issues.push(issue(
+                        "jwt_provider",
+                        &p.name,
+                        "jwks_url",
+                        format!("'{}' must be an absolute http(s) URL", p.jwks_url),
+                    ));
+                }
+            }
+            Err(_) => issues.push(issue(
+                "jwt_provider",
+                &p.name,
+                "jwks_url",
+                format!("'{}' is not a valid URL", p.jwks_url),
+            )),
+        }
+        if p.algorithms.is_empty() {
+            issues.push(issue(
+                "jwt_provider",
+                &p.name,
+                "algorithms",
+                "at least one algorithm must be allowed",
+            ));
+        }
+        for a in &p.algorithms {
+            let upper = a.to_ascii_uppercase();
+            if matches!(upper.as_str(), "HS256" | "HS384" | "HS512" | "NONE") {
+                issues.push(issue(
+                    "jwt_provider",
+                    &p.name,
+                    "algorithms",
+                    format!(
+                        "algorithm '{a}' is not allowed: only asymmetric verification \
+                         (RS*/ES*/PS*/EdDSA) is supported"
+                    ),
+                ));
+            } else if jsonwebtoken::Algorithm::from_str(&upper).is_err() {
+                issues.push(issue(
+                    "jwt_provider",
+                    &p.name,
+                    "algorithms",
+                    format!("unknown algorithm '{a}'"),
+                ));
+            }
+        }
+        if p.refresh_secs == 0 {
+            issues.push(issue(
+                "jwt_provider",
+                &p.name,
+                "refresh_secs",
+                "refresh_secs must be > 0",
+            ));
+        }
+        if let Some(consumer) = &p.consumer {
+            if !gateway.consumers.iter().any(|c| &c.name == consumer) {
+                issues.push(issue(
+                    "jwt_provider",
+                    &p.name,
+                    "consumer",
+                    format!("references unknown consumer '{consumer}'"),
+                ));
+            }
+        }
+    }
 
     // Listener sanity and bind conflicts.
     let mut binds = std::collections::BTreeSet::new();
@@ -862,6 +944,19 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     }
 
     for c in &gateway.consumers {
+        // The consumer name is injected upstream as the X-Consumer-Name
+        // header value; non-visible-ASCII names cannot be represented in a
+        // header and would silently break the identity injection (DW-019
+        // review). Reject at compile time instead.
+        if c.name.is_empty() || !c.name.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+            issues.push(issue(
+                "consumer",
+                &c.name,
+                "name",
+                "consumer name must be non-empty visible ASCII (0x21-0x7E): it is injected \
+                 upstream as the X-Consumer-Name header value",
+            ));
+        }
         if let Some(p) = c.priority {
             if p > 10 {
                 issues.push(issue(
@@ -1200,6 +1295,7 @@ impl Snapshot {
                 consumers: Vec::new(),
                 policies: Vec::new(),
                 max_concurrent_requests: None,
+                jwt_providers: Vec::new(),
             }),
             routes: Arc::new(RouteTable::empty()),
         }
@@ -1405,6 +1501,7 @@ mod tests {
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                     priority: None,
+                    auth_required: false,
                 },
                 Route {
                     name: "static".into(),
@@ -1423,6 +1520,7 @@ mod tests {
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                     priority: None,
+                    auth_required: false,
                 },
                 Route {
                     name: "legacy".into(),
@@ -1441,6 +1539,7 @@ mod tests {
                     action: RouteAction::Proxy { rewrite: None },
                     policies: vec![],
                     priority: None,
+                    auth_required: false,
                 },
             ],
             services: vec![Service {
@@ -1471,6 +1570,7 @@ mod tests {
             consumers: vec![],
             policies: vec![],
             max_concurrent_requests: None,
+            jwt_providers: Vec::new(),
         }
     }
 

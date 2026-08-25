@@ -516,6 +516,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             },
             policies: vec![],
             priority: None,
+            auth_required: false,
         }],
         services: vec![],
         upstreams: vec![Upstream {
@@ -554,6 +555,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             timeouts: None,
         }],
         max_concurrent_requests: None,
+        jwt_providers: Vec::new(),
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");

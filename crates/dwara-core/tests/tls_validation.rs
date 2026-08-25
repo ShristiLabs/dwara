@@ -85,6 +85,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             action: RouteAction::Proxy { rewrite: None },
             policies: vec![],
             priority: None,
+            auth_required: false,
         }],
         services: vec![Service {
             name: "svc".into(),
@@ -114,6 +115,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         consumers: vec![],
         policies: vec![],
         max_concurrent_requests: None,
+        jwt_providers: Vec::new(),
     }
 }
 

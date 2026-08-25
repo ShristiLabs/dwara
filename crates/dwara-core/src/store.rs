@@ -39,10 +39,10 @@
 //! transactional; WAL journal mode and foreign-key enforcement are on.
 //!
 //! The store NEVER sees plaintext secrets: credential values arrive
-//! pre-hashed with a lookup `selector` (key id/prefix, JWT kid, or
-//! certificate fingerprint). Hashing is the authenticator's job (DW-019).
-//! See the seeding note on [`sync_consumers_from_config`] for the interim
-//! config-based credential story.
+//! pre-hashed with a lookup `selector` (a hash for API keys/Basic since
+//! DW-019, or a JWT kid/issuer / certificate fingerprint for bindings).
+//! Hashing is the authenticator's job (DW-019); config-seeded keys are
+//! hashed at seed time (see [`sync_consumers_from_config`]).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -553,6 +553,44 @@ impl StateStore {
         Ok(record)
     }
 
+    /// Legacy-cleanup rule (DW-019 review): databases seeded by the
+    /// pre-DW-019 build hold api_key rows whose SELECTOR is the plaintext
+    /// config key and whose hash is the placeholder
+    /// `config:api_key:<key>` — both embed the secret verbatim, and
+    /// without this cleanup they would sit in the store forever (the
+    /// post-DW-019 seeding writes a sha256 selector/hash and never
+    /// matches them, so the idempotence check skips them). This build
+    /// never writes that format, so every matching row is transitional
+    /// and is deleted here. A schema migration is overkill for one
+    /// build's placeholder rows: a code-level cleanup at sync time is
+    /// sufficient, runs everywhere sync runs (deployments with or
+    /// without a state DB), and needs no version bump. JWT/mTLS binding
+    /// rows (`config:jwt:` / `config:mtls:`) are NOT deleted — those are
+    /// the current, non-secret binding-marker format. Returns the number
+    /// of rows deleted (0 on a clean or fresh database).
+    pub fn delete_legacy_config_placeholder_credentials(&self) -> Result<u64> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let selectors: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT selector FROM credentials WHERE hash LIKE 'config:api_key:%'")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        if selectors.is_empty() {
+            return Ok(0);
+        }
+        let deleted = u64::try_from(conn.execute(
+            "DELETE FROM credentials WHERE hash LIKE 'config:api_key:%'",
+            [],
+        )?)
+        .unwrap_or(u64::MAX);
+        drop(conn);
+        for selector in selectors {
+            self.invalidate(&selector);
+        }
+        Ok(deleted)
+    }
+
     /// Invalidate one selector's cache entry (next lookup re-reads disk).
     pub fn invalidate(&self, selector: &str) {
         self.cache
@@ -769,26 +807,32 @@ fn row_to_credential(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord
     })
 }
 
-/// Bootstrap the store from the gateway config (DW-018 interim seeding).
+/// Bootstrap the store from the gateway config (DW-018 seeding, hashing
+/// per DW-019).
 ///
 /// Creates/updates every consumer found in the config and inserts a
 /// credential row for each config credential that is not already present
 /// (matched by consumer + selector, so re-syncing is idempotent).
 ///
-/// HONESTY NOTE on hashes: config credentials today carry plaintext-ish
-/// values (`api_key: <value>`); credential HASHING lands with the
-/// authenticator (DW-019). Until then, seeded rows store a placeholder
-/// hash derived from the config value and the SELECTOR is the config
-/// value itself (api key value / JWT issuer / mTLS fingerprint). This
-/// means config-based credentials remain CONFIG-authenticated: the store
-/// rows exist so the schema, seeding, and cache paths are exercised, not
-/// so the dataplane authenticates against them. DW-019 replaces the
-/// placeholder with a real hash and the authenticator's selector scheme.
+/// Hashing (DW-019): config API keys are hashed at seed time — the
+/// selector is `hex(sha256(key))` (never the plaintext key; this closes
+/// the DW-018 finding that seeded selectors were raw config values) and
+/// the stored hash is `sha256:<hex(sha256(key))>`, the format the
+/// authenticator's constant-time verifier expects. JWT and mTLS config
+/// credentials are BINDINGS, not secrets (tokens are verified
+/// cryptographically; client certificates by fingerprint), so their rows
+/// keep a binding-marker hash and the issuer/fingerprint selector.
+///
+/// Legacy cleanup: rows seeded by the pre-DW-019 build (plaintext api-key
+/// selector + `config:api_key:` placeholder hash) are deleted on every
+/// sync — see
+/// [`StateStore::delete_legacy_config_placeholder_credentials`].
 pub fn sync_consumers_from_config(store: &StateStore, gateway: &Gateway) -> Result<()> {
+    store.delete_legacy_config_placeholder_credentials()?;
     for consumer in &gateway.consumers {
         let record = store.upsert_consumer(&consumer.name, consumer.priority)?;
         for credential in &consumer.credentials {
-            let (kind, selector) = credential_parts(credential);
+            let (kind, selector, hash) = credential_parts(credential);
             let existing = store.lookup_credentials_by_selector(&selector)?;
             if existing
                 .iter()
@@ -796,18 +840,29 @@ pub fn sync_consumers_from_config(store: &StateStore, gateway: &Gateway) -> Resu
             {
                 continue;
             }
-            let placeholder_hash = format!("config:{}:{selector}", kind.as_str());
-            store.add_credential(record.id, kind, placeholder_hash, None, selector.clone())?;
+            store.add_credential(record.id, kind, hash, None, selector.clone())?;
         }
     }
     Ok(())
 }
 
-fn credential_parts(credential: &Credential) -> (CredentialKind, String) {
+fn credential_parts(credential: &Credential) -> (CredentialKind, String, String) {
     match credential {
-        Credential::ApiKey { key } => (CredentialKind::ApiKey, key.clone()),
-        Credential::Jwt { issuer, .. } => (CredentialKind::Jwt, issuer.clone()),
-        Credential::Mtls { fingerprint } => (CredentialKind::Mtls, fingerprint.clone()),
+        Credential::ApiKey { key } => (
+            CredentialKind::ApiKey,
+            crate::authn::credential_selector(key),
+            crate::authn::sha256_stored_hash(key),
+        ),
+        Credential::Jwt { issuer, .. } => (
+            CredentialKind::Jwt,
+            issuer.clone(),
+            format!("config:jwt:{issuer}"),
+        ),
+        Credential::Mtls { fingerprint } => (
+            CredentialKind::Mtls,
+            fingerprint.clone(),
+            format!("config:mtls:{fingerprint}"),
+        ),
     }
 }
 
@@ -1047,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn seeding_from_config_is_idempotent_and_honest() {
+    fn seeding_from_config_is_idempotent_and_hashed() {
         let config = parse_gateway(
             "consumers:\n  - name: acme\n    priority: 3\n    credentials:\n      - \
              type: api_key\n        key: secret-key\n      - type: jwt\n        issuer: \
@@ -1060,11 +1115,17 @@ mod tests {
         let listed = store.list_consumers().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].priority, Some(3));
-        let api = store.lookup_credentials_by_selector("secret-key").unwrap();
+        // DW-019: the selector is the sha256 of the key (never the
+        // plaintext), and the stored hash is the format the
+        // authenticator's constant-time verifier expects.
+        let selector = crate::authn::credential_selector("secret-key");
+        let api = store.lookup_credentials_by_selector(&selector).unwrap();
         assert_eq!(api.len(), 1);
         assert_eq!(api[0].kind, CredentialKind::ApiKey);
-        // Placeholder hash, not a real digest: documented DW-019 gap.
-        assert_eq!(api[0].hash, "config:api_key:secret-key");
+        assert_eq!(api[0].hash, crate::authn::sha256_stored_hash("secret-key"));
+        // Nothing in the store contains the plaintext key.
+        let dumped = format!("{:?}{}", api[0].hash, selector);
+        assert!(!dumped.contains("secret-key"));
         assert_eq!(
             store
                 .lookup_credentials_by_selector("https://issuer.example")
@@ -1075,6 +1136,89 @@ mod tests {
         assert_eq!(
             store.lookup_credentials_by_selector("AA:BB").unwrap().len(),
             1
+        );
+    }
+
+    #[test]
+    fn sync_deletes_legacy_config_placeholder_api_key_rows() {
+        // Legacy-cleanup rule: a pre-DW-019 build seeded api_key rows with
+        // a PLAINTEXT selector and a `config:api_key:<key>` placeholder
+        // hash. Sync must delete them (the sha256 seeding never matches
+        // them, so without the cleanup they persist forever), while
+        // leaving current binding rows (`config:jwt:`/`config:mtls:`) and
+        // properly hashed api_key rows untouched.
+        let config = parse_gateway(
+            "consumers:\n  - name: acme\n    credentials:\n      - type: api_key\n        \
+             key: secret-key\n      - type: jwt\n        issuer: https://issuer.example\n",
+        )
+        .unwrap();
+        let store = StateStore::open_in_memory().unwrap();
+        // Seed exactly as the pre-DW-019 build did: plaintext selector and
+        // placeholder hash (api key), plus a legacy jwt binding row.
+        store.upsert_consumer("acme", None).unwrap();
+        let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+        store
+            .add_credential(
+                consumer.id,
+                CredentialKind::ApiKey,
+                "config:api_key:secret-key".into(),
+                None,
+                "secret-key".into(),
+            )
+            .unwrap();
+        store
+            .add_credential(
+                consumer.id,
+                CredentialKind::Jwt,
+                "config:jwt:https://issuer.example".into(),
+                None,
+                "https://issuer.example".into(),
+            )
+            .unwrap();
+        // A revoked legacy row is deleted too (the secret must not linger
+        // behind a revocation timestamp).
+        let revoked = store
+            .add_credential(
+                consumer.id,
+                CredentialKind::ApiKey,
+                "config:api_key:old-key".into(),
+                None,
+                "old-key".into(),
+            )
+            .unwrap();
+        store.revoke_credential(revoked.id).unwrap();
+
+        sync_consumers_from_config(&store, &config).unwrap();
+
+        // The plaintext legacy api_key rows are gone...
+        assert!(store
+            .lookup_credentials_by_selector("secret-key")
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .lookup_credentials_by_selector("old-key")
+            .unwrap()
+            .is_empty());
+        // ...the properly re-seeded sha256 api_key row exists...
+        let selector = crate::authn::credential_selector("secret-key");
+        let api = store.lookup_credentials_by_selector(&selector).unwrap();
+        assert_eq!(api.len(), 1);
+        assert_eq!(api[0].hash, crate::authn::sha256_stored_hash("secret-key"));
+        // ...and the jwt binding row (current format) survives.
+        assert_eq!(
+            store
+                .lookup_credentials_by_selector("https://issuer.example")
+                .unwrap()
+                .len(),
+            1
+        );
+        // A second sync is a clean no-op cleanup (0 deleted) and still
+        // idempotent overall.
+        assert_eq!(
+            store
+                .delete_legacy_config_placeholder_credentials()
+                .unwrap(),
+            0
         );
     }
 

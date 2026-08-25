@@ -46,6 +46,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         action: RouteAction::Proxy { rewrite: None },
         policies: vec![],
         priority: None,
+        auth_required: false,
     }
 }
 
@@ -92,6 +93,7 @@ fn base_gateway() -> Gateway {
         consumers: vec![],
         policies: vec![],
         max_concurrent_requests: None,
+        jwt_providers: Vec::new(),
     }
 }
 

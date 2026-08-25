@@ -3,6 +3,7 @@
 //! dataplane and admin crates.
 
 pub mod active;
+pub mod authn;
 pub mod balance;
 pub mod breaker;
 pub mod config;

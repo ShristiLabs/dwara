@@ -60,6 +60,19 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 rusqlite_migration = "2.4"
 # Tempfile-backed on-disk store tests (DW-018 dev-only): MIT/Apache-2.0.
 tempfile = "3"
+# Authentication (DW-019): all MIT OR Apache-2.0. subtle is the standard
+# constant-time comparison primitive; sha2 is the fast API-key hash path
+# (hash-at-rest + hash-selector lookups); argon2 verifies OPTIONAL
+# memory-hard PHC-format credential hashes (admin-supplied via the store —
+# per-lookup argon2 is slow, so config-seeded keys hash with sha256);
+# base64 decodes Basic credentials; jsonwebtoken verifies Bearer tokens
+# against JWKS keys (RS/ES/Ed; its ring backend is already in the tree
+# via rcgen).
+subtle = "2"
+sha2 = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+jsonwebtoken = "9"
 
 [profile.release]
 lto = true

@@ -79,6 +79,77 @@ pub struct Gateway {
     /// probes still answer under saturation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_requests: Option<u32>,
+    /// JWT verification providers (DW-019): trusted token issuers whose
+    /// keys are fetched from a JWKS endpoint. Each provider independently
+    /// verifies `Authorization: Bearer` tokens (alg allowlist, iss/aud,
+    /// exp with leeway) and maps the token to a consumer — via the
+    /// provider's explicit `consumer` binding, or by matching a
+    /// consumer's `jwt` credential `issuer` against the token's `iss`
+    /// claim. Empty (the default): the gateway does not interpret Bearer
+    /// tokens and forwards `Authorization` upstream untouched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jwt_providers: Vec<JwtProvider>,
+}
+
+/// One JWT verification provider (DW-019).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JwtProvider {
+    pub name: String,
+    /// JWKS endpoint (`http://` or `https://`). Keys are fetched lazily on
+    /// the first Bearer request, refreshed after `refresh_secs`, and
+    /// re-fetched on an unknown `kid` (key rotation mid-flight).
+    pub jwks_url: String,
+    /// Required token issuer (`iss` claim). Absent: any issuer accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// Required audience (`aud` claim). Absent: any audience accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Allowed signature algorithms (default `["RS256", "ES256"]`).
+    /// `none` and HMAC (`HS*`) algorithms are never allowed implicitly —
+    /// they must not appear in this list; validation rejects them
+    /// (asymmetric verification only: the gateway holds no shared
+    /// secrets with issuers).
+    #[serde(default = "default_jwt_algorithms")]
+    pub algorithms: Vec<String>,
+    /// JWKS cache staleness bound in seconds (default 300): a cached key
+    /// set older than this is refreshed before use.
+    #[serde(
+        default = "default_jwt_refresh_secs",
+        skip_serializing_if = "is_default_jwt_refresh_secs"
+    )]
+    pub refresh_secs: u64,
+    /// exp/nbf clock-skew leeway in seconds (default 30).
+    #[serde(
+        default = "default_jwt_leeway_secs",
+        skip_serializing_if = "is_default_jwt_leeway_secs"
+    )]
+    pub leeway_secs: u64,
+    /// Consumer this provider's tokens authenticate. Absent: the token's
+    /// `iss` claim is matched against consumers' `jwt` credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+}
+
+fn default_jwt_algorithms() -> Vec<String> {
+    vec!["RS256".to_string(), "ES256".to_string()]
+}
+
+fn default_jwt_refresh_secs() -> u64 {
+    300
+}
+
+fn default_jwt_leeway_secs() -> u64 {
+    30
+}
+
+fn is_default_jwt_refresh_secs(v: &u64) -> bool {
+    *v == 300
+}
+
+fn is_default_jwt_leeway_secs(v: &u64) -> bool {
+    *v == 30
 }
 
 /// Entry point: bind address + port + TLS termination (or passthrough) config.
@@ -188,6 +259,14 @@ pub struct Route {
     /// rejects values above 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// Require authenticated requests (DW-019): a request that arrives
+    /// WITHOUT a recognized credential (or with an invalid one) is
+    /// rejected with 401 and a `WWW-Authenticate` challenge. Absent
+    /// (the default) allows anonymous traffic through; note that an
+    /// INVALID presented credential is always rejected with 401
+    /// regardless of this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auth_required: bool,
 }
 
 /// Matching rules for incoming requests.

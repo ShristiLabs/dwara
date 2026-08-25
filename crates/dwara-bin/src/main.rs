@@ -18,11 +18,11 @@
 //!   validate; every validation issue is printed.
 //! - `DWARA_STATE_DB`: path to a SQLite state store (DW-018). When set,
 //!   the gateway opens/creates the store at startup and seeds consumers
-//!   and credentials from the config into it (see `store::sync_consumers_from_config`
-//!   for the interim config-credential hashing story). When unset (the
-//!   default), the gateway runs purely on config — behavior identical to
-//!   pre-DW-018. Nothing on the request path reads the store yet; the
-//!   authenticator (DW-019) wires it in.
+//!   and credentials from the config into it (hashed at seed time; see
+//!   `store::sync_consumers_from_config`). When unset (the default), the
+//!   gateway runs purely on config — credentials hashed in memory at
+//!   startup. The authenticator (DW-019) consults the store when it is
+//!   set and config credentials otherwise.
 //! - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on SIGTERM/SIGINT,
 //!   default 10. In-flight requests that exceed the budget are dropped when
 //!   the process exits.
@@ -472,9 +472,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Optional SQLite state store (DW-018): opened and seeded from the
     // config when DWARA_STATE_DB is set. Held alive for the process
-    // lifetime; the request path does not touch it yet (DW-019 wires the
-    // authenticator against it). Unset = pure-config operation (default).
-    let _state_store = match std::env::var("DWARA_STATE_DB") {
+    // lifetime and handed to the dataplane's authenticator (DW-019):
+    // credentials then resolve from the store's hot cache instead of
+    // in-memory config hashes. Unset = pure-config operation (default).
+    let state_store = match std::env::var("DWARA_STATE_DB") {
         Ok(path) if !path.is_empty() => {
             let store = match tokio::task::spawn_blocking({
                 let path = path.clone();
@@ -619,6 +620,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // driver returns (graceful shutdown drops it).
     let reload_state = Arc::clone(&state);
     let dp = DataPlane::new(Arc::clone(&state));
+    // DW-019: with a state store configured, the authenticator consults
+    // the store's hot-cached credential records (config consumers are
+    // still its seed source; the store adds admin-managed credentials
+    // and Basic-auth records).
+    if let Some(store) = &state_store {
+        dp.set_state_store(Arc::clone(store));
+    }
     let reload_dp = Arc::clone(&dp);
     let reload_tls = tls_states.clone();
     let reload_shutdown = shutdown_rx.clone();

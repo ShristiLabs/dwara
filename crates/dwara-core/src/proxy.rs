@@ -148,6 +148,7 @@
 //! connection-oriented headers wholesale would reject this; we chose
 //! upgrade transparency, and the behavior is pinned by the coverage suite.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -164,6 +165,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::authn::{AuthError, Authenticator, CompositeAuthenticator, Identity, JwksCacheEntry};
 use crate::config::{
     Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
@@ -171,6 +173,7 @@ use crate::extensions::rate_limiter::{RateLimitEngine, RateLimitOutcome};
 use crate::retries::RetryParams;
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
+use crate::store::StateStore;
 use crate::upstream::{UpstreamBody, UpstreamError, UpstreamRegistry};
 
 /// Body type of every proxied/gateway-generated response: either a small
@@ -184,6 +187,8 @@ const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
 const X_RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
 const X_RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
 const X_RATELIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit-reset");
+const WWW_AUTHENTICATE: HeaderName = HeaderName::from_static("www-authenticate");
+const X_CONSUMER_NAME: HeaderName = HeaderName::from_static("x-consumer-name");
 
 /// The default priority class (DW-016): requests on routes without an
 /// explicit `priority` shed and are shed as class 5.
@@ -282,6 +287,17 @@ pub struct DataPlane {
     /// and coupling buckets to the (rule-shaped) generation avoids
     /// lifetime questions when rules change or disappear.
     rate_limits: ArcSwap<RateLimitEngine>,
+    /// Authenticator (DW-019), rebuilt on every generation swap from the
+    /// new config (and the optional state store, set once at startup via
+    /// [`DataPlane::set_state_store`]).
+    authn: ArcSwap<CompositeAuthenticator>,
+    /// The DWARA_STATE_DB store when deployed; None = config-only
+    /// credentials. Set once before serving; the authenticator rebuild
+    /// reads it.
+    state_store: std::sync::RwLock<Option<Arc<StateStore>>>,
+    /// JWKS caches keyed by provider URL, carried ACROSS generation swaps
+    /// so key rotation state survives reloads (DW-019).
+    jwks_caches: std::sync::Mutex<HashMap<String, Arc<JwksCacheEntry>>>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -348,13 +364,41 @@ impl DataPlane {
         let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
         let global_cap = global_cap_of(snapshot.gateway());
         let rate_limits = RateLimitEngine::compile(snapshot.gateway());
-        Arc::new(DataPlane {
+        let dp = DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
             rate_limits: ArcSwap::from_pointee(rate_limits),
+            authn: ArcSwap::from_pointee(CompositeAuthenticator::disabled()),
+            state_store: std::sync::RwLock::new(None),
+            jwks_caches: std::sync::Mutex::new(HashMap::new()),
             state,
-        })
+        };
+        dp.rebuild_authn();
+        Arc::new(dp)
+    }
+
+    /// Attach the DWARA_STATE_DB store (DWARA_STATE_DB deployments):
+    /// credentials then come from the store's hot-cached records instead
+    /// of in-memory config hashes. Call once, before serving traffic;
+    /// rebuilds the authenticator against it immediately.
+    pub fn set_state_store(&self, store: Arc<StateStore>) {
+        *self.state_store.write().expect("state store lock poisoned") = Some(store);
+        self.rebuild_authn();
+    }
+
+    /// Rebuild the authenticator from the CURRENT snapshot and the
+    /// attached state store (if any), reusing JWKS caches by URL.
+    fn rebuild_authn(&self) {
+        let store = self
+            .state_store
+            .read()
+            .expect("state store lock poisoned")
+            .clone();
+        let snapshot = self.state.snapshot();
+        let mut caches = self.jwks_caches.lock().expect("jwks cache lock poisoned");
+        let authn = CompositeAuthenticator::build(snapshot.gateway(), store, &mut caches);
+        self.authn.store(authn);
     }
 
     /// Rebuild the (snapshot, registry) pair from the state's current
@@ -375,6 +419,7 @@ impl DataPlane {
             .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
+        self.rebuild_authn();
     }
 
     fn current(&self) -> Arc<Generation> {
@@ -432,7 +477,7 @@ fn reserved_path(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
 /// Handle one request against the current generation. Never panics; every
 /// failure path is a classified response. Generic over the request body so
 /// tests and alternative frontends can drive it with any streaming body.
-pub async fn handle<B>(dp: &DataPlane, peer: IpAddr, req: Request<B>) -> Response<ProxyBody>
+pub async fn handle<B>(dp: &DataPlane, peer: IpAddr, mut req: Request<B>) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -463,6 +508,40 @@ where
         return simple(StatusCode::NOT_FOUND, "no route");
     }
 
+    // Authentication (DW-019): after route resolution, before rate
+    // limiting and cap admission (the rate-limit `credential` selector
+    // and the shedding priority class both consume the identity). An
+    // INVALID presented credential is always rejected (401 +
+    // WWW-Authenticate), even on a route that allows anonymous traffic;
+    // an anonymous request is rejected only when the route sets
+    // `auth_required`. Gateway-side failures (JWKS endpoint down) answer
+    // 500 — the gateway cannot vouch for the caller either way.
+    let authn = dp.authn.load_full();
+    let identity = match authn.authenticate(req.headers()).await {
+        Ok(id) => id,
+        Err(AuthError::Invalid(_)) => return unauthorized(&authn.challenge()),
+        Err(AuthError::Unavailable(msg)) => {
+            eprintln!("dwara: authentication backend unavailable: {msg}");
+            return simple(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "authentication unavailable",
+            );
+        }
+    };
+    if route.auth_required && identity.is_none() {
+        return unauthorized(&authn.challenge());
+    }
+    // Spoof prevention: any client-supplied X-Consumer-* header is
+    // stripped here; the trusted identity header is injected on the
+    // proxied request below.
+    strip_consumer_headers(req.headers_mut());
+    let consumer_cfg = identity.as_ref().and_then(|id| {
+        gateway
+            .consumers
+            .iter()
+            .find(|c| c.name == id.consumer_name)
+    });
+
     // Local rate limiting (DW-017): BEFORE cap admission — a 429 is the
     // cheapest rejection the gateway can emit, so it precedes the permit
     // acquisition below (rate-limited requests never hold a cap slot).
@@ -471,6 +550,7 @@ where
     // back to the peer IP until authN identifies consumers.
     let service = gateway.services.iter().find(|s| s.name == route.service);
     let service_policies: &[String] = service.map(|s| s.policies.as_slice()).unwrap_or(&[]);
+    let consumer_policies: &[String] = consumer_cfg.map(|c| c.policies.as_slice()).unwrap_or(&[]);
     let rate_headers = {
         let engine = dp.rate_limits.load_full();
         if engine.is_empty() {
@@ -478,10 +558,10 @@ where
         } else {
             let ctx = crate::extensions::rate_limiter::RateLimitKeyContext {
                 peer,
-                consumer: None, // DW-019 seam: authN fills this in
+                consumer: identity.as_ref().map(|id| id.consumer_name.as_str()),
                 route: &route.name,
             };
-            match engine.check(&ctx, &route.policies, service_policies) {
+            match engine.check(&ctx, consumer_policies, &route.policies, service_policies) {
                 RateLimitOutcome::Denied {
                     limit,
                     remaining,
@@ -510,9 +590,9 @@ where
     // attaches it to the streaming body, and complete bodies (errors,
     // redirects, respond actions) release it when this scope ends.
     //
-    // AuthN (DW-019/020) will identify the consumer here; until then the
-    // resolver runs route-only (see `resolve_priority`).
-    let priority = resolve_priority(None, route);
+    // AuthN (DW-019) supplies the consumer here: its priority overrides
+    // the route's when the authenticated consumer declares one.
+    let priority = resolve_priority(consumer_cfg, route);
     let cap = dp.global_cap.load_full();
     let mut global_permit = match &cap.general {
         None => {
@@ -552,7 +632,17 @@ where
 
     let mut resp = match &route.action {
         RouteAction::Proxy { .. } => {
-            proxy_request(&gen, peer, req, route, idx, &params, &mut global_permit).await
+            proxy_request(
+                &gen,
+                peer,
+                req,
+                route,
+                idx,
+                &params,
+                &mut global_permit,
+                identity.as_ref(),
+            )
+            .await
         }
         RouteAction::Redirect {
             scheme,
@@ -580,6 +670,33 @@ where
         apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
     }
     resp
+}
+
+/// The 401 response for an unauthenticated/invalid request (DW-019):
+/// plain body plus a `WWW-Authenticate` challenge built from the schemes
+/// the current authenticator interprets.
+fn unauthorized(challenge: &str) -> Response<ProxyBody> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(&WWW_AUTHENTICATE, challenge)
+        .body(Either::Left(Full::new(Bytes::from("unauthorized"))))
+        .expect("static 401 response is valid")
+}
+
+/// Remove every client-supplied `X-Consumer-*` header (spoof prevention,
+/// DW-019): consumer identity is established by the gateway's
+/// authenticator and injected as a trusted header on the proxied request;
+/// a client claiming `X-Consumer-*` must never reach the upstream with it.
+fn strip_consumer_headers(headers: &mut HeaderMap) {
+    let names: Vec<HeaderName> = headers
+        .keys()
+        .filter(|n| n.as_str().starts_with("x-consumer-"))
+        .cloned()
+        .collect();
+    for name in names {
+        headers.remove(&name);
+    }
 }
 
 /// The 429 response for a denied rate limit (DW-017): `Retry-After` in
@@ -832,6 +949,10 @@ fn resolve_ref<'a>(
         .unwrap_or("")
 }
 
+// Eight parameters is the price of keeping every input explicit on the
+// per-request proxy path (no per-request allocation of a context struct);
+// DW-019's identity is the newest.
+#[allow(clippy::too_many_arguments)]
 async fn proxy_request<B>(
     gen: &Generation,
     peer: IpAddr,
@@ -840,6 +961,7 @@ async fn proxy_request<B>(
     route_idx: usize,
     params: &[(String, String)],
     global_permit: &mut Option<OwnedSemaphorePermit>,
+    identity: Option<&Identity>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -930,6 +1052,15 @@ where
     }
     if let Ok(v) = HeaderValue::from_str(&peer.to_string()) {
         parts.headers.insert(&X_REAL_IP, v);
+    }
+    // Trusted consumer identity upstream (DW-019): injected by the gateway
+    // AFTER inbound X-Consumer-* headers were stripped in `handle`, so the
+    // upstream can trust `X-Consumer-Name` as the authenticated consumer
+    // (absent for anonymous traffic). Strip + inject, never pass-through.
+    if let Some(identity) = identity {
+        if let Ok(v) = HeaderValue::from_str(&identity.consumer_name) {
+            parts.headers.insert(&X_CONSUMER_NAME, v);
+        }
     }
 
     let out_req_parts = parts;

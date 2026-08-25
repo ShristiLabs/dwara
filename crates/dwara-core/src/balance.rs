@@ -1151,6 +1151,7 @@ mod tests {
             consumers: vec![],
             policies: vec![],
             max_concurrent_requests: None,
+            jwt_providers: Vec::new(),
         };
         st.compile_and_publish(&g).expect("publish A");
         let dp = DataPlane::new(Arc::clone(&st));

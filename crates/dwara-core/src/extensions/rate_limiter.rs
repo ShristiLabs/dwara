@@ -414,12 +414,12 @@ pub enum RateLimitOutcome {
 ///
 /// **Precedence chain** (frozen vocabulary: consumer, then route, then
 /// service, then listener, then global): rules from ALL applicable
-/// policies apply and are AND-ed; the resolution order is consumer
-/// (LIVE once DW-019 supplies a consumer on the request — the resolver
-/// seam already takes it), then route, then service. Listener- and
-/// global-attached policies have no config attachment point yet (v1
-/// schema attaches policies only at consumers, routes, and services) —
-/// those links go live with their config fields.
+/// policies apply and are AND-ed; the resolution order is consumer (LIVE
+/// since DW-019: authenticated requests carry their consumer's policies),
+/// then route, then service. Listener- and global-attached policies have
+/// no config attachment point yet (v1 schema attaches policies only at
+/// consumers, routes, and services) — those links go live with their
+/// config fields.
 ///
 /// Key building per rule: each selector contributes one component
 /// (`ip` = peer, `credential` = consumer or peer fallback, `route` =
@@ -517,26 +517,24 @@ impl RateLimitEngine {
     }
 
     /// Resolve the applicable rules for one request and check them.
-    /// `route_policies`/`service_policies` are the policy name lists
-    /// attached to the matched route and its service (the consumer link
-    /// arrives with DW-019 via `ctx.consumer`). All applicable rules
-    /// apply (AND); on success the reported constraint is the tightest
-    /// one (least remaining budget). On denial the FIRST denying rule
-    /// binds the Limit/Remaining/Reset headers, but evaluation continues
-    /// through the remaining applicable rules so `retry_after_s` (and the
-    /// matching Reset) reflect the MAXIMUM wait any denying rule demands —
-    /// a client honoring the hint never retries into a second 429 with an
-    /// understated Retry-After.
+    /// `consumer_policies`/`route_policies`/`service_policies` are the
+    /// policy name lists attached to the authenticated consumer (DW-019;
+    /// empty for anonymous traffic), the matched route, and its service.
+    /// All applicable rules apply (AND); on success the reported
+    /// constraint is the tightest one (least remaining budget). On denial
+    /// the FIRST denying rule binds the Limit/Remaining/Reset headers,
+    /// but evaluation continues through the remaining applicable rules so
+    /// `retry_after_s` (and the matching Reset) reflect the MAXIMUM wait
+    /// any denying rule demands — a client honoring the hint never
+    /// retries into a second 429 with an understated Retry-After.
     pub fn check(
         &self,
         ctx: &RateLimitKeyContext<'_>,
+        consumer_policies: &[String],
         route_policies: &[String],
         service_policies: &[String],
     ) -> RateLimitOutcome {
         // Resolution order (precedence): consumer > route > service.
-        // Consumer-attached policies go live with authN (DW-019); the
-        // engine takes the consumer from the context so that wiring needs
-        // no change here beyond passing its policy names in front.
         // Header binding: the FIRST denying rule supplies Limit /
         // Remaining / Reset (the tightest constraint in resolution
         // order); Retry-After is the MAX wait across every denying rule,
@@ -545,7 +543,11 @@ impl RateLimitEngine {
         // rule has denied (the response is a 429 regardless).
         let mut acc: Option<RateLimitOutcome> = None;
         let mut denied: Option<RateLimitOutcome> = None;
-        for name in route_policies.iter().chain(service_policies) {
+        for name in consumer_policies
+            .iter()
+            .chain(route_policies)
+            .chain(service_policies)
+        {
             for (policy_name, rule) in &self.rules {
                 if policy_name != name {
                     continue;
@@ -926,17 +928,17 @@ consumers: []
         let per_ip: Vec<String> = vec!["per-ip".into()];
         for _ in 0..3 {
             assert!(matches!(
-                engine.check(&ctx("10.0.0.1", "a"), &[], &per_ip),
+                engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip),
                 RateLimitOutcome::Allowed { .. }
             ));
         }
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "a"), &[], &per_ip),
+            engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip),
             RateLimitOutcome::Denied { limit: 3, .. }
         ));
         assert!(
             matches!(
-                engine.check(&ctx("10.0.0.2", "a"), &[], &per_ip),
+                engine.check(&ctx("10.0.0.2", "a"), &[], &[], &per_ip),
                 RateLimitOutcome::Allowed { .. }
             ),
             "a different client IP has an independent key"
@@ -949,17 +951,17 @@ consumers: []
         let ip_route: Vec<String> = vec!["ip-route".into()];
         for _ in 0..3 {
             assert!(matches!(
-                engine.check(&ctx("10.0.0.1", "a"), &ip_route, &[]),
+                engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[]),
                 RateLimitOutcome::Allowed { .. }
             ));
         }
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "a"), &ip_route, &[]),
+            engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[]),
             RateLimitOutcome::Denied { .. }
         ));
         // Same IP, different route: independent (ip, route) key.
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "b"), &ip_route, &[]),
+            engine.check(&ctx("10.0.0.1", "b"), &[], &ip_route, &[]),
             RateLimitOutcome::Allowed { .. }
         ));
     }
@@ -969,7 +971,7 @@ consumers: []
         let engine = engine_from(IP_RULES_YAML);
         for _ in 0..10 {
             assert_eq!(
-                engine.check(&ctx("10.0.0.1", "a"), &[], &[]),
+                engine.check(&ctx("10.0.0.1", "a"), &[], &[], &[]),
                 RateLimitOutcome::NotLimited
             );
         }
@@ -986,17 +988,17 @@ policies:
         );
         let legacy: Vec<String> = vec!["legacy".into()];
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "r"), &legacy, &[]),
+            engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[]),
             RateLimitOutcome::Allowed { .. }
         ));
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "r"), &legacy, &[]),
+            engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[]),
             RateLimitOutcome::Allowed { .. }
         ));
         // Legacy field keys by ROUTE: a second client on the same route
         // shares the budget (the documented [route] mapping).
         assert!(matches!(
-            engine.check(&ctx("10.0.0.2", "r"), &legacy, &[]),
+            engine.check(&ctx("10.0.0.2", "r"), &[], &legacy, &[]),
             RateLimitOutcome::Denied { limit: 2, .. }
         ));
     }
@@ -1005,8 +1007,8 @@ policies:
     async fn engine_reports_decreasing_remaining_and_reset() {
         let engine = engine_from(IP_RULES_YAML);
         let per_ip: Vec<String> = vec!["per-ip".into()];
-        let first = engine.check(&ctx("10.0.0.9", "a"), &[], &per_ip);
-        let second = engine.check(&ctx("10.0.0.9", "a"), &[], &per_ip);
+        let first = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip);
+        let second = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip);
         match (first, second) {
             (
                 RateLimitOutcome::Allowed {

@@ -248,7 +248,13 @@ fn seeding_twice_creates_single_consumer_and_credential_rows() {
     sync_consumers_from_config(&store, &config).unwrap();
     sync_consumers_from_config(&store, &config).unwrap();
     assert_eq!(store.list_consumers().unwrap().len(), 1);
-    assert_eq!(store.lookup_credentials_by_selector("k1").unwrap().len(), 1);
+    assert_eq!(
+        store
+            .lookup_credentials_by_selector(&dwara_core::authn::credential_selector("k1"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -272,7 +278,13 @@ fn removed_config_consumers_persist_in_the_store_upsert_only_sync() {
         .collect();
     assert_eq!(names, vec!["acme".to_string(), "gone".to_string()]);
     // The removed consumer's credential is still active in the store.
-    assert_eq!(store.lookup_credentials_by_selector("k2").unwrap().len(), 1);
+    assert_eq!(
+        store
+            .lookup_credentials_by_selector(&dwara_core::authn::credential_selector("k2"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -283,10 +295,15 @@ fn seed_resync_after_revoke_reinserts_the_config_credential() {
         config_yaml("  - name: acme\n    credentials:\n      - type: api_key\n        key: k1\n");
     let store = StateStore::open_in_memory().unwrap();
     sync_consumers_from_config(&store, &config).unwrap();
-    let cred_id = store.lookup_credentials_by_selector("k1").unwrap()[0].id;
+    let cred_id = store
+        .lookup_credentials_by_selector(&dwara_core::authn::credential_selector("k1"))
+        .unwrap()[0]
+        .id;
     assert!(store.revoke_credential(cred_id).unwrap());
     sync_consumers_from_config(&store, &config).unwrap();
-    let active = store.lookup_credentials_by_selector("k1").unwrap();
+    let active = store
+        .lookup_credentials_by_selector(&dwara_core::authn::credential_selector("k1"))
+        .unwrap();
     assert_eq!(active.len(), 1, "revoked config credential is re-seeded");
 }
 

@@ -4,8 +4,9 @@ A high-performance API gateway written in Rust.
 
 Status: pre-alpha. The core reverse-proxy dataplane works — routing,
 streaming proxying, TLS termination/passthrough, upstream load
-balancing, hot config reload, and local rate limiting — with more
-traffic policy still to come in M1.
+balancing, hot config reload, request authentication (API keys, Basic,
+JWT Bearer), and local rate limiting — with more traffic policy still
+to come in M1.
 
 ## Quickstart
 
@@ -299,8 +300,8 @@ routes:
       type: proxy
 ```
 
-Consumers also accept a `priority`; it takes effect only once request
-authentication identifies the consumer (a later M1 release) — until
+Consumers also accept a `priority`; it takes effect once request
+authentication (see "Authentication") identifies the consumer — until
 then, shedding priority comes from the matched route. When known, the
 consumer's priority overrides the route's.
 
@@ -665,23 +666,25 @@ not retried — the upstream is saturated by definition; a retry would
 add load.
 
 Local rate limiting (DW-017) runs BEFORE every layer below — after
-route resolution but before the gateway concurrency cap — so a rejected
-request is the cheapest thing the gateway can do with a request and
-never holds a cap slot. See "Rate limiting" below.
+route resolution and authentication but before the gateway concurrency
+cap — so a rejected request is the cheapest thing the gateway can do
+with a request and never holds a cap slot. See "Rate limiting" below.
 
 The admission layers stack in a fixed order, outermost first:
 
-1. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
+1. authentication (see Authentication) — invalid credential or missing
+   on an `auth_required` route: 401 + `WWW-Authenticate`;
+2. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
    429 + `Retry-After`;
-2. gateway concurrency cap (`max_concurrent_requests`, see Global
+3. gateway concurrency cap (`max_concurrent_requests`, see Global
    settings) — over-cap: 503 "gateway saturated";
-3. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
+4. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
    circuit open" + `Retry-After`;
-4. per-endpoint ejection (the `health` block) — an ejected endpoint is
+5. per-endpoint ejection (the `health` block) — an ejected endpoint is
    skipped by the balancer;
-5. per-upstream pending cap (`max_pending`) — queue full: 503
+6. per-upstream pending cap (`max_pending`) — queue full: 503
    "upstream saturated";
-6. connect (`connection_cap`, `timeouts.connect_ms`).
+7. connect (`connection_cap`, `timeouts.connect_ms`).
 
 ### Rate limiting
 
@@ -691,11 +694,12 @@ services that reference the policy by name via their `policies` list.
 Precedence follows the frozen chain consumer > route > service >
 listener > global, but limiting does NOT pick one winner: rules from
 every applicable policy ALL apply and are AND-ed — a request denied by
-any rule is denied. The consumer link goes live with authentication
-(a later M1 release); listener- and global-attached policies have no
-config attachment point yet. Today: route- and service-attached
-policies limit; a request whose route and service reference no policy
-with rate rules is not limited and carries no rate headers.
+any rule is denied. The consumer link is live: a policy attached to the
+authenticated consumer's `policies` list applies (consumer-attached
+policies run first in the chain); listener- and global-attached
+policies have no config attachment point yet. A request whose consumer,
+route, and service reference no policy with rate rules is not limited
+and carries no rate headers.
 
 A policy carries a list of rules under `rate_limits`; each rule has
 these fields:
@@ -741,10 +745,12 @@ counter key, which decides whether buckets are shared or independent:
   draws from the same budget (a global cap on the route).
 - `selector: [ip, route]` — one bucket per (client IP, route) pair:
   each client gets an independent budget per route.
-- `credential` falls back to the client IP until authentication
-  identifies consumers, so anonymous traffic limits per client rather
-  than sharing one global "anonymous" bucket. `selector: [credential,
-  route]` becomes per-(client, route) until then.
+- `credential` is the authenticated consumer's name (see
+  "Authentication"); it falls back to the client IP for anonymous
+  traffic, so unauthenticated requests limit per client rather than
+  sharing one global "anonymous" bucket. `selector: [credential,
+  route]` is per-(consumer, route) — per-(client, route) when
+  anonymous.
 
 **Burst and sustained rate.** Windows are GCRA buckets: `requests_per`
 is the sustained replenishment rate and `burst` is the bucket size. A
@@ -792,6 +798,121 @@ with `selector: [route]`, a single window of `requests` per
 one policy; both apply. Use `rate_limits` for new configs.
 
 
+
+### Authentication
+
+Request authentication (DW-019) runs after route resolution, before
+rate limiting and cap admission (the rate-limit `credential` selector
+and the shedding priority class both consume the identity). It accepts
+three credential families:
+
+- **API key**: `X-API-Key: <key>`. Config declares these under
+  `consumers[].credentials` (`type: api_key`, a `key` value).
+- **Basic**: `Authorization: Basic base64(user:pass)`. The username is
+  the lookup selector and the password is verified against the stored
+  hash through the same path as API keys (see the hashing model below);
+  Basic credentials therefore live in the state store, not the config.
+  A resolved Basic identity is reported with the API-key kind.
+- **JWT Bearer**: `Authorization: Bearer <token>`, verified per
+  `jwt_providers` config (below).
+
+`X-API-Key` wins over `Authorization`; within `Authorization`, the
+`Basic`/`Bearer` scheme token decides. A gateway with NO consumers and
+NO JWT providers has authentication disabled: the authenticator
+resolves anonymous for everything and `Authorization` is forwarded
+upstream untouched (pass-through mode). Once any credential is
+configured the gateway INTERPRETS `Authorization` — except that `Bearer`
+stays pass-through unless a JWT provider exists, so a gateway fronting
+an OAuth-protected upstream without its own JWT config keeps forwarding
+tokens.
+
+```yaml
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: sekrit            # hashed at startup; never stored or logged
+routes:
+  - name: private
+    service: echo
+    auth_required: true        # anonymous requests get 401
+    match:
+      path: { type: prefix, value: /private }
+    action:
+      type: proxy
+```
+
+**Route enforcement (`auth_required`).** Routes take a boolean
+`auth_required` (default `false`). Two distinct rules:
+
+- A request that PRESENTS an invalid credential is rejected `401` with
+  body `unauthorized` and a `WWW-Authenticate` challenge, on every
+  route, regardless of `auth_required`.
+- An anonymous request (no credential family applied) is rejected 401
+  only on routes with `auth_required: true`.
+
+A gateway-side authentication failure (e.g. the JWKS endpoint is down)
+answers `500` — the gateway cannot vouch for the caller either way. The
+challenge lists the schemes actually configured (`Basic realm="dwara"`
+when credential records exist, plus `Bearer` when JWT providers do).
+
+**Hashing model.** The gateway never indexes or stores plaintext key
+material. The lookup selector is `hex(sha256(secret))` and the stored
+hash is `sha256:<hex(sha256(secret))>`, verified with a constant-time
+comparison. Config-declared API keys are hashed at startup (or at state
+store seed time); the plaintext value is then dropped. A credential
+whose stored hash is a PHC argon2id string (`$argon2id$...`, supplied
+through the state store) is verified with argon2id instead — opt-in per
+credential: an argon2 verify is memory-hard and far too slow for the
+per-request hot path, so config-declared keys are always sha256.
+
+**JWT providers.** Top-level `jwt_providers` lists trusted token
+issuers whose keys are fetched from a JWKS endpoint:
+
+```yaml
+jwt_providers:
+  - name: auth0
+    jwks_url: https://auth.example.com/.well-known/jwks.json
+    issuer: https://auth.example.com/
+    audience: my-api
+    algorithms: [RS256]        # default [RS256, ES256]
+    refresh_secs: 300          # JWKS cache staleness bound, default 300
+    leeway_secs: 30            # exp/nbf clock-skew tolerance, default 30
+    consumer: acme             # optional explicit consumer binding
+```
+
+Verification per provider: `iss`/`aud` (when configured), `exp` and
+`nbf` with `leeway_secs` skew, and the algorithm allowlist enforced
+before any signature work — `none` and HMAC (`HS*`) are never allowed
+(asymmetric verification only; the gateway holds no shared secrets with
+issuers). A token is verified against each provider whose allowlist
+contains the token's algorithm until one succeeds.
+
+The consumer a token maps to: the provider's explicit `consumer`
+binding, when set; otherwise the token's `iss` claim is matched against
+consumers' `jwt` credentials (`type: jwt`, an `issuer` and optional
+`audiences` — the token's audience must be contained in the list when
+it is non-empty).
+
+JWKS fetching is lazy (first Bearer request), cached per provider URL,
+and refreshed two ways: after `refresh_secs`, and on an unknown `kid` —
+a fresh key id appearing mid-flight (key rotation) triggers a re-fetch
+and the token then verifies, with no restart and no failed requests.
+Concurrent refreshes coalesce into one fetch. JWKS caches survive config
+reloads (keyed by URL), so rotation state outlives a reload. A JWKS
+fetch has a 5-second connect timeout and a 1 MiB body cap; a failed
+fetch is a 500 (gateway-side failure), not a 401.
+
+**X-Consumer hygiene.** The gateway strips every client-supplied
+`X-Consumer-*` header from proxied requests (a client must never reach
+the upstream claiming a consumer identity) and injects its own trusted
+`X-Consumer-Name` when authentication resolved a consumer — absent for
+anonymous traffic. Strip and inject, never pass-through.
+
+The authenticated consumer also drives behavior elsewhere: its
+`policies` join rate limiting with consumer precedence (see "Rate
+limiting"), and its `priority` overrides the route's for load shedding
+(see "Load shedding and priority").
 
 ### TLS
 
@@ -928,13 +1049,14 @@ database file with the matching `.bak-*` snapshot, and restart — or,
 since schema-v1 content is fully re-derivable, recreate the file and
 let config seeding repopulate it.
 
-Honesty note: credential hashing lands with the authenticator (a later
-M1 release). Until then, seeded credential rows carry a placeholder
-hash and config credentials keep authenticating (once authentication
-exists) from config — the rows exist to exercise the schema, seeding,
-and cache paths, not to authorize traffic. Nothing on the request path
-reads the store yet; behavior with the variable set is otherwise
-identical to unset.
+Credential hashing is real: seeded API-key rows carry the same hash
+the authenticator verifies (`sha256:<hex(sha256(key))>`, selector
+`hex(sha256(key))` — never the plaintext key). With `DWARA_STATE_DB`
+set, the dataplane authenticates against the store's hot-cached
+records; without it, config credentials are hashed in-memory at
+startup. JWT and mTLS config credentials are bindings, not secrets
+(tokens are verified cryptographically, client certificates by
+fingerprint), so their rows keep binding-marker hashes.
 
 The store keeps an in-memory hot cache: credential lookups by selector
 avoid disk after their first lookup (unknown selectors are cached as
