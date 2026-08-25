@@ -7,3 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_path_to_error = { workspace = true }
+serde_yaml_ng = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

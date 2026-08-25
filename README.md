@@ -22,6 +22,41 @@ curl http://127.0.0.1:8080
 
 Stop it with Ctrl-C.
 
+## Configuration
+
+Gateway configuration is a YAML file parsed strictly by `dwara-core`
+(`parse_gateway`): unknown fields are rejected, and errors carry the
+path of the offending node. A minimal valid configuration:
+
+```yaml
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: all
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /
+    action:
+      type: proxy
+services:
+  - name: echo
+    upstream: echo-upstream
+upstreams:
+  - name: echo-upstream
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000
+```
+
+More examples live in `crates/dwara-core/tests/fixtures/` (minimal and
+full). A machine-readable `json_schema()` export exists
+programmatically; it is the intended canonical reference once the
+schema stabilizes. The schema still churns during M1.
+
 ## Crates
 
 | Crate | Role |

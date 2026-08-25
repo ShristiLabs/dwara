@@ -1,0 +1,100 @@
+listeners:
+  - name: edge-https
+    address: 0.0.0.0
+    port: 8443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/tls/server.crt
+      key_file: /etc/dwara/tls/server.key
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: users-v1
+    service: users-api
+    match:
+      path:
+        type: prefix
+        value: /v1/users
+      host: api.example.com
+      methods:
+        - GET
+        - POST
+      headers:
+        x-api-version: "1"
+    action:
+      type: proxy
+    policies:
+      - standard-rate-limit
+  - name: legacy-redirect
+    service: users-api
+    match:
+      path:
+        type: prefix
+        value: /users
+    action:
+      type: redirect
+      scheme: https
+      host: api.example.com
+      path: /v1/users
+      status: 301
+  - name: healthz
+    service: users-api
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+services:
+  - name: users-api
+    upstream: users-upstream
+    base_path: /v1
+    version: v1
+    policies:
+      - default-timeouts
+upstreams:
+  - name: users-upstream
+    load_balancer: least_requests
+    protocol: http2
+    endpoints:
+      - address: 10.0.0.1
+        port: 8080
+        weight: 3
+      - address: 10.0.0.2
+        port: 8080
+    timeouts:
+      connect_ms: 2000
+      read_ms: 30000
+      write_ms: 30000
+consumers:
+  - name: mobile-app
+    credentials:
+      - type: api_key
+        key: dwara-test-key-do-not-use
+      - type: jwt
+        issuer: https://auth.example.com
+        audiences:
+          - users-api
+    policies:
+      - mobile-quota
+  - name: partner-mtls
+    credentials:
+      - type: mtls
+        fingerprint: sha256:9f2a7c1e...
+policies:
+  - name: standard-rate-limit
+    rate_limit:
+      requests: 1000
+      window_seconds: 60
+  - name: default-timeouts
+    timeouts:
+      connect_ms: 5000
+      read_ms: 60000
+  - name: mobile-quota
+    rate_limit:
+      requests: 100
+      window_seconds: 60

@@ -1,0 +1,21 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: all
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /
+    action:
+      type: proxy
+services:
+  - name: echo
+    upstream: echo-upstream
+upstreams:
+  - name: echo-upstream
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000
