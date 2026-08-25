@@ -31,6 +31,24 @@ Stop it with Ctrl-C.
 | `dwara-admin` | Admin / management-plane API |
 | `dwara-cli` | Operator command-line client |
 
+## Development
+
+CI runs on pushes and pull requests to `main` (when Rust sources,
+manifests, toolchain files, or the workflow itself change). Blocking
+gates: `cargo fmt --check`, clippy with `-D warnings`, build, tests,
+and [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) checks
+(advisories, licenses, bans — policy in `deny.toml`). A CycloneDX SBOM
+is generated and uploaded as an artifact on each run.
+
+Run the same checks locally:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
+```
+
 ## License
 
 Apache-2.0
