@@ -29,6 +29,11 @@
 //! endpoint's health, and ejecting on them would remove healthy capacity
 //! exactly when backpressure is needed (documented choice).
 //!
+//! Active health probes report through [`EndpointHealth::report_probe`],
+//! which drives the SAME consecutive streak and ejection/recovery
+//! transitions but never inserts an observation into the rolling window:
+//! synthetic probes never mix into real-traffic ratios.
+//!
 //! # Recovery (half-open)
 //!
 //! After `eject_ms` (default 30 s) the tracker moves to half-open on the
@@ -284,6 +289,31 @@ impl EndpointHealth {
         {
             events.pop_front();
         }
+        self.apply_observation(&mut events, params, now, is_failure);
+    }
+
+    /// Report one ACTIVE (synthetic probe) observation at `now` (Unix-epoch
+    /// ms). Runs the same state machine as [`EndpointHealth::report`] —
+    /// the shared consecutive-failure streak and every ejection/recovery
+    /// transition — but the observation NEVER enters the rolling
+    /// failure-ratio window: that window is real traffic only, so probes
+    /// cannot contaminate the passive ratios (the ratio rule also stays
+    /// disabled by the caller's parameters as a second line of defense).
+    pub fn report_probe(&self, params: &HealthParams, now: u64, is_failure: bool) {
+        let mut events = self.events.lock().expect("health tracker poisoned");
+        self.apply_observation(&mut events, params, now, is_failure);
+    }
+
+    /// Streak update plus status transitions, shared by passive and probe
+    /// reports. Caller holds the events lock (probe reports hold it too,
+    /// so transitions stay consistent with the window they read).
+    fn apply_observation(
+        &self,
+        events: &mut VecDeque<(u64, bool)>,
+        params: &HealthParams,
+        now: u64,
+        is_failure: bool,
+    ) {
         if is_failure {
             self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -293,26 +323,26 @@ impl EndpointHealth {
         match self.status.load(Ordering::Acquire) {
             HALF_OPEN => {
                 if is_failure {
-                    self.eject_locked(&mut events, params, now);
+                    self.eject_locked(events, params, now);
                 } else {
                     // Successful probe (or a fail-open success racing the
                     // probe): back to healthy with a clean history.
-                    self.recover_locked(&mut events);
+                    self.recover_locked(events);
                 }
             }
             EJECTED => {
                 if !is_failure {
                     // Only reachable via the all-ejected fail-open path:
                     // real traffic to this endpoint just succeeded.
-                    self.recover_locked(&mut events);
+                    self.recover_locked(events);
                 }
                 // Failures while ejected (fail-open traffic) leave the
                 // ejection standing; the expiry/half-open cycle is the
                 // designed recovery path.
             }
             _ => {
-                if is_failure && self.should_eject_locked(&events, params) {
-                    self.eject_locked(&mut events, params, now);
+                if is_failure && self.should_eject_locked(events, params) {
+                    self.eject_locked(events, params, now);
                 }
             }
         }

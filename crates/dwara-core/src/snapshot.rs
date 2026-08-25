@@ -669,6 +669,76 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        if let Some(a) = &u.active_health {
+            // Active probes report into the passive ejection machinery, so
+            // the passive block (which owns eject/half-open windows) is a
+            // hard requirement.
+            if u.health.is_none() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "active_health",
+                    "active health requires the passive `health` block (probe results report \
+                     into the same ejection machinery)",
+                ));
+            }
+            for (field, v) in [
+                ("active_health.interval_ms", a.interval_ms),
+                ("active_health.timeout_ms", a.timeout_ms),
+            ] {
+                if v == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        field,
+                        "active health value must be > 0",
+                    ));
+                }
+            }
+            // jitter_ms == 0 is legal: it disables jitter entirely.
+            for (field, v) in [
+                ("active_health.success_threshold", a.success_threshold),
+                ("active_health.failure_threshold", a.failure_threshold),
+            ] {
+                if v == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        field,
+                        "active health threshold must be > 0",
+                    ));
+                }
+            }
+            if a.timeout_ms > a.interval_ms {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "active_health.timeout_ms",
+                    "timeout_ms must be <= interval_ms (an overlapping probe would pile up)",
+                ));
+            }
+            if a.jitter_ms > a.interval_ms {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "active_health.jitter_ms",
+                    "jitter_ms must be <= interval_ms",
+                ));
+            }
+            if a.kind == crate::config::ProbeKind::Http
+                && (!a.path.starts_with('/') || a.path.bytes().any(|b| b.is_ascii_control()))
+            {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "active_health.path",
+                    format!(
+                        "probe path '{}' must start with '/' and contain no control characters",
+                        a.path
+                    ),
+                ));
+            }
+        }
         if let Some(t) = &u.timeouts {
             for (field, v) in [
                 ("connect_ms", t.connect_ms),
@@ -1232,6 +1302,7 @@ mod tests {
                 connection_cap: None,
                 slow_start_ms: None,
                 health: None,
+                active_health: None,
                 timeouts: None,
             }],
             consumers: vec![],

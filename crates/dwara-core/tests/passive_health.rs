@@ -590,6 +590,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             ],
             connection_cap: None,
             slow_start_ms: None,
+            active_health: None,
             health: Some(health),
             timeouts: None,
         }],
@@ -761,6 +762,7 @@ fn upstream_cfg(
         endpoints,
         connection_cap: None,
         slow_start_ms: None,
+        active_health: None,
         health: Some(health),
         timeouts: None,
     }
@@ -1008,6 +1010,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             }],
             connection_cap: None,
             slow_start_ms: None,
+            active_health: None,
             health: Some(h),
             timeouts: None,
         }],

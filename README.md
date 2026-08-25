@@ -162,7 +162,7 @@ routes:
   - name: health
     service: echo
     match:
-      path: { type: exact, value: /healthz }
+      path: { type: exact, value: /ping }
     action:
       type: respond
       status: 200
@@ -270,6 +270,9 @@ connection pool. Fields:
   (default) disables the ramp. See below.
 - `health`: passive health / outlier detection block; absent (default)
   disables it entirely. All keys inside the block default. See below.
+- `active_health`: active health probing block; absent (default)
+  disables probing. Requires a `health` block (validation rejects the
+  pairing otherwise). All keys inside the block default. See below.
 
 Each endpoint carries a `weight` (default 1, must be > 0). For
 `https`/`http2` upstreams, server certificates are verified against the
@@ -359,6 +362,70 @@ upstreams:
 ```
 
 A `health:` block with no keys enables ejection with the defaults above.
+
+Active health checks (`active_health` block, DW-013): dwara PROBES each
+endpoint on its own schedule, in addition to watching real traffic.
+Requires the passive `health` block (the probe results report into the
+same per-endpoint ejection machinery, which owns the eject and half-open
+windows). One probe loop per endpoint sleeps `interval_ms` plus a
+uniform random `0..jitter_ms` (full jitter) and then probes the endpoint
+DIRECTLY — bypassing load balancing and the connection pool, since a
+probe must examine one specific endpoint. An `http` probe issues
+`GET {path}` over HTTP/1.1 on its own connection (TLS with webpki root
+verification toward `https`/`http2` upstreams) and counts a 2xx status
+as success; anything else — 3xx included, redirects are not followed —
+4xx, 5xx, truncation, timeout, or transport error is a failure. A `tcp`
+probe succeeds when the TCP connect completes within `timeout_ms`; use
+it for `http2` upstreams whose servers refuse HTTP/1.1 on a separate
+connection.
+
+Fields (all default; zero values for the millisecond and threshold
+fields are rejected, `interval_ms` must be >= `timeout_ms` and >=
+`jitter_ms`, and `jitter_ms: 0` disables jitter):
+
+- `kind`: `http` (default) or `tcp`.
+- `path`: path probed by `http` checks, default `/healthz`. Ignored by
+  `tcp`.
+- `interval_ms`: time between probe attempts, default 5000.
+- `timeout_ms`: per-probe timeout (connect plus response for `http`),
+  default 2000.
+- `success_threshold`: consecutive probe successes required to (re)admit
+  an ejected endpoint, default 2.
+- `failure_threshold`: consecutive probe failures required to eject,
+  default 3.
+- `jitter_ms`: full-jitter bound, default 500.
+
+Interplay with passive ejection: probe results feed the SAME ejection
+tracker as traffic outcomes, and the two share the per-endpoint
+consecutive-failure streak — either signal can eject, on its own
+threshold (passive `consecutive_failures` or active
+`failure_threshold`). Probe outcomes never enter the passive
+failure-ratio/volume window, so synthetic probes do not pollute
+real-traffic ratios. Ejected endpoints stay out of rotation for
+`health.eject_ms`, and probe failures while ejected cannot extend that
+window. Recovery is probe-driven: `success_threshold` consecutive
+successful probes re-admit the endpoint outright — even before
+`eject_ms` expires, and even for endpoints carrying no traffic (which
+passive health alone can never recover). Probe loops are restarted on
+every config reload, but the shared tracker (keyed by `address:port`)
+survives the swap, so an ejection streak outlives the restart.
+
+```yaml
+upstreams:
+  - name: echo-upstream
+    health: {}                    # required: owns eject/half-open windows
+    active_health:
+      kind: http
+      path: /healthz
+      interval_ms: 5000
+      timeout_ms: 2000
+      success_threshold: 2
+      failure_threshold: 3
+      jitter_ms: 500
+```
+
+An `active_health:` block with no keys enables HTTP probes with the
+defaults above.
 
 ### TLS
 
@@ -457,6 +524,17 @@ adding or removing listeners or changing address/port takes effect on
 restart; only route/config changes and certificate material reload
 live. Passthrough splices are also not drained on graceful shutdown;
 they run until the process exits.
+
+Health endpoints: dwara reserves `/healthz` and `/readyz` and serves
+them on every terminate and cleartext listener BEFORE route resolution.
+`/healthz` answers 200 whenever the process is up (liveness);
+`/readyz` answers 200 once a config generation has been published
+successfully and 503 before that (readiness — it tracks the gateway's
+own state, not upstream health). Caveat: these paths are not routable —
+a configured route matching `/healthz` or `/readyz` (exact, regex, or
+prefix) is permanently shadowed by the reserved handlers; this is
+accepted v1 behavior, not a validation error. TLS-passthrough listeners
+never serve them (they do not speak HTTP).
 
 Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 (including ones still in the kernel accept backlog) within

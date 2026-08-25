@@ -336,6 +336,15 @@ pub struct Upstream {
     /// disables passive health entirely (no ejections).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<PassiveHealth>,
+    /// Active health checks (DW-013): synthetic HTTP/TCP probes per
+    /// endpoint on a fixed interval with full jitter. Probe results report
+    /// into the SAME per-endpoint ejection machinery as passive health, so
+    /// an endpoint failing its probes leaves load-balancer rotation and a
+    /// success streak returns it. Requires the passive `health` block
+    /// (which owns the ejection/recovery windows); rejected by validation
+    /// otherwise. Absent disables active probing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_health: Option<ActiveHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
 }
@@ -411,6 +420,111 @@ fn default_health_eject_ms() -> u64 {
 
 fn default_health_half_open_probes() -> u32 {
     1
+}
+
+/// Active health check knobs (DW-013). A block with no keys enables HTTP
+/// probes with the defaults.
+///
+/// Probe semantics (frozen):
+/// - `http` probes issue `GET {path}` over HTTP/1.1 DIRECTLY to the
+///   endpoint (bypassing load balancing and the pooled client); success is
+///   a 2xx status. Redirects (3xx) are NOT followed — a health endpoint
+///   answering 3xx is treated as a failure (a load balancer must not chase
+///   redirects to decide health).
+/// - `tcp` probes succeed when a TCP connection completes within
+///   `timeout_ms`.
+/// - Full jitter: each loop sleeps `interval_ms` plus a uniform random
+///   `0..jitter_ms` before the next probe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveHealth {
+    /// Probe kind (default `http`).
+    #[serde(default = "default_probe_kind")]
+    pub kind: ProbeKind,
+    /// Path probed by `http` checks (default `/healthz`). Ignored by `tcp`.
+    #[serde(
+        default = "default_probe_path",
+        skip_serializing_if = "is_default_probe_path"
+    )]
+    pub path: String,
+    /// Time between probe attempts in milliseconds (default 5000). Must be
+    /// >= `timeout_ms` and >= `jitter_ms`.
+    #[serde(default = "default_probe_interval_ms")]
+    pub interval_ms: u64,
+    /// Per-probe timeout in milliseconds (default 2000), covering connect
+    /// plus the response for http probes.
+    #[serde(default = "default_probe_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Consecutive probe SUCCESSES required to (re)admit an ejected
+    /// endpoint (default 2).
+    #[serde(default = "default_probe_success_threshold")]
+    pub success_threshold: u32,
+    /// Consecutive probe FAILURES required to eject a healthy endpoint
+    /// (default 3). Reports the same per-endpoint streak the passive
+    /// checker uses; see the active-health module docs for precedence.
+    #[serde(default = "default_probe_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Full-jitter bound in milliseconds (default 500): each loop sleeps a
+    /// uniform random `0..jitter_ms` in addition to `interval_ms`. Must be
+    /// <= `interval_ms`.
+    #[serde(default = "default_probe_jitter_ms")]
+    pub jitter_ms: u64,
+}
+
+impl Default for ActiveHealth {
+    fn default() -> Self {
+        ActiveHealth {
+            kind: default_probe_kind(),
+            path: default_probe_path(),
+            interval_ms: default_probe_interval_ms(),
+            timeout_ms: default_probe_timeout_ms(),
+            success_threshold: default_probe_success_threshold(),
+            failure_threshold: default_probe_failure_threshold(),
+            jitter_ms: default_probe_jitter_ms(),
+        }
+    }
+}
+
+fn default_probe_kind() -> ProbeKind {
+    ProbeKind::Http
+}
+
+fn default_probe_path() -> String {
+    "/healthz".to_string()
+}
+
+fn is_default_probe_path(p: &str) -> bool {
+    p == "/healthz"
+}
+
+fn default_probe_interval_ms() -> u64 {
+    5_000
+}
+
+fn default_probe_timeout_ms() -> u64 {
+    2_000
+}
+
+fn default_probe_success_threshold() -> u32 {
+    2
+}
+
+fn default_probe_failure_threshold() -> u32 {
+    3
+}
+
+fn default_probe_jitter_ms() -> u64 {
+    500
+}
+
+/// Kind of active health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeKind {
+    /// HTTP/1.1 GET to `path`; success = 2xx.
+    Http,
+    /// TCP connect within the timeout.
+    Tcp,
 }
 
 fn default_load_balancer() -> LoadBalancer {

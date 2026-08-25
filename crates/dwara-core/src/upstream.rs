@@ -723,6 +723,7 @@ mod tests {
             connection_cap: cap,
             slow_start_ms: None,
             health: None,
+            active_health: None,
             timeouts: connect_ms.map(|connect_ms| Timeouts {
                 connect_ms: Some(connect_ms),
                 read_ms: None,
@@ -1041,6 +1042,7 @@ mod tests {
                 connection_cap: Some(0),
                 slow_start_ms: None,
                 health: None,
+                active_health: None,
                 timeouts: Some(Timeouts {
                     connect_ms: Some(0),
                     read_ms: Some(0),
@@ -1083,6 +1085,7 @@ mod tests {
             connection_cap: None,
             slow_start_ms: None,
             health: None,
+            active_health: None,
             timeouts: None,
         };
         let handle = build_handle(&up, webpki_root_store(), None);

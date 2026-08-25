@@ -35,7 +35,9 @@
 //! Hot reload semantics:
 //! - Config file watch + SIGHUP: re-read, validate, `compile_and_publish`
 //!   (DW-006 semantics unchanged). On success, terminate listeners'
-//!   TLS configurations are rebuilt from the new snapshot.
+//!   TLS configurations are rebuilt from the new snapshot and the active
+//!   health probe loops (DW-013) are respawned against the new generation
+//!   (endpoints persisting across the swap keep their health trackers).
 //! - Certificate hot reload: cert/key files of terminate listeners are
 //!   watched; a change rebuilds the `ServerConfig` behind an `ArcSwap`
 //!   WITHOUT dropping connections. New handshakes use the new material;
@@ -109,6 +111,7 @@ async fn reload(
     source: &FileConfigSource,
     trigger: &str,
     tls_states: &BTreeMap<String, Arc<TlsTermination>>,
+    probes: &mut dwara_core::active::ActiveProbes,
 ) {
     let old = state.snapshot();
     match source.load().await {
@@ -125,6 +128,12 @@ async fn reload(
                 );
                 dp.refresh();
                 refresh_tls_states(&state.snapshot(), tls_states, trigger);
+                // Active health checks (DW-013): probe loops are per
+                // generation — cancel the old tasks and spawn against the
+                // new registry. Endpoints whose address:port persists keep
+                // their health trackers (carried by the balancer), so an
+                // ejection streak survives the swap.
+                probes.respawn(&dp.registry(), &state.snapshot());
             }
             Err(err) => {
                 // CompileError::Validation's Display lists every issue.
@@ -555,19 +564,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    // Reload driver: config file events (debounced) and SIGHUP.
+    // Reload driver: config file events (debounced) and SIGHUP. Owns the
+    // active-probe task set (DW-013): initial spawn against the startup
+    // generation, respawn on every successful reload, abort-all when the
+    // driver returns (graceful shutdown drops it).
     let reload_state = Arc::clone(&state);
     let dp = DataPlane::new(Arc::clone(&state));
     let reload_dp = Arc::clone(&dp);
     let reload_tls = tls_states.clone();
     let reload_shutdown = shutdown_rx.clone();
     let reload_task = tokio::spawn(async move {
+        let mut probes = dwara_core::active::ActiveProbes::new();
+        probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
         let mut watcher_rx = watcher_rx;
         let mut shutting_down = reload_shutdown;
         loop {
             tokio::select! {
                 _ = sighup.recv() => {
-                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls).await;
+                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls, &mut probes).await;
                 }
                 maybe_event = watcher_rx.recv() => {
                     let Some(()) = maybe_event else { break };
@@ -576,7 +590,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         _ = shutting_down.changed() => return,
                     }
                     while watcher_rx.try_recv().is_ok() {}
-                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls).await;
+                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls, &mut probes).await;
                 }
                 _ = shutting_down.changed() => return,
             }

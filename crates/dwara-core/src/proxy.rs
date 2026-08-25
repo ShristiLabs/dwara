@@ -143,6 +143,40 @@ impl DataPlane {
     pub fn registry(&self) -> Arc<UpstreamRegistry> {
         Arc::clone(&self.current().registry)
     }
+
+    /// Whether the gateway is READY to serve: at least one config
+    /// generation has been published successfully (generation >= 1). This
+    /// is the `/readyz` definition (DW-013). Upstream health deliberately
+    /// does NOT participate: a fully-ejected pool fail-opens rather than
+    /// blackholing (DW-012), so readiness tracks the gateway's own state,
+    /// not its backends'.
+    pub fn ready(&self) -> bool {
+        self.state.snapshot().generation() >= 1
+    }
+}
+
+/// Reserved gateway paths (DW-013), served on EVERY listener BEFORE any
+/// route resolution: `/healthz` answers 200 whenever the process is up
+/// (liveness; a container orchestrator should restart it otherwise-false
+/// cases, which only process death can produce), and `/readyz` answers 200
+/// exactly when [`DataPlane::ready`] holds, 503 otherwise. Precedence:
+/// these paths are NOT routable — a configured route matching `/healthz`
+/// or `/readyz` (exact, regex, or prefix) is permanently shadowed, which
+/// is accepted v1 behavior (documented; no conflict rejection). Applies
+/// regardless of listener protocol, so a TLS-terminated listener serves
+/// them too; TLS-passthrough listeners do not (they never speak HTTP).
+fn reserved_path(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
+    match path {
+        "/healthz" => Some(simple(StatusCode::OK, "ok")),
+        "/readyz" => {
+            if dp.ready() {
+                Some(simple(StatusCode::OK, "ready"))
+            } else {
+                Some(simple(StatusCode::SERVICE_UNAVAILABLE, "not ready"))
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Handle one request against the current generation. Never panics; every
@@ -156,6 +190,11 @@ where
     let gen = dp.current();
     let gateway = gen.snapshot.gateway();
     let path = req.uri().path().to_string();
+
+    // Reserved gateway paths first: they shadow any configured route.
+    if let Some(resp) = reserved_path(dp, &path) {
+        return resp;
+    }
 
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
         return simple(StatusCode::NOT_FOUND, "no route");

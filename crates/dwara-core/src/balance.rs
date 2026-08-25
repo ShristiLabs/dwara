@@ -466,6 +466,20 @@ impl UpstreamLb {
         s.endpoints.get(idx).map(|e| (e.address.clone(), e.port))
     }
 
+    /// Every endpoint's `address:port` and passive-health tracker in the
+    /// current set, in state order. Trackers are present only when the
+    /// generation carries passive health (DW-012). This is the ACTIVE
+    /// health engine's (DW-013) view: probe loops target a SPECIFIC
+    /// endpoint and report into its live tracker, bypassing balancing.
+    /// Single atomic state load, so address and tracker always correspond.
+    pub fn health_targets(&self) -> Vec<(String, u16, Option<Arc<EndpointHealth>>)> {
+        let s = self.state.load();
+        s.endpoints
+            .iter()
+            .map(|e| (e.address.clone(), e.port, e.health.clone()))
+            .collect()
+    }
+
     /// Current in-flight count for endpoint `idx`.
     pub fn inflight(&self, idx: usize) -> u64 {
         self.state
@@ -1118,6 +1132,7 @@ mod tests {
             }),
             slow_start_ms: None,
             health: None,
+            active_health: None,
         }
     }
 
