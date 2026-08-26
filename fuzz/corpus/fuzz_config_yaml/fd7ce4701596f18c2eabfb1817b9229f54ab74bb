@@ -1,0 +1,17 @@
+liste   type: proxy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+ !- namrs:
+  - n   ion:
+      type: proxy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+ !- name: u
+    endpoints:
+ e: u
+    endpoints:
+      - addr0

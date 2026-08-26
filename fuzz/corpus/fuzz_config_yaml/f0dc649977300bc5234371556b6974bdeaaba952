@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: q.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: ceho
+    action: ''''''ess> q.0.0.0
+t: 9000

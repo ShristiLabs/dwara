@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 1.0.1.0
+    port: 880
+routes:
+  |-
+|-   typ - nams:
+  - naervice: echo
+    match:ste: 

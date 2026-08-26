@@ -1,0 +1,12 @@
+listeners:
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v0
+    action:
+     2888888888888888888888888888888800000!0
+ pe: p:
+ type: prefi      poAt: 9000

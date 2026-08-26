@@ -1,0 +1,11 @@
+listeners:
+  - name  service: echo
+    match:
+      path:
+    walisteners:
+  - name: main
+    !address: 2.:.0.0
+ :.
+  - fix
+ echo
+    upstrean

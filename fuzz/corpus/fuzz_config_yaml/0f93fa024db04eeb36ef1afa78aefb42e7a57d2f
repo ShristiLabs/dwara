@@ -1,0 +1,20 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1T
+    action:
+      type: proxy
+services:
+ atc 
+:h    ho
+   !upstreamT: u
+upstreams:
+  -      patTh:
+   T @

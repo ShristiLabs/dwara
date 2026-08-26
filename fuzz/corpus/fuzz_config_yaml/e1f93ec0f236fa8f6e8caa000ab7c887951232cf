@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 2.0.00
+    port: 8080
+routes:
+  -  service: echo
+  5  match:
+   r match:
+   rean

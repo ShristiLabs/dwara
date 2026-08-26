@@ -76,7 +76,21 @@
 //! NEW observations (the window and consecutive counter live on).
 
 use std::collections::VecDeque;
+// DW-025: under the `loom` dev feature the synchronization primitives are
+// swapped for loom's model-checked equivalents so the CAS transition logic
+// can be exhaustively explored; builds are bit-identical otherwise.
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+#[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+// Arc stays std even under loom: it is a container, not a synchronization
+// primitive, and keeping it std avoids infecting cross-module signatures
+// (balance.rs Dispatch/HealthDispatch) with loom types.
+#[cfg(feature = "loom")]
+use loom::sync::Mutex;
+#[cfg(feature = "loom")]
+use std::sync::Arc;
+#[cfg(not(feature = "loom"))]
 use std::sync::{Arc, Mutex};
 
 /// Default rolling observation window in milliseconds.

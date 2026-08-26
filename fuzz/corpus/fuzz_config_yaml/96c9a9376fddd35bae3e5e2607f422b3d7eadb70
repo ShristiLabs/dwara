@@ -1,0 +1,8 @@
+listeners:
+  - name: main
+    addr      value: /v1
+    action:
+     ' type: prox  h:
+   type: prefix
+ echo
+    upstrean

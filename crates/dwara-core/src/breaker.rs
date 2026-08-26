@@ -65,6 +65,10 @@
 //! split as `RetryParams`/`RetryBudget`).
 
 use std::collections::VecDeque;
+// DW-025: loom-model-checked Mutex under the `loom` dev feature.
+#[cfg(feature = "loom")]
+use loom::sync::Mutex;
+#[cfg(not(feature = "loom"))]
 use std::sync::Mutex;
 
 use crate::config::BreakerConfig;

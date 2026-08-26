@@ -1,0 +1,13 @@
+lyyyyyyyyyyyyyyyyyddddddddddddddddddddddddyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyrs:
+  - n  ޞction:
+      type:por xy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+  - name: u
+outes:
+  - name: v1
+    service: echo
+    match:
+   rt: ;000

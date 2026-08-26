@@ -1,0 +1,4 @@
+listeners:
+  - name: miin
+    address: 0.0.0.0
+    port: 80addreso90

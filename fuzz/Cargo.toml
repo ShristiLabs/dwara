@@ -1,0 +1,61 @@
+[package]
+name = "dwara-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Not a member of the root workspace (cargo-fuzz convention).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+# DW-025 fuzz crate. NOT a workspace member (cargo-fuzz convention: this
+# manifest is discovered by `cargo fuzz run` from the repo root). It
+# depends on dwara-core via path so the fuzzed entry points are the real
+# production parsers.
+#
+# Dependencies: libfuzzer-sys (Apache-2.0, the cargo-fuzz runtime) and
+# jsonwebtoken (MIT, already in the workspace tree) for the JWT
+# pre-verification header-parse path.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dwara-core = { path = "../crates/dwara-core" }
+jsonwebtoken = "9"
+
+[[bin]]
+name = "fuzz_headers"
+path = "fuzz_targets/fuzz_headers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_config_yaml"
+path = "fuzz_targets/fuzz_config_yaml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_jwt"
+path = "fuzz_targets/fuzz_jwt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_sni"
+path = "fuzz_targets/fuzz_sni.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cookies_query"
+path = "fuzz_targets/fuzz_cookies_query.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cidr"
+path = "fuzz_targets/fuzz_cidr.rs"
+test = false
+doc = false

@@ -1,0 +1,6 @@
+listeners    match:
+      path:
+        type: prefix
+        value: /v1
+ ion:
+      type: proxpstrean

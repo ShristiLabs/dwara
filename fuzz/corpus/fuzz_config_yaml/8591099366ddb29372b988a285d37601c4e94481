@@ -1,0 +1,22 @@
+listeners:
+  -es:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+      type: proxy
+services:
+  - name: echo
+    ion:
+      type: proxy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+   - name: echo
+dpoints:
+      - address: 128.0.0.1
+        port: 9000

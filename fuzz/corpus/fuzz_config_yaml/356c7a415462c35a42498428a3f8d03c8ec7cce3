@@ -1,0 +1,6 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otreaddress: 0.0..0
+    port: 8 ddrt:  9000

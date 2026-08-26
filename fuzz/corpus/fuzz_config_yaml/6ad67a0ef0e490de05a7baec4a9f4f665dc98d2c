@@ -1,0 +1,7 @@
+listenerort: 8080
+r: u
+upstreams:
+  - name: u
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000

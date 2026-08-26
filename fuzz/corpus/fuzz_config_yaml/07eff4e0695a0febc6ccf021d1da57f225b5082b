@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#[?!otliners:
+  - name: ma0
+    port: 8080
+#otrddress: 0.0.0.0
+    port: 80

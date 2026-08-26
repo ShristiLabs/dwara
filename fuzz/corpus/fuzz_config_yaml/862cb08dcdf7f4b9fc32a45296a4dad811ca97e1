@@ -1,0 +1,11 @@
+listeners:
+  - n   action:
+      type: proxy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+  - name: u
+    endpoints:
+      - addr*ss: 128.0.0.1
+      )9000

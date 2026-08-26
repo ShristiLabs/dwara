@@ -1,0 +1,8 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: '
+#'A-ss: 127.0.0.1
+        port: 9000

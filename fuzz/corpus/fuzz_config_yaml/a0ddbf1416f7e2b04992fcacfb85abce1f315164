@@ -1,0 +1,23 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+      type: proxy
+services:
+alue: /v1
+    action:
+      type: proxy
+services:
+ atch:
+     ho
+   !upstream: u
+upstre27.0.0.1
+        poAt: 9000

@@ -1511,6 +1511,66 @@ be 0) and a best-effort 100k-connection test on the standard runner. A
 trigger it from the Actions tab when a soak is wanted (e.g. ahead of a
 release).
 
+## Fuzzing and concurrency testing
+
+Coverage-guaranteed robustness work (DW-025) lives in the `fuzz/` crate
+and two dedicated test binaries in `dwara-core`.
+
+### Fuzz targets
+
+Six libFuzzer targets exercise the parser-heavy hot paths with the real
+production code (the crate depends on `dwara-core` by path):
+
+| Target | Coverage |
+| --- | --- |
+| `fuzz_headers` | header parsing / hop-by-hop filtering |
+| `fuzz_config_yaml` | strict gateway YAML config parsing |
+| `fuzz_jwt` | JWT pre-verification header parse path |
+| `fuzz_sni` | TLS ClientHello SNI parser (passthrough) |
+| `fuzz_cookies_query` | raw cookie and query matching |
+| `fuzz_cidr` | CIDR / IP parsing for `trusted_proxies` and IP ACLs |
+
+Fuzzing needs nightly and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+(`cargo install cargo-fuzz`). Run a target against the seed corpus in
+`fuzz/corpus/<target>/`:
+
+```sh
+cargo +nightly fuzz run fuzz_headers fuzz/corpus/fuzz_headers
+```
+
+Bound a run with `-max_total_time` (CI uses 120 s per target); crash
+artifacts land in `fuzz/artifacts/<target>/`. Add interesting inputs you
+find to the seed corpus so they are replayed forever.
+
+### Loom model checks
+
+Concurrency internals are model-checked with
+[loom](https://github.com/tokio-rs/loom) behind the `loom` cargo
+feature, which swaps sync primitives for loom equivalents across the
+crate — so ONLY the loom test binary is meaningful under it:
+
+```sh
+cargo test -p dwara-core --features loom --test loom
+```
+
+Known limitation: arc-swap 1.9.x has no loom support, so the
+snapshot/load-balancer swap paths are covered by real-thread stress
+tests instead (`crates/dwara-core/tests/swap_stress.rs`), which run as
+part of the regular `cargo test --workspace`:
+
+```sh
+cargo test -p dwara-core --test swap_stress -- --nocapture
+```
+
+### CI posture
+
+Fuzzing never runs on pull requests. The `fuzz` workflow
+(`.github/workflows/fuzz.yml`) is scheduled weekly (Thursdays, 04:23 UTC
+— offset from the bench workflow so the two never contend for runners)
+and manually dispatchable: each target runs bounded at 120 s over the
+seed corpus, with crash artifacts uploaded on failure; the loom job runs
+the model checks and the swap-stress tests.
+
 ## Crates
 
 | Crate | Role |

@@ -398,14 +398,18 @@ pub fn admin_mtls_server_config(
 /// returns the first `host_name` entry. Returns `None` on any structural
 /// shortcoming; callers treat that as "no SNI".
 pub fn sni_from_client_hello(buf: &[u8]) -> Option<String> {
-    fn u16be(b: &[u8]) -> u16 {
-        u16::from_be_bytes([b[0], b[1]])
+    // DW-025 fuzz fix: every u16be call site must tolerate slices shorter
+    // than two bytes (`slice::get(i..)` succeeds for i <= len even when
+    // fewer than 2 bytes remain), so the helper returns Option and
+    // truncation anywhere is "no SNI" instead of an index panic.
+    fn u16be(b: &[u8]) -> Option<u16> {
+        Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
     }
     // Record header: type(1) version(2) length(2)
     if buf.len() < 5 || buf[0] != 0x16 {
         return None;
     }
-    let rec_len = u16be(&buf[3..]) as usize;
+    let rec_len = u16be(buf.get(3..)?)? as usize;
     let rec = buf.get(5..5 + rec_len)?;
     // Handshake header: type(1) length(3); expect ClientHello (0x01).
     if rec.len() < 4 || rec[0] != 0x01 {
@@ -420,18 +424,18 @@ pub fn sni_from_client_hello(buf: &[u8]) -> Option<String> {
     let sid_len = *body.get(i)? as usize;
     i += 1 + sid_len;
     // cipher suites
-    let cs_len = u16be(body.get(i..)?) as usize;
+    let cs_len = u16be(body.get(i..)?)? as usize;
     i += 2 + cs_len;
     // compression methods
     let cm_len = *body.get(i)? as usize;
     i += 1 + cm_len;
     // extensions
-    let ext_total = u16be(body.get(i..)?) as usize;
+    let ext_total = u16be(body.get(i..)?)? as usize;
     i += 2;
     let ext_end = i + ext_total;
     while i + 4 <= ext_end && i + 4 <= body.len() {
-        let ext_type = u16be(&body[i..]);
-        let ext_len = u16be(&body[i + 2..]) as usize;
+        let ext_type = u16be(body.get(i..)?)?;
+        let ext_len = u16be(body.get(i + 2..)?)? as usize;
         let ext = body.get(i + 4..i + 4 + ext_len)?;
         if ext_type == 0x0000 {
             // server_name list: total length (2), then entries:
@@ -439,7 +443,7 @@ pub fn sni_from_client_hello(buf: &[u8]) -> Option<String> {
             if ext.len() < 2 {
                 return None;
             }
-            let list_len = u16be(ext) as usize;
+            let list_len = u16be(ext)? as usize;
             let list = ext.get(2..2 + list_len)?;
             if list.is_empty() {
                 return None;
@@ -448,7 +452,7 @@ pub fn sni_from_client_hello(buf: &[u8]) -> Option<String> {
             if name_type != 0x00 || list.len() < 4 {
                 return None;
             }
-            let name_len = u16be(&list[1..]) as usize;
+            let name_len = u16be(list.get(1..)?)? as usize;
             let name = list.get(3..3 + name_len)?;
             return std::str::from_utf8(name).ok().map(|s| s.to_string());
         }
@@ -670,6 +674,109 @@ mod tests {
         rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
         rec.extend_from_slice(&hs);
         assert_eq!(sni_from_client_hello(&rec), Some("x.test".to_string()));
+    }
+
+    /// Prefix of a valid ClientHello of `keep` bytes with the record and
+    /// handshake length fields rewritten to describe the truncated
+    /// message, so the parser walks INTO the truncated body (and its
+    /// short length fields) instead of bailing at the record boundary.
+    /// DW-025 regression helper: every u16be call site must tolerate a
+    /// 0- or 1-byte remainder without panicking.
+    fn truncated_client_hello(keep: usize) -> Vec<u8> {
+        let mut buf = client_hello(Some("api.example.com"));
+        assert!(keep >= 9 && keep <= buf.len(), "keep={keep} out of range");
+        buf.truncate(keep);
+        buf[3..5].copy_from_slice(&((keep - 5) as u16).to_be_bytes());
+        let hs_len = keep - 9;
+        buf[6] = (hs_len >> 16) as u8;
+        buf[7] = (hs_len >> 8) as u8;
+        buf[8] = hs_len as u8;
+        buf
+    }
+
+    #[test]
+    fn sni_record_length_larger_than_buffer_returns_none() {
+        let mut buf = client_hello(Some("api.example.com"));
+        buf[3..5].copy_from_slice(&0xffffu16.to_be_bytes());
+        assert_eq!(sni_from_client_hello(&buf), None);
+        // One byte short of the claimed record (no retag): over-claim by 1.
+        let mut short = client_hello(Some("api.example.com"));
+        short.truncate(short.len() - 1);
+        assert_eq!(sni_from_client_hello(&short), None);
+    }
+
+    #[test]
+    fn sni_cipher_suites_length_field_truncated_returns_none() {
+        // Record/handshake headers are 9 bytes; the cipher-suite length
+        // u16be reads body[35..37] i.e. buf[44..46]. One byte remains at
+        // keep=45 (the exact pre-fix panic: `b[1]` on a 1-byte slice),
+        // zero bytes at keep=44, and the field present but its suites
+        // truncated at keep=46.
+        for keep in [44, 45, 46] {
+            assert_eq!(
+                sni_from_client_hello(&truncated_client_hello(keep)),
+                None,
+                "keep={keep} must be no-SNI, not a panic"
+            );
+        }
+        // Just-short-by-one boundary in the other direction: with the
+        // full cipher-suite bytes present the walk proceeds past them.
+        assert_eq!(sni_from_client_hello(&truncated_client_hello(48)), None);
+        assert_eq!(
+            sni_from_client_hello(&client_hello(Some("api.example.com"))),
+            Some("api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn sni_extensions_total_length_field_truncated_returns_none() {
+        // ext_total u16be reads body[41..43] i.e. buf[50..52].
+        for keep in [50, 51] {
+            assert_eq!(
+                sni_from_client_hello(&truncated_client_hello(keep)),
+                None,
+                "keep={keep} must be no-SNI, not a panic"
+            );
+        }
+        // Boundary: field exactly present, no extension bytes after it.
+        assert_eq!(sni_from_client_hello(&truncated_client_hello(52)), None);
+    }
+
+    #[test]
+    fn sni_extension_length_overrun_returns_none() {
+        // Extension header (type+len) present but the claimed extension
+        // payload is cut short: ext_len says 9+n bytes, body ends inside.
+        for keep in [56, 58, 60] {
+            assert_eq!(
+                sni_from_client_hello(&truncated_client_hello(keep)),
+                None,
+                "keep={keep} must be no-SNI, not a panic"
+            );
+        }
+    }
+
+    #[test]
+    fn sni_list_and_name_length_overruns_return_none() {
+        let full = client_hello(Some("api.example.com"));
+        let n = "api.example.com".len();
+        // SNI list length claims far more than the extension carries.
+        let mut over_list = full.clone();
+        over_list[full.len() - n - 5..full.len() - n - 3].copy_from_slice(&0xffffu16.to_be_bytes());
+        assert_eq!(sni_from_client_hello(&over_list), None);
+        // Host-name length claims far more than the list carries.
+        let mut over_name = full.clone();
+        over_name[full.len() - n - 2..full.len() - n].copy_from_slice(&0xffffu16.to_be_bytes());
+        assert_eq!(sni_from_client_hello(&over_name), None);
+        // Boundary (control): the same fields at their exact values parse.
+        assert_eq!(
+            sni_from_client_hello(&full),
+            Some("api.example.com".to_string())
+        );
+        // Name cut one byte short (all framing intact above it).
+        assert_eq!(
+            sni_from_client_hello(&truncated_client_hello(full.len() - 1)),
+            None
+        );
     }
 
     // --- passthrough routing ----------------------------------------------

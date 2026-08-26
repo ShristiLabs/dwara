@@ -1,0 +1,14 @@
+listeners:
+  - n   action:
+      type: proxy
+services:
+;      type: proxy
+sreams:
+  - name: u
+    endpoin  - nzame: echo
+    upstream: u
+upstreams:
+  - name: u
+    endpoints:
+      - addre.ss: 127.0.0.2
+        port: 9000

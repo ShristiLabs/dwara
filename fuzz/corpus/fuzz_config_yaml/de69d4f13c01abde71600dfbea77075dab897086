@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otream: u
+upstreams:
+  - name: u
+    endpoints:
+      - addr

@@ -1,0 +1,9 @@
+listeners:
+  - n   action:
+      type: proxy
+se*-X-rvices:
+  - -name: echo
+    upstreamlistene|s: [
+:
+  -0.0.1
+                 port

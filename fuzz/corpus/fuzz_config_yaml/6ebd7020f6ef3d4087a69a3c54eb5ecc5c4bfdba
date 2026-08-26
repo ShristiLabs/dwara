@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 00
+    port: 8081
+routes:
+  -  action:
+*     type: proxy
+servicnts:
+      - ad0

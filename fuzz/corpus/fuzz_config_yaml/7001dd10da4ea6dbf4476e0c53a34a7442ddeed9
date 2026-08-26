@@ -1,0 +1,18 @@
+|
+ lbsteners:
+  -$nam     tyrvices:
+  --:routes:
+  -|
+ lbsteners:
+  -$nam     tyrvices:
+  --:routes:
+  - name: v0
+ lbsteners:
+ : v0
+ lbsteners:
+  -+na~m name: v0
+ lbsteners:
+ : v0
+ lbst:
+  -:
+ a~m

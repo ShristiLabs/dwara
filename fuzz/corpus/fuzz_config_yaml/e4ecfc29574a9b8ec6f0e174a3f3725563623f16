@@ -1,0 +1,10 @@
+listeners:
+  - name: mai
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+  he co
+     up  - an

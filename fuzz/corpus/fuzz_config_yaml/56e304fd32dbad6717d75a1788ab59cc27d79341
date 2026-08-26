@@ -1,0 +1,10 @@
+listeners:
+  - name: main
+    a    path:
+        type: prefix
+        value: /v1
+    action:
+      type: proxy
+services:
+  - nameliste: echo
+    upstrean

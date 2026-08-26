@@ -1,0 +1,17 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8081
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+     o.iy: {m[=t* {m[wn1 =t,u~nkno[wn,u[wn1 =t,u~nk typection:
+      type:`proxy
+services:
+127.0.0.1
+E       port: 9000

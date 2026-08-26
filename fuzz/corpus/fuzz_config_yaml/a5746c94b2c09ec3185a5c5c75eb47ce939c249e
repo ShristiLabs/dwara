@@ -1,0 +1,11 @@
+lyyyyyyyyyyyyyyyyydddddddddddddddddddddddddddddddddddddd:dddd+dddddddddddddddddddddyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyryyyyyyyyyyisteners:
+  - n  ޞction:
+      type:por xy
+services:
+  - name: echo
+    upstream: u
+upstreams:
+  - name: u
+    endpoints:
+      - address:ype: proxy
+se    ) port: ;000

@@ -1,0 +1,19 @@
+listeners:
+  - name: main
+    add#ress: 0.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: ecno
+    mitch:
+      path:
+        type: prefix
+    alue: /v1
+    action:
+      type: proxy
+services:
+  - name: echo
+  p us tream: u
+upstreams:
+lilist(n.rs:
+   - nam !!e: 

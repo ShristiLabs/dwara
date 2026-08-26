@@ -1,0 +1,7 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otream: u
+upstreams:
+  - nameaddress: 0.0.0TTTToi     port:  8000

@@ -1,0 +1,11 @@
+listeners:
+  - n   action:
+      type: proxy
+services:
+  - name: echo
+    upstream: u
+ustreams:
+  - name: u
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000

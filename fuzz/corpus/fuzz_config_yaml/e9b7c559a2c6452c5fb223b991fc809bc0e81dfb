@@ -1,0 +1,7 @@
+listeners:
+  - nars:
+me: |#  port: 8080
+routes:
+  - ame: v1
+   =se rt:
+9000

@@ -1,0 +1,30 @@
+listeners:
+  - name: main
+    address: 0.0
+    port: 8080
+routes:
+  - name: v1
+    servat   part: 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+servicgy: {n

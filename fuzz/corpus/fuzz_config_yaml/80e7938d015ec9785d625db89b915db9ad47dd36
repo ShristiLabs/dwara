@@ -1,0 +1,23 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: v0
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+      ty:
+        type: prefix
+        ess: x
+        ess: 127.0.0.1
+        port -ma ne: main)
+        value: /v1
+    actio--n:
+      ty:: 1.0.0.0
+  @ s!port: 8080
+routes:
+  - name

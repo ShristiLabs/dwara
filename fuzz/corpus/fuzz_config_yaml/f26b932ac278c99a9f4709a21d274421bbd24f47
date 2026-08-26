@@ -1,0 +1,4 @@
+listeners:
+  - name: main
+    address:
+    port: 809000

@@ -1,0 +1,13 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otlistenerssteners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otlisteners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otgy: {unkno[wnkno[w:- {unkno[w::orecm[:g:

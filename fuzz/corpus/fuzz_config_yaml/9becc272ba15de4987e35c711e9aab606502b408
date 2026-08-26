@@ -1,0 +1,21 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+      type: proxy
+services:
+ """i5""i - name: echo
+    upstream: u
+upstream  :s-n
+ ame: u
+    (ndpoints:
+  s5""7    -   por"t: 9000"i
+5

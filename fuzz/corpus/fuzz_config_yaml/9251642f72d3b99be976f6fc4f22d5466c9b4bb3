@@ -1,0 +1,15 @@
+listeners:
+  - name: main
+    address: 0.0.0.0T
+    port: 4040
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action: !Tn:
+      ts: 0.0.0.0T
+    portg80
+routesvalue: /000

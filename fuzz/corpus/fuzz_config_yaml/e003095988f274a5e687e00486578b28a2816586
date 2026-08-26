@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otlisteners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otrd port: 8080ss:  ep

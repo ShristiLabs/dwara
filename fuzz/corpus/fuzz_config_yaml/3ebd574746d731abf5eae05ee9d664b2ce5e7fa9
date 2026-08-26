@@ -1,0 +1,6 @@
+listeners:
+  - nam     type: proxy
+services:
+  - name: echo
+  p us tream: u
+u9000

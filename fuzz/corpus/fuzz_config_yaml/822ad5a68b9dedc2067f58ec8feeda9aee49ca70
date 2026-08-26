@@ -1,0 +1,6 @@
+listeners:
+  - name: mdin
+    address: 0.0.0&0
+    port: 8081
+routes:
+  -000XXXXXXXXX000_0ean

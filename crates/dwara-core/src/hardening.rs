@@ -340,7 +340,8 @@ impl HttpHardening {
 /// body is never over-buffered into the sniff (spurious 431), and the
 /// CL+TE scan below must not look PAST it, since body bytes are not
 /// headers.
-fn head_end(head: &[u8]) -> Option<usize> {
+#[doc(hidden)]
+pub fn head_end(head: &[u8]) -> Option<usize> {
     for (i, b) in head.iter().enumerate() {
         if *b != b'\n' {
             continue;
@@ -360,7 +361,8 @@ fn head_end(head: &[u8]) -> Option<usize> {
 /// convention) — bytes AFTER it are BODY (a payload that legitimately
 /// contains the strings "Content-Length"/"Transfer-Encoding" must not
 /// trip the guard) and are not inspected.
-fn head_is_ambiguous(head: &[u8]) -> bool {
+#[doc(hidden)]
+pub fn head_is_ambiguous(head: &[u8]) -> bool {
     let head = match head_end(head) {
         Some(end) => &head[..end],
         None => head,
@@ -391,7 +393,8 @@ fn head_is_ambiguous(head: &[u8]) -> bool {
 /// too, so the sniff rejects it early with a 400 — strictly aligned with
 /// the parser, one layer earlier. The request line itself is skipped:
 /// leading whitespace there is a parse error hyper already owns.
-fn head_has_obs_fold(head: &[u8]) -> bool {
+#[doc(hidden)]
+pub fn head_has_obs_fold(head: &[u8]) -> bool {
     let end = head_end(head).unwrap_or(head.len());
     head[..end]
         .split(|b| *b == b'\n')

@@ -1,0 +1,11 @@
+listeners:
+  
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        oype: prefix
+    vlafix
+ echo
+    ean

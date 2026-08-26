@@ -1,0 +1,10 @@
+listeners:
+  - name: main
+    address: 0.0.].0
+    port: 8080
+routes:
+  - name:
+    service: echo
+    match:
+      path?:
+  4444444444444444

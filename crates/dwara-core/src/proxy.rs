@@ -1096,7 +1096,8 @@ pub fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
 
 /// One `key=value` (or bare `key`) pair of a query string. No
 /// percent-decoding in v1: matching is over the raw bytes the client sent.
-fn query_param_matches(query: Option<&str>, want: &NameValueMatch) -> bool {
+#[doc(hidden)]
+pub fn query_param_matches(query: Option<&str>, want: &NameValueMatch) -> bool {
     let Some(raw) = query else { return false };
     raw.split('&').any(|pair| {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));

@@ -1,0 +1,20 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otlisteners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otrddreners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otlisteners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+#otrddress: 0.0.0.0
+  : 0.0.0.0
+    port: 80A0
+rougy: {uu  ep

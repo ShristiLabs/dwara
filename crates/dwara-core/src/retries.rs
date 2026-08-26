@@ -42,7 +42,13 @@
 //! backoff cap before it).
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+// DW-025: loom-model-checked Mutex under the `loom` dev feature.
+#[cfg(feature = "loom")]
+use loom::sync::Mutex;
+#[cfg(not(feature = "loom"))]
+use std::sync::Mutex;
+// OnceLock seeds the jitter RNG in production code; it stays std.
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::config::RetryConfig;

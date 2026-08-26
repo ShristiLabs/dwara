@@ -1,0 +1,12 @@
+listeners:
+  
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v1
+    action:
+     !trvices:
+  - name:`ect: 9000

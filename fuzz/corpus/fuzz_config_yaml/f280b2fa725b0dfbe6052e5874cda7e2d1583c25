@@ -1,0 +1,9 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    pOrt: 8080
+routes:
+  - nrefix
+points:
+      - address: 127.0.0.1
+        port: 9000

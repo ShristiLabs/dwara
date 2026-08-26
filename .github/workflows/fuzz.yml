@@ -1,0 +1,90 @@
+# DW-025 fuzzing + concurrency model checks.
+#
+# COMPUTE POSTURE: this workflow is SCHEDULED (weekly) and manually
+# dispatchable ONLY — no push/pull_request triggers (repo CI-cost
+# conventions; ci.yml stays the per-PR gate). The schedule is offset from
+# bench.yml (Mon 03:17) so the two never contend for runners.
+#
+# Jobs:
+#   fuzz — cargo-fuzz targets over the seed corpus in fuzz/corpus/<target>/
+#          (valid + edge-case inputs distilled from the test suites).
+#          Each target runs bounded at -max_total_time=120s (NOT a 24h
+#          burner; the local 1M-exec verification per target is the
+#          done-when bar for DW-025, CI keeps the corpus growing weekly).
+#          Crash artifacts land in fuzz/artifacts/<target>/ and are
+#          uploaded via actions/upload-artifact on failure.
+#   loom — the loom model-checked tests (feature-gated; see
+#          crates/dwara-core/tests/loom.rs). Runs ONLY the loom test
+#          binary: the feature swaps sync primitives for loom equivalents
+#          everywhere, so other test binaries are meaningless under it.
+#
+# KNOWN LIMITATION (documented in tests/loom.rs): arc-swap 1.9.x has no
+# loom support, so the ArcSwap snapshot/LB-swap paths are covered by the
+# real-thread stress tests in tests/swap_stress.rs (run by the regular
+# per-PR test command in ci.yml), not by the loom job.
+
+name: fuzz
+
+on:
+  schedule:
+    # Thursdays 04:23 UTC — offset from bench.yml's Monday 03:17.
+    - cron: "23 4 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # Compute posture: bounded even if a fuzzer hangs (120s budget plus
+    # toolchain install and build headroom).
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_headers
+          - fuzz_config_yaml
+          - fuzz_jwt
+          - fuzz_sni
+          - fuzz_cookies_query
+          - fuzz_cidr
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }} (bounded 120s)
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=120 -rss_limit_mb=2560 -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  loom:
+    name: loom model checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run loom tests
+        run: cargo test -p dwara-core --features loom --test loom
+
+      - name: Run ArcSwap stress tests
+        run: cargo test -p dwara-core --test swap_stress -- --nocapture

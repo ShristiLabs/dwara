@@ -1,0 +1,10 @@
+='±#listeners:
+  - rt: 8080
+#otrea: u
+upstreams:
+  - name: u
+±    endpoints:
+      - address: 127'0.0.1
+        port: 9000
+ch:
+ : 

@@ -1,0 +1,7 @@
+listeners:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
+routes:
+  - {{{{{{{{{{{{{{{{{{{{{{{{{{{{ ste: echo
+    upstrean

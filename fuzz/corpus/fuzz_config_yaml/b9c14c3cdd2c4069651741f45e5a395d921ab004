@@ -1,0 +1,22 @@
+listeners:
+  -:s:
+  - name: v1
+    service: echo
+    match:
+tion:
+      type: proxy
+services:
+  - name:
+    ion:
+      type: proxy
+ces:
+  - name: ceho
+    upstream:e: proxy
+services:
+  - name: ec%ho
+    upstream: u
+upstreams:
+  -  - name: echo
+dpoints:
+      - address: 128.0.0.1
+        port: 4500

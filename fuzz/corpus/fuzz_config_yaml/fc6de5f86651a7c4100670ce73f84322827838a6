@@ -1,0 +1,7 @@
+listeners:
+  - name: main
+    address: 0.0.p.0
+    port: 8080
+routes:
+  -  - name: maners:
+  

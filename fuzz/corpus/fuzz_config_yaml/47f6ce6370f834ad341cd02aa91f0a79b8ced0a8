@@ -1,0 +1,17 @@
+listeners:
+  - name: main
+    address: 0.0.A.0
+    port: 8080
+routes:
+  - name: v1
+    service: echo
+    match:
+      path:
+        type: prefix
+        value: /v0
+    action:
+      -0!S! u
+upstreas:
+  - name: u
+    (n
+        port: 9000

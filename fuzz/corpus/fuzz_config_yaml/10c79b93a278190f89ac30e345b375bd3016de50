@@ -1,0 +1,6 @@
+"is  - name: echo
+    upstream: u
+upstreams:
+  - name: u
+    endpoints:
+      - address: [

@@ -1,0 +1,12 @@
+listeners:
+  - name: main
+    addrners:
+  - esrvice: echo
+    match:
+      path:
+        type: prefix
+        value: /2
+    action:
+      type: proxy
+services:
+  port: 8999
