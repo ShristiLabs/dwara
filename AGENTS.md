@@ -120,7 +120,8 @@ Rules for new code:
   expressed through the public API — each carries a comment saying why
   it stays (e.g. raw-SQL introspection of the store's connection).
   Current residuals: `state/store.rs`,
-  `dataplane/{balance,upstream,proxy}.rs`. New suites must be
+  `dataplane/{balance,upstream,proxy}.rs`, and `dwara-bin`'s
+  `listeners.rs` (panic supervisor). New suites must be
   deterministic under load: bounded polls, unique ports, generous
   margins; see the Test map below.
 - **Feature flags** are declared in the owning crate's `Cargo.toml`
@@ -271,6 +272,17 @@ implementations without touching call sites — extend, do not break them.
   argon2id PHC hashes.
 - arc-swap has no loom support; swap paths are covered by real-thread
   stress tests in `tests/swap_stress.rs`.
+- Listener accept tasks are panic-supervised (`listeners.rs`): a
+  panicked accept loop is respawned on the SAME bound socket (cap 8 per
+  listener, process lifetime), then the listener is given up on with an
+  ERROR log — the process never aborts for a dead listener. The socket
+  stays behind a shared `Arc`, so the shutdown flush polls `poll_accept`
+  with a no-op waker instead of `into_std` (re-binding would race the
+  port away).
+- The passthrough SNI parser reassembles ClientHellos fragmented across
+  TLS records, bounded at 64 KiB (`MAX_HELLO_BYTES` in `tls.rs`); the
+  peek never consumes bytes, so the original hello is replayed to the
+  upstream by the splice.
 
 ## CI posture (compute-conscious)
 

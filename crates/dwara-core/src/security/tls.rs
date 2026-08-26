@@ -33,6 +33,7 @@ use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use zeroize::Zeroizing;
 
 use crate::config::{Gateway, ListenerTls, SniRoute};
 
@@ -125,19 +126,32 @@ fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsError>
 
 fn load_signing_key(path: &str) -> Result<Arc<dyn rustls::sign::SigningKey>, TlsError> {
     let ppath = PathBuf::from(path);
-    let keys = PrivateKeyDer::pem_file_iter(&ppath)
-        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
-    let key = keys.into_iter().next().ok_or(TlsError::EmptyPem {
-        path: ppath,
-        what: "private keys",
-    })?;
+    // #120 key-material hygiene: the PEM file body is plaintext secret
+    // material. Reading it into a Zeroizing buffer wipes the raw bytes on
+    // drop (the old pem_file_iter path left the decoded text in heap
+    // memory after the iterator finished).
+    let pem = Zeroizing::new(std::fs::read(&ppath)?);
+    // PrivateKeyDer implements Zeroize (rustls-pki-types), so the parsed
+    // DER secret is wiped when this wrapper drops — including the
+    // error paths below. The clone_key() copy handed to the provider is
+    // the one residue: aws-lc copies what it needs into its own
+    // structures, but that DER buffer itself is freed unwiped
+    // (PrivateKeyDer implements Zeroize with no Drop). The provider's
+    // own key material is wiped by aws-lc on free.
+    let key = Zeroizing::new(
+        PrivateKeyDer::pem_slice_iter(&pem)
+            .next()
+            .ok_or(TlsError::EmptyPem {
+                path: ppath,
+                what: "private keys",
+            })?
+            .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?,
+    );
     // Loading a signing key requires an installed provider; the binary
     // installs aws-lc-rs at startup, tests call the installer too.
     rustls::crypto::aws_lc_rs::default_provider()
         .key_provider
-        .load_private_key(key)
+        .load_private_key(key.clone_key())
         .map_err(TlsError::Rustls)
 }
 
@@ -390,7 +404,75 @@ pub fn admin_mtls_server_config(
     Ok(config)
 }
 
-/// Parse the SNI server name out of a TLS ClientHello record.
+/// DW-025 fuzz fix: every u16be call site must tolerate slices shorter
+/// than two bytes (`slice::get(i..)` succeeds for i <= len even when
+/// fewer than 2 bytes remain), so the helper returns Option and
+/// truncation anywhere is "no SNI" instead of an index panic.
+fn u16be(b: &[u8]) -> Option<u16> {
+    Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
+}
+
+/// Handshake-message length out of a ClientHello handshake header
+/// (the type byte is checked by the caller): 3-byte big-endian.
+fn hs_len_of(header: &[u8]) -> usize {
+    ((header[1] as usize) << 16) | ((header[2] as usize) << 8) | header[3] as usize
+}
+
+/// Reassemble the first handshake message body (the ClientHello body)
+/// out of a connection prefix that may carry the message FRAGMENTED
+/// across several TLS records (#120: TLS records cap their payload at
+/// 16384 bytes, so larger ClientHellos arrive as multiple records and
+/// must be reassembled before parsing).
+///
+/// Single-record hellos borrow from `buf`; fragmented hellos copy the
+/// record-payload tails into one buffer. Returns `None` while the
+/// message is incomplete, over the reassembly budget, or structurally
+/// unusable.
+fn client_hello_body(buf: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    // Record header: type(1) version(2) length(2)
+    if buf.len() < 5 || buf[0] != 0x16 {
+        return None;
+    }
+    let rec_len = u16be(buf.get(3..)?)? as usize;
+    let first = buf.get(5..5 + rec_len)?;
+    // Handshake header: type(1) length(3); expect ClientHello (0x01).
+    if first.len() < 4 || first[0] != 0x01 {
+        return None;
+    }
+    let hs_len = hs_len_of(first);
+    // Refuse hellos whose handshake message alone exceeds the
+    // reassembly budget: a bounded close, never an unbounded buffer.
+    if 4 + hs_len > MAX_HELLO_BYTES {
+        return None;
+    }
+    if first.len() >= 4 + hs_len {
+        return Some(std::borrow::Cow::Borrowed(&first[4..4 + hs_len]));
+    }
+    // Fragmented: the first record holds a prefix of the message;
+    // append the tails carried by subsequent complete handshake records
+    // until the message is whole.
+    let mut body = Vec::with_capacity(hs_len);
+    body.extend_from_slice(&first[4..]);
+    let mut pos = 5 + rec_len;
+    while body.len() < hs_len {
+        let hdr = buf.get(pos..pos + 5)?;
+        if hdr[0] != 0x16 {
+            // Handshake bytes travel in handshake records only; a record
+            // of another type cannot complete the message.
+            return None;
+        }
+        let rl = u16be(hdr.get(3..)?)? as usize;
+        let payload = buf.get(pos + 5..pos + 5 + rl)?;
+        let take = (hs_len - body.len()).min(payload.len());
+        body.extend_from_slice(&payload[..take]);
+        pos += 5 + rl;
+    }
+    Some(std::borrow::Cow::Owned(body))
+}
+
+/// Parse the SNI server name out of a TLS ClientHello, reassembling
+/// handshake fragments across records when the hello does not fit in
+/// one (#120).
 ///
 /// Minimal record parser (no new dependency): walks the TLS record and
 /// handshake headers, skips session id / cipher suites / compression
@@ -398,25 +480,8 @@ pub fn admin_mtls_server_config(
 /// returns the first `host_name` entry. Returns `None` on any structural
 /// shortcoming; callers treat that as "no SNI".
 pub fn sni_from_client_hello(buf: &[u8]) -> Option<String> {
-    // DW-025 fuzz fix: every u16be call site must tolerate slices shorter
-    // than two bytes (`slice::get(i..)` succeeds for i <= len even when
-    // fewer than 2 bytes remain), so the helper returns Option and
-    // truncation anywhere is "no SNI" instead of an index panic.
-    fn u16be(b: &[u8]) -> Option<u16> {
-        Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
-    }
-    // Record header: type(1) version(2) length(2)
-    if buf.len() < 5 || buf[0] != 0x16 {
-        return None;
-    }
-    let rec_len = u16be(buf.get(3..)?)? as usize;
-    let rec = buf.get(5..5 + rec_len)?;
-    // Handshake header: type(1) length(3); expect ClientHello (0x01).
-    if rec.len() < 4 || rec[0] != 0x01 {
-        return None;
-    }
-    let hs_len = ((rec[1] as usize) << 16) | ((rec[2] as usize) << 8) | rec[3] as usize;
-    let body = rec.get(4..4 + hs_len)?;
+    let body = client_hello_body(buf)?;
+    let body = body.as_ref();
     let mut i = 0usize;
     i += 2; // client version
     i += 32; // random
@@ -521,19 +586,122 @@ pub fn resolve_passthrough(
     PassthroughAction::Close
 }
 
-/// Maximum bytes peeked while looking for a complete ClientHello: one
-/// maximal TLS record is 16384 bytes of payload plus a 5-byte header.
-const PEEK_LIMIT: usize = 5 + 16 * 1024;
+/// Total reassembly budget for one passthrough ClientHello (#120): a
+/// hello fragmented across records is accumulated up to this size, and
+/// anything whose handshake message alone is larger is refused (the
+/// connection is closed). Real ClientHellos are a few KB; 64 KiB covers
+/// four maximal TLS records.
+const MAX_HELLO_BYTES: usize = 64 * 1024;
+/// Maximum bytes peeked while looking for a complete ClientHello: the
+/// reassembly budget plus per-record header overhead and slack for
+/// coalesced trailing records. The decision fires as soon as the hello
+/// is complete, so a FULL window without one means the hello exceeds
+/// the budget and the connection is refused instead of spinning until
+/// the peek timeout.
+const PEEK_LIMIT: usize = MAX_HELLO_BYTES + 5 + 1024;
 /// How long to wait for a complete ClientHello before giving up.
 const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the peek loop should do after examining the buffered prefix of
+/// a passthrough connection.
+enum HelloPeek {
+    /// A complete ClientHello carrying SNI.
+    Sni(String),
+    /// Nothing that can still arrive would change the answer (non-TLS
+    /// bytes, a structurally complete hello without SNI, a handshake
+    /// message that is not a ClientHello, or a hello over the
+    /// reassembly budget): decide now.
+    Settled,
+    /// The ClientHello is fragmented across records (or bytes are still
+    /// arriving) and the message is not complete yet: keep waiting,
+    /// bounded by [`PEEK_TIMEOUT`] and [`PEEK_LIMIT`].
+    Pending,
+}
+
+/// Examine a peeked connection prefix: is the ClientHello complete (and
+/// what SNI does it carry), definitively undecidable-as-no-SNI, or still
+/// missing bytes that may yet arrive? A hello split across records keeps
+/// the answer [`HelloPeek::Pending`] until its last fragment lands (#120).
+fn examine_peeked(seen: &[u8]) -> HelloPeek {
+    // Early reject (documented): a TLS record always starts with the
+    // handshake content type 0x16, so anything else is a non-TLS client
+    // (e.g. plain HTTP) — decide immediately instead of waiting.
+    if seen.first() != Some(&0x16) {
+        return HelloPeek::Settled;
+    }
+    // Walk complete handshake records, counting the bytes of the first
+    // handshake message they carry.
+    let mut pos = 0usize;
+    // Total bytes the message needs (4-byte header + body), once read.
+    let mut needed: Option<usize> = None;
+    // Message bytes present so far (header + body fragments).
+    let mut have = 0usize;
+    loop {
+        let Some(hdr) = seen.get(pos..pos + 5) else {
+            // A further record header is absent or truncated: if the
+            // message is still short, more records may complete it.
+            return HelloPeek::Pending;
+        };
+        if hdr[0] != 0x16 {
+            // Handshake bytes travel in handshake records only; a record
+            // of another type while the message is short cannot complete
+            // it, so there is nothing left to wait for.
+            return HelloPeek::Settled;
+        }
+        let Some(rec_len) = u16be(hdr.get(3..).unwrap_or(&[])) else {
+            // Unreachable for a 5-byte header slice; kept as a guarded
+            // fallback per the DW-025 no-index-panic style.
+            return HelloPeek::Pending;
+        };
+        let rec_len = rec_len as usize;
+        let Some(payload) = seen.get(pos + 5..pos + 5 + rec_len) else {
+            // Record payload still arriving.
+            return HelloPeek::Pending;
+        };
+        if needed.is_none() {
+            if payload.len() < 4 {
+                // Boundary decision: a hello fragmented INSIDE its 4-byte
+                // handshake header (no real TLS stack does this) is not
+                // reassembled — the first record must carry the whole
+                // header so the message length is readable.
+                return HelloPeek::Settled;
+            }
+            if payload[0] != 0x01 {
+                return HelloPeek::Settled;
+            }
+            let hs_len = hs_len_of(payload);
+            if 4 + hs_len > MAX_HELLO_BYTES {
+                return HelloPeek::Settled;
+            }
+            needed = Some(4 + hs_len);
+        }
+        // Every payload byte of these records belongs to the message
+        // stream (the 4-byte handshake header included): the message
+        // occupies a contiguous byte range starting at the first
+        // record's payload.
+        have += payload.len();
+        if have >= needed.unwrap_or(0) {
+            // The whole message is buffered: parse it for SNI.
+            return match sni_from_client_hello(seen) {
+                Some(name) => HelloPeek::Sni(name),
+                None => HelloPeek::Settled,
+            };
+        }
+        pos += 5 + rec_len;
+    }
+}
 
 /// Peek the ClientHello off a passthrough connection, decide the route,
 /// and either splice both directions to the upstream or close.
 ///
 /// `pick` is the endpoint resolver handed to [`resolve_passthrough`]
 /// (upstream name -> load-balanced `(address, port)`; None falls back to
-/// the first configured endpoint). Peeking (never reading) keeps the bytes
-/// available for the upstream once splicing starts.
+/// the first configured endpoint). Peeking (never reading) keeps the
+/// bytes available for the upstream once splicing starts: the entire
+/// hello — including fragments that had to be reassembled for the SNI
+/// decision (#120) — is still in the socket buffer and is replayed to
+/// the upstream by the splice. A ClientHello fragmented across records
+/// is waited for (bounded) rather than closed as no-SNI.
 pub async fn handle_passthrough(
     stream: &mut TcpStream,
     tls: &ListenerTls,
@@ -551,26 +719,19 @@ pub async fn handle_passthrough(
             ));
         }
         let seen = &scratch[..n];
-        // Early reject (documented): a TLS record always starts with the
-        // handshake content type 0x16, so anything else is a non-TLS
-        // client (e.g. plain HTTP) — close immediately instead of
-        // spinning until the peek timeout.
-        if seen[0] != 0x16 {
-            break None;
+        match examine_peeked(seen) {
+            HelloPeek::Sni(name) => break Some(name),
+            HelloPeek::Settled => break None,
+            HelloPeek::Pending => {
+                // A full window without a decision means the handshake
+                // message exceeds the reassembly budget: refuse now
+                // rather than spinning until the peek timeout.
+                if n >= PEEK_LIMIT || started.elapsed() >= PEEK_TIMEOUT {
+                    break None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
         }
-        if let Some(sni) = sni_from_client_hello(seen) {
-            break Some(sni);
-        }
-        // Not usable yet: either the record is still arriving (wait for
-        // more bytes) or it is complete and carries no SNI / is not TLS.
-        let complete = seen.len() >= 5 && {
-            let rec_len = u16::from_be_bytes([seen[3], seen[4]]) as usize;
-            seen.len() >= 5 + rec_len
-        };
-        if complete || started.elapsed() >= PEEK_TIMEOUT {
-            break None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     };
 
     match resolve_passthrough(sni.as_deref(), &tls.sni_routes, gateway, pick) {

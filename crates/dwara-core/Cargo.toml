@@ -19,6 +19,8 @@ regex = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+# #120: zeroizes PEM/DER private-key buffers on drop in security::tls.
+zeroize = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

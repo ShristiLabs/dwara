@@ -38,8 +38,18 @@ notify = "8"
 # cmake/cc); tokio-rustls for async accept/connect. PEM loading uses
 # rustls-pki-types PemObject directly (rustls-pemfile is unmaintained,
 # RUSTSEC-2025-0134); rcgen (dev-only) generates test certificates.
-rustls = { version = "0.23", default-features = true, features = ["aws-lc-rs"] }
+# #120: default-features = false trims rustls's default set down to exactly
+# what the gateway uses (at 0.23.43 the operative drop is the
+# prefer-post-quantum default suite tweak); the ring provider feature is
+# not enabled anywhere in the workspace (ring the crate only appears via
+# rcgen/jsonwebtoken). Mirrors the tokio-rustls declaration below.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "aws-lc-rs"] }
+# Key-material hygiene (#120): Zeroizing wrappers wipe PEM/DER private-key
+# buffers on drop. License Apache-2.0 OR MIT (the Apache-2.0 branch is
+# allow-listed in deny.toml); already in the tree as a rustls /
+# rustls-pki-types dependency, so this only makes it a direct one.
+zeroize = "1"
 rcgen = "0.13"
 # Property-based tests (DW-011 balancer coverage): Apache-2.0/MIT.
 # GCRA rate limiting (DW-017): MIT; dashmap feature gives sharded keyed state.

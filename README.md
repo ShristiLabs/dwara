@@ -1135,8 +1135,11 @@ listeners:
 consumed), the SNI server name is matched exactly (case-insensitive)
 against `sni_routes`, and the raw TLS bytes are spliced bidirectionally
 to the upstream. A non-TLS client, a ClientHello with no SNI, or an
-unmatched name has its connection closed. Certificate fields are
-rejected in this mode; `sni_routes` are rejected in terminate mode.
+unmatched name has its connection closed. A ClientHello fragmented
+across TLS records (larger than one 16 KiB record) is waited for and
+reassembled, bounded at 64 KiB, rather than closed as no-SNI.
+Certificate fields are rejected in this mode; `sni_routes` are rejected
+in terminate mode.
 
 ```yaml
 listeners:

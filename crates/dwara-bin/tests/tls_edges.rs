@@ -626,6 +626,200 @@ async fn passthrough_large_padded_clienthello_is_still_parsed_and_spliced() {
     );
 }
 
+#[tokio::test]
+async fn passthrough_fragmented_clienthello_across_two_records_is_reassembled_and_spliced() {
+    let dir = temp_dir("pass-frag");
+    let cert = write_cert(&dir, "back.example.com");
+    let back_port = spawn_backend(&cert).await;
+    let (addr, _config, _server) = start_passthrough("pass-frag2", back_port).await;
+
+    // #120: re-frame one ClientHello as TWO TLS records — the handshake
+    // message (and its SNI extension) is byte-identical to the
+    // single-record form; only the record framing is cut mid-message.
+    // The gateway must wait for the second fragment, reassemble, extract
+    // SNI, and splice — replaying the ORIGINAL bytes upstream.
+    let hello = client_hello(Some("back.example.com"), 0);
+    let hs = &hello[5..]; // handshake message (4-byte header + body)
+    let split = hs.len() / 2;
+    let mut rec1 = vec![0x16, 0x03, 0x01];
+    rec1.extend_from_slice(&(split as u16).to_be_bytes());
+    rec1.extend_from_slice(&hs[..split]);
+    let mut rec2 = vec![0x16, 0x03, 0x01];
+    rec2.extend_from_slice(&((hs.len() - split) as u16).to_be_bytes());
+    rec2.extend_from_slice(&hs[split..]);
+
+    let mut tcp = TcpStream::connect(&addr).await.unwrap();
+    tcp.write_all(&rec1).await.unwrap();
+
+    // Bounded not-EOF window: with the old first-record-only parser the
+    // gateway decided "complete, no SNI" and CLOSED here; holding the
+    // connection open for the whole window is exactly the wait-for-the-
+    // next-fragment behavior. The read timeout IS the assertion (a
+    // bounded poll, not sleep-based synchronization).
+    let mut probe = [0u8; 1];
+    match tokio::time::timeout(Duration::from_millis(300), tcp.read(&mut probe)).await {
+        Err(_still_open) => {}
+        Ok(Ok(0)) => {
+            panic!("gateway closed after the first record: fragmented hello treated as no-SNI")
+        }
+        Ok(Ok(n)) => panic!("unexpected {n} bytes before the second record"),
+        Ok(Err(e)) => panic!("read error: {e}"),
+    }
+
+    tcp.write_all(&rec2).await.unwrap();
+
+    // Splice proof (same shape as the large-hello test): the backend
+    // answers with a TLS record — handshake (0x16) or alert (0x15) —
+    // proving the fragmented hello was reassembled, routed by SNI, and
+    // the ORIGINAL first-record bytes replayed upstream.
+    let mut head = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut head))
+        .await
+        .expect("TLS record within timeout")
+        .expect("read record header");
+    assert!(
+        head[0] == 0x16 || head[0] == 0x15,
+        "expected a handshake (0x16) or alert (0x15) record from the spliced backend, got {head:?}"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_fragmented_hello_bytes_are_replayed_verbatim() {
+    // The definitive splice/replay proof (#120): a RAW upstream that
+    // reads exactly the bytes the two-record framing declares and
+    // answers b"OK" only on a byte-exact match. An alert record from a
+    // TLS backend (accepted by the tests above) would also be produced
+    // by a MANGLED replay; a verbatim comparison cannot be fooled by
+    // one. Peeking must not consume, drop, reorder, or re-serialize any
+    // fragment of the hello.
+    let hello = client_hello(Some("back.example.com"), 0);
+    let hs = &hello[5..];
+    let split = hs.len() / 2;
+    let mut rec1 = vec![0x16, 0x03, 0x01];
+    rec1.extend_from_slice(&(split as u16).to_be_bytes());
+    rec1.extend_from_slice(&hs[..split]);
+    let mut rec2 = vec![0x16, 0x03, 0x01];
+    rec2.extend_from_slice(&((hs.len() - split) as u16).to_be_bytes());
+    rec2.extend_from_slice(&hs[split..]);
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&rec1);
+    expected.extend_from_slice(&rec2);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let back_port = listener.local_addr().unwrap().port();
+    let want = expected.clone();
+    let upstream = tokio::spawn(async move {
+        let Ok((mut sock, _)) = listener.accept().await else {
+            return false;
+        };
+        let mut got = Vec::new();
+        while got.len() < want.len() {
+            let mut chunk = [0u8; 4096];
+            let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut chunk)).await
+            {
+                Ok(Ok(0)) | Err(_) => return false,
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => return false,
+            };
+            got.extend_from_slice(&chunk[..n]);
+        }
+        let matched = got == want;
+        if matched {
+            let _ = sock.write_all(b"OK").await;
+        }
+        matched
+    });
+
+    let (addr, _config, _server) = start_passthrough("pass-verbatim", back_port).await;
+    let mut tcp = TcpStream::connect(&addr).await.unwrap();
+    tcp.write_all(&rec1).await.unwrap();
+    tcp.write_all(&rec2).await.unwrap();
+
+    let mut marker = [0u8; 2];
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut marker))
+        .await
+        .expect("verbatim-match marker within timeout")
+        .expect("read marker");
+    assert_eq!(&marker, b"OK", "upstream did not receive the exact bytes");
+    let matched = tokio::time::timeout(Duration::from_secs(5), upstream)
+        .await
+        .expect("upstream task finishes")
+        .expect("upstream task clean");
+    assert!(matched, "raw upstream saw a byte-exact replay");
+}
+
+#[tokio::test]
+async fn passthrough_over_budget_hello_is_refused_without_waiting_for_the_peek_timeout() {
+    let dir = temp_dir("pass-budget");
+    let cert = write_cert(&dir, "back.example.com");
+    let back_port = spawn_backend(&cert).await;
+    let (addr, _config, _server) = start_passthrough("pass-budget2", back_port).await;
+
+    // The handshake header alone declares a message over the 64 KiB
+    // reassembly budget (#120): the decision must fire as soon as the
+    // first record is seen (Settled) and the connection close — never a
+    // 10 s hang until the peek timeout, and never an unbounded buffer.
+    // The handshake length is the 3 bytes of 70_000 = 0x011170 (a u32's
+    // [1..]); a usize's [1..] would append 7 bytes and the field would
+    // decode as an empty (0x000000) body instead of an over-budget one.
+    let mut over = vec![0x16, 0x03, 0x03];
+    over.extend_from_slice(&4u16.to_be_bytes());
+    over.push(0x01); // ClientHello
+    over.extend_from_slice(&70_000u32.to_be_bytes()[1..]);
+    let started = Instant::now();
+    let resp = write_then_read_to_eof(&addr, &over, Duration::from_secs(5)).await;
+    assert!(resp.is_empty(), "no response bytes: {resp:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "over-budget hello must be refused promptly, took {started:?}"
+    );
+
+    // The listener is unharmed: a well-formed SNI handshake still
+    // splices to the backend.
+    let conn = tls_connector(&["http/1.1"]);
+    let (cert_der, resp) = tls_get_ok(&addr, "back.example.com", &conn).await;
+    assert_eq!(cert_der, cert_der_of(&cert), "backend cert after refusal");
+    assert!(String::from_utf8_lossy(&resp).ends_with("backend"));
+}
+
+#[tokio::test]
+async fn passthrough_fragment_then_non_handshake_record_closes_immediately() {
+    let dir = temp_dir("pass-mixed");
+    let cert = write_cert(&dir, "back.example.com");
+    let back_port = spawn_backend(&cert).await;
+    let (addr, _config, _server) = start_passthrough("pass-mixed2", back_port).await;
+
+    // A valid first fragment, then an application-data record where
+    // handshake bytes are still needed: handshake bytes travel in
+    // handshake records only, so nothing that can still arrive would
+    // complete the message — the gateway must decide NOW and close,
+    // not hold the connection open.
+    let hello = client_hello(Some("back.example.com"), 0);
+    let hs = &hello[5..];
+    let split = hs.len() / 2;
+    let mut bytes = vec![0x16, 0x03, 0x01];
+    bytes.extend_from_slice(&(split as u16).to_be_bytes());
+    bytes.extend_from_slice(&hs[..split]);
+    bytes.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4]);
+    let started = Instant::now();
+    let resp = write_then_read_to_eof(&addr, &bytes, Duration::from_secs(5)).await;
+    assert!(resp.is_empty(), "no response bytes: {resp:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "non-handshake continuation must close immediately, took {started:?}"
+    );
+
+    // The listener survived the malformed exchange.
+    let conn = tls_connector(&["http/1.1"]);
+    let (cert_der, resp) = tls_get_ok(&addr, "back.example.com", &conn).await;
+    assert_eq!(
+        cert_der,
+        cert_der_of(&cert),
+        "backend cert after mixed records"
+    );
+    assert!(String::from_utf8_lossy(&resp).ends_with("backend"));
+}
+
 // ---------------------------------------------------------------------------
 // 3. Certificate hot-reload torn state + concurrency
 // ---------------------------------------------------------------------------

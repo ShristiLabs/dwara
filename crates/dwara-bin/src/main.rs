@@ -80,7 +80,7 @@ use dwara_core::snapshot::ConfigState;
 use dwara_core::store::{sync_consumers_from_config, StateStore};
 use dwara_core::tls::{self, TlsTermination};
 use hyper_util::server::graceful::GracefulShutdown;
-use listeners::{bind_listener, run_listener, ListenerMode};
+use listeners::{bind_listener, run_listener_supervised, ListenerMode};
 use reload::{refresh_tls_states, reload, spawn_file_watcher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
@@ -433,8 +433,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let graceful = Arc::clone(&graceful);
         let rx = shutdown_rx.clone();
         let hardening = Arc::clone(&hardening);
-        tasks.push(tokio::spawn(run_listener(
-            bound, tcp, state, dp, graceful, rx, timeout, hardening,
+        // #120: each accept task runs under panic supervision — a
+        // panicked accept loop is respawned (bounded) on the same bound
+        // socket instead of silently killing its listener.
+        tasks.push(tokio::spawn(run_listener_supervised(
+            bound,
+            Arc::new(tcp),
+            state,
+            dp,
+            graceful,
+            rx,
+            timeout,
+            hardening,
         )));
     }
 

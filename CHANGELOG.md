@@ -126,6 +126,14 @@ the project follows semantic versioning once 1.0 is reached.
 - TLS certificate hot-reload accepted a torn cert/key pair (new cert
   with old key); reloads now verify the key matches the leaf
   certificate and otherwise keep the previous material.
+- SNI passthrough closed ClientHellos fragmented across TLS records as
+  no-SNI; such hellos (larger than one 16 KiB record) are now
+  reassembled, bounded at 64 KiB, and routed by their server name, with
+  the original bytes replayed to the upstream unchanged.
+- A panicked listener accept task killed its listener silently; accept
+  loops are now respawned on the same bound socket up to 8 times per
+  listener, after which the listener is given up on with an ERROR log
+  while the process and other listeners keep serving.
 
 ### Changed
 
@@ -133,9 +141,20 @@ the project follows semantic versioning once 1.0 is reached.
   watcher's reload of identical content is a no-op.
 - Gateway-generated responses use a uniform JSON error envelope
   (`{error:{code,message,request_id}}`).
+- rustls is built with an explicit feature set (`aws-lc-rs`, `logging`,
+  `std`, `tls12`; default features off), mirroring the tokio-rustls
+  declaration. No binary-size win resulted: at 0.23.43 the ring
+  provider was never in rustls's default features (ring enters via
+  rcgen and jsonwebtoken), so the pin is supply-chain hygiene; the one
+  behavioral delta is dropping rustls's `prefer-post-quantum` default,
+  with interop unchanged.
 
 ### Security
 
 - All GitHub Actions references pinned to full commit SHAs (first- and
   third-party) with weekly Dependabot updates keeping the pins fresh
   (DW-002 follow-up).
+- TLS private keys are zeroized after loading: PEM file bodies and
+  parsed key values (terminate listeners and the admin mTLS key) are
+  wiped on drop via the `zeroize` crate instead of lingering in heap
+  memory (DW-007 follow-up).
