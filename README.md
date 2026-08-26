@@ -1436,6 +1436,81 @@ only — a second process writing the same file is not seen until
 restart. Unset (the default), the gateway runs purely from config. A
 startup failure (unwritable path, newer schema version) exits 1.
 
+## Benchmarks
+
+Two harnesses cover performance work (DW-024). Absolute numbers are
+machine- and run-dependent and are deliberately NOT recorded here —
+consult the CI artifacts for reference output.
+
+### Micro benchmarks
+
+Criterion benches in `crates/dwara-core/benches/micro.rs` (route
+resolution, config validate/compile, hop-by-hop header filtering,
+balancer picks, GCRA rate-limit checks, API-key verification):
+
+```sh
+cargo bench --workspace --bench micro
+```
+
+A checked-in baseline (`crates/dwara-core/benches/baseline.json`) plus a
+regression gate (`scripts/bench-baseline.py`, tolerance 25%) fail the
+run when any benchmark slows by more than 25% relative to the baseline:
+
+```sh
+cargo bench --workspace --bench micro -- --output-format bencher \
+  | scripts/bench-baseline.py --baseline crates/dwara-core/benches/baseline.json
+```
+
+Refresh the baseline when benchmarked code changes shape or the
+reference machine changes, and note the machine in the commit trail:
+
+```sh
+cargo bench --workspace --bench micro -- --output-format bencher \
+  | scripts/bench-baseline.py --write crates/dwara-core/benches/baseline.json
+```
+
+### Macro load testing
+
+`scripts/bench-macro.sh [DURATION_SECS] [CONNS...]` builds the release
+binaries, boots the gateway against an in-process echo upstream
+(`dwara-loadgen --echo-only`), and drives it at each connection count,
+printing a requests/RPS/errors/percentiles table. Defaults: 10 s at 10 /
+100 / 1000 connections; exit is nonzero if any request errors. Ports
+default to 18080 (gateway) and 18081 (echo), overridable via
+`BENCH_GATEWAY_PORT` / `BENCH_ECHO_PORT`.
+
+The load generator itself is `dwara-loadgen` (in `dwara-cli`):
+
+```sh
+dwara-loadgen --url http://127.0.0.1:18080/ \
+  --connections 100 --duration 10 --rate 0
+```
+
+`--rate 0` (default) is unbounded — each connection issues back-to-back
+requests; a positive value paces a global requests-per-second target.
+`--echo PORT` also serves a minimal echo upstream in the same process
+(`--echo-only` serves just the upstream; `--echo-body` sets the response
+size, default 128 bytes). Output includes a machine-parseable `RESULT:`
+line; the exit code is 1 if any request failed.
+
+**File-descriptor limits.** The OS caps open sockets long before the
+gateway does. macOS defaults are low (often 2560) — keep local runs at
+10k connections or fewer. The 100k-connection test needs
+`ulimit -n 1048576` on a tuned Linux host (two sockets per connection
+pair, client and server side, plus kernel headroom:
+`net.ipv4.ip_local_port_range`, `somaxconn`).
+
+### CI posture
+
+Benchmarks never run on pull requests. The `bench` workflow
+(`.github/workflows/bench.yml`) is scheduled weekly (Mondays, 03:17 UTC)
+and manually dispatchable: the micro job runs the criterion gate against
+the checked-in baseline; the macro job runs load profiles (errors must
+be 0) and a best-effort 100k-connection test on the standard runner. A
+24h soak job exists in the same workflow but is manual-dispatch only —
+trigger it from the Actions tab when a soak is wanted (e.g. ahead of a
+release).
+
 ## Crates
 
 | Crate | Role |

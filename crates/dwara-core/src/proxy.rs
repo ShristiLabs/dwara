@@ -1942,7 +1942,10 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
 /// Returns the `Connection` token list collected before stripping (original
 /// case, deduplicated, order preserved) so the tunneling caller can rebuild
 /// a `Connection` header with the surviving tokens.
-fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) -> Vec<String> {
+///
+/// (Public so the DW-024 micro-benchmark can exercise it directly; it is
+/// not part of the stable public surface.)
+pub fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) -> Vec<String> {
     let tokens = connection_tokens(headers);
     let listed: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
     let drop: Vec<HeaderName> = headers

@@ -15,5 +15,16 @@ regex = { workspace = true }
 # Atomic fmt writes (temp file + rename, mirroring dwara-admin's
 # config writer): already a workspace dependency.
 tempfile = { workspace = true }
+# dwara-loadgen (DW-024): the load-generator bench binary ships as a bin
+# target of this crate (src/bin/loadgen.rs). tokio/hyper are already
+# workspace dependencies of the gateway crates; no new external crates.
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
 
-[dev-dependencies]
+# DW-024 load generator (see src/bin/loadgen.rs docs).
+[[bin]]
+name = "dwara-loadgen"
+path = "src/bin/loadgen.rs"

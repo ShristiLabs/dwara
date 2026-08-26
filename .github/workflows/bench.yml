@@ -1,0 +1,172 @@
+# DW-024 NFR verification harness (benchmark + regression gate).
+#
+# COMPUTE POSTURE: this workflow is SCHEDULED (weekly) and manually
+# dispatchable ONLY. It deliberately has NO push/pull_request triggers —
+# benchmarks are slow and noisy and must not run per-PR (see the repo's
+# CI-cost conventions). ci.yml remains the per-PR gate.
+#
+# Jobs:
+#   micro  — criterion micro-benchmarks + regression gate against the
+#            checked-in baseline (crates/dwara-core/benches/baseline.json,
+#            fail on >25% regression on any benchmark). GATE SEMANTICS: the
+#            gate compares ONLY when the baseline was captured on the same
+#            machine class as this runner (--expect-machine). The checked-in
+#            baseline.json is the DEV-MACHINE reference (see its meta.note);
+#            while it is the one in place, the gate SKIPS comparison with a
+#            clear notice and fails open. BOOTSTRAP: immediately after this
+#            workflow merges, dispatch the `baseline-refresh` job ONCE — it
+#            re-runs the benches on the CI runner and commits a CI-captured
+#            baseline (meta.machine = ubuntu-latest), after which the
+#            weekly gate compares like-for-like.
+#   baseline-refresh — manual (workflow_dispatch) ONLY. Runs the micro
+#            benches ON THE CI RUNNER and COMMITS the refreshed baseline
+#            back to this branch (job-level permissions: contents: write;
+#            uses the repo's standard GITHUB_TOKEN — no extra secrets).
+#   macro  — Linux end-to-end load rig (gateway + echo upstream +
+#            dwara-loadgen) at low/med/high concurrency, asserting errors=0,
+#            plus the 100k-connection test with a raised fd limit.
+#   soak   — 24h soak. DEFINED but DISABLED: it is workflow_dispatch-only
+#            (no cron below) so a 24h runner is never burned by default.
+#            Trigger manually from the Actions tab when a soak is wanted.
+
+name: bench
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Weekly, Monday 03:17 UTC (off the :00 mark to shed load).
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  micro:
+    name: micro benchmarks + regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run micro benchmarks (criterion, bencher format)
+        run: |
+          cargo bench --workspace --bench micro -- --output-format bencher | tee bench-output.txt
+
+      - name: Regression gate vs baseline (fail on >25% regression)
+        # Skips (fail-open) with a notice while the baseline is the
+        # dev-machine reference; see the baseline-refresh job and the
+        # header comment for the bootstrap flow.
+        run: |
+          scripts/bench-baseline.py --baseline crates/dwara-core/benches/baseline.json \
+            --expect-machine ubuntu-latest < bench-output.txt
+
+      - name: Upload bench output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: micro-bench-output
+          path: bench-output.txt
+
+  baseline-refresh:
+    name: refresh micro baseline on the CI runner (dispatch only)
+    # Manual ONLY (workflow_dispatch): re-captures benches/baseline.json on
+    # the same runner class the weekly `micro` gate uses, and commits the
+    # result back to the ref it was dispatched on. This is the bootstrap
+    # step after this workflow first merges (the checked-in baseline is a
+    # dev-machine reference; cross-machine ns/iter comparison is invalid).
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run micro benchmarks and write CI-captured baseline
+        run: |
+          cargo bench --workspace --bench micro -- --output-format bencher \
+            | scripts/bench-baseline.py --write crates/dwara-core/benches/baseline.json \
+                --force --machine ubuntu-latest
+
+      - name: Commit refreshed baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add crates/dwara-core/benches/baseline.json
+          if git diff --cached --quiet; then
+            echo "baseline unchanged; nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(bench): refresh micro baseline on ubuntu-latest CI runner"
+          git push
+
+  macro:
+    name: macro load rig (gateway end-to-end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run load profiles (low/med/high concurrency, errors must be 0)
+        run: scripts/bench-macro.sh 20 10 100 1000
+
+      - name: 100k connections test (best-effort on the standard runner)
+        # The NFR bar is 100k concurrent connections. The standard
+        # ubuntu-latest runner does not advertise a large-runner fd budget;
+        # this step raises the soft/hard limits first and is best-effort
+        # (continue-on-error) — treat a red X here as "needs a larger
+        # runner or a dedicated host", not a code regression. On a
+        # dedicated Linux host: ulimit -n 1048576 before running.
+        continue-on-error: true
+        run: |
+          ulimit -n 1048576 || ulimit -n "$(ulimit -Hn)"
+          ulimit -n
+          scripts/bench-macro.sh 60 10000 100000
+
+  soak:
+    name: 24h soak (manual only — disabled by default)
+    # DELIBERATELY NOT SCHEDULED. A 24h soak burns a runner for a day;
+    # it exists to be triggered manually (Actions tab -> bench -> Run
+    # workflow -> soak) when wanted, e.g. ahead of a release. The
+    # schedule section above intentionally lists only the weekly bench.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Soak (24h at moderate concurrency; errors must be 0)
+        run: |
+          ulimit -n "$(ulimit -Hn)"
+          scripts/bench-macro.sh 86400 100

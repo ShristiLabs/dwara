@@ -83,6 +83,11 @@ prometheus = { version = "0.14", default-features = false }
 # CLI argument parsing (DW-022): clap is MIT OR Apache-2.0; derive
 # feature only to keep the dep tree small.
 clap = { version = "4", features = ["derive"] }
+# Micro-benchmark harness (DW-024, dev/bench-only): MIT OR Apache-2.0.
+# default-features = false drops plotters/rayon (reporting deps we do not
+# use); cargo_bench_support keeps `--output-format bencher` for the
+# regression gate in .github/workflows/bench.yml.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]
 lto = true
