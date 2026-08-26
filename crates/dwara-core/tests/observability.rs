@@ -227,7 +227,9 @@ async fn envelope_of(
 /// request a bounded number of times: every retry that records a
 /// COMPLETE trace proves the contract; only persistent incompleteness
 /// fails.
+#[serial_test::serial]
 #[tokio::test]
+#[serial_test::serial]
 async fn one_trace_shows_all_phases() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -268,7 +270,9 @@ async fn one_trace_shows_all_phases() {
 
 // --- access log -------------------------------------------------------------
 
+#[serial_test::serial]
 #[tokio::test]
+#[serial_test::serial]
 async fn access_log_line_has_fields_and_redacts_query() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -326,6 +330,7 @@ async fn access_log_line_has_fields_and_redacts_query() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn request_id_echoed_generated_and_validated() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -383,6 +388,7 @@ async fn request_id_echoed_generated_and_validated() {
 // --- metrics ----------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn metrics_endpoint_serves_families_and_counts_traffic() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -466,6 +472,7 @@ async fn metrics_endpoint_serves_families_and_counts_traffic() {
 // --- error envelope ---------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn error_envelope_shape_across_codes() {
     let port = spawn_ok_backend().await;
     // 401: an auth_required route answers anonymous traffic.
@@ -575,6 +582,7 @@ async fn error_envelope_shape_across_codes() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn reserved_paths_aligned_to_envelope() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -586,7 +594,9 @@ async fn reserved_paths_aligned_to_envelope() {
 
 // --- redaction --------------------------------------------------------------
 
+#[serial_test::serial]
 #[tokio::test]
+#[serial_test::serial]
 async fn poisoned_authorization_never_reaches_logs() {
     const POISON: &str = "Bearer sk-abcdef1234567890deadbeef";
     let port = spawn_ok_backend().await;
@@ -639,7 +649,9 @@ fn captured_blob(cap: &Capture) -> String {
 /// poisoned Cookie, Basic credentials, an API key, a query-string token,
 /// and a token embedded in the configured JWKS URL — must appear in
 /// NEITHER the captured spans/events NOR the scraped /metrics text.
+#[serial_test::serial]
 #[tokio::test]
+#[serial_test::serial]
 async fn redaction_poisons_never_reach_logs_or_metrics() {
     const COOKIE_POISON: &str = "session=COOKIESECRET987";
     const BASIC_POISON: &str = "Basic c3VwZXI6UkVBTExZWU9HQVNFQ1JFVA=="; // superi:REALLYEGASCRET
@@ -767,6 +779,7 @@ fn sample_value(text: &str, metric: &str, labels: &str) -> Option<f64> {
 /// for the route, active_requests is back to 0, and the breaker_state
 /// gauge shows the 0 -> 1 transition.
 #[tokio::test]
+#[serial_test::serial]
 async fn metrics_integrity_mixed_sequence() {
     let port = spawn_ok_backend().await;
     let dead = dead_port();
@@ -948,6 +961,7 @@ async fn metrics_integrity_mixed_sequence() {
 /// inbound ID (256 chars) is replaced rather than echoed, and every
 /// response carries the header.
 #[tokio::test]
+#[serial_test::serial]
 async fn request_id_parallel_distinct_and_invalid_replaced() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -1056,6 +1070,7 @@ fn assert_envelope(status: StatusCode, headers: &hyper::HeaderMap, text: &str) {
 /// one config and the 5xx family through failure configs all answer the
 /// strict envelope.
 #[tokio::test]
+#[serial_test::serial]
 async fn envelope_on_every_gateway_generated_status() {
     let port = spawn_ok_backend().await;
     // One config covering 404, 401, 403 (IP ACL denial), 429.
@@ -1131,6 +1146,7 @@ async fn envelope_on_every_gateway_generated_status() {
 /// errors still land; sample=1.0 logs everything; an intermediate rate
 /// is statistically honored by the Weyl sequence (bounded margin).
 #[tokio::test]
+#[serial_test::serial]
 async fn sampling_end_to_end_zero_full_and_bounded() {
     let port = spawn_ok_backend().await;
     let dp = proxy_config(port, "");
@@ -1194,7 +1210,9 @@ fn sampling_bounded_n_statisical_margin() {
 /// LOG VOLUME under streaming: a response served as many small body
 /// chunks produces exactly ONE access line at completion, not one per
 /// chunk.
+#[serial_test::serial]
 #[tokio::test]
+#[serial_test::serial]
 async fn streamed_response_emits_one_access_line() {
     // A backend that streams 8 chunks with tiny gaps so the proxy's
     // zero-buffering pass-through genuinely interleaves.

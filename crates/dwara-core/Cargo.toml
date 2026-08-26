@@ -55,6 +55,7 @@ proptest = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 prometheus = { workspace = true }
+serial_test = { workspace = true }
 tokio = { workspace = true }
 # Micro-benchmarks (DW-024): criterion is dev/bench-only; it never ships in
 # the gateway binary or library builds.

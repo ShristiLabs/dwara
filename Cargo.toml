@@ -78,6 +78,7 @@ jsonwebtoken = "9"
 # renders JSON logs with env filtering; prometheus with default features
 # OFF keeps the protobuf exporter out of the tree (text format only).
 tracing = "0.1"
+serial_test = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 prometheus = { version = "0.14", default-features = false }
 # CLI argument parsing (DW-022): clap is MIT OR Apache-2.0; derive
