@@ -39,7 +39,7 @@ jobs:
     name: fmt, clippy, build, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,7 +61,7 @@ jobs:
         run: cargo test --workspace
 
       # DW-026: the committed schema-derived config reference must be
-      # exactly what `dwara-cli schema` emits (feature analysis 13.5).
+      # exactly what `dwara-cli schema` emits.
       - name: Config reference freshness
         run: cargo run -q -p dwara-cli --bin dwara-cli -- schema | diff config-reference.json -
 
@@ -69,7 +69,7 @@ jobs:
     name: cargo-deny and SBOM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -91,11 +91,11 @@ jobs:
           tool: cargo-cyclonedx
 
       - name: Generate SBOM (CycloneDX 1.5)
-        run: cargo cyclonedx --format json --sbom 1.5
+        run: cargo cyclonedx --format json --spec-version 1.5
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
           name: sbom-cyclonedx
-          path: target/cyclonedx/
+          path: crates/*/*.cdx.json
           if-no-files-found: error

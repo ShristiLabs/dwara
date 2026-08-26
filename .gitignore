@@ -25,3 +25,6 @@ __pycache__/
 *.pyc
 .sdlc
 docs-internal
+
+# cargo-cyclonedx output (per-crate SBOMs)
+*.cdx.json
