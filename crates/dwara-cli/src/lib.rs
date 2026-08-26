@@ -15,8 +15,14 @@
 //! Lint rules are ADVISORY findings beyond validation (see
 //! [`lint_config`]): they flag config that compiles and routes traffic
 //! but likely does not do what the author meant.
+//!
+//! The [`loadgen`] module holds the DW-024 macro load-generator rig
+//! (public for reuse and testing; the `dwara-loadgen` binary is a thin
+//! wrapper over it).
 
 use std::collections::BTreeSet;
+
+pub mod loadgen;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, validate};
