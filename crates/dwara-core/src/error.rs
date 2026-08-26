@@ -142,3 +142,5 @@ impl From<ExtensionsError> for Error {
         Error::Extensions(e)
     }
 }
+// retrigger CI after a lost push event (path-filtered workflows
+// need a real file change; empty commits do not qualify).
