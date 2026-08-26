@@ -91,3 +91,8 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 
 [profile.release]
 lto = true
+# DW-026 size bar: strip symbols from release binaries (the musl image
+# lands well under 25 MB with this on; see quickstart/packaging notes).
+# panic stays "unwind" — abort would change the gateway's error
+# semantics (in-flight request failure vs process teardown).
+strip = true

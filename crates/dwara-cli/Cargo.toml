@@ -23,6 +23,10 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
+# `schema` subcommand (DW-026): pretty-print the schemars JSON Schema.
+# Already a workspace dependency (dwara-core/observability uses it); no
+# new external crate enters the tree.
+serde_json = { workspace = true }
 
 # DW-024 load generator (see src/bin/loadgen.rs docs).
 [[bin]]

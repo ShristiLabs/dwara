@@ -227,6 +227,77 @@ fn binary_fmt_rewrites_in_place() {
     assert_eq!(after, format_config_text(VALID).unwrap());
 }
 
+// --- DW-026: schema subcommand ---------------------------------------------
+
+/// `dwara-cli schema` prints valid, pretty JSON for the gateway config:
+/// exit 0, parses, carries a title and $defs, and is byte-stable across
+/// invocations (the CI freshness check diffs the committed reference
+/// against a second run of this stream).
+#[test]
+fn binary_schema_prints_valid_stable_json_schema() {
+    let out = run_cli(&["schema"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let first_run = out.stdout.clone();
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("schema output is JSON");
+    assert!(
+        json.get("title").is_some(),
+        "schema must carry a title: top-level keys {:?}",
+        json.as_object().map(|m| m.keys().collect::<Vec<_>>())
+    );
+    assert!(
+        json.get("$defs").is_some(),
+        "schema must carry $defs (schemars flavor)"
+    );
+    // The config model surfaces listeners/routes at the top level.
+    assert!(json
+        .get("properties")
+        .and_then(|p| p.get("listeners"))
+        .is_some());
+    assert!(json
+        .get("properties")
+        .and_then(|p| p.get("routes"))
+        .is_some());
+
+    // Determinism: a second run is byte-identical.
+    let again = run_cli(&["schema"]);
+    assert_eq!(first_run, again.stdout, "schema output must be stable");
+}
+
+/// The committed config reference (config-reference.json at the repo
+/// root, per the CI freshness step) is exactly what the subcommand
+/// emits — the local half of that check.
+#[test]
+fn binary_schema_matches_committed_config_reference() {
+    let reference =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config-reference.json");
+    let committed =
+        std::fs::read(&reference).unwrap_or_else(|e| panic!("read {}: {e}", reference.display()));
+    let out = run_cli(&["schema"]);
+    assert_eq!(out.status.code(), Some(0));
+    // Both sides end in a trailing newline (println).
+    let emitted = out.stdout;
+    let emitted = if emitted.ends_with(b"\n") {
+        &emitted[..emitted.len() - 1]
+    } else {
+        &emitted[..]
+    };
+    let committed = if committed.ends_with(b"\n") {
+        &committed[..committed.len() - 1]
+    } else {
+        &committed[..]
+    };
+    assert_eq!(
+        emitted, committed,
+        "committed config-reference.json is stale; regenerate with `dwara-cli schema`"
+    );
+}
+
 // --- DW-022 follow-ups: exit-code separation, diff depth, fmt bytes ---
 
 /// Exit-code contract end to end on ONE file evolving: schema error ->

@@ -1,0 +1,2 @@
+# gen-certs.sh output: local self-signed material, never committed
+certs/

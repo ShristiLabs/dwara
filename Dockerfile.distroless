@@ -1,0 +1,42 @@
+# Dockerfile.distroless (DW-026): static musl gateway image on distroless.
+#
+# Same binary as Dockerfile.scratch (static musl — distroless/cc has no
+# libc of its own, which is fine because we do not link one dynamically),
+# but the runtime layer is gcr.io/distroless/cc-debian12:nonroot:
+#
+# - runs as UID 65532 (nonroot) out of the box — preferred when the
+#   orchestrator cannot inject a user (e.g. strict admission policies)
+# - adds a minimal glibc-free runtime surface: /etc/passwd (the nonroot
+#   user), tzdata, and the distroless CA certificates bundle
+# - still no shell, no package manager, no apt attack surface
+#
+# The CA bundle is redundant for dwara (webpki roots are compiled in,
+# DW-008) but harmless; the passthrough/termination listener never reads
+# the system trust store in v1.
+#
+# Use this variant when you want a baked-in non-root identity; use
+# Dockerfile.scratch for the absolute minimum image with the user injected
+# by the orchestrator.
+
+ARG RUST_VERSION=1.94-alpine
+
+FROM rust:${RUST_VERSION} AS builder
+RUN apk add --no-cache musl-dev cmake make perl
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')}" in \
+        amd64) echo 'x86_64-unknown-linux-musl' > /target.triple ;; \
+        arm64) echo 'aarch64-unknown-linux-musl' > /target.triple ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
+RUN rustup target add "$(cat /target.triple)"
+RUN cargo build --release --target "$(cat /target.triple)" --bin dwara -p dwara-bin
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /build/target/*/release/dwara /usr/local/bin/dwara
+COPY crates/dwara-bin/dwara.yaml /etc/dwara/dwara.yaml
+ENV DWARA_CONFIG=/etc/dwara/dwara.yaml
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/dwara"]

@@ -1,0 +1,50 @@
+# Dockerfile.scratch (DW-026): static musl gateway image on FROM scratch.
+#
+# Size: the dwara binary is fully static (musl + bundled SQLite + aws-lc-rs
+# C compiled in), so scratch works with ONLY the binary and config — no
+# libc, no base layer, no CA certificate bundle. Upstream TLS verification
+# uses the Mozilla webpki root set COMPILED INTO the binary (webpki-roots,
+# DW-008), so /etc/ssl/certs is not needed and not shipped.
+#
+# Trade-offs vs Dockerfile.distroless:
+# - smallest possible image (no shell, no package manager, nothing)
+# - no nonroot user exists on scratch — the container runs as the image's
+#   implicit user (root) unless the orchestrator sets one (docker --user,
+#   compose user:, k8s runAsNonRoot). If you need an unprivileged UID
+#   baked in, use the distroless nonroot variant instead.
+#
+# Build (local, native arch):
+#   docker build -f Dockerfile.scratch -t dwara:scratch .
+# Multi-arch release builds happen in .github/workflows/release-artifacts.yml
+# (version tags only, per the project's CI cost policy).
+#
+# Builder notes: rust:1.94-alpine pins the toolchain to the workspace's
+# rust-toolchain.toml channel. aws-lc-rs (the rustls crypto provider)
+# compiles C via cmake/perl, so the builder needs those plus musl-dev;
+# none of it reaches the final image.
+
+ARG RUST_VERSION=1.94-alpine
+
+FROM rust:${RUST_VERSION} AS builder
+RUN apk add --no-cache musl-dev cmake make perl
+WORKDIR /build
+# Cargo metadata first so dependency compilation is layer-cached.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+# TARGETARCH is set by buildx (amd64/arm64); map to the musl triple.
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')}" in \
+        amd64) echo 'x86_64-unknown-linux-musl' > /target.triple ;; \
+        arm64) echo 'aarch64-unknown-linux-musl' > /target.triple ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
+RUN rustup target add "$(cat /target.triple)"
+RUN cargo build --release --target "$(cat /target.triple)" --bin dwara -p dwara-bin
+
+FROM scratch
+COPY --from=builder /build/target/*/release/dwara /usr/local/bin/dwara
+# Example config for zero-config boots (DWARA_CONFIG can override; the
+# quickstart mounts its own). Read-only is the operator's mount choice.
+COPY crates/dwara-bin/dwara.yaml /etc/dwara/dwara.yaml
+ENV DWARA_CONFIG=/etc/dwara/dwara.yaml
+ENTRYPOINT ["/usr/local/bin/dwara"]

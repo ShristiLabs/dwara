@@ -1,0 +1,30 @@
+# Quickstart (DW-026): one command, TLS proxying a demo upstream.
+#
+#   ./gen-certs.sh
+#   docker compose up
+#   curl --cacert certs/server.crt https://localhost:8443/
+#
+# The gateway image is built from ../Dockerfile.scratch (static musl
+# binary on FROM scratch). Scratch has no users, so the service injects
+# the nonroot UID 65532 via `user:` (same UID the distroless variant
+# bakes in — swap `dockerfile:` to Dockerfile.distroless to get it from
+# the image instead; 8443 needs no privileged caps).
+services:
+  dwara:
+    build:
+      context: ..
+      dockerfile: Dockerfile.scratch
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ./certs:/etc/dwara/certs:ro
+    ports:
+      - "8443:8443"
+    depends_on:
+      - upstream
+  upstream:
+    image: nginx:alpine
+    volumes:
+      - ./upstream:/usr/share/nginx/html:ro

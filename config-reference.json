@@ -1,0 +1,1452 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gateway",
+  "description": "Root of a dwara configuration: one gateway process, N listeners, and one\ncompiled config generation.",
+  "type": "object",
+  "properties": {
+    "admin": {
+      "description": "Admin API listener (DW-022, decision 6): mTLS-ONLY management\nendpoint. Absent (the default): no admin listener is started at\nall — the gateway is admin-silent until an operator configures\none. When present, `tls` must carry all three files (server\ncert, key, and the CA that client certificates must chain to);\na missing `client_ca_file` is rejected by validation — plaintext\nadmin is not a supported production shape. The dev fallback\n(`DWARA_ADMIN_DEV=1`, dwara-bin) allows loopback-only plaintext\nand is loudly dev-only. The admin listener's bind set is fixed\nat startup; changes take effect on restart.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AdminConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "consumers": {
+      "description": "API caller identities.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Consumer"
+      }
+    },
+    "jwt_providers": {
+      "description": "JWT verification providers (DW-019): trusted token issuers whose\nkeys are fetched from a JWKS endpoint. Each provider independently\nverifies `Authorization: Bearer` tokens (alg allowlist, iss/aud,\nexp with leeway) and maps the token to a consumer — via the\nprovider's explicit `consumer` binding, or by matching a\nconsumer's `jwt` credential `issuer` against the token's `iss`\nclaim. Empty (the default): the gateway does not interpret Bearer\ntokens and forwards `Authorization` upstream untouched.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JwtProvider"
+      }
+    },
+    "listeners": {
+      "description": "Entry points the gateway binds.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Listener"
+      }
+    },
+    "max_concurrent_requests": {
+      "description": "Gateway-level concurrency cap (DW-015): the maximum number of\nrequests admitted concurrently across the WHOLE gateway. Absent\n(the default) is unlimited; 0 is invalid (validation rejects it —\nomit the field for unlimited). Over-cap requests are rejected\nimmediately with 503 \"gateway saturated\" (no queueing). A slot is\nreserved at request admission and released when the response body\ncompletes (or the connection drops). The reserved paths\n`/healthz` and `/readyz` bypass the cap so liveness/readiness\nprobes still answer under saturation.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "policies": {
+      "description": "Named reusable rule bundles.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Policy"
+      }
+    },
+    "routes": {
+      "description": "Match rules routing requests to services.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Route"
+      }
+    },
+    "services": {
+      "description": "Logical APIs being exposed.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Service"
+      }
+    },
+    "trusted_proxies": {
+      "description": "IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims\nare trusted (gateway-level; the direct connection peer must be in\nthis list for an inbound XFF chain to be preserved and extended).\nEach entry must be an IP address (e.g. `10.1.2.3`) or a CIDR\n(e.g. `10.0.0.0/8`); anything else fails validation. Empty (the\ndefault) trusts nobody: every proxied request carries an XFF of\nexactly the direct peer, and inbound XFF values are discarded.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "upstreams": {
+      "description": "Load-balancing pools.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Upstream"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ActiveHealth": {
+      "description": "Active health check knobs (DW-013). A block with no keys enables HTTP\nprobes with the defaults.\n\nProbe semantics (frozen):\n- `http` probes issue `GET {path}` over HTTP/1.1 DIRECTLY to the\n  endpoint (bypassing load balancing and the pooled client); success is\n  a 2xx status. Redirects (3xx) are NOT followed — a health endpoint\n  answering 3xx is treated as a failure (a load balancer must not chase\n  redirects to decide health).\n- `tcp` probes succeed when a TCP connection completes within\n  `timeout_ms`.\n- Full jitter: each loop sleeps `interval_ms` plus a uniform random\n  `0..jitter_ms` before the next probe.",
+      "type": "object",
+      "properties": {
+        "failure_threshold": {
+          "description": "Consecutive probe FAILURES required to eject a healthy endpoint\n(default 3). Reports the same per-endpoint streak the passive\nchecker uses; see the active-health module docs for precedence.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "interval_ms": {
+          "description": "Time between probe attempts in milliseconds (default 5000). Must be\n>= `timeout_ms` and >= `jitter_ms`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 0
+        },
+        "jitter_ms": {
+          "description": "Full-jitter bound in milliseconds (default 500): each loop sleeps a\nuniform random `0..jitter_ms` in addition to `interval_ms`. Must be\n<= `interval_ms`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 500,
+          "minimum": 0
+        },
+        "kind": {
+          "description": "Probe kind (default `http`).",
+          "$ref": "#/$defs/ProbeKind",
+          "default": "http"
+        },
+        "path": {
+          "description": "Path probed by `http` checks (default `/healthz`). Ignored by `tcp`.",
+          "type": "string"
+        },
+        "success_threshold": {
+          "description": "Consecutive probe SUCCESSES required to (re)admit an ejected\nendpoint (default 2).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "description": "Per-probe timeout in milliseconds (default 2000), covering connect\nplus the response for http probes.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 2000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "AdminConfig": {
+      "description": "Admin listener configuration (DW-022).",
+      "type": "object",
+      "properties": {
+        "bind": {
+          "description": "Bind address of the admin listener. Default `127.0.0.1:2019`\n(loopback-only; frozen decision 6) — override only to place the\nadmin API on a dedicated management interface, and rely on mTLS\nfor access control: there is no token layer in v1 (the client\ncertificate IS the auth).",
+          "type": "string",
+          "default": "127.0.0.1:2019"
+        },
+        "tls": {
+          "description": "mTLS material for the admin listener; all three files are\nrequired.",
+          "$ref": "#/$defs/AdminTlsConfig"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tls"
+      ]
+    },
+    "AdminTlsConfig": {
+      "description": "mTLS material for the admin listener (DW-022). Unlike dataplane\nlisteners there is no mode: the admin listener always terminates TLS\nand always requires a client certificate chaining to `client_ca_file`.",
+      "type": "object",
+      "properties": {
+        "cert_file": {
+          "description": "Path to the PEM certificate chain the admin server presents.",
+          "type": "string"
+        },
+        "client_ca_file": {
+          "description": "Path to the PEM CA bundle client certificates must chain to.\nRequired (mTLS-only): validation rejects an admin block without\nit rather than silently serving no-auth TLS.",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "Path to the PEM private key for `cert_file`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cert_file",
+        "key_file",
+        "client_ca_file"
+      ]
+    },
+    "Authz": {
+      "description": "Route-level authorization rules (DW-020, feature analysis 4.7).\n\nRule semantics (frozen here; evaluation lives in the `authz` module):\n\n- `denied_consumers` / `denied_groups` beat `allowed_*` at the SAME\n  level: within one [`Authz`], a deny always wins a tie.\n- `allowed_consumers`, when non-empty, is a closed set: the\n  authenticated consumer must be listed. Empty = any authenticated\n  consumer passes the consumer rule.\n- `allowed_groups`, when non-empty, requires the consumer to be a\n  member of at least one listed group. Group membership comes from\n  the CONFIG consumer's `groups` field; store-only consumers\n  (DWARA_STATE_DB deployments whose consumer has no config entry)\n  have no groups and therefore never satisfy an `allowed_groups`\n  rule (documented limitation until the state store carries groups).\n- `required_scopes`: every listed scope must appear in the JWT\n  `scope` claim. The claim may be a space-separated string\n  (`\"read write\"`, the OAuth convention) or a JSON array of strings\n  (`[\"read\", \"write\"]`, joined to its space-separated form when the\n  identity's claims are captured in `authn`); non-JWT identities\n  (API key / Basic) carry no claims and never satisfy scope rules.\n- `required_claims`: exact string equality on the stringified claim\n  value; a claim absent from the token fails the match. Only\n  string- and number-valued claims are captured on the identity\n  (see `authn`), so a claim that is a JSON `true`/`false`, `null`,\n  object, or nested structure can NEVER satisfy a `required_claims`\n  entry — there is no stringified form to compare. Comparisons are\n  CASE-SENSITIVE throughout: consumer names, groups, scopes, and\n  claim values must match byte-for-byte.\n- `ip_acl`: evaluated against the EFFECTIVE client IP — the\n  `X-Forwarded-For`-resolved client when the direct peer is inside\n  `gateway.trusted_proxies` (DW-009 chain), otherwise the direct\n  peer. See [`IpAcl`].\n\nAuthentication implication: an [`Authz`] carrying ANY identity rule\n(consumer/group/scope/claim) rejects anonymous requests with 401; an\n`ip_acl`-only [`Authz`] is the one authorization shape that can\nADMIT anonymous traffic (from an IP the ACL allows). A denial of an\nAUTHENTICATED request is 403 (forbidden), never 401.",
+      "type": "object",
+      "properties": {
+        "allowed_consumers": {
+          "description": "Consumers allowed to call the route (empty = any authenticated).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_groups": {
+          "description": "Groups allowed to call the route (empty = no group constraint).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_consumers": {
+          "description": "Consumers explicitly rejected, even when otherwise allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_groups": {
+          "description": "Groups explicitly rejected, even when otherwise allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ip_acl": {
+          "description": "IP allow/deny gate on the effective client IP.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpAcl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_claims": {
+          "description": "Claims (name -> exact stringified value) every request must\ncarry. A listed claim absent from the token's claims fails.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "required_scopes": {
+          "description": "JWT scopes (from the `scope` claim) every request must carry.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "BreakerConfig": {
+      "description": "Per-upstream circuit breaker knobs (DW-015). All fields default; a\n`breaker:` block with no keys enables the breaker with the defaults.\n\nFrozen semantics (see the `breaker` module docs):\n- The breaker gates the WHOLE upstream (all endpoints); per-endpoint\n  ejection (DW-012) is an independent layer beneath it.\n- It opens on `consecutive_failures` consecutive failures (5xx or\n  transport) OR an in-window error ratio >= `error_ratio` once at least\n  `error_volume` observations are in the 60 s window.\n- While open, requests fail fast with 503 and a `Retry-After` header\n  (seconds until half-open); in-flight requests complete normally.\n- After `open_ms` a half-open probe (`half_open_probes` concurrent\n  trials) closes the breaker on success or re-opens it on failure.",
+      "type": "object",
+      "properties": {
+        "consecutive_failures": {
+          "description": "Consecutive failures (5xx + transport) that open the breaker\n(default 5).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "error_ratio": {
+          "description": "In-window error ratio in (0, 1] that opens the breaker once\n`error_volume` observations exist (default 0.5).",
+          "type": "number",
+          "format": "double",
+          "default": 0.5
+        },
+        "error_volume": {
+          "description": "Minimum observations in the 60 s window before the ratio is\nevaluated (default 20).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "half_open_probes": {
+          "description": "Concurrent trial requests admitted in half-open (default 1).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "open_ms": {
+          "description": "Cooling-off period in milliseconds before a half-open probe is\nadmitted (default 30000).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Consumer": {
+      "description": "Identity of an API caller (app/team/user); owns credentials, quotas, and\nthe analytics identity.",
+      "type": "object",
+      "properties": {
+        "credentials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Credential"
+          }
+        },
+        "groups": {
+          "description": "Consumer group memberships (DW-020): group names this consumer\nbelongs to, consulted by authorization `allowed_groups` /\n`denied_groups` rules. Empty (the default) = no groups. Group\nnames are free-form strings; validation checks that authorization\nrules referencing groups resolve against at least one consumer's\nmembership.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "description": "Consumer priority class for load shedding (DW-016): 0 (lowest) to 10\n(highest). Stored and validated now; it takes effect only once\nauthentication (DW-019/DW-020) identifies the consumer on a request —\nuntil then, shedding priority comes from the matched route (or the\ndefault 5). Consumer priority overrides the route's when known, but\nit does NOT trigger reserved-bucket carving today — only a\nhigh-priority route does.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "Credential": {
+      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS fingerprint.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "The API key; hashed at rest by the state layer, never logged.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "api_key"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "audiences": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "issuer": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "jwt"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "issuer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fingerprint": {
+              "description": "SHA-256 fingerprint of the client certificate.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "mtls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "fingerprint"
+          ]
+        }
+      ]
+    },
+    "Endpoint": {
+      "description": "One `address:port` inside an upstream.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "weight": {
+          "description": "Relative traffic weight (default 1 for all endpoints).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "port"
+      ]
+    },
+    "IpAcl": {
+      "description": "IP access control on the effective client IP (DW-020, feature\nanalysis 4.15). Entries are IP addresses (e.g. `10.1.2.3`) or CIDRs\n(e.g. `10.0.0.0/8`); anything else fails config validation (the same\nparser as `gateway.trusted_proxies`). Evaluation order: the `deny`\nlist first (a match rejects with 403 regardless of the allow list),\nthen the `allow` list, then `default` for IPs matched by neither.\n\nA `/0` (all-addresses) entry such as `0.0.0.0/0` or `::/0` is\nREJECTED by validation in the `allow` list: an allow-all entry\nfilters nothing and is always a mistake — the intended shape is an\nempty allow list with `default: allow` (the ACL's default mode).\nA `/0` in the `deny` list is meaningful (deny-all) and is accepted.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "CIDRs/IPs allowed through the gate.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": {
+          "description": "What happens to an IP matched by NEITHER list: `allow` (the\ndefault — the lists are exceptions) or `deny` (closed mode — only\nallow-listed IPs pass).",
+          "$ref": "#/$defs/IpAclDefault"
+        },
+        "deny": {
+          "description": "CIDRs/IPs rejected; a deny match wins over any allow match.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "IpAclDefault": {
+      "description": "Fallback decision of an [`IpAcl`] for IPs matched by neither list.",
+      "oneOf": [
+        {
+          "description": "Unmatched IPs pass the IP gate (the default).",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Unmatched IPs are rejected: only the allow list passes.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "JwtProvider": {
+      "description": "One JWT verification provider (DW-019).",
+      "type": "object",
+      "properties": {
+        "algorithms": {
+          "description": "Allowed signature algorithms (default `[\"RS256\", \"ES256\"]`).\n`none` and HMAC (`HS*`) algorithms are never allowed implicitly —\nthey must not appear in this list; validation rejects them\n(asymmetric verification only: the gateway holds no shared\nsecrets with issuers).",
+          "type": "array",
+          "default": [
+            "RS256",
+            "ES256"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "audience": {
+          "description": "Required audience (`aud` claim). Absent: any audience accepted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "consumer": {
+          "description": "Consumer this provider's tokens authenticate. Absent: the token's\n`iss` claim is matched against consumers' `jwt` credentials.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "Required token issuer (`iss` claim). Absent: any issuer accepted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jwks_url": {
+          "description": "JWKS endpoint (`http://` or `https://`). Keys are fetched lazily on\nthe first Bearer request, refreshed after `refresh_secs`, and\nre-fetched on an unknown `kid` (key rotation mid-flight).",
+          "type": "string"
+        },
+        "leeway_secs": {
+          "description": "exp/nbf clock-skew leeway in seconds (default 30).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "refresh_secs": {
+          "description": "JWKS cache staleness bound in seconds (default 300): a cached key\nset older than this is refreshed before use.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "jwks_url"
+      ]
+    },
+    "Listener": {
+      "description": "Entry point: bind address + port + TLS termination (or passthrough) config.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "Bind address, e.g. `0.0.0.0` or `127.0.0.1`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "protocol": {
+          "$ref": "#/$defs/ListenerProtocol",
+          "default": "http"
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListenerTls"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "address",
+        "port"
+      ]
+    },
+    "ListenerProtocol": {
+      "type": "string",
+      "enum": [
+        "http",
+        "https"
+      ]
+    },
+    "ListenerTls": {
+      "description": "TLS handling for a listener: terminate at the edge or pass through.",
+      "type": "object",
+      "properties": {
+        "cert_file": {
+          "description": "Path to the PEM certificate chain (termination mode only). Serves as\nthe default/fallback certificate when `certificates` is also set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "certificates": {
+          "description": "Additional SNI-scoped certificate pairs (termination mode only).\nEach entry serves the listed `server_names`; the single\ncert_file/key_file pair (if present) is the fallback for unmatched\nor absent SNI. With no single pair, the first entry is the fallback.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TlsCertificate"
+          }
+        },
+        "key_file": {
+          "description": "Path to the PEM private key (termination mode only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/TlsMode",
+          "default": "terminate"
+        },
+        "sni_routes": {
+          "description": "SNI routing rules for passthrough mode: each entry maps its\n`server_names` to an upstream (by name) that receives the raw TLS\nbytes. Rejected in terminate mode.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SniRoute"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LoadBalancer": {
+      "type": "string",
+      "enum": [
+        "round_robin",
+        "least_requests",
+        "random",
+        "ip_hash"
+      ]
+    },
+    "NameValueMatch": {
+      "description": "One query-parameter or cookie criterion: the parameter/cookie must be\npresent; when `value` is given it must equal that exact string.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Exact value required; `None` means \"present is enough\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "PassiveHealth": {
+      "description": "Passive health / outlier detection knobs (DW-012). All fields default;\na `health:` block with no keys enables ejection with the defaults.\n\nFailure classification: transport errors (connect timeout, refusal,\nreset) and HTTP statuses >= 500 are failures; 1xx-4xx are successes.\n429/408 are deliberately successes in v1 (they describe the caller or\nqueueing, not endpoint health).",
+      "type": "object",
+      "properties": {
+        "consecutive_failures": {
+          "description": "Eject after this many consecutive failures (default 5).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "eject_ms": {
+          "description": "How long an ejected endpoint stays out of rotation, in milliseconds\n(default 30000).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30000,
+          "minimum": 0
+        },
+        "failure_min_volume": {
+          "description": "Minimum observations in the window before `failure_ratio` applies\n(default 20).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "failure_ratio": {
+          "description": "Eject when the in-window failure share is >= this ratio AND volume\nis >= `failure_min_volume`. Must be in (0, 1] (default 0.5).",
+          "type": "number",
+          "format": "double",
+          "default": 0.5
+        },
+        "half_open_probes": {
+          "description": "Trial requests allowed through per half-open recovery attempt\n(default 1). A successful probe restores health; a failed probe\nre-ejects for another `eject_ms`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "window_ms": {
+          "description": "Rolling observation window for the failure ratio, in milliseconds\n(default 60000).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PathMatch": {
+      "description": "How a route's path pattern is interpreted.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/PathMatchKind"
+        },
+        "value": {
+          "description": "The pattern value, e.g. `/v1/users` or `/v1/.*`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "PathMatchKind": {
+      "type": "string",
+      "enum": [
+        "exact",
+        "prefix",
+        "regex"
+      ]
+    },
+    "PathRewrite": {
+      "description": "Path rewrite applied before proxying (DW-010). Exactly one variant per\nproxy action; there is no rewrite chaining in v1. All variants operate\non the path component only — the inbound query string is re-attached\nuntouched.",
+      "oneOf": [
+        {
+          "description": "Strip the route's matched prefix (the `match.path.value` with\ntrailing slashes trimmed) from the front of the request path.\nMeaningful for prefix-kind routes; for other kinds it strips the\npattern's byte length when the path starts with the pattern value\nand is a no-op otherwise. If nothing remains (or the remainder\nlacks a leading `/`), the result is normalized to `/rest`.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "strip_prefix"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Replace a literal prefix: when the request path starts with\n`prefix`, that prefix is replaced by `replacement`; otherwise this\nrewrite is a no-op (the path is forwarded unchanged).",
+          "type": "object",
+          "properties": {
+            "prefix": {
+              "type": "string"
+            },
+            "replacement": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "replace_prefix"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "prefix",
+            "replacement"
+          ]
+        },
+        {
+          "description": "Replace the FIRST regex match on the request path with\n`substitution`. Substitution references: `$1`..`$9` / `${n}` for\ncapture groups of `pattern`; `$name` / `${name}` for named capture\ngroups of `pattern`, falling back to path parameters captured by\nthe route's `{param}` template. Unknown references expand to the\nempty string. The pattern must compile — checked at config compile\ntime, never at request time.",
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "substitution": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "regex"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "pattern",
+            "substitution"
+          ]
+        }
+      ]
+    },
+    "Policy": {
+      "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_limits": {
+          "description": "Stacked GCRA rate-limit rules (DW-017). Each rule stacks one or\nmore windows (e.g. `s` AND `hour`); a request is admitted only if\nEVERY window of EVERY applicable rule allows it. The legacy\nsingle-window `rate_limit` field above still applies when set (see\nits mapping in the rate-limiter module docs); use `rate_limits`\nfor new configs.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RateLimitRule"
+          }
+        },
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timeouts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "ProbeKind": {
+      "description": "Kind of active health probe.",
+      "oneOf": [
+        {
+          "description": "HTTP/1.1 GET to `path`; success = 2xx.",
+          "type": "string",
+          "const": "http"
+        },
+        {
+          "description": "TCP connect within the timeout.",
+          "type": "string",
+          "const": "tcp"
+        }
+      ]
+    },
+    "RateLimit": {
+      "description": "Local GCRA-style rate limit.",
+      "type": "object",
+      "properties": {
+        "requests": {
+          "description": "Maximum requests allowed per window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "window_seconds": {
+          "description": "Window length in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "requests",
+        "window_seconds"
+      ]
+    },
+    "RateLimitRule": {
+      "description": "One rate-limit rule (DW-017): a key selector plus one or more stacked\nwindows. `selector` names the request attributes that form the\ncounter key (all listed attributes are joined into ONE key, so\n`[ip, route]` limits each (client IP, route) pair independently);\n`requests_per` carries the sustained rates per window (at least one\nwindow must be present); `burst` is the bucket size (defaults to the\nwindow's request count).",
+      "type": "object",
+      "properties": {
+        "burst": {
+          "description": "Bucket size (burst capacity); must be >= 1 when present. Defaults\nto the window's request count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "Optional label (documentation only; not part of the key).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requests_per": {
+          "$ref": "#/$defs/RateRequestsPer"
+        },
+        "selector": {
+          "description": "Key components: `ip`, `credential`, and/or `route` (at least one;\norder does not matter). `credential` falls back to the client IP\nuntil authentication (DW-019) identifies consumers.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RateLimitSelector"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "requests_per"
+      ]
+    },
+    "RateLimitSelector": {
+      "description": "One attribute of a rate-limit key (DW-017).",
+      "oneOf": [
+        {
+          "description": "The direct connection peer (the same IP used for X-Real-IP).",
+          "type": "string",
+          "const": "ip"
+        },
+        {
+          "description": "The authenticated consumer; until DW-019 this falls back to `ip`.",
+          "type": "string",
+          "const": "credential"
+        },
+        {
+          "description": "The matched route's name.",
+          "type": "string",
+          "const": "route"
+        }
+      ]
+    },
+    "RateRequestsPer": {
+      "description": "Sustained rates per window (DW-017). At least one field must be set\nand every set field must be > 0; each set field becomes one stacked\nGCRA cell (a request must satisfy ALL set windows).",
+      "type": "object",
+      "properties": {
+        "hour": {
+          "description": "Requests per hour.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "minute": {
+          "description": "Requests per minute.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "s": {
+          "description": "Requests per second.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RetryConfig": {
+      "description": "Upstream retry knobs (DW-014). All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n  (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n  may be retried; an over-cap body streams without retry. Buffering is\n  opt-in: the default (0) buffers only empty bodies, so the default\n  proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n  attempt; a response body that dies mid-stream is never retried (its\n  failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n  retry budget (`budget_percent`).",
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "description": "Maximum retries beyond the first attempt (default 0 = off).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "backoff_base_ms": {
+          "description": "Exponential backoff base in milliseconds (default 25): the nominal\ndelay before retry n is `min(base * 2^(n-1), backoff_cap_ms)`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 25,
+          "minimum": 0
+        },
+        "backoff_cap_ms": {
+          "description": "Exponential backoff ceiling in milliseconds (default 250). Must be\n>= `backoff_base_ms`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 250,
+          "minimum": 0
+        },
+        "budget_percent": {
+          "description": "Retry budget: the maximum percentage of requests to this upstream,\nin a rolling window, that may be retries (default 10). Must be in\n(0, 100]. When the budget is exhausted, failing requests fail\nthrough to the client instead of retrying.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 10,
+          "minimum": 0
+        },
+        "buffer_max_bytes": {
+          "description": "Request-body buffering cap in bytes (default 0 = no buffering). A\nrequest body is buffered (and becomes replayable) only while it fits\nwithin this cap; larger bodies stream and are never retried.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "retry_post": {
+          "description": "Retry non-idempotent POST requests. Default false: POST is never\nretried unless an operator explicitly opts in here (a retried POST\nmay replay a body the upstream already partially processed).",
+          "type": "boolean"
+        },
+        "retry_statuses": {
+          "description": "Response statuses that trigger a retry when received as the upstream\nresponse status (default `[502, 503, 504]`). Each entry must be a\nvalid 4xx/5xx status. An empty list disables status-based retries.",
+          "type": "array",
+          "default": [
+            502,
+            503,
+            504
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
+        "retry_transport": {
+          "description": "Retry on transport errors (connect timeout/refusal/reset/framing)\nand per-attempt read timeouts (default true).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Route": {
+      "description": "Match rules (path/host/method/header) plus action and attached policies.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/RouteAction"
+        },
+        "auth_required": {
+          "description": "Require authenticated requests (DW-019): a request that arrives\nWITHOUT a recognized credential (or with an invalid one) is\nrejected with 401 and a `WWW-Authenticate` challenge. Absent\n(the default) allows anonymous traffic through; note that an\nINVALID presented credential is always rejected with 401\nregardless of this flag.",
+          "type": "boolean"
+        },
+        "authorization": {
+          "description": "Route-level authorization rules (DW-020, feature analysis 4.7).\nAbsent (the default) imposes no authorization on the route. A\nPRESENT-but-entirely-empty block (no consumers, groups, scopes,\nclaims, or `ip_acl`) is likewise a no-op at evaluation time —\nit imposes nothing, exactly like an absent one — but it is\nalways a config-authoring mistake (a rule block with no rules),\nso validation REJECTS it: omit the block instead of emptying it.\nWhen present (and non-empty), the rules are evaluated after\nauthentication and BEFORE\nrate limiting; see [`Authz`] for the rule semantics. Presence of\nany identity rule implies authentication (an anonymous request is\nrejected 401); an `ip_acl`-only block is the one case that can\npermit anonymous access (from an allowed IP). Precedence across\nlevels (consumer > route > service > listener > global) is\nresolved by the `authz` module's resolver; today only the route\nlink has a config attachment point — the other links activate\nwhen their config fields land.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "match": {
+          "$ref": "#/$defs/RouteMatch"
+        },
+        "name": {
+          "type": "string"
+        },
+        "policies": {
+          "description": "Attached policy names (most specific wins: consumer > route > service\n> listener > global).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "description": "Request priority class for load shedding (DW-016): 0 (lowest) to 10\n(highest); absent means the default 5. When the gateway concurrency\ncap is saturated, requests at `high_priority` (>= 8) draw from a\nsmall reserved sub-allowance of the cap that lower-priority traffic\ncannot use (see `proxy` module docs); preemption is impossible, so\nnormal traffic is shed first rather than displaced. Validation\nrejects values above 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "service": {
+          "description": "Name of the service this route targets.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "service",
+        "match",
+        "action"
+      ]
+    },
+    "RouteAction": {
+      "description": "What the gateway does when a route matches.",
+      "oneOf": [
+        {
+          "description": "Forward to the route's service (its upstream).\n\n`rewrite` (at most ONE per action in v1) is applied to the inbound\npath before the request is sent upstream; the query string is always\npreserved verbatim.",
+          "type": "object",
+          "properties": {
+            "rewrite": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PathRewrite"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "proxy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scheme": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "redirect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "headers": {
+              "description": "Extra response headers (name -> value), emitted verbatim.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "respond"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "status"
+          ]
+        }
+      ]
+    },
+    "RouteMatch": {
+      "description": "Matching rules for incoming requests.",
+      "type": "object",
+      "properties": {
+        "cookies": {
+          "description": "Cookie matches (parsed from the `Cookie` header); every entry must\nmatch (AND). Name-only entries match on presence; a `value` requires\nan exact match (no cookie-unquoting in v1).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameValueMatch"
+          }
+        },
+        "headers": {
+          "description": "Exact header matches.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "host": {
+          "description": "Exact host match (e.g. `api.example.com`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "methods": {
+          "description": "Allowed HTTP methods; empty means all methods.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "$ref": "#/$defs/PathMatch"
+        },
+        "query": {
+          "description": "Query-parameter matches; every entry must match (AND). Name-only\nentries match on presence; a `value` requires an exact raw match (no\npercent-decoding in v1).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameValueMatch"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "Service": {
+      "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream.",
+      "type": "object",
+      "properties": {
+        "base_path": {
+          "description": "Base path prefix the API is served under (e.g. `/v1`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "upstream": {
+          "description": "Name of the upstream this service targets.",
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "upstream"
+      ]
+    },
+    "SniRoute": {
+      "description": "One SNI-to-upstream routing rule for TLS passthrough.",
+      "type": "object",
+      "properties": {
+        "server_names": {
+          "description": "Server names (SNI values) routed to `upstream`. Exact match.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "upstream": {
+          "description": "Name of the upstream that receives the spliced TLS stream.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "server_names",
+        "upstream"
+      ]
+    },
+    "Timeouts": {
+      "description": "Timeout hints, in milliseconds.",
+      "type": "object",
+      "properties": {
+        "connect_ms": {
+          "description": "Connect timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "read_ms": {
+          "description": "Read timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "write_ms": {
+          "description": "Write timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "TlsCertificate": {
+      "description": "One SNI-scoped certificate pair for TLS termination.",
+      "type": "object",
+      "properties": {
+        "cert_file": {
+          "description": "Path to the PEM certificate chain.",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "Path to the PEM private key.",
+          "type": "string"
+        },
+        "server_names": {
+          "description": "Server names (SNI values) this certificate answers. Exact match,\ncase-insensitive per rustls.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "server_names",
+        "cert_file",
+        "key_file"
+      ]
+    },
+    "TlsMode": {
+      "type": "string",
+      "enum": [
+        "terminate",
+        "passthrough"
+      ]
+    },
+    "Upstream": {
+      "description": "Load-balancing pool: algorithm, protocol, endpoints.",
+      "type": "object",
+      "properties": {
+        "active_health": {
+          "description": "Active health checks (DW-013): synthetic HTTP/TCP probes per\nendpoint on a fixed interval with full jitter. Probe results report\ninto the SAME per-endpoint ejection machinery as passive health, so\nan endpoint failing its probes leaves load-balancer rotation and a\nsuccess streak returns it. Requires the passive `health` block\n(which owns the ejection/recovery windows); rejected by validation\notherwise. Absent disables active probing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActiveHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "breaker": {
+          "description": "Per-upstream circuit breaker (DW-015): opens the WHOLE upstream on\nconsecutive failures or a rolling error ratio, fails fast with 503\nwhile open, probes half-open after `breaker.open_ms`. Absent\ndisables the breaker entirely (no fail-fast, behavior identical to\npre-DW-015).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BreakerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_cap": {
+          "description": "Maximum number of concurrent outbound connections to this upstream\n(active plus pooled idle). Defaults to 64 when absent. Enforced by\nthe upstream client (DW-008); excess connection attempts wait for a\nslot rather than fail.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Endpoint"
+          }
+        },
+        "health": {
+          "description": "Passive health checking / outlier detection (DW-012): eject\nendpoints that fail real traffic (transport errors and 5xx), let\nthem back via half-open trial probes after `eject_ms`. Absent\ndisables passive health entirely (no ejections).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassiveHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "load_balancer": {
+          "$ref": "#/$defs/LoadBalancer",
+          "default": "round_robin"
+        },
+        "max_pending": {
+          "description": "Maximum number of requests WAITING for an outbound connection slot\nto this upstream (DW-015). 0/absent (the default) means unbounded\nqueueing — the DW-008 `connection_cap` behavior. A positive value\nrejects excess requests IMMEDIATELY with 503 \"upstream saturated\"\ninstead of letting them wait.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "description": "Protocol used toward upstream endpoints.",
+          "$ref": "#/$defs/UpstreamProtocol",
+          "default": "http1"
+        },
+        "retries": {
+          "description": "Upstream retries (DW-014): bounded per-request retry attempts with\nexponential backoff + full jitter, a retry budget, and opt-in\nsize-capped request-body buffering. Absent (or `attempts` left at\nits default 0) disables retries entirely: every request gets exactly\none attempt and the proxy path keeps its zero-copy streaming body.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "slow_start_ms": {
+          "description": "Slow-start window in milliseconds (DW-011): an endpoint entering the\nupstream's set ramps its effective load-balancing weight from ~0 up\nto its configured weight over this window. Absent (or 0) disables\nthe ramp. Applies to the weighted algorithms (round_robin; ip_hash\nvnode counts stay fixed so ring consistency is preserved).\nValidation bounds the value to at most 10 minutes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timeouts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "endpoints"
+      ]
+    },
+    "UpstreamProtocol": {
+      "type": "string",
+      "enum": [
+        "http1",
+        "http2",
+        "https"
+      ]
+    }
+  }
+}

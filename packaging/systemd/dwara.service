@@ -1,0 +1,56 @@
+# dwara gateway systemd unit (DW-026).
+#
+# Install:
+#   install -Dm755 target/*/release/dwara /usr/local/bin/dwara
+#   install -Dm644 quickstart/dwara.yaml /etc/dwara/dwara.yaml   # or your own
+#   install -Dm644 packaging/systemd/dwara.service /etc/systemd/system/dwara.service
+#   useradd --system --home /var/lib/dwara --shell /usr/sbin/nologin dwara
+#   install -d /etc/dwara/certs
+#   install -Dm644 quickstart/certs/server.crt /etc/dwara/certs/server.crt
+#   install -Dm400 -o dwara -g dwara quickstart/certs/server.key /etc/dwara/certs/server.key
+#   # (quickstart self-signed pair is dev-only; bring your own CA otherwise)
+#   systemctl daemon-reload && systemctl enable --now dwara
+#
+# The gateway reads /etc/dwara/dwara.yaml (Environment below), reloads it
+# on file change and SIGHUP (`systemctl reload dwara`), and drains
+# gracefully on stop (SIGTERM, DWARA_SHUTDOWN_TIMEOUT_SECS budget).
+# Hardening below assumes ports >1024; for :443 keep the AmbientCapabilities
+# line so the unprivileged user can bind it, or use an external redirect.
+
+[Unit]
+Description=dwara API gateway
+Documentation=https://github.com/shristilabs/dwara
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dwara
+Group=dwara
+Environment=DWARA_CONFIG=/etc/dwara/dwara.yaml
+ExecStart=/usr/local/bin/dwara
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# Hardening: read-only filesystem except the paths the gateway writes
+# (none required for pure-config operation; add ReadWritePaths= for a
+# SQLite state store via DWARA_STATE_DB).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
