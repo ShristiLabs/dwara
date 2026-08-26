@@ -21,7 +21,7 @@ implemented.
 
 | Path | Contents |
 |---|---|
-| `crates/dwara-core` | The library: config schema (`config.rs`), snapshot compile pipeline (`snapshot.rs`), reverse-proxy dataplane (`proxy.rs`), TLS terminate/passthrough (`tls.rs`), upstream client (`upstream.rs`), load balancing (`balance.rs`), passive/active health (`health.rs`, `active.rs`), retries (`retries.rs`), circuit breaker (`breaker.rs`), rate limiting (`extensions/rate_limiter.rs`), authn/authz (`authn.rs`, `authz.rs`), SQLite state store + migrations (`store.rs`, `migrations.rs`), observability (`observability.rs`), protocol hardening (`hardening.rs`), extension traits (`extensions/`) |
+| `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
 | `crates/dwara-bin` | The `dwara` gateway binary: listeners, hot reload, graceful shutdown, admin spawn |
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
 | `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`) and the `dwara-loadgen` load generator |
@@ -31,6 +31,73 @@ implemented.
 | `grafana/` | Starter dashboard for the /metrics families |
 | `scripts/` | Macro bench rig + baseline gate |
 | `config-reference.json` | Generated JSON Schema (repo root; see freshness gate) |
+
+## Code organization
+
+The codebase follows an enterprise bounded-context layout. `dwara-core`
+is the domain library; its `src/` tree groups modules by domain with a
+facade `lib.rs` as the only intended public surface:
+
+```
+crates/dwara-core/src/
+  lib.rs              facade: declares the domain modules, re-exports
+                      the legacy top-level module aliases, documents
+                      the dependency direction
+  config/             configuration schema types and YAML parsing
+  snapshot/           validate -> compile -> publish pipeline; the
+                      immutable Snapshot behind ArcSwap
+  extensions/         the five swappable subsystem traits
+                      (RateLimiter, ConfigSource, CacheStore,
+                      AnalyticsSink, SecretSource) + local impls
+  observability.rs    spans, access logs, metrics registry, envelope
+  state/              SQLite store + migrations
+  security/           tls, authn, authz
+  resilience/         health, active probes, retries, breaker
+  dataplane/          proxy, upstream, balance, hardening
+```
+
+Dependency direction is strictly downward (enforced by convention until
+a lint/guard is added):
+
+```
+config          <- everything
+extensions      <- config
+snapshot        <- config
+observability   <- (none)
+state           <- config
+security        <- config, state, observability
+resilience      <- config, snapshot, extensions, observability
+dataplane       <- all of the above
+bin/admin/cli   <- dwara-core (presentation layer)
+```
+
+Rules for new code:
+
+- **Pick the domain first.** New behavior goes into the domain
+  directory that owns it; if it spans two domains, it belongs in the
+  lower one and is consumed by the higher one.
+- **Never import upward.** `config` imports nothing from sibling
+  domains; `dataplane` may import anything. A change that forces an
+  upward import is a design smell — restructure instead.
+- **The facade is the API.** Public items are reachable via the domain
+  modules; the root also re-exports legacy flat aliases
+  (`dwara_core::proxy`, `dwara_core::tls`, ...) kept for compatibility.
+  New external code should prefer the canonical domain paths
+  (`dwara_core::dataplane::proxy`).
+- **Domain promotion path.** When a domain grows an independent release
+  cadence or a heavy dependency tree (e.g. `state` pulling rusqlite),
+  promote `src/<domain>/` to `crates/dwara-<domain>` and re-export it
+  from the facade. The directory structure is the extraction seam —
+  keep domains self-contained so promotion is a `git mv` plus Cargo
+  manifest work, not a rewrite.
+- **Tests** live in `crates/dwara-core/tests/<domain or suite>.rs`
+  (integration, process-level where possible) and in `#[cfg(test)]`
+  modules beside the code they test (unit). New suites must be
+  deterministic under load: bounded polls, unique ports, generous
+  margins; see the Test map below.
+- **Feature flags** are declared in the owning crate's `Cargo.toml`
+  with a comment stating why they exist (see `loom`). No default-on
+  features beyond the standard set.
 
 ## Development environment
 
