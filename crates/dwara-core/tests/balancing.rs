@@ -504,21 +504,30 @@ async fn passthrough_sni_resolution_alternates_endpoints_via_registry() {
             upstream: "up".into(),
         }],
     };
-    let hosts: Vec<String> = (0..4)
-        .map(|_| {
-            match resolve_passthrough(
-                Some("a.example.com"),
-                &tls.sni_routes,
-                &gateway,
-                Some(&registry),
-            ) {
-                dwara_core::tls::PassthroughAction::Forward { host, port } => {
-                    format!("{host}:{port}")
+    let hosts: Vec<String> = {
+        // The dataplane's resolver: pick through the registry's balancers
+        // (no hash key — same as the bin's passthrough listener).
+        let pick = |name: &str| {
+            registry
+                .get(name)
+                .and_then(|h| h.lb().pick_endpoint(None).map(|(_, a, p)| (a, p)))
+        };
+        (0..4)
+            .map(|_| {
+                match resolve_passthrough(
+                    Some("a.example.com"),
+                    &tls.sni_routes,
+                    &gateway,
+                    Some(&pick),
+                ) {
+                    dwara_core::tls::PassthroughAction::Forward { host, port } => {
+                        format!("{host}:{port}")
+                    }
+                    other => panic!("expected forward, got {other:?}"),
                 }
-                other => panic!("expected forward, got {other:?}"),
-            }
-        })
-        .collect();
+            })
+            .collect()
+    };
     assert_eq!(
         hosts,
         vec![

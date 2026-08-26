@@ -119,7 +119,7 @@ fn render_contains_families() {
         .expect("publish");
     let registry =
         dwara_core::dataplane::upstream::UpstreamRegistry::from_snapshot(&state.snapshot());
-    obs.refresh_state_gauges(&registry);
+    dwara_core::dataplane::upstream::refresh_observation_gauges(&registry, &obs);
     let text = obs.render();
     for name in [
         "# HELP requests_total",

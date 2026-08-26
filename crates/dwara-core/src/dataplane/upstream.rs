@@ -59,7 +59,7 @@
 //!   Private-CA upstreams work via [`UpstreamRegistry::with_root_certificates`].
 //!
 //! Load balancing (DW-011): every dispatch picks its endpoint through the
-//! upstream's [`crate::balance::UpstreamLb`] (smooth weighted round-robin,
+//! upstream's [`crate::dataplane::balance::UpstreamLb`] (smooth weighted round-robin,
 //! least-connections, random-2, or ketama ip-hash; slow-start ramps; hot
 //! endpoint-set swaps that carry per-address state). Config lifecycle:
 //! build a registry from a published snapshot; reloads rebuild it from the
@@ -69,8 +69,8 @@
 //!
 //! Retries (DW-014) are driven from the proxy (which owns the request
 //! body replay decision); the handle exposes the resolved
-//! [`crate::retries::RetryParams`] and the per-upstream
-//! [`crate::retries::RetryBudget`] for that loop, and every `send` call is
+//! [`crate::resilience::retries::RetryParams`] and the per-upstream
+//! [`crate::resilience::retries::RetryBudget`] for that loop, and every `send` call is
 //! one ATTEMPT (fresh load-balancer pick, fresh per-attempt deadlines).
 
 use std::collections::BTreeMap;
@@ -94,10 +94,12 @@ use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_service::Service;
 
-use crate::breaker::{Breaker, BreakerParams};
+use crate::config::limits::MAX_SLOW_START_MS;
 use crate::config::{Timeouts, Upstream, UpstreamProtocol};
-use crate::health::HealthDispatch;
-use crate::retries::{RetryBudget, RetryParams};
+use crate::observability::Observability;
+use crate::resilience::breaker::{Breaker, BreakerParams, BreakerState};
+use crate::resilience::health::HealthDispatch;
+use crate::resilience::retries::{RetryBudget, RetryParams};
 use crate::snapshot::Snapshot;
 
 /// Default connection cap when `connection_cap` is absent.
@@ -274,7 +276,7 @@ pub struct UpstreamBody {
     inner: Incoming,
     idle: Option<Duration>,
     sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-    health: Option<(Arc<crate::balance::UpstreamLb>, HealthDispatch)>,
+    health: Option<(Arc<crate::dataplane::balance::UpstreamLb>, HealthDispatch)>,
     /// Gateway concurrency-cap permit (DW-015), attached by the proxy to
     /// STREAMING responses so the global slot is held until the body
     /// completes (or the response is dropped — client disconnect included).
@@ -603,7 +605,7 @@ pub struct UpstreamHandle {
     >,
     /// Load balancer over this upstream's endpoint set (DW-011); picks
     /// the endpoint per dispatch and tracks in-flight counts.
-    lb: Arc<crate::balance::UpstreamLb>,
+    lb: Arc<crate::dataplane::balance::UpstreamLb>,
     scheme: &'static str,
     http2_only: bool,
 }
@@ -691,7 +693,7 @@ impl UpstreamHandle {
     /// This upstream's load balancer (endpoint set, algorithm, in-flight
     /// counters). Exposed for the TLS-passthrough path (which picks an
     /// endpoint the same way) and for tests.
-    pub fn lb(&self) -> &Arc<crate::balance::UpstreamLb> {
+    pub fn lb(&self) -> &Arc<crate::dataplane::balance::UpstreamLb> {
         &self.lb
     }
 
@@ -919,11 +921,7 @@ fn effective_write_timeout(u: &Upstream) -> Option<Duration> {
 }
 
 fn effective_slow_start(u: &Upstream) -> Duration {
-    Duration::from_millis(
-        u.slow_start_ms
-            .unwrap_or(0)
-            .min(crate::balance::MAX_SLOW_START_MS),
-    )
+    Duration::from_millis(u.slow_start_ms.unwrap_or(0).min(MAX_SLOW_START_MS))
 }
 
 fn build_handle(
@@ -994,7 +992,7 @@ fn build_handle(
             );
             Arc::clone(prev)
         }
-        None => crate::balance::UpstreamLb::new_with_health(
+        None => crate::dataplane::balance::UpstreamLb::new_with_health(
             &u.endpoints,
             u.load_balancer,
             effective_slow_start(u),
@@ -1111,6 +1109,36 @@ impl UpstreamRegistry {
     /// Names of all upstreams in this registry.
     pub fn names(&self) -> Vec<&str> {
         self.handles.keys().map(String::as_str).collect()
+    }
+}
+
+/// Refresh the state-derived observation gauges (breaker state, endpoint
+/// health, fail-open picks) from `registry` into `obs` (DW-021).
+///
+/// Called at scrape time: `/metrics` reflects a point-in-time snapshot,
+/// and the hot paths (pick, report) stay pure atomics with zero metrics
+/// coupling. The walk lives here — next to the registry state it reads —
+/// and the observability side only exposes plain setters, so metrics
+/// depend on nothing. Series for endpoints/upstreams removed by a reload
+/// linger until process restart (documented Prometheus caveat).
+pub fn refresh_observation_gauges(registry: &UpstreamRegistry, obs: &Observability) {
+    for name in registry.names() {
+        let Some(handle) = registry.get(name) else {
+            continue;
+        };
+        let state = match handle.breaker().state() {
+            BreakerState::Closed { .. } => 0,
+            BreakerState::Open { .. } => 1,
+            BreakerState::HalfOpen { .. } => 2,
+        };
+        obs.set_breaker_state(name, state);
+        obs.set_fail_open_picks(name, handle.lb().fail_open_picks() as i64);
+        let lb_now = handle.lb().now_ms();
+        for (address, port, health) in handle.lb().health_targets() {
+            let label = format!("{address}:{port}");
+            let up = health.map(|h| h.is_available(lb_now)).unwrap_or(true);
+            obs.set_endpoint_health(name, &label, up);
+        }
     }
 }
 

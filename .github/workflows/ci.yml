@@ -15,6 +15,7 @@ on:
       - "deny.toml"
       - ".github/workflows/ci.yml"
       - "config-reference.json"
+      - "scripts/check_deps.py"
   pull_request:
     branches: [main]
     paths:
@@ -26,6 +27,7 @@ on:
       - "deny.toml"
       - ".github/workflows/ci.yml"
       - "config-reference.json"
+      - "scripts/check_deps.py"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -59,6 +61,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # Dependency-direction guard: keeps the bounded-context layering
+      # documented in dwara-core's lib.rs enforceable, not aspirational.
+      - name: Dependency direction
+        run: python3 scripts/check_deps.py
 
       # DW-026: the committed schema-derived config reference must be
       # exactly what `dwara-cli schema` emits.

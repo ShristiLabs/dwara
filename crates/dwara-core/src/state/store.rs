@@ -32,7 +32,7 @@
 //! # Schema and migrations
 //!
 //! The schema is created and evolved by the versioned, transactional
-//! migration set in [`crate::migrations`] (DW-115): opening a store
+//! migration set in [`crate::state::migrations`] (DW-115): opening a store
 //! applies all pending migrations automatically, taking a file backup
 //! first (see [`StateStore::open`]). A database whose `user_version` is
 //! NEWER than this build supports is refused. All writes are
@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::config::{Credential, Gateway};
-use crate::migrations::{migrations, SchemaInfo, LATEST_SCHEMA_VERSION};
+use crate::state::migrations::{migrations, SchemaInfo, LATEST_SCHEMA_VERSION};
 
 /// Quota-counter retention horizon in seconds: rows whose `window_start`
 /// is older than the newest window in the table by more than this are
@@ -241,7 +241,7 @@ impl StateStore {
     ///
     /// A database whose `user_version` is NEWER than this build supports
     /// is refused with a clear error (downgrade attempts; the migration
-    /// set is forward-only — see [`crate::migrations`] for the rebuild
+    /// set is forward-only — see [`crate::state::migrations`] for the rebuild
     /// path).
     ///
     /// ## Permissions
@@ -308,7 +308,7 @@ impl StateStore {
 
     /// Current schema version of the open database (`PRAGMA user_version`).
     /// After [`Self::open`] this always equals
-    /// [`crate::migrations::LATEST_SCHEMA_VERSION`].
+    /// [`crate::state::migrations::LATEST_SCHEMA_VERSION`].
     pub fn schema_version(&self) -> Result<u32> {
         let conn = self.conn.lock().expect("store connection poisoned");
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -850,8 +850,8 @@ fn credential_parts(credential: &Credential) -> (CredentialKind, String, String)
     match credential {
         Credential::ApiKey { key } => (
             CredentialKind::ApiKey,
-            crate::authn::credential_selector(key),
-            crate::authn::sha256_stored_hash(key),
+            crate::config::credentials::credential_selector(key),
+            crate::config::credentials::sha256_stored_hash(key),
         ),
         Credential::Jwt { issuer, .. } => (
             CredentialKind::Jwt,

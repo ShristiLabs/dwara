@@ -15,18 +15,18 @@
 //!
 //! There are NO down migrations. Rolling a gateway binary back onto a
 //! newer-schema data directory is refused (see
-//! [`StateStore`][crate::store::StateStore] open: `user_version` greater
+//! [`StateStore`][crate::state::store::StateStore] open: `user_version` greater
 //! than the binary's latest is a hard error), and downgrading in place is
 //! unsupported. The documented rebuild path, since schema v1 content is
 //! entirely re-derivable:
 //!
 //! 1. Stop the gateway. Every migration takes a backup first — see
-//!    "Backup before migrate" in [`crate::store`] — so locate the newest
+//!    "Backup before migrate" in [`crate::state::store`] — so locate the newest
 //!    `<db>.bak-<version>-<timestamp>` file for the version you want.
 //! 2. Replace the live db file with that backup (it is a consistent
 //!    `VACUUM INTO` snapshot at the pre-migration version).
 //! 3. Restart. Consumers and credentials are also re-seedable from
-//!    config via [`sync_consumers_from_config`][crate::store::sync_consumers_from_config]
+//!    config via [`sync_consumers_from_config`][crate::state::store::sync_consumers_from_config]
 //!    if no backup exists, so the honest v1 answer is: restore the backup,
 //!    or recreate the data dir and let config seeding repopulate it.
 //!
@@ -81,7 +81,7 @@ const MIGRATION_001_BASELINE: &str = "
 /// Migration 002: index `quota_counters (window_start)`.
 ///
 /// Additive (a CREATE INDEX over existing rows changes no data). The
-/// retention prune in [`StateStore::incr_quota`][crate::store::StateStore::incr_quota]
+/// retention prune in [`StateStore::incr_quota`][crate::state::store::StateStore::incr_quota]
 /// runs `DELETE ... WHERE window_start < (SELECT MAX(window_start) ...)` on
 /// every quota write; without an index on `window_start` that subquery and
 /// delete scan the whole table, which grows with one row per (consumer,
@@ -103,7 +103,7 @@ pub fn migrations() -> Migrations<'static> {
 
 /// Current vs latest schema version, for the admin surface (DW-022 will
 /// expose this via the admin API; `current < latest` after open should be
-/// impossible because [`StateStore::open`][crate::store::StateStore::open]
+/// impossible because [`StateStore::open`][crate::state::store::StateStore::open]
 /// migrates automatically — the seam exists for reporting, not gating).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaInfo {

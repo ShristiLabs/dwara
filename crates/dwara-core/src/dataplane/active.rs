@@ -37,7 +37,7 @@
 //! # Reporting model (precedence over passive)
 //!
 //! Probe results report into the SAME per-endpoint
-//! [`crate::health::EndpointHealth`] tracker the passive
+//! [`crate::resilience::health::EndpointHealth`] tracker the passive
 //! checker and the load balancer use, so both systems feed one ejection
 //! state and the existing pick filter removes failing endpoints from
 //! rotation:
@@ -89,11 +89,11 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
-use crate::balance::UpstreamLb;
 use crate::config::{ActiveHealth, ProbeKind};
-use crate::health::{EndpointHealth, HealthParams};
+use crate::dataplane::balance::UpstreamLb;
+use crate::dataplane::upstream::UpstreamRegistry;
+use crate::resilience::health::{EndpointHealth, HealthParams};
 use crate::snapshot::Snapshot;
-use crate::upstream::UpstreamRegistry;
 
 /// Resolved (validated) active-probe parameters, copied into each probe
 /// loop so a config rebuild cannot change a running loop mid-flight.

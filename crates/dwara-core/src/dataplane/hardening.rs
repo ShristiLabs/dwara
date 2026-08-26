@@ -29,7 +29,7 @@
 //!    dataplane is wrapped in [`InboundBody`], which errors when the gap
 //!    between two body frames exceeds the configured duration. Semantics
 //!    deliberately mirror the DW-014 response-side `write_ms` wrapper
-//!    ([`crate::upstream::UpstreamBody`]): it is a GAP timeout, not a total
+//!    ([`crate::dataplane::upstream::UpstreamBody`]): it is a GAP timeout, not a total
 //!    budget — a legitimate slow upload (large file over a slow link) that
 //!    keeps making progress never trips it; a client that sends headers and
 //!    then trickles body bytes forever to hold a concurrency slot and an
@@ -470,7 +470,7 @@ impl std::fmt::Display for InboundBodyError {
 impl std::error::Error for InboundBodyError {}
 
 /// Inbound request body with an inactivity-gap timeout (the request-side
-/// mirror of [`crate::upstream::UpstreamBody`]). A `tokio::time::Sleep` is
+/// mirror of [`crate::dataplane::upstream::UpstreamBody`]). A `tokio::time::Sleep` is
 /// armed whenever the stream is idle-Pending and cleared on every frame,
 /// so the timeout bounds GAPS, not total streaming time. When it fires the
 /// error propagates through the dataplane's attempt machinery: the in-flight

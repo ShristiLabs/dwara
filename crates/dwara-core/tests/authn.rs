@@ -13,7 +13,7 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use bytes::Bytes;
-use dwara_core::authn::credential_selector;
+use dwara_core::config::credentials::credential_selector;
 use dwara_core::config::parse_gateway;
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
@@ -209,7 +209,7 @@ async fn basic_auth_against_store_seeded_credential() {
         .add_credential(
             consumer.id,
             dwara_core::store::CredentialKind::ApiKey,
-            dwara_core::authn::sha256_stored_hash("hunter2"),
+            dwara_core::config::credentials::sha256_stored_hash("hunter2"),
             None,
             credential_selector("basic-user"),
         )
@@ -1160,7 +1160,7 @@ async fn store_backed_credentials_authenticate_and_revoke_is_immediate() {
         .add_credential(
             consumer.id,
             dwara_core::store::CredentialKind::ApiKey,
-            dwara_core::authn::sha256_stored_hash("store-only-key"),
+            dwara_core::config::credentials::sha256_stored_hash("store-only-key"),
             None,
             credential_selector("store-only-key"),
         )
@@ -1374,7 +1374,7 @@ async fn legacy_config_api_key_rows_are_deleted_at_sync_and_bindings_survive() {
     assert_eq!(api.len(), 1);
     assert_eq!(
         api[0].hash,
-        dwara_core::authn::sha256_stored_hash("secret-key")
+        dwara_core::config::credentials::sha256_stored_hash("secret-key")
     );
     // ...and the config:jwt: binding row SURVIVES the cleanup.
     let jwt = store

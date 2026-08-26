@@ -17,6 +17,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use dwara_core::config::net;
 use dwara_core::config::parse_gateway;
 use dwara_core::proxy::{self, DataPlane};
 use dwara_core::snapshot::ConfigState;
@@ -851,10 +852,10 @@ fn peer_trust_matching_covers_ips_and_cidrs() {
     let exact: IpAddr = "192.168.1.1".parse().unwrap();
     let no: IpAddr = "192.168.1.2".parse().unwrap();
     let v6: IpAddr = "::1".parse().unwrap();
-    assert!(proxy::peer_is_trusted(&trusted, yes));
-    assert!(proxy::peer_is_trusted(&trusted, exact));
-    assert!(!proxy::peer_is_trusted(&trusted, no));
-    assert!(!proxy::peer_is_trusted(&trusted, v6));
-    assert!(proxy::peer_is_trusted(&["::1/128".to_string()], v6));
-    assert!(proxy::peer_is_trusted(&["0.0.0.0/0".to_string()], no));
+    assert!(net::peer_is_trusted(&trusted, yes));
+    assert!(net::peer_is_trusted(&trusted, exact));
+    assert!(!net::peer_is_trusted(&trusted, no));
+    assert!(!net::peer_is_trusted(&trusted, v6));
+    assert!(net::peer_is_trusted(&["::1/128".to_string()], v6));
+    assert!(net::peer_is_trusted(&["0.0.0.0/0".to_string()], no));
 }

@@ -5,7 +5,7 @@
 
 #![no_main]
 
-use dwara_core::proxy::{ip_in_net, parse_ip_or_cidr};
+use dwara_core::config::net::{ip_in_net, parse_ip_or_cidr};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

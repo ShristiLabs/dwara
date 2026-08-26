@@ -13,8 +13,9 @@
 //! - [`observability`] — tracing, metrics, and access logging
 //! - [`state`] — SQLite-backed durable state and schema migrations
 //! - [`security`] — TLS, authentication, authorization
-//! - [`resilience`] — passive/active health, retries, circuit breaker
-//! - [`dataplane`] — the reverse-proxy request path and its upstreams
+//! - [`resilience`] — passive health, retries, circuit breaker
+//! - [`dataplane`] — the reverse-proxy request path, its upstreams, and
+//!   active health probing
 //!
 //! # Dependency direction
 //!
@@ -43,13 +44,9 @@
 //! `dwara_core::proxy` and `dwara_core::dataplane::proxy` (and likewise
 //! for `upstream`, `balance`, `hardening`, `health`, `active`, `retries`,
 //! `breaker`, `tls`, `authn`, `authz`, `store`, `migrations`) denote the
-//! same module. Prefer the domain-qualified path in new code.
-//!
-//! Future work: mark the root-level compatibility aliases
-//! `#[doc(hidden)]` and/or fold item-level re-exports into this facade
-//! once downstream consumers have migrated to the domain-qualified paths.
-//! Deferred in this pass so intra-doc links and existing doc references
-//! keep resolving throughout the move.
+//! same module. The aliases are `#[doc(hidden)]`: they still compile but
+//! stay out of the rendered docs. Use the domain-qualified path in new
+//! code (`dwara_core::dataplane::proxy`, `dwara_core::security::tls`).
 
 pub mod config;
 pub mod dataplane;
@@ -62,18 +59,32 @@ pub mod state;
 
 // Path-compatibility aliases: these re-exports keep the historical
 // top-level module paths (`dwara_core::proxy`, `dwara_core::tls`, ...)
-// resolving after the move into domain directories. See "Path
-// compatibility" above.
+// resolving after the move into domain directories. They are hidden
+// from docs so new code gravitates to the canonical domain paths. See
+// "Path compatibility" above.
+#[doc(hidden)]
+pub use dataplane::active;
+#[doc(hidden)]
 pub use dataplane::balance;
+#[doc(hidden)]
 pub use dataplane::hardening;
+#[doc(hidden)]
 pub use dataplane::proxy;
+#[doc(hidden)]
 pub use dataplane::upstream;
-pub use resilience::active;
+#[doc(hidden)]
 pub use resilience::breaker;
+#[doc(hidden)]
 pub use resilience::health;
+#[doc(hidden)]
 pub use resilience::retries;
+#[doc(hidden)]
 pub use security::authn;
+#[doc(hidden)]
 pub use security::authz;
+#[doc(hidden)]
 pub use security::tls;
+#[doc(hidden)]
 pub use state::migrations;
+#[doc(hidden)]
 pub use state::store;

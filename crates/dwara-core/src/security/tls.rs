@@ -470,23 +470,32 @@ pub enum PassthroughAction {
     Close,
 }
 
+/// Endpoint resolver for passthrough routing: maps an upstream NAME to a
+/// load-balanced `(address, port)`. The dataplane caller builds it from
+/// the CURRENT registry (see dwara-bin's listener), so passthrough picks
+/// follow config reloads; `Send + Sync` because the passthrough path runs
+/// on spawned tasks. `None` means "no dataplane" — the first configured
+/// endpoint is used.
+pub type EndpointPicker<'a> = &'a (dyn Fn(&str) -> Option<(String, u16)> + Send + Sync);
+
 /// Resolve a passthrough SNI route against the gateway config.
 ///
 /// Routing rule (v1, documented): the SNI server name is matched exactly
 /// against the `sni_routes` entries of the listener. A hit forwards to an
-/// endpoint of the referenced upstream chosen by that upstream's load
-/// balancer (DW-011; `registry` is the dataplane's current registry, so
-/// passthrough picks follow config reloads too). The pick carries no hash
-/// key — a byte splice has no per-request client-IP semantics to weight
-/// beyond stickiness, so `ip_hash` degrades to its smooth-RR fallback.
-/// Without a registry (callers without a dataplane) the FIRST configured
-/// endpoint is used. No match, no SNI, or a non-TLS client closes the
-/// connection.
+/// endpoint of the referenced upstream. Endpoint selection is delegated to
+/// `pick`: the caller supplies a resolver that maps an upstream NAME to a
+/// load-balanced `(address, port)` (DW-011; the dataplane caller builds it
+/// from the CURRENT registry, so passthrough picks follow config reloads
+/// too — see dwara-bin's listener). The pick carries no hash key — a byte
+/// splice has no per-request client-IP semantics to weight beyond
+/// stickiness, so `ip_hash` degrades to its smooth-RR fallback. Without a
+/// resolver (callers without a dataplane) the FIRST configured endpoint is
+/// used. No match, no SNI, or a non-TLS client closes the connection.
 pub fn resolve_passthrough(
     sni: Option<&str>,
     routes: &[SniRoute],
     gateway: &Gateway,
-    registry: Option<&crate::upstream::UpstreamRegistry>,
+    pick: Option<EndpointPicker<'_>>,
 ) -> PassthroughAction {
     let Some(name) = sni else {
         return PassthroughAction::Close;
@@ -495,14 +504,12 @@ pub fn resolve_passthrough(
         if r.server_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
             let upstream = gateway.upstreams.iter().find(|u| u.name == r.upstream);
             let endpoint = upstream.and_then(|u| {
-                // Prefer the live balancer; fall back to the first
-                // configured endpoint.
-                // Single-load pick: index and address:port come from the
-                // same state snapshot, so a concurrent reload cannot pair
-                // an index from one set with an address from another.
-                registry
-                    .and_then(|reg| reg.get(&u.name))
-                    .and_then(|h| h.lb().pick_endpoint(None).map(|(_, a, p)| (a, p)))
+                // Prefer the caller's (balancer-backed) pick; fall back to
+                // the first configured endpoint. Single-load pick: index
+                // and address:port come from the same state snapshot, so a
+                // concurrent reload cannot pair an index from one set with
+                // an address from another.
+                pick.and_then(|pick| pick(&u.name))
                     .or_else(|| u.endpoints.first().map(|e| (e.address.clone(), e.port)))
             });
             if let Some((host, port)) = endpoint {
@@ -523,13 +530,15 @@ const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Peek the ClientHello off a passthrough connection, decide the route,
 /// and either splice both directions to the upstream or close.
 ///
-/// Peeking (never reading) keeps the bytes available for the upstream
-/// once splicing starts.
+/// `pick` is the endpoint resolver handed to [`resolve_passthrough`]
+/// (upstream name -> load-balanced `(address, port)`; None falls back to
+/// the first configured endpoint). Peeking (never reading) keeps the bytes
+/// available for the upstream once splicing starts.
 pub async fn handle_passthrough(
     stream: &mut TcpStream,
     tls: &ListenerTls,
     gateway: &Gateway,
-    registry: Option<&crate::upstream::UpstreamRegistry>,
+    pick: Option<EndpointPicker<'_>>,
 ) -> std::io::Result<PassthroughAction> {
     let mut scratch = vec![0u8; PEEK_LIMIT];
     let started = std::time::Instant::now();
@@ -564,7 +573,7 @@ pub async fn handle_passthrough(
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     };
 
-    match resolve_passthrough(sni.as_deref(), &tls.sni_routes, gateway, registry) {
+    match resolve_passthrough(sni.as_deref(), &tls.sni_routes, gateway, pick) {
         PassthroughAction::Forward { host, port } => {
             let mut upstream = TcpStream::connect((host.as_str(), port)).await?;
             let _ = stream.set_nodelay(true);

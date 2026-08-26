@@ -52,8 +52,8 @@
 //! set rather than blackholing traffic (documented choice; a gateway that
 //! returns 503 for a fully-ejected pool has converted an upstream brownout
 //! into a guaranteed outage). The balancer counts these fallbacks
-//! ([`crate::balance::UpstreamLb::fail_open_picks`]) so operators can see
-//! the degraded state.
+//! (`UpstreamLb::fail_open_picks`) so operators can see the degraded
+//! state.
 //!
 //! # Time
 //!

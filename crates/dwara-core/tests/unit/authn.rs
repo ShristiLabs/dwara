@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use hyper::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 
+use dwara_core::config::credentials::{credential_selector, sha256_hex, sha256_stored_hash};
 use dwara_core::security::authn::*;
 
 #[test]

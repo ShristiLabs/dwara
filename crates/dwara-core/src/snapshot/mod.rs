@@ -131,7 +131,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // Trusted proxies: each entry must be an IP address or CIDR (parsed by
     // the dataplane's trusted-proxy matcher; rejected here at compile time).
     for (i, entry) in gateway.trusted_proxies.iter().enumerate() {
-        if crate::proxy::parse_ip_or_cidr(entry).is_none() {
+        if crate::config::net::parse_ip_or_cidr(entry).is_none() {
             issues.push(issue(
                 "gateway",
                 "(root)",
@@ -618,7 +618,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             if let Some(acl) = &authz.ip_acl {
                 for (side, entries) in [("ip_acl.allow", &acl.allow), ("ip_acl.deny", &acl.deny)] {
                     for (i, entry) in entries.iter().enumerate() {
-                        if crate::proxy::parse_ip_or_cidr(entry).is_none() {
+                        if crate::config::net::parse_ip_or_cidr(entry).is_none() {
                             issues.push(issue(
                                 "route",
                                 &r.name,
@@ -629,7 +629,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 ),
                             ));
                         } else if side == "ip_acl.allow"
-                            && crate::proxy::parse_ip_or_cidr(entry)
+                            && crate::config::net::parse_ip_or_cidr(entry)
                                 .is_some_and(|(_, prefix)| prefix == 0)
                         {
                             issues.push(issue(
@@ -833,10 +833,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ),
                 ));
             }
-            total_vnodes += crate::balance::KETAMA_VNODES * e.weight.max(1) as u64;
+            total_vnodes += crate::config::limits::KETAMA_VNODES * e.weight.max(1) as u64;
         }
         if u.load_balancer == crate::config::LoadBalancer::IpHash
-            && total_vnodes > crate::balance::MAX_RING_VNODES
+            && total_vnodes > crate::config::limits::MAX_RING_VNODES
         {
             issues.push(issue(
                 "upstream",
@@ -844,7 +844,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "endpoints.weight",
                 format!(
                     "ip_hash ring too large: total vnodes (160 * sum of weights) must be at most {}",
-                    crate::balance::MAX_RING_VNODES
+                    crate::config::limits::MAX_RING_VNODES
                 ),
             ));
         }
@@ -894,7 +894,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             }
         }
         if u.slow_start_ms
-            .is_some_and(|ms| ms > crate::balance::MAX_SLOW_START_MS)
+            .is_some_and(|ms| ms > crate::config::limits::MAX_SLOW_START_MS)
         {
             issues.push(issue(
                 "upstream",
@@ -1030,14 +1030,14 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             }
         }
         if let Some(r) = &u.retries {
-            if r.attempts > crate::retries::MAX_RETRY_ATTEMPTS {
+            if r.attempts > crate::config::limits::MAX_RETRY_ATTEMPTS {
                 issues.push(issue(
                     "upstream",
                     &u.name,
                     "retries.attempts",
                     format!(
                         "retries.attempts must be at most {} (retries beyond the first attempt)",
-                        crate::retries::MAX_RETRY_ATTEMPTS
+                        crate::config::limits::MAX_RETRY_ATTEMPTS
                     ),
                 ));
             }

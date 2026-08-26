@@ -80,23 +80,9 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
+use crate::config::limits::KETAMA_VNODES;
 use crate::config::{Endpoint, LoadBalancer, PassiveHealth};
-use crate::health::{EndpointHealth, HealthDispatch, HealthParams};
-
-/// Ketama vnode count per unit of endpoint weight (a weight-1 endpoint
-/// gets 160 vnodes; a weight-w endpoint gets `160 * w` — footprint is
-/// additive, so adding an endpoint never resizes existing segments).
-pub const KETAMA_VNODES: u64 = 160;
-
-/// Validation bound on total ip_hash ring size (`sum(weight) * 160`).
-/// Keeps ring construction cheap and the BTreeMap small even for skewed
-/// weight sets.
-pub const MAX_RING_VNODES: u64 = 65_536;
-
-/// Validation bound for `upstreams[].slow_start_ms` (10 minutes): the ramp
-/// window is per-endpoint-entry, and unbounded windows would keep recycled
-/// addresses permanently underweighted.
-pub const MAX_SLOW_START_MS: u64 = 600_000;
+use crate::resilience::health::{EndpointHealth, HealthDispatch, HealthParams};
 
 /// One endpoint's runtime row inside an [`LbState`].
 struct LbEndpoint {
@@ -264,8 +250,8 @@ fn build_state(
 /// another endpoint with a different weight joins or leaves: adding a
 /// weight-w endpoint to total weight W remaps only ~w/(W+w) of keys, and
 /// keys between unchanged endpoints stay put. Validation bounds the total
-/// ring size at [`MAX_RING_VNODES`]. Collisions (same ring hash) keep the
-/// later endpoint — harmless at 64-bit hash widths.
+/// ring size at `config::limits::MAX_RING_VNODES`. Collisions (same ring
+/// hash) keep the later endpoint — harmless at 64-bit hash widths.
 fn build_ring(eps: &[LbEndpoint]) -> BTreeMap<u64, usize> {
     let mut ring = BTreeMap::new();
     for (i, e) in eps.iter().enumerate() {

@@ -5,7 +5,7 @@
 //!
 //! All knobs live on the UPSTREAM (`upstreams[].retries`); there is no
 //! per-route retry configuration in v1. [`RetryParams`] is the resolved,
-//! validated form carried by each [`crate::upstream::UpstreamHandle`];
+//! validated form carried by each `UpstreamHandle`;
 //! [`RetryConfig`] is the serde schema form (defaults applied there).
 //!
 //! # Retry budget
@@ -55,8 +55,6 @@ use crate::config::RetryConfig;
 
 /// Rolling window the retry budget accounts over (milliseconds).
 pub const RETRY_BUDGET_WINDOW_MS: u64 = 10_000;
-/// Validation bound on `retries.attempts` (mirrored in `snapshot::validate`).
-pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 /// Default retry statuses (`502, 503, 504`).
 pub const DEFAULT_RETRY_STATUSES: [u16; 3] = [502, 503, 504];
 

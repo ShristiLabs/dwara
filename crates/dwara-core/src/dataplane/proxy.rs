@@ -193,17 +193,22 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument as _;
 
-use crate::authn::{AuthError, Authenticator, CompositeAuthenticator, Identity, JwksCacheEntry};
+use crate::config::net::peer_is_trusted;
 use crate::config::{
     Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
+use crate::dataplane::upstream::{
+    refresh_observation_gauges, UpstreamBody, UpstreamError, UpstreamRegistry,
+};
 use crate::extensions::rate_limiter::{RateLimitEngine, RateLimitOutcome};
 use crate::observability::{self, AccessRecord, ListenerLabel, Observability};
-use crate::retries::RetryParams;
+use crate::resilience::retries::RetryParams;
+use crate::security::authn::{
+    AuthError, Authenticator, CompositeAuthenticator, Identity, JwksCacheEntry,
+};
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
-use crate::store::StateStore;
-use crate::upstream::{UpstreamBody, UpstreamError, UpstreamRegistry};
+use crate::state::store::StateStore;
 
 /// Body type of every proxied/gateway-generated response: either a small
 /// fully-buffered gateway message (`Full`) or the untouched streaming
@@ -537,7 +542,7 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
         // refreshed from the CURRENT generation at scrape time.
         "/metrics" => {
             let obs = &dp.obs;
-            obs.refresh_state_gauges(&dp.current().registry);
+            refresh_observation_gauges(&dp.current().registry, obs);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -745,33 +750,36 @@ where
                 .headers()
                 .get(&X_FORWARDED_FOR)
                 .and_then(|v| v.to_str().ok());
-            let effective_ip =
-                crate::authz::effective_client_ip(&gateway.trusted_proxies, peer, inbound_xff);
-            let authz_ctx = crate::authz::AuthzContext {
+            let effective_ip = crate::security::authz::effective_client_ip(
+                &gateway.trusted_proxies,
+                peer,
+                inbound_xff,
+            );
+            let authz_ctx = crate::security::authz::AuthzContext {
                 identity: identity.as_ref(),
                 consumer_groups: consumer_cfg.map(|c| c.groups.as_slice()).unwrap_or(&[]),
                 peer_ip: peer,
                 effective_ip,
             };
-            let chain = crate::authz::AuthzChain {
+            let chain = crate::security::authz::AuthzChain {
                 consumer: None,
                 route: route.authorization.as_ref(),
                 service: None,
                 listener: None,
                 global: None,
             };
-            crate::authz::authorize(&chain, &authz_ctx)
+            crate::security::authz::authorize(&chain, &authz_ctx)
         } else {
-            crate::authz::Decision::Allow
+            crate::security::authz::Decision::Allow
         }
     };
     match authz_decision {
-        crate::authz::Decision::Allow => {}
-        crate::authz::Decision::Deny {
+        crate::security::authz::Decision::Allow => {}
+        crate::security::authz::Decision::Deny {
             unauthenticated: true,
             ..
         } => return unauthorized(&authn.challenge(), rid),
-        crate::authz::Decision::Deny { reason, .. } => {
+        crate::security::authz::Decision::Deny { reason, .. } => {
             // Reason is server-side only: which list matched, which claim
             // was absent — none of it is the client's business.
             tracing::warn!(
@@ -1447,7 +1455,9 @@ where
         // a breaker that trips mid-request (an earlier attempt's failure
         // crossed the threshold) still short-circuits the retries.
         if let Some(bp) = breaker_params {
-            if let crate::breaker::BreakerDecision::Reject { retry_after_ms } = breaker.check(&bp) {
+            if let crate::resilience::breaker::BreakerDecision::Reject { retry_after_ms } =
+                breaker.check(&bp)
+            {
                 tracing::warn!(
                     code = "upstream_circuit_open",
                     request_id = %rid,
@@ -1530,7 +1540,7 @@ where
                         status = resp.status().as_u16(),
                         "retryable upstream status; retrying"
                     );
-                    tokio::time::sleep(crate::retries::jitter_delay(
+                    tokio::time::sleep(crate::resilience::retries::jitter_delay(
                         rp.backoff_base_ms,
                         rp.backoff_cap_ms,
                         done_tries,
@@ -1571,7 +1581,7 @@ where
                         attempt = done_tries,
                         "upstream attempt failed: {err}; retrying"
                     );
-                    tokio::time::sleep(crate::retries::jitter_delay(
+                    tokio::time::sleep(crate::resilience::retries::jitter_delay(
                         rp.backoff_base_ms,
                         rp.backoff_cap_ms,
                         done_tries,
@@ -1992,53 +2002,9 @@ fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
     tokens
 }
 
-// --- trusted proxies: minimal IP/CIDR support (no new dependency) --------
-
-/// Parse `ip`, `ip/prefix` into (network address, prefix length).
-/// Returns None for anything that is not a well-formed IPv4/IPv6 address
-/// or CIDR (including prefixes wider than the address family allows).
-pub fn parse_ip_or_cidr(s: &str) -> Option<(IpAddr, u8)> {
-    let s = s.trim();
-    if let Ok(ip) = s.parse::<IpAddr>() {
-        let bits = if ip.is_ipv4() { 32 } else { 128 };
-        return Some((ip, bits));
-    }
-    let (addr, prefix) = s.split_once('/')?;
-    let ip: IpAddr = addr.trim().parse().ok()?;
-    let max = if ip.is_ipv4() { 32 } else { 128 };
-    let prefix: u8 = prefix.trim().parse().ok()?;
-    if prefix > max {
-        return None;
-    }
-    Some((ip, prefix))
-}
-
-/// Whether `ip` falls inside `net/prefix` (same-family only). Public so
-/// authorization (DW-020) matches IP ACL entries with the exact
-/// DW-009 trusted-proxy semantics.
-pub fn ip_in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
-    match (ip, net) {
-        (IpAddr::V4(a), IpAddr::V4(b)) => {
-            let (a, b) = (u32::from(a), u32::from(b));
-            prefix == 0 || ((a ^ b) >> (32 - prefix as u32)) == 0
-        }
-        (IpAddr::V6(a), IpAddr::V6(b)) => {
-            let (a, b) = (u128::from(a), u128::from(b));
-            prefix == 0 || ((a ^ b) >> (128 - prefix as u32)) == 0
-        }
-        _ => false,
-    }
-}
-
-/// Whether `peer` falls inside any configured trusted-proxy entry.
-/// Unparseable entries cannot occur in a validated config; they are
-/// conservatively treated as non-matching here (validation rejects the
-/// whole config before the dataplane ever sees it).
-pub fn peer_is_trusted(trusted: &[String], peer: IpAddr) -> bool {
-    trusted.iter().any(|entry| {
-        parse_ip_or_cidr(entry).is_some_and(|(net, prefix)| ip_in_net(peer, net, prefix))
-    })
-}
+// --- trusted proxies: the IP/CIDR grammar lives in `config::net` (shared
+// --- with validation and the authorization ACLs); the dataplane consumes
+// --- it for the forwarded-header trust rule above. -------------------------
 
 #[cfg(test)]
 mod tests {

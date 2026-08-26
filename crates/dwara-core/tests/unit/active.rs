@@ -1,9 +1,9 @@
-//! Unit tests for `resilience::active` (relocated from src).
+//! Unit tests for `dataplane::active` (relocated from src).
 
 use std::time::Duration;
 
 use dwara_core::config::ProbeKind;
-use dwara_core::resilience::active::*;
+use dwara_core::dataplane::active::*;
 use dwara_core::resilience::health::HealthParams;
 
 #[test]

@@ -14,6 +14,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use dwara_core::config::net;
 use dwara_core::config::parse_gateway;
 use dwara_core::proxy::{self, DataPlane};
 use dwara_core::snapshot::{validate, CompileError, ConfigState};
@@ -330,7 +331,7 @@ fn parse_ip_or_cidr_rejects_invalid_forms() {
         "1.2.3.4/8/9",
     ] {
         assert!(
-            proxy::parse_ip_or_cidr(bad).is_none(),
+            net::parse_ip_or_cidr(bad).is_none(),
             "'{bad}' must be rejected"
         );
     }
@@ -339,20 +340,20 @@ fn parse_ip_or_cidr_rejects_invalid_forms() {
 #[test]
 fn parse_ip_or_cidr_accepts_bare_ips_and_valid_cidrs() {
     assert_eq!(
-        proxy::parse_ip_or_cidr("10.0.0.0/8"),
+        net::parse_ip_or_cidr("10.0.0.0/8"),
         Some(("10.0.0.0".parse().unwrap(), 8))
     );
     assert_eq!(
-        proxy::parse_ip_or_cidr(" 192.168.1.1 "),
+        net::parse_ip_or_cidr(" 192.168.1.1 "),
         Some(("192.168.1.1".parse().unwrap(), 32))
     );
     assert_eq!(
-        proxy::parse_ip_or_cidr("2001:db8::/32"),
+        net::parse_ip_or_cidr("2001:db8::/32"),
         Some(("2001:db8::".parse().unwrap(), 32))
     );
     // /0 is legal (matches everything of that family).
     assert_eq!(
-        proxy::parse_ip_or_cidr("0.0.0.0/0"),
+        net::parse_ip_or_cidr("0.0.0.0/0"),
         Some(("0.0.0.0".parse().unwrap(), 0))
     );
 }
@@ -363,8 +364,8 @@ fn ipv4_mapped_ipv6_is_a_v6_address_not_a_v4_match() {
     // trusted entry "1.2.3.4" (family mismatch, pinned deliberately).
     let mapped: std::net::IpAddr = "::ffff:1.2.3.4".parse().unwrap();
     assert!(mapped.is_ipv6());
-    assert!(!proxy::peer_is_trusted(&["1.2.3.4".to_string()], mapped));
-    assert!(proxy::peer_is_trusted(
+    assert!(!net::peer_is_trusted(&["1.2.3.4".to_string()], mapped));
+    assert!(net::peer_is_trusted(
         &["::ffff:1.2.3.4".to_string()],
         mapped
     ));
@@ -375,20 +376,20 @@ fn cidr_matching_ranges_and_respects_family_boundaries() {
     let trusted = |e: &str| vec![e.to_string()];
     let in8: std::net::IpAddr = "10.255.1.2".parse().unwrap();
     let out8: std::net::IpAddr = "11.0.0.1".parse().unwrap();
-    assert!(proxy::peer_is_trusted(&trusted("10.0.0.0/8"), in8));
-    assert!(!proxy::peer_is_trusted(&trusted("10.0.0.0/8"), out8));
+    assert!(net::peer_is_trusted(&trusted("10.0.0.0/8"), in8));
+    assert!(!net::peer_is_trusted(&trusted("10.0.0.0/8"), out8));
 
     // IPv6 exact, /128, and /64 forms.
     let lo: std::net::IpAddr = "::1".parse().unwrap();
-    assert!(proxy::peer_is_trusted(&trusted("::1"), lo));
-    assert!(proxy::peer_is_trusted(&trusted("::1/128"), lo));
+    assert!(net::peer_is_trusted(&trusted("::1"), lo));
+    assert!(net::peer_is_trusted(&trusted("::1/128"), lo));
     let in64: std::net::IpAddr = "2001:db8:1::dead:beef".parse().unwrap();
     let out64: std::net::IpAddr = "2001:db8:2::dead:beef".parse().unwrap();
-    assert!(proxy::peer_is_trusted(&trusted("2001:db8:1::/64"), in64));
-    assert!(!proxy::peer_is_trusted(&trusted("2001:db8:1::/64"), out64));
+    assert!(net::peer_is_trusted(&trusted("2001:db8:1::/64"), in64));
+    assert!(!net::peer_is_trusted(&trusted("2001:db8:1::/64"), out64));
 
     // A v4 CIDR never matches a v6 peer and vice versa.
-    assert!(!proxy::peer_is_trusted(&trusted("10.0.0.0/8"), lo));
+    assert!(!net::peer_is_trusted(&trusted("10.0.0.0/8"), lo));
 }
 
 // --- 3. Hop-by-hop edge cases ------------------------------------------------

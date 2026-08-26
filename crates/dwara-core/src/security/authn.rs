@@ -98,13 +98,13 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_service::Service;
 
+use crate::config::credentials::{credential_selector, sha256_hex, sha256_stored_hash};
 use crate::config::{Credential, Gateway, JwtProvider as JwtProviderConfig};
 use crate::observability::Observability;
-use crate::store::{CredentialKind, CredentialRecord, StateStore};
+use crate::state::store::{CredentialKind, CredentialRecord, StateStore};
 
 const X_API_KEY: hyper::header::HeaderName = hyper::header::HeaderName::from_static("x-api-key");
 
@@ -163,36 +163,10 @@ pub trait Authenticator: Send + Sync {
 }
 
 // --- hashing ---------------------------------------------------------------
-
-/// Lowercase hex of a byte slice (no external hex dependency).
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(TABLE[usize::from(*b >> 4)] as char);
-        out.push(TABLE[usize::from(*b & 0x0f)] as char);
-    }
-    out
-}
-
-/// sha256 digest, hex-encoded (the API-key/Basic hashing path).
-pub fn sha256_hex(input: &[u8]) -> String {
-    let digest = Sha256::digest(input);
-    hex(&digest)
-}
-
-/// Lookup selector for API-key and Basic credentials: `hex(sha256(value))`.
-/// The selector is therefore a HASH, never plaintext — an indexed store of
-/// selectors leaks nothing about key material (this closes the DW-018
-/// finding that config-seeded selectors were the raw config values).
-pub fn credential_selector(value: &str) -> String {
-    sha256_hex(value.as_bytes())
-}
-
-/// Stored-hash format for the fast path: `sha256:<hex(sha256(secret))>`.
-pub fn sha256_stored_hash(secret: &str) -> String {
-    format!("sha256:{}", sha256_hex(secret.as_bytes()))
-}
+//
+// The selector/stored-hash FORMATS live in `config::credentials` (part of
+// the credential schema contract shared with the state store); this
+// module re-imports them and owns the VERIFICATION path below.
 
 /// Verify a presented secret against a stored hash, in constant time for
 /// the sha256 path (`subtle::ConstantTimeEq` over the encoded digests —

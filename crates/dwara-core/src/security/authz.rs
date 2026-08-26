@@ -66,9 +66,9 @@
 
 use std::net::IpAddr;
 
-use crate::authn::Identity;
+use crate::config::net::{ip_in_net, parse_ip_or_cidr, peer_is_trusted};
 use crate::config::{Authz, IpAcl, IpAclDefault};
-use crate::proxy::{ip_in_net, parse_ip_or_cidr, peer_is_trusted};
+use crate::security::authn::Identity;
 
 /// The outcome of an authorization decision.
 #[derive(Debug, Clone, PartialEq, Eq)]

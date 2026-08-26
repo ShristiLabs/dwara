@@ -258,13 +258,13 @@ fn seeding_from_config_is_idempotent_and_hashed() {
     // DW-019: the selector is the sha256 of the key (never the
     // plaintext), and the stored hash is the format the
     // authenticator's constant-time verifier expects.
-    let selector = dwara_core::security::authn::credential_selector("secret-key");
+    let selector = dwara_core::config::credentials::credential_selector("secret-key");
     let api = store.lookup_credentials_by_selector(&selector).unwrap();
     assert_eq!(api.len(), 1);
     assert_eq!(api[0].kind, CredentialKind::ApiKey);
     assert_eq!(
         api[0].hash,
-        dwara_core::security::authn::sha256_stored_hash("secret-key")
+        dwara_core::config::credentials::sha256_stored_hash("secret-key")
     );
     // Nothing in the store contains the plaintext key.
     let dumped = format!("{:?}{}", api[0].hash, selector);
@@ -343,12 +343,12 @@ fn sync_deletes_legacy_config_placeholder_api_key_rows() {
         .unwrap()
         .is_empty());
     // ...the properly re-seeded sha256 api_key row exists...
-    let selector = dwara_core::security::authn::credential_selector("secret-key");
+    let selector = dwara_core::config::credentials::credential_selector("secret-key");
     let api = store.lookup_credentials_by_selector(&selector).unwrap();
     assert_eq!(api.len(), 1);
     assert_eq!(
         api[0].hash,
-        dwara_core::security::authn::sha256_stored_hash("secret-key")
+        dwara_core::config::credentials::sha256_stored_hash("secret-key")
     );
     // ...and the jwt binding row (current format) survives.
     assert_eq!(

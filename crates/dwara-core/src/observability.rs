@@ -511,35 +511,33 @@ impl Observability {
         self.config_generation.set(generation as i64);
     }
 
-    /// Refresh the state-derived gauges (breaker, endpoint health,
-    /// fail-open picks) from live registry state. Called at scrape time:
-    /// `/metrics` reflects a point-in-time snapshot, and the hot paths
-    /// (pick, report) stay pure atomics with zero registry coupling.
-    /// Series for endpoints/upstreams removed by a reload linger until
-    /// process restart (documented Prometheus caveat).
-    pub fn refresh_state_gauges(&self, registry: &crate::upstream::UpstreamRegistry) {
-        for name in registry.names() {
-            let Some(handle) = registry.get(name) else {
-                continue;
-            };
-            let state = match handle.breaker().state() {
-                crate::breaker::BreakerState::Closed { .. } => 0,
-                crate::breaker::BreakerState::Open { .. } => 1,
-                crate::breaker::BreakerState::HalfOpen { .. } => 2,
-            };
-            self.breaker_state.with_label_values(&[name]).set(state);
-            self.fail_open_picks
-                .with_label_values(&[name])
-                .set(handle.lb().fail_open_picks() as i64);
-            let lb_now = handle.lb().now_ms();
-            for (address, port, health) in handle.lb().health_targets() {
-                let label = format!("{address}:{port}");
-                let up = health.map(|h| h.is_available(lb_now)).unwrap_or(true) as i64;
-                self.endpoint_health
-                    .with_label_values(&[name, &label])
-                    .set(up);
-            }
-        }
+    /// Set the `breaker_state` gauge for one upstream (0 closed, 1 open,
+    /// 2 half-open). Scrape-time snapshot setter: the walk that computes
+    /// the values from live upstream state lives on the dataplane (see
+    /// `refresh_observation_gauges` in `dataplane::upstream`), keeping
+    /// this module free of runtime-state dependencies — it only records
+    /// what it is handed.
+    pub fn set_breaker_state(&self, upstream: &str, state: i64) {
+        self.breaker_state.with_label_values(&[upstream]).set(state);
+    }
+
+    /// Set the `upstream_fail_open_picks` gauge for one upstream
+    /// (scrape-time snapshot of the balancer's monotonic fail-open
+    /// counter; a gauge rather than a counter so the hot pick path stays
+    /// free of metrics coupling).
+    pub fn set_fail_open_picks(&self, upstream: &str, picks: i64) {
+        self.fail_open_picks
+            .with_label_values(&[upstream])
+            .set(picks);
+    }
+
+    /// Set the `endpoint_health` gauge for one endpoint (1 available,
+    /// 0 ejected). Scrape-time snapshot setter; see
+    /// [`Self::set_breaker_state`] for the refresh model.
+    pub fn set_endpoint_health(&self, upstream: &str, endpoint: &str, up: bool) {
+        self.endpoint_health
+            .with_label_values(&[upstream, endpoint])
+            .set(up as i64);
     }
 
     /// Render every family in Prometheus text format.

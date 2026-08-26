@@ -21,8 +21,8 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use dwara_core::authn::{credential_selector, sha256_stored_hash};
 use dwara_core::balance::UpstreamLb;
+use dwara_core::config::credentials::{credential_selector, sha256_stored_hash};
 use dwara_core::config::{
     Endpoint, Gateway, LoadBalancer, PathMatch, PathMatchKind, Route, RouteAction, RouteMatch,
     Service, Upstream, UpstreamProtocol,

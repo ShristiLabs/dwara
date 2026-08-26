@@ -14,6 +14,16 @@
 //! `parse_gateway(gateway_to_yaml(cfg))` always succeeds and yields a value
 //! that serializes to the identical normalized text (stable normalization,
 //! not byte-identity with the original input).
+//!
+//! Submodules carry the parts of the config CONTRACT that are more than
+//! serde shapes: [`credentials`] defines the credential selector/stored-hash
+//! formats every credential holder must agree on, [`limits`] the numeric
+//! bounds validation enforces, and [`net`] the trusted-proxy IP/CIDR
+//! grammar shared by validation and the runtime matchers.
+
+pub mod credentials;
+pub mod limits;
+pub mod net;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
