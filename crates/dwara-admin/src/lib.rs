@@ -19,8 +19,9 @@
 //!   config file (temp file + rename, so the file watcher and restarts
 //!   observe exactly what was published) and then published to the
 //!   running dataplane. Documented consequence: the gateway's config
-//!   watcher also observes the rename and re-publishes the identical
-//!   content (generation advances once more, harmlessly).
+//!   watcher also observes the rename; because the content is identical
+//!   to what was just published, the watcher's reload is a no-op (the
+//!   generation does not advance again).
 //! - `GET /health` — gateway readiness, config generation, and
 //!   per-upstream per-endpoint health labels.
 //! - `GET /stats` — cheap live state only: state-store schema version

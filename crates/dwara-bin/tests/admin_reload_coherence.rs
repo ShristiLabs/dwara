@@ -1,10 +1,10 @@
 //! Cross-plane coherence e2e (DW-022): the admin API, the config file
 //! watcher, and the dataplane as ONE process (the real `dwara` binary).
 //!
-//! - PATCH /config publishes (+1 generation) and the file watcher then
-//!   re-publishes the renamed file: the documented watcher-driven double
-//!   bump, pinned as at least +2 with convergence (the exact burst count
-//!   depends on machine timing, not on the contract).
+//! - PATCH /config publishes (+1 generation); the file watcher observes
+//!   the admin's atomic rename of identical content and must NO-OP
+//!   (file-watch reloads of unchanged content do not republish), so the
+//!   generation settles at exactly +1 and then goes quiet.
 //! - GET /config reflects a change made via a plain FILE EDIT picked up
 //!   by the watcher (file -> watcher -> publish -> admin reads it back).
 //! - A proxy request already IN FLIGHT when a PATCH publishes completes
@@ -154,16 +154,6 @@ fn generation(admin_port: u16) -> u64 {
         .unwrap()
 }
 
-/// Poll until the admin-reported generation reaches `want` (watcher
-/// reloads land asynchronously after a 250 ms debounce).
-fn wait_generation(admin_port: u16, want: u64) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while generation(admin_port) < want {
-        assert!(Instant::now() < deadline, "generation never reached {want}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 /// Poll until the admin-reported generation has been unchanged for one
 /// full quiet window, then return the settled value. How many debounce
 /// windows an atomic write's filesystem events land in is machine-timing
@@ -227,20 +217,20 @@ fn patch_publishes_and_watcher_republishes_file_edit_reaches_admin() {
     assert_eq!(status, 200);
     assert_eq!(body, "v1");
 
-    // PATCH to v2: the admin publish (+1) plus the watcher's re-publish
-    // of the renamed file. The write burst may span more than one debounce
-    // window on a loaded runner, so pin convergence: at least the PATCH
-    // and one watcher re-publish land, then the generation goes quiet
-    // (this also catches a runaway re-publish loop).
+    // PATCH to v2: the admin publish (+1). The watcher will observe the
+    // admin's atomic rename of identical content and must NO-OP (file-watch
+    // reloads of unchanged content do not republish), so the generation
+    // settles at exactly +1 — convergence also catches a runaway
+    // re-publish loop.
     let (status, headers, resp) =
         admin_patch(&respond_config("v2", data_port, admin_port), admin_port);
     assert_eq!(status, 200, "resp: {resp}");
     assert!(headers.contains(&format!("x-dwara-config-generation: {}", gen0 + 1)));
-    wait_generation(admin_port, gen0 + 2);
     let settled = settle_generation(admin_port);
-    assert!(
-        settled >= gen0 + 2,
-        "PATCH plus at least one watcher re-publish must land (settled at {settled})"
+    assert_eq!(
+        settled,
+        gen0 + 1,
+        "PATCH publishes; the watcher's identical-content reload must no-op"
     );
 
     // Cross-plane coherence: admin GET /config shows the PATCHed content.

@@ -71,10 +71,15 @@
 //!
 //! Hot reload semantics:
 //! - Config file watch + SIGHUP: re-read, validate, `compile_and_publish`
-//!   (DW-006 semantics unchanged). On success, terminate listeners'
-//!   TLS configurations are rebuilt from the new snapshot and the active
-//!   health probe loops (DW-013) are respawned against the new generation
-//!   (endpoints persisting across the swap keep their health trackers).
+//!   (DW-006 semantics unchanged). A file-watch reload of UNCHANGED
+//!   content is a no-op (the generation only moves when content changes);
+//!   SIGHUP always re-publishes (forced reload). Watch events limited to
+//!   create/modify-data/remove/rename — metadata churn (atime) from the
+//!   reload's own reads must not re-trigger it. On success, terminate
+//!   listeners' TLS configurations are rebuilt from the new snapshot and
+//!   the active health probe loops (DW-013) are respawned against the new
+//!   generation (endpoints persisting across the swap keep their health
+//!   trackers).
 //! - Certificate hot reload: cert/key files of terminate listeners are
 //!   watched; a change rebuilds the `ServerConfig` behind an `ArcSwap`
 //!   WITHOUT dropping connections. New handshakes use the new material;
@@ -155,9 +160,30 @@ async fn reload(
 ) {
     let old = state.snapshot();
     match source.load().await {
-        Ok(gateway) => match state.compile_and_publish(&gateway) {
-            Ok(info) => {
-                tracing::info!(
+        Ok(gateway) => {
+            // File-watch reloads of identical content are no-ops: the
+            // generation only moves when content changes (editors and
+            // the admin API's atomic rename both re-deliver events for
+            // already-current content). SIGHUP stays a forced reload —
+            // operators use it to re-publish and reset per-generation
+            // state. Compile failures fall through to the publish path,
+            // which reports them without touching the running snapshot.
+            if trigger == "file-watch" {
+                if let Ok(compiled) = dwara_core::snapshot::compile(&gateway) {
+                    if compiled.content_hash() == old.content_hash() {
+                        tracing::info!(
+                            code = "config_reload_unchanged",
+                            trigger,
+                            generation = old.generation(),
+                            "config reload skipped: content unchanged"
+                        );
+                        return;
+                    }
+                }
+            }
+            match state.compile_and_publish(&gateway) {
+                Ok(info) => {
+                    tracing::info!(
                     code = "config_reloaded",
                     trigger,
                     from_generation = old.generation(),
@@ -170,31 +196,32 @@ async fn reload(
                     info.route_count,
                     old.generation(),
                 );
-                dp.refresh();
-                refresh_tls_states(&state.snapshot(), tls_states, trigger);
-                // Active health checks (DW-013): probe loops are per
-                // generation — cancel the old tasks and spawn against the
-                // new registry. Endpoints whose address:port persists keep
-                // their health trackers (carried by the balancer), so an
-                // ejection streak survives the swap.
-                probes.respawn(&dp.registry(), &state.snapshot());
+                    dp.refresh();
+                    refresh_tls_states(&state.snapshot(), tls_states, trigger);
+                    // Active health checks (DW-013): probe loops are per
+                    // generation — cancel the old tasks and spawn against the
+                    // new registry. Endpoints whose address:port persists keep
+                    // their health trackers (carried by the balancer), so an
+                    // ejection streak survives the swap.
+                    probes.respawn(&dp.registry(), &state.snapshot());
+                }
+                Err(err) => {
+                    // CompileError::Validation's Display lists every issue.
+                    tracing::error!(
+                        code = "config_reload_rejected",
+                        trigger,
+                        "config reload rejected: {err}"
+                    );
+                    tracing::error!(
+                        code = "config_reload_kept_previous",
+                        generation = old.generation(),
+                        "keeping running generation {} (content_hash={:#x})",
+                        old.generation(),
+                        old.content_hash()
+                    );
+                }
             }
-            Err(err) => {
-                // CompileError::Validation's Display lists every issue.
-                tracing::error!(
-                    code = "config_reload_rejected",
-                    trigger,
-                    "config reload rejected: {err}"
-                );
-                tracing::error!(
-                    code = "config_reload_kept_previous",
-                    generation = old.generation(),
-                    "keeping running generation {} (content_hash={:#x})",
-                    old.generation(),
-                    old.content_hash()
-                );
-            }
-        },
+        }
         Err(err) => {
             tracing::error!(
                 code = "config_reload_read_failed",
@@ -259,6 +286,18 @@ fn spawn_file_watcher(
     let mut watcher =
         notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
             let Ok(event) = event else { return };
+            // Metadata-only churn (atime/ctime) and access events must
+            // not trigger reloads: on Linux inotify, a reload re-reads
+            // the file, the read bumps atime, IN_ATTRIB re-fires the
+            // watcher — a self-sustaining reload loop at the debounce
+            // cadence. Only creation, data modification, removal, and
+            // rename events count.
+            match event.kind {
+                notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                | notify::EventKind::Access(_)
+                | notify::EventKind::Other => return,
+                _ => {}
+            }
             let touches_target = event
                 .paths
                 .iter()

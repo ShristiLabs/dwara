@@ -1176,7 +1176,11 @@ validates, and publishes a new generation atomically; the route table
 and the upstream connection pools hot-swap together, so a new route
 never runs against old pools; upstream endpoint sets, weights, and
 load-balancer settings swap in the same atomic publish. In-flight requests keep the generation
-they started with until they complete. A rejected
+they started with until they complete. A file-watch reload of
+UNCHANGED content is a no-op (the generation only moves when the
+content changes; editors and the admin API's atomic rename re-deliver
+events for already-current content), while SIGHUP always re-publishes
+(forced reload). A rejected
 reload (unreadable, parse, or validation failure) logs every issue and
 keeps serving the running generation — the process never exits on a
 bad reload. If the file watch cannot start, SIGHUP reload still works.
@@ -1318,8 +1322,8 @@ certificate (or one from the wrong CA) fails the TLS handshake.
   leaves either the old or the new document, never a torn one, and
   restarts observe exactly what was published) and then published to
   the running dataplane. Consequences: the config watcher also
-  observes the rename and re-publishes the identical content
-  (generation advances once more, harmlessly), and the response
+  observes the rename but its reload of identical content is a no-op
+  (the generation does not advance again), and the response
   carries the new generation, content hash, and route count. A body
   over 4 MiB is rejected 413; concurrent PATCHes are serialized.
 - `GET /health` — readiness (at least one published generation), the
