@@ -90,9 +90,16 @@ Rules for new code:
   from the facade. The directory structure is the extraction seam —
   keep domains self-contained so promotion is a `git mv` plus Cargo
   manifest work, not a rewrite.
-- **Tests** live in `crates/dwara-core/tests/<domain or suite>.rs`
-  (integration, process-level where possible) and in `#[cfg(test)]`
-  modules beside the code they test (unit). New suites must be
+- **Tests live in `tests/`, not `src/`.** `crates/dwara-core/tests/`
+  holds integration suites (`<domain>.rs`, process-level where
+  possible) and the relocated unit tests (`tests/unit/`, one mod file
+  per source module behind a single `main.rs` binary to bound CI link
+  time). The ONLY tests allowed in `src/` are white-box tests of
+  private internals that cannot be expressed through the public API —
+  each carries a comment saying why it stays (e.g. raw-SQL introspection
+  of the store's connection). Current residuals: `state/store.rs`,
+  `dataplane/{balance,upstream,proxy}.rs`, and the `dwara-loadgen` bin
+  (bin targets are not importable from `tests/`). New suites must be
   deterministic under load: bounded polls, unique ports, generous
   margins; see the Test map below.
 - **Feature flags** are declared in the owning crate's `Cargo.toml`
@@ -213,6 +220,7 @@ implementations without touching call sites — extend, do not break them.
 
 | Area | Suites |
 |---|---|
+| Unit (relocated from src) | `tests/unit/*` (one file per source module; white-box residuals stay in `src/` with justification comments) |
 | Config schema / validation | `config_schema`, `config_schema_extended`, `snapshot_pipeline` |
 | Routing | `router_golden` (golden files), `proxy_coverage` |
 | Proxy behavior | `proxy`, `proxy_coverage` |

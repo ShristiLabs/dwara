@@ -199,7 +199,9 @@ pub fn sha256_stored_hash(secret: &str) -> String {
 /// comparing hex strings byte-wise is length-equal and timing-uniform).
 /// Supported formats: `sha256:<hex>` and PHC argon2id strings
 /// (`$argon2id$...`). Unknown formats verify false (never accept).
-fn verify_secret(stored_hash: &str, presented: &str) -> bool {
+///
+/// Public for testing the stored-hash verification contract.
+pub fn verify_secret(stored_hash: &str, presented: &str) -> bool {
     if let Some(hexdigest) = stored_hash.strip_prefix("sha256:") {
         if hexdigest.len() != 64 || !hexdigest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return false;
@@ -767,7 +769,8 @@ fn algorithm_family(alg: Algorithm) -> String {
     }
 }
 
-fn parse_algorithms(names: &[String]) -> Option<Vec<Algorithm>> {
+/// Public for testing the JWT algorithm-allowlist contract.
+pub fn parse_algorithms(names: &[String]) -> Option<Vec<Algorithm>> {
     use std::str::FromStr as _;
     if names.is_empty() {
         return None;
@@ -1103,96 +1106,3 @@ pub const CONSUMER_HEADER_PREFIX: &str = "x-consumer-";
 /// The trusted consumer-identity header the gateway injects upstream.
 pub const X_CONSUMER_NAME: hyper::header::HeaderName =
     hyper::header::HeaderName::from_static("x-consumer-name");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selector_and_hash_are_sha256_hex_not_plaintext() {
-        let key = "secret-key";
-        let selector = credential_selector(key);
-        assert_eq!(selector.len(), 64);
-        assert!(selector.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert!(!selector.contains(key));
-        assert_eq!(sha256_stored_hash(key), format!("sha256:{selector}"));
-        // SHA-256 of the empty string, well-known vector.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn verify_secret_accepts_and_rejects() {
-        let stored = sha256_stored_hash("hunter2");
-        assert!(verify_secret(&stored, "hunter2"));
-        assert!(!verify_secret(&stored, "hunter3"));
-        // Unknown hash formats never accept.
-        assert!(!verify_secret("plaintext", "plaintext"));
-        assert!(!verify_secret("sha256:short", "x"));
-    }
-
-    #[test]
-    fn verify_secret_handles_argon2id_phc_strings() {
-        use argon2::password_hash::{PasswordHasher as _, SaltString};
-        use argon2::Argon2;
-        // Mint a real PHC string at test time (memory-hard hashing is
-        // slow; one hash per test run is fine). The salt is fixed test
-        // material to avoid pulling a rand feature.
-        let salt = SaltString::from_b64("c2FsdHNhbHRzYWx0c2FsdHNhbHQ").unwrap();
-        let phc = Argon2::default()
-            .hash_password(b"password", &salt)
-            .unwrap()
-            .to_string();
-        assert!(phc.starts_with("$argon2id$"));
-        assert!(verify_secret(&phc, "password"));
-        assert!(!verify_secret(&phc, "passwordd"));
-        // A malformed PHC string never accepts.
-        assert!(!verify_secret("$argon2id$garbage", "password"));
-    }
-
-    #[test]
-    fn algorithm_allowlist_rejects_symmetric_and_none() {
-        assert!(parse_algorithms(&["RS256".into(), "ES256".into()]).is_some());
-        assert!(parse_algorithms(&["HS256".into()]).is_none());
-        assert!(parse_algorithms(&["none".into()]).is_none());
-        assert!(parse_algorithms(&[]).is_none());
-        assert!(parse_algorithms(&["GARBAGE".into()]).is_none());
-    }
-
-    #[test]
-    fn config_registry_hashes_keys_and_drops_plaintext() {
-        let gateway = crate::config::parse_gateway(
-            "consumers:\n  - name: acme\n    credentials:\n      - type: api_key\n        key: \
-             sekrit\n",
-        )
-        .unwrap();
-        let registry = CredentialRegistry::from_config(&gateway);
-        let CredentialRegistry::Config(map) = &registry else {
-            panic!("config registry");
-        };
-        let entry = map.get(&credential_selector("sekrit")).unwrap();
-        assert_eq!(entry.len(), 1);
-        assert_eq!(entry[0].consumer_name, "acme");
-        assert_eq!(entry[0].hash, sha256_stored_hash("sekrit"));
-        // No plaintext anywhere in the registry.
-        let dumped = format!("{map:?}");
-        assert!(!dumped.contains("sekrit"));
-    }
-
-    #[tokio::test]
-    async fn disabled_composite_is_anonymous_for_anything() {
-        use hyper::header::HeaderValue;
-        let gateway = crate::config::parse_gateway("routes:\n").unwrap();
-        let auth = CompositeAuthenticator::build(&gateway, None, &mut HashMap::new(), None);
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            hyper::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer abc.def.ghi"),
-        );
-        headers.insert(X_API_KEY, HeaderValue::from_static("whatever"));
-        assert_eq!(auth.authenticate(&headers).await.unwrap(), None);
-        assert_eq!(auth.challenge(), "Bearer");
-    }
-}

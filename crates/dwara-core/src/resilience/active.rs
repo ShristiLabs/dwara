@@ -126,7 +126,9 @@ impl ActiveParams {
 /// Report parameters for probe outcomes: the passive window/eject/half-open
 /// parameters with the ACTIVE thresholds substituted and the ratio rule
 /// disabled (see the module docs).
-fn report_params(active: &ActiveParams, passive: &HealthParams) -> HealthParams {
+///
+/// Public for testing the probe report-parameters contract.
+pub fn report_params(active: &ActiveParams, passive: &HealthParams) -> HealthParams {
     HealthParams {
         window_ms: passive.window_ms,
         consecutive_failures: active.failure_threshold.max(1),
@@ -250,7 +252,8 @@ fn webpki_roots_store() -> rustls::RootCertStore {
 // same approach as the balancer's random-2).
 static JITTER_RNG: AtomicU64 = AtomicU64::new(0x853c_49e6_748f_ea9b);
 
-fn next_below(bound_ms: u64) -> u64 {
+/// Public for testing the probe-jitter bound contract.
+pub fn next_below(bound_ms: u64) -> u64 {
     if bound_ms == 0 {
         return 0;
     }
@@ -437,47 +440,5 @@ impl ActiveProbes {
     pub fn task_count(&mut self) -> usize {
         while self.tasks.try_join_next().is_some() {}
         self.tasks.len()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn full_jitter_stays_in_bounds() {
-        for bound in [1u64, 100, 500] {
-            for _ in 0..200 {
-                let v = next_below(bound);
-                assert!(v < bound, "{v} not below {bound}");
-            }
-        }
-        assert_eq!(next_below(0), 0);
-    }
-
-    #[test]
-    fn report_params_swap_thresholds_and_disable_ratio() {
-        let active = ActiveParams {
-            kind: ProbeKind::Http,
-            path: "/x".into(),
-            interval: Duration::from_millis(10),
-            timeout: Duration::from_millis(5),
-            success_threshold: 2,
-            failure_threshold: 4,
-            jitter: Duration::ZERO,
-        };
-        let passive = HealthParams {
-            window_ms: 1_000,
-            consecutive_failures: 9,
-            failure_ratio: 0.5,
-            failure_min_volume: 5,
-            eject_ms: 2_000,
-            half_open_probes: 1,
-        };
-        let p = report_params(&active, &passive);
-        assert_eq!(p.consecutive_failures, 4);
-        assert_eq!(p.failure_min_volume, u32::MAX);
-        assert_eq!(p.eject_ms, 2_000);
-        assert_eq!(p.window_ms, 1_000);
     }
 }
