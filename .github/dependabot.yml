@@ -1,0 +1,15 @@
+# Pin freshness for the SHA-pinned actions in .github/workflows/ (#119).
+# Every `uses:` reference is pinned to a full 40-char commit SHA (with a
+# `# pinned: <tag> @ <short-sha>` comment naming the tag it was resolved
+# from), so a hijacked upstream tag cannot execute code in CI. Dependabot
+# watches the github-actions ecosystem and opens weekly PRs moving each
+# pin to the release tagged with the same major, which keeps the pins
+# fresh without restoring floating tags. A single `directory: "/"` entry
+# covers all workflow files; weekly matches the repo's compute-conscious
+# posture (low PR volume, reviews batch naturally).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

@@ -133,3 +133,9 @@ the project follows semantic versioning once 1.0 is reached.
   watcher's reload of identical content is a no-op.
 - Gateway-generated responses use a uniform JSON error envelope
   (`{error:{code,message,request_id}}`).
+
+### Security
+
+- All GitHub Actions references pinned to full commit SHAs (first- and
+  third-party) with weekly Dependabot updates keeping the pins fresh
+  (DW-002 follow-up).

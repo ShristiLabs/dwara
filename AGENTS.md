@@ -281,6 +281,11 @@ implementations without touching call sites — extend, do not break them.
   never on PRs.
 - `release-artifacts.yml`: tag-only (`v*`), musl binaries with a 25 MB bar
   and GHCR multi-arch images.
+- Every action ref across `.github/workflows/` is pinned to a full commit
+  SHA (with a `# pinned: <tag> @ <sha>` comment naming the source tag);
+  Dependabot (`github-actions`, weekly, `.github/dependabot.yml`) keeps
+  the pins fresh — reviewers should not accept unpinned third-party
+  actions.
 
 ## Quickstart sanity check
 

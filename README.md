@@ -1679,7 +1679,9 @@ manifests, toolchain files, or the workflow itself change). Blocking
 gates: `cargo fmt --check`, clippy with `-D warnings`, build, tests,
 and [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) checks
 (advisories, licenses, bans — policy in `deny.toml`). A CycloneDX SBOM
-is generated and uploaded as an artifact on each run.
+is generated and uploaded as an artifact on each run. Every `uses:`
+reference in the workflows is pinned to a full commit SHA; Dependabot
+opens weekly PRs to keep the pins fresh.
 
 Run the same checks locally:
 
