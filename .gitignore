@@ -23,3 +23,5 @@ target
 # Python bytecode from bench-baseline.py runs
 __pycache__/
 *.pyc
+.sdlc
+docs-internal
