@@ -267,13 +267,28 @@ async fn access_log_line_has_fields_and_redacts_query() {
     assert_eq!(resp.status(), StatusCode::OK);
     let _ = body_text(resp).await;
 
-    let events = cap.events.lock().unwrap().clone();
-    let access: Vec<_> = events
+    // The access line is emitted after response completion — emission
+    // races the test's read under load. Bounded poll for exactly one
+    // line (a second line would be a bug; zero just means not yet).
+    let mut events;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        events = cap.events.lock().unwrap().clone();
+        let lines = events.iter().filter(|(t, _)| t == "dwara::access").count();
+        if lines == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected exactly one access line, got {events:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let fields = &events
         .iter()
-        .filter(|(t, _)| t == "dwara::access")
-        .collect();
-    assert_eq!(access.len(), 1, "exactly one access line, got {events:?}");
-    let fields = &access[0].1;
+        .find(|(t, _)| t == "dwara::access")
+        .expect("just counted")
+        .1;
     assert_eq!(
         field(fields, "path"),
         "/api/things",
@@ -287,7 +302,8 @@ async fn access_log_line_has_fields_and_redacts_query() {
     assert_eq!(field(fields, "attempts"), "1");
     assert_eq!(field(fields, "status"), "200");
     // The serialized capture must not carry the query token anywhere.
-    let all = format!("{events:?}");
+    let all_events = cap.events.lock().unwrap().clone();
+    let all = format!("{all_events:?}");
     assert!(!all.contains("supersecretvalue"));
 }
 
