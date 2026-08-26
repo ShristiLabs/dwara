@@ -1,0 +1,1371 @@
+//! Protocol hardening integration tests (DW-023, feature analysis 4.20).
+//!
+//! Done-when coverage, driven against the REAL binary over raw TCP
+//! sockets (no client library — the point is to control the exact wire
+//! bytes):
+//!
+//! - **Smuggling corpus**: requests carrying both Content-Length and
+//!   Transfer-Encoding (both header orders, whitespace-obfuscated TE
+//!   values, duplicated CL on top of TE), conflicting duplicate
+//!   Content-Length headers, obfuscated/invalid/obsolete
+//!   Transfer-Encoding values, malformed chunk framing, and oversized
+//!   chunk extensions. Every entry must be REJECTED by the gateway
+//!   (400/431 or connection close) and must never forward the smuggled
+//!   second request to the upstream (hit-count assertion against a real
+//!   counting backend). Structural argument this pins: hyper 1.x rejects
+//!   CL+TE ambiguity at parse time, and the gateway rebuilds every
+//!   forwarded request from parsed parts — there is no raw-passthrough
+//!   path a desync could ride.
+//! - **Sniff-guard false-positive sweep**: the pre-parse CL+TE guard is
+//!   header-NAME anchored and stops at the head's blank line, so legal
+//!   traffic (TE-only, CL-only, "Transfer-Encoding" inside header
+//!   VALUES/cookies, an `X-Transfer-Encoding` header, CL+TE strings in
+//!   the BODY, clean h2c prefaces) must proxy untouched.
+//! - **Slowloris**: a connection that sends partial headers and stalls
+//!   past `DWARA_HTTP1_HEADER_TIMEOUT_MS` is closed within a precise
+//!   window; headers sent SLOWLY but completing within the window are
+//!   served, and keep-alive survives across the guard.
+//! - **Slow body**: gap semantics — trickling body bytes faster than the
+//!   gap SUCCEED, stalls beyond the gap are cut off, and
+//!   `DWARA_REQUEST_BODY_TIMEOUT_MS=0` disables the wrapper.
+//! - **Parser caps**: the 100-header count cap and the 64 KiB read-buffer
+//!   cap, each pinned just-under (served) and just-over (refused).
+//! - **h2c preface abuse**: the HTTP/2 preface followed by garbage closes
+//!   the connection instead of desyncing it.
+//! - **Admin surface**: the dev-mode loopback admin listener applies the
+//!   same slowloris timeout and the same CL+TE rejection.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+struct ServerGuard(Child);
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+    listener.local_addr().expect("no local addr").port()
+}
+
+fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
+    while Instant::now() < deadline {
+        if TcpStream::connect(addr).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A real counting upstream: records every request line it serves (across
+/// keep-alive connections AND pipelined requests) so tests can assert the
+/// smuggled "second request" never arrived. Reads with a timeout so a
+/// truncated body (the malformed-chunk case) ends the connection instead
+/// of hanging the thread.
+#[allow(dead_code)] // kept for sibling-test symmetry; start_server_ex is the entry point
+fn spawn_backend() -> (u16, Arc<Mutex<Vec<String>>>) {
+    spawn_backend_with_read_timeout(Duration::from_millis(500))
+}
+
+/// Same counting backend with a caller-chosen per-read timeout: slow-body
+/// tests stream a LEGAL-but-slow body, and the backend must not time out
+/// first and turn a success case into a connection reset.
+fn spawn_backend_with_read_timeout(read_timeout: Duration) -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("backend bind");
+    let port = listener.local_addr().expect("backend addr").port();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&log);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let log = Arc::clone(&shared);
+            std::thread::spawn(move || run_backend_conn(stream, log, read_timeout));
+        }
+    });
+    (port, log)
+}
+
+fn run_backend_conn(stream: TcpStream, log: Arc<Mutex<Vec<String>>>, read_timeout: Duration) {
+    stream.set_read_timeout(Some(read_timeout)).ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut stream = stream;
+    loop {
+        // Read the request head (up to \r\n\r\n).
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => return, // client closed
+                Ok(_) => {
+                    head.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if head.len() > 64 * 1024 {
+                        return;
+                    }
+                }
+                Err(_) => return, // timeout / reset: drop the connection
+            }
+        }
+        let request_line = head.lines().next().unwrap_or_default().to_string();
+        let content_length = head
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let chunked = head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+        // Read the body so pipelined requests parse correctly.
+        if let Some(n) = content_length {
+            let mut body = vec![0u8; n as usize];
+            if reader.read_exact(&mut body).is_err() {
+                log.lock().unwrap().push(request_line);
+                return;
+            }
+        } else if chunked {
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    return;
+                }
+                let size = line.trim().split(';').next().unwrap_or("");
+                let Ok(sz) = usize::from_str_radix(size, 16) else {
+                    return; // invalid chunk framing: close
+                };
+                let mut chunk = vec![0u8; sz + 2]; // data + CRLF
+                if reader.read_exact(&mut chunk).is_err() {
+                    return;
+                }
+                if sz == 0 {
+                    break;
+                }
+            }
+        }
+        log.lock().unwrap().push(request_line);
+        if stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Spawn the gateway binary proxying everything to the counting backend,
+/// with extra env (the hardening knob overrides under test).
+fn start_server(tag: &str, env: &[(&str, &str)]) -> (String, Arc<Mutex<Vec<String>>>, ServerGuard) {
+    let (addr, _admin, log, guard) = start_server_ex(tag, env, false, Duration::from_millis(500));
+    (addr, log, guard)
+}
+
+/// `start_server`, additionally starting the plaintext dev-mode loopback
+/// ADMIN listener (DWARA_ADMIN_DEV=1) so the admin surface's hardening
+/// posture can be pinned. Returns (data_addr, admin_addr, log, guard).
+fn start_server_admin(
+    tag: &str,
+    env: &[(&str, &str)],
+) -> (String, String, Arc<Mutex<Vec<String>>>, ServerGuard) {
+    start_server_ex(tag, env, true, Duration::from_millis(500))
+}
+
+fn start_server_ex(
+    tag: &str,
+    env: &[(&str, &str)],
+    with_admin: bool,
+    backend_read_timeout: Duration,
+) -> (String, String, Arc<Mutex<Vec<String>>>, ServerGuard) {
+    let (backend_port, log) = spawn_backend_with_read_timeout(backend_read_timeout);
+    let addr = format!("127.0.0.1:{}", free_port());
+    let (admin_section, admin_addr) = if with_admin {
+        let port = free_port();
+        (
+            format!(
+                "admin:\n  bind: 127.0.0.1:{port}\n  tls:\n    cert_file: /dev/null\n    key_file: /dev/null\n    client_ca_file: /dev/null\n"
+            ),
+            format!("127.0.0.1:{port}"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    let config = std::env::temp_dir().join(format!(
+        "dwara-dw023-hardening-{}-{}-{tag}.yaml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(
+        &config,
+        format!(
+            "routes:\n\
+             \x20\x20 - name: all\n\
+             \x20\x20   service: svc\n\
+             \x20\x20   match:\n\
+             \x20\x20     path:\n\
+             \x20\x20       type: regex\n\
+             \x20\x20       value: /.*\n\
+             \x20\x20   action:\n\
+             \x20\x20     type: proxy\n\
+             services:\n\
+             \x20\x20 - name: svc\n\
+             \x20\x20   upstream: up\n\
+             upstreams:\n\
+             \x20\x20 - name: up\n\
+             \x20\x20   endpoints:\n\
+             \x20\x20     - address: 127.0.0.1\n\
+             \x20\x20       port: {backend_port}\n{admin_section}"
+        ),
+    )
+    .unwrap();
+    let stderr_log = std::env::temp_dir().join(format!(
+        "dwara-dw023-hardening-{}-{}-{tag}.stderr",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_BIND", &addr)
+        .env("DWARA_CONFIG", &config)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&stderr_log).expect("stderr log"));
+    if with_admin {
+        cmd.env("DWARA_ADMIN_DEV", "1");
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().expect("failed to spawn dwara binary");
+    let guard = ServerGuard(child);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr} within 10s"
+    );
+    if with_admin {
+        assert!(
+            wait_for_ready(&admin_addr, Instant::now() + Duration::from_secs(10)),
+            "admin listener did not become ready on {admin_addr} within 10s"
+        );
+    }
+    std::fs::remove_file(&config).ok();
+    std::fs::remove_file(&stderr_log).ok();
+    eprintln!("dwara {tag} on {addr}, stderr: {}", stderr_log.display());
+    (addr, admin_addr, log, guard)
+}
+
+/// Send raw bytes, then read whatever the gateway sends back until EOF or
+/// the deadline. Err(Timeout) means the gateway neither closed nor
+/// answered within the bound.
+fn exchange(addr: &str, bytes: &[u8], deadline: Duration) -> Result<String, &'static str> {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream.write_all(bytes).expect("write request");
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if started.elapsed() > deadline {
+            return Err("gateway neither responded nor closed within the bound");
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Ok(String::from_utf8_lossy(&out).into_owned()),
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                // Keep-alive: stop as soon as a complete response HEAD is
+                // in hand (the server will not close the connection).
+                if out.windows(4).any(|w| w == b"\r\n\r\n") {
+                    return Ok(String::from_utf8_lossy(&out).into_owned());
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Ok(String::from_utf8_lossy(&out).into_owned()),
+        }
+    }
+}
+
+fn assert_not_smuggled(log: &Arc<Mutex<Vec<String>>>) {
+    let requests = log.lock().unwrap();
+    for r in requests.iter() {
+        assert!(
+            !r.contains("smuggled"),
+            "smuggled request reached the upstream: {r:?} (full log: {requests:?})"
+        );
+    }
+}
+
+/// Upstream cleanliness for REJECTED requests: the counting backend saw
+/// ZERO requests, so nothing (not even a partial attempt) leaked through.
+fn assert_upstream_saw_nothing(log: &Arc<Mutex<Vec<String>>>) {
+    let requests = log.lock().unwrap();
+    assert!(
+        requests.is_empty(),
+        "rejected requests must never reach the upstream: {requests:?}"
+    );
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Read one complete proxied response (head + the backend's fixed 2-byte
+/// "ok" body) off a keep-alive stream, polling past read timeouts.
+fn read_one_response(stream: &mut TcpStream, deadline: Duration) -> String {
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        assert!(
+            started.elapsed() < deadline,
+            "no complete response within {deadline:?}; got so far: {}",
+            String::from_utf8_lossy(&out)
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => return String::from_utf8_lossy(&out).into_owned(),
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if let Some(pos) = find_subsequence(&out, b"\r\n\r\n") {
+                    if out.len() >= pos + 4 + 2 {
+                        return String::from_utf8_lossy(&out).into_owned();
+                    }
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return String::from_utf8_lossy(&out).into_owned(),
+        }
+    }
+}
+
+/// A well-formed HTTP/2 frame (no flags, stream 0) for the h2c tests.
+fn h2_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(9 + payload.len());
+    f.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
+    f.push(kind);
+    f.push(0); // flags
+    f.extend_from_slice(&0u32.to_be_bytes());
+    f.extend_from_slice(payload);
+    f
+}
+
+// --- smuggling corpus -------------------------------------------------
+
+/// The classic CL.TE payload: the frontend that honors Content-Length
+/// would treat the chunked terminator and the "second request" as body
+/// bytes; hyper must reject the ambiguity outright.
+const CL_TE: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// TE.CL order: same ambiguity, headers reversed.
+const TE_CL: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// Conflicting duplicate Content-Length values (the 0-vs-32 desync).
+const DUP_CL: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\nContent-Length: 32\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// Transfer-Encoding with a trailing list separator: an invalid coding
+/// list hyper must refuse rather than silently treat as identity.
+const TE_OBFUSCATED_LIST: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked ,\r\nContent-Length: 6\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// OWS-obfuscated "chunked" (extra space after the colon): per the RFC
+/// this IS legal chunked, so hyper alone would frame it — the smuggling
+/// risk is the CL+TE pair itself, which the name-anchored guard rejects.
+const TE_LEADING_SPACE: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\nTransfer-Encoding:  chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// Same with a TAB instead of a space.
+const TE_LEADING_TAB: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\nTransfer-Encoding:\tchunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// CL duplicated (identical values, so hyper alone would accept) on top
+/// of a Transfer-Encoding: the triple is still the smuggling primitive.
+const DUP_CL_PLUS_TE: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// Obsolete `Transfer-Encoding: identity` WITH a Content-Length: the
+/// guard is name-anchored, so the pair is rejected regardless of the
+/// (obsolete) coding value.
+const TE_IDENTITY_WITH_CL: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: identity\r\nContent-Length: 6\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+/// Obsolete `Transfer-Encoding: identity` ALONE: no Content-Length, so
+/// the sniff guard does not apply — hyper's own parser must refuse the
+/// obsolete coding instead of framing the body as identity.
+const TE_IDENTITY_ALONE: &[u8] = b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: identity\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+
+#[test]
+fn cl_plus_te_is_rejected_not_forwarded() {
+    let (addr, log, _server) = start_server("clte", &[]);
+    for payload in [CL_TE, TE_CL] {
+        let response =
+            exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+        assert!(
+            response.starts_with("HTTP/1.1 400") || response.is_empty(),
+            "CL+TE ambiguity must be a 400 or close, got: {response}"
+        );
+    }
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+#[test]
+fn conflicting_duplicate_content_length_is_rejected() {
+    let (addr, log, _server) = start_server("dupcl", &[]);
+    let response =
+        exchange(&addr, DUP_CL, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400") || response.is_empty(),
+        "conflicting duplicate Content-Length must be a 400 or close, got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+#[test]
+fn obfuscated_transfer_encoding_is_rejected() {
+    let (addr, log, _server) = start_server("teobf", &[]);
+    let response = exchange(&addr, TE_OBFUSCATED_LIST, Duration::from_secs(5))
+        .expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400") || response.is_empty(),
+        "obfuscated Transfer-Encoding must be a 400 or close, got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+#[test]
+fn whitespace_obfuscated_te_and_duplicated_cl_plus_te_are_rejected() {
+    let (addr, log, _server) = start_server("tews", &[]);
+    for payload in [TE_LEADING_SPACE, TE_LEADING_TAB, DUP_CL_PLUS_TE] {
+        let response =
+            exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+        assert!(
+            response.starts_with("HTTP/1.1 400") || response.is_empty(),
+            "CL+TE with whitespace-obfuscated TE / duplicated CL must be a 400 or close, got: {response}"
+        );
+    }
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+#[test]
+fn obsolete_te_identity_is_rejected() {
+    let (addr, log, _server) = start_server("teident", &[]);
+    // With CL: the sniff guard rejects the pair by header NAME.
+    let response = exchange(&addr, TE_IDENTITY_WITH_CL, Duration::from_secs(5))
+        .expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400") || response.is_empty(),
+        "TE identity + CL must be a 400 or close, got: {response}"
+    );
+    // Alone: no CL, so the sniff guard does not apply — hyper's own
+    // parser refuses the obsolete coding with a 400 (pinned) and never
+    // frames the suffix as a second request.
+    let response = exchange(&addr, TE_IDENTITY_ALONE, Duration::from_secs(5))
+        .expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "obsolete TE identity must be refused with 400, got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+/// Case-insensitive "Chunked" is legal chunked framing per the RFC (the
+/// token is case-insensitive), so the safety property is not "reject" but
+/// "no desync": the request frames deterministically and the smuggled
+/// suffix is NEVER interpreted as body-embedded second request reaching
+/// the upstream in parsed-ambiguity. The backend must see only complete,
+/// correctly framed requests.
+#[test]
+fn case_variant_transfer_encoding_frames_without_desync() {
+    let (addr, log, _server) = start_server("tecase", &[]);
+    let payload = b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: Chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "legal chunked (case variant) must proxy cleanly, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one framed request, no desync: {requests:?}"
+    );
+    assert!(requests[0].starts_with("POST /first"));
+}
+
+/// Small chunk extensions are legal framing (RFC 9112 7.1.1) and must
+/// proxy cleanly — the guard and parser only bound the SIZE, not the
+/// presence, of extensions.
+#[test]
+fn small_chunk_extensions_are_proxied() {
+    let (addr, log, _server) = start_server("chunkext", &[]);
+    let payload = b"POST /ext HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3;key=val\r\nabc\r\n0;final=yes\r\n\r\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "small chunk extensions must proxy cleanly, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one framed request: {requests:?}");
+    assert!(requests[0].starts_with("POST /ext"));
+}
+
+/// A chunk-size line carrying a ~100 KB extension cannot fit inside the
+/// 64 KiB read buffer, so the parse must fail (connection close) instead
+/// of pinning unbounded memory — and nothing may reach the upstream.
+#[test]
+fn giant_chunk_extension_is_rejected() {
+    let (addr, log, _server) = start_server("chunkgiant", &[]);
+    let mut payload =
+        b"POST /ext HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    payload.extend_from_slice(b"A;");
+    payload.extend(std::iter::repeat_n(b'e', 100 * 1024));
+    payload.extend_from_slice(b"\r\n0123456789\r\n0\r\n\r\n");
+    let response =
+        exchange(&addr, &payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "giant chunk extension must not be served, got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+#[test]
+fn malformed_chunk_size_is_rejected_mid_body() {
+    let (addr, log, _server) = start_server("badchunk", &[]);
+    let payload =
+        b"POST /first HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\nAAAA\r\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    // hyper aborts the exchange mid-body; it must NOT answer 200 as if
+    // the request were well-formed (a 4xx/5xx from the gateway's own
+    // classifier or a bare close are both correct outcomes).
+    let status = response.lines().next().unwrap_or_default();
+    assert!(
+        status.contains(" 400") || status.contains(" 5") || response.is_empty(),
+        "malformed chunk framing must fail, got: {response}"
+    );
+    assert_not_smuggled(&log);
+}
+
+/// Header-count cap boundary (DWARA_HTTP1_MAX_HEADERS, default 100):
+/// a request with exactly 100 header lines is served; 101 is refused
+/// with hyper's 431 (Request Header Fields Too Large).
+#[test]
+fn header_count_at_the_cap_is_served_and_cap_plus_one_is_refused() {
+    let (addr, log, _server) = start_server("hdrcount", &[]);
+    let request = |total: usize| {
+        // Host + Connection are two of the `total` header lines.
+        let mut req = String::from("GET /count HTTP/1.1\r\nHost: h\r\n");
+        for i in 0..(total - 2) {
+            req.push_str(&format!("X-Pad-{i:03}: v\r\n"));
+        }
+        req.push_str("Connection: close\r\n\r\n");
+        req.into_bytes()
+    };
+    let response = exchange(&addr, &request(100), Duration::from_secs(5)).expect("at-cap answers");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "exactly 100 headers (the cap) must be served, got: {response}"
+    );
+    let response =
+        exchange(&addr, &request(101), Duration::from_secs(5)).expect("over-cap answers");
+    assert!(
+        response.starts_with("HTTP/1.1 431"),
+        "101 headers must be refused with 431, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the at-cap request is proxied: {requests:?}"
+    );
+}
+
+/// Read-buffer cap boundary (DWARA_HTTP1_MAX_BUF_KIB, default 64): a
+/// single ~48 KiB header value fits and is served; an ~80 KiB one cannot
+/// fit the buffer and the connection is refused with a 431-class answer.
+#[test]
+fn header_value_under_the_buffer_cap_is_served_over_is_refused() {
+    let (addr, log, _server) = start_server("hdrbuf", &[]);
+    let request = |value_len: usize| {
+        format!(
+            "GET /big HTTP/1.1\r\nHost: h\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(value_len)
+        )
+        .into_bytes()
+    };
+    let response =
+        exchange(&addr, &request(48 * 1024), Duration::from_secs(5)).expect("under-cap answers");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a 48 KiB header value must be served, got: {} bytes: {:?}",
+        response.len(),
+        response.chars().take(80).collect::<String>()
+    );
+    let response =
+        exchange(&addr, &request(80 * 1024), Duration::from_secs(5)).expect("over-cap answers");
+    assert!(
+        response.starts_with("HTTP/1.1 431"),
+        "an 80 KiB header value must be refused with 431, got: {} bytes",
+        response.len()
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the under-cap request is proxied: {requests:?}"
+    );
+}
+
+#[test]
+fn h2c_preface_followed_by_garbage_is_closed() {
+    let (addr, _log, _server) = start_server("h2c", &[]);
+    let mut payload = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+    payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0xFF, 0xFF]);
+    let response =
+        exchange(&addr, &payload, Duration::from_secs(5)).expect("gateway closes the connection");
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "garbage after the h2c preface must not be served as HTTP/1.1, got: {response}"
+    );
+}
+
+// --- sniff-guard false-positive sweep ----------------------------------
+
+/// POST with Transfer-Encoding chunked ONLY (no Content-Length): legal
+/// framing, must proxy.
+#[test]
+fn te_only_chunked_post_proxies_cleanly() {
+    let (addr, log, _server) = start_server("teonly", &[]);
+    let payload = b"POST /teonly HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "TE-only chunked POST must proxy, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /teonly"));
+}
+
+/// POST with Content-Length ONLY (no Transfer-Encoding): legal framing,
+/// must proxy.
+#[test]
+fn cl_only_post_proxies_cleanly() {
+    let (addr, log, _server) = start_server("clonly", &[]);
+    let payload = b"POST /clonly HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nbody";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "CL-only POST must proxy, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /clonly"));
+}
+
+/// The strings "Transfer-Encoding" / "Content-Length" inside HEADER
+/// VALUES and cookies are not headers: the guard is header-NAME anchored
+/// (it splits at the FIRST colon of each line), so this must NOT trip.
+#[test]
+fn transfer_encoding_in_header_values_and_cookies_does_not_trip() {
+    let (addr, log, _server) = start_server("fpvalue", &[]);
+    let payload = b"POST /note HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX-Note: Transfer-Encoding: chunked\r\nCookie: spec=\"Content-Length: 6; Transfer-Encoding: chunked\"\r\n\r\nabc";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "header values mentioning Transfer-Encoding must not trip the guard, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /note"));
+}
+
+/// A header literally named `X-Transfer-Encoding` is NOT
+/// `Transfer-Encoding`: must not trip the name-anchored guard.
+#[test]
+fn x_transfer_encoding_header_name_does_not_trip() {
+    let (addr, log, _server) = start_server("fpxte", &[]);
+    let payload = b"POST /xte HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX-Transfer-Encoding: chunked\r\n\r\nabc";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "X-Transfer-Encoding must not trip the guard, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /xte"));
+}
+
+/// Payload BYTES containing the header strings are BODY, not headers:
+/// the sniff ends at the head's blank line, so a CL-framed (and a
+/// TE-framed) request whose body embeds "Content-Length" /
+/// "Transfer-Encoding" text must proxy untouched. This is the classic
+/// false-positive shape for a naive substring scanner.
+#[test]
+fn cl_te_strings_in_the_body_do_not_trip() {
+    let (addr, log, _server) = start_server("fpbody", &[]);
+    // CL-framed request whose body embeds both header strings.
+    let body = "GET /embedded HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n0\r\n\r\n";
+    let payload = format!(
+        "POST /bodystrings HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = exchange(&addr, payload.as_bytes(), Duration::from_secs(5))
+        .expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "CL+TE strings in the BODY must not trip the guard, got: {response}"
+    );
+    // TE-framed request whose chunked body embeds a Content-Length line.
+    let body2 = "GET /embedded2 HTTP/1.1\r\nContent-Length: 6\r\n\r\n";
+    let payload2 = format!(
+        "POST /bodystrings2 HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body2}\r\n0\r\n\r\n",
+        body2.len()
+    );
+    let response = exchange(&addr, payload2.as_bytes(), Duration::from_secs(5))
+        .expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a Content-Length string in a chunked BODY must not trip the guard, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "both requests proxied exactly once: {requests:?}"
+    );
+    assert!(requests.iter().any(|r| r.starts_with("POST /bodystrings")));
+    assert!(requests.iter().any(|r| r.starts_with("POST /bodystrings2")));
+}
+
+/// The h2c prior-knowledge preface with clean SETTINGS/PING frames must
+/// pass the h1 sniff untouched (no HTTP/1.x rejection) and leave the
+/// connection open for real h2 traffic.
+#[test]
+fn h2c_preface_with_clean_frames_is_not_sniff_rejected() {
+    let (addr, _log, _server) = start_server("h2cclean", &[]);
+    let mut payload = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+    // SETTINGS with six entries (a "big clean preface").
+    let mut settings = Vec::new();
+    for (id, val) in [
+        (1u16, 4096u32),
+        (2, 0),
+        (3, 128),
+        (4, 65535),
+        (5, 16384),
+        (6, 4096),
+    ] {
+        settings.extend_from_slice(&id.to_be_bytes());
+        settings.extend_from_slice(&val.to_be_bytes());
+    }
+    payload.extend(h2_frame(0x4, &settings));
+    payload.extend(h2_frame(0x7, &[0x42; 8])); // PING
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream.write_all(&payload).expect("write preface");
+    // Within a generous window the gateway must NOT answer with an
+    // HTTP/1.x error: hyper's h2 side replies with its own SETTINGS/ACK
+    // (and a PONG for the PING) — binary frames, not "HTTP/1.1 ...". An
+    // idle close AFTER that exchange is fine; the pinned property is
+    // that the preface passed the h1 sniff and was served as h2.
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while started.elapsed() < Duration::from_millis(800) {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    assert!(
+        !text.is_empty(),
+        "clean h2c preface must be answered with h2 frames (SETTINGS/ACK), got nothing"
+    );
+    assert!(
+        !text.contains("HTTP/1.1 4") && !text.contains("HTTP/1.1 5"),
+        "clean h2c preface must not be sniff-rejected, got: {text:?}"
+    );
+}
+
+// --- line-ending conventions and obs-fold -------------------------------
+
+/// A full request using LF-only line endings (head AND body) is legal
+/// under hyper's tolerant h1 parsing: the sniff must stop at the FIRST
+/// blank line (`\n\n`) so the body is never over-buffered into the sniff
+/// (the old bug: 431 or a stall for a healthy bare-LF client).
+#[test]
+fn lf_only_request_head_and_body_proxy_cleanly() {
+    let (addr, log, _server) = start_server("lfonly", &[]);
+    let payload = b"POST /lfonly HTTP/1.1\nHost: h\nContent-Length: 4\n\nbody";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "an LF-only head+body request must proxy cleanly, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /lfonly"));
+}
+
+/// LF-only SMUGGLING must not slip past the guard just because the line
+/// convention changed: a bare-LF head carrying both Content-Length and
+/// Transfer-Encoding: chunked is rejected with 400 and NOTHING reaches
+/// the upstream.
+#[test]
+fn lf_only_cl_te_smuggling_is_rejected() {
+    let (addr, log, _server) = start_server("lfsmuggle", &[]);
+    let payload = b"POST /first HTTP/1.1\nHost: h\nContent-Length: 6\nTransfer-Encoding: chunked\n\n0\n\nGET /smuggled HTTP/1.1\nHost: h\n\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "LF-only CL+TE ambiguity must be a 400, got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+/// Obs-fold (RFC 7230 3.2.4 obsolete line folding) can split a header
+/// NAME across lines — `Transfer-\r\n Encoding: chunked` — slipping the
+/// CL+TE pair past the name-anchored scan. The sniff must reject such
+/// heads with a 400 (code `request_head_obs_fold` on the server side)
+/// and never touch the upstream.
+#[test]
+fn obs_fold_split_transfer_encoding_is_rejected() {
+    let (addr, log, _server) = start_server("obsfold", &[]);
+    let payload = b"POST /first HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\nTransfer-\r\n Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "obs-fold continuation line must be a 400 (request_head_obs_fold), got: {response}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+/// The obs-fold distinction, pinned from the safe side: obs-fold is a
+/// LINE STARTING with SP/HTAB — whitespace AFTER the colon is ordinary
+/// optional whitespace in a header VALUE ("X-Foo:  bar" is perfectly
+/// legal RFC 9112 OWS) and must NOT trip the rejection.
+#[test]
+fn leading_whitespace_in_header_values_is_not_obs_fold() {
+    let (addr, log, _server) = start_server("obsfoldctl", &[]);
+    let payload = b"POST /obsctl HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX-Foo:  bar\r\nX-Tab:\tbaz\r\n\r\nabc";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "extra whitespace after the colon is a VALUE, not obs-fold; must proxy, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("POST /obsctl"));
+}
+
+/// Mixed-convention head terminators hyper tolerates — `\r\n\n` (CRLF
+/// lines, bare-LF blank line) and `\n\r\n` (LF lines, CRLF blank line):
+/// the sniff's head_end stops at the first blank line under either
+/// convention and the request proxies.
+#[test]
+fn crlf_lines_with_lf_blank_line_terminator_proxies() {
+    let (addr, log, _server) = start_server("mixedterm1", &[]);
+    let payload = b"GET /mixed-crlf-lf HTTP/1.1\r\nHost: h\r\n\n";
+    let response =
+        exchange(&addr, payload, Duration::from_secs(5)).expect("gateway answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a \\r\\n\\n terminator (CRLF lines, LF blank) must proxy, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    assert!(requests[0].starts_with("GET /mixed-crlf-lf"));
+}
+
+/// The OTHER mixed convention — LF lines with a CRLF blank line
+/// (`\n\r\n`) — is NOT accepted by hyper's tolerant h1 parser: the stray
+/// `\r` begins a "header line" that can never complete, so the request
+/// is neither served nor smuggled; it is held until the slowloris
+/// header timeout closes the connection. Pinned with a short timeout so
+/// the closure (not the convention's legality) is what the test asserts.
+/// NOTE: the original dispatch pin asked for a 200 here; empirically
+/// hyper only tolerates `\r\n\n` on the happy path — flagged as a
+/// tester finding for the developer to either reject `\n\r\n` at the
+/// sniff (400) or document the limitation.
+#[test]
+fn lf_lines_with_crlf_blank_line_terminator_are_never_served_and_time_out() {
+    let (addr, log, _server) =
+        start_server("mixedterm2", &[("DWARA_HTTP1_HEADER_TIMEOUT_MS", "400")]);
+    let payload = b"GET /mixed-lf-crlf HTTP/1.1\nHost: h\n\r\n";
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream.write_all(payload).expect("write request");
+    let started = Instant::now();
+    let mut buf = [0u8; 256];
+    let mut out = Vec::new();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_millis(1400),
+            "connection neither answered nor closed within the header-timeout window"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    assert!(
+        !text.starts_with("HTTP/1.1 200"),
+        "a \\n\\r\\n terminator must never be SERVED as a legal head, got: {text}"
+    );
+    assert_not_smuggled(&log);
+    assert_upstream_saw_nothing(&log);
+}
+
+// --- slowloris ---------------------------------------------------------
+
+#[test]
+fn stalled_headers_are_closed_within_the_header_timeout_window() {
+    let (addr, _log, _server) =
+        start_server("slowloris", &[("DWARA_HTTP1_HEADER_TIMEOUT_MS", "400")]);
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: h\r\nX-Stall: ")
+        .expect("partial headers");
+    let started = Instant::now();
+    let mut buf = [0u8; 256];
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "server did not close the stalled connection within ~2x the 400 ms window"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => break, // closed by the server
+            Ok(_) => continue,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "closed too fast to be the header timeout ({:?}); wrong code path?",
+        started.elapsed()
+    );
+}
+
+/// Precision pin on the same knob: with a 400 ms header timeout, a fully
+/// stalled connection is closed no earlier than the timeout itself and
+/// no later than 1.5 s (the guard's read timeout and hyper's header
+/// deadline chain: ~2x400 ms expected, 1.5 s gives scheduling margin).
+#[test]
+fn stalled_headers_close_window_is_precise() {
+    let (addr, _log, _server) =
+        start_server("slowlorisprec", &[("DWARA_HTTP1_HEADER_TIMEOUT_MS", "400")]);
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: h\r\nX-Stall: ")
+        .expect("partial headers");
+    let started = Instant::now();
+    let mut buf = [0u8; 256];
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_millis(1400),
+            "stalled connection not closed within 1.4 s"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(380),
+        "closed before the 400 ms header timeout could fire ({elapsed:?})"
+    );
+}
+
+/// Headers sent SLOWLY but COMPLETING within the window are served (the
+/// timeout bounds stalls, not slowness), and keep-alive continuity holds
+/// across the guard: a second request on the same connection works.
+#[test]
+fn slow_but_progressing_headers_complete_and_keep_alive_survives() {
+    let (addr, log, _server) =
+        start_server("slowhdr", &[("DWARA_HTTP1_HEADER_TIMEOUT_MS", "2000")]);
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    let request = b"GET /slowhdr HTTP/1.1\r\nHost: h\r\nX-One: 1\r\nX-Two: 2\r\n\r\n";
+    // Six pieces 150 ms apart: ~750 ms total, well inside the 2000 ms
+    // window (2.6x margin) but far slower than a healthy client.
+    let piece_len = request.len() / 6;
+    for (i, piece) in request.chunks(piece_len).enumerate() {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        stream.write_all(piece).expect("write piece");
+    }
+    let first = read_one_response(&mut stream, Duration::from_secs(5));
+    assert!(
+        first.starts_with("HTTP/1.1 200"),
+        "slowly-sent headers within the window must be served, got: {first}"
+    );
+    // Keep-alive continuity: an immediate second request on the SAME
+    // connection (the one whose head was replayed through the sniff
+    // guard's PrefixedStream) must also work.
+    stream
+        .write_all(b"GET /second HTTP/1.1\r\nHost: h\r\n\r\n")
+        .expect("second request");
+    let second = read_one_response(&mut stream, Duration::from_secs(5));
+    assert!(
+        second.starts_with("HTTP/1.1 200"),
+        "pipelined follow-up after a slow first request must work, got: {second}"
+    );
+    let requests = log.lock().unwrap();
+    assert_eq!(requests.len(), 2, "both requests proxied: {requests:?}");
+}
+
+// --- slow body ---------------------------------------------------------
+
+#[test]
+fn trickling_request_body_errors_out_and_releases_the_slot() {
+    let (addr, log, _server) =
+        start_server("slowbody", &[("DWARA_REQUEST_BODY_TIMEOUT_MS", "400")]);
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: h\r\nContent-Length: 1000\r\n\r\n0123456789")
+        .expect("headers + first bytes");
+
+    // The gateway must answer (classified 5xx) within a bounded window
+    // after the body stalls; a legit 200 would mean the knob is inert.
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let status_line;
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "no response to the stalled body within ~2x the 400 ms gap"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                status_line = String::from_utf8_lossy(&out).into_owned();
+                break;
+            }
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if out.windows(4).any(|w| w == b"\r\n\r\n") {
+                    status_line = String::from_utf8_lossy(&out).into_owned();
+                    break;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => {
+                status_line = String::from_utf8_lossy(&out).into_owned();
+                break;
+            }
+        }
+    }
+    let first_line = status_line.lines().next().unwrap_or_default();
+    assert!(
+        first_line.contains(" 5") || first_line.is_empty(),
+        "stalled body must produce a 5xx or close, got: {first_line}"
+    );
+
+    // Slot release: a fresh request on a new connection proxies fine.
+    let ok = exchange(
+        &addr,
+        b"GET /after HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        Duration::from_secs(5),
+    )
+    .expect("follow-up request completes");
+    assert!(
+        ok.starts_with("HTTP/1.1 200"),
+        "follow-up request after slow-body cutoff must succeed, got: {ok}"
+    );
+    assert_not_smuggled(&log);
+    let requests = log.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.contains("/after")),
+        "follow-up request reached the upstream: {requests:?}"
+    );
+}
+
+/// Gap semantics: a body trickling one byte every 300 ms against a 500 ms
+/// gap is LEGAL (every gap is under the timeout) and must complete —
+/// the knob bounds stalls, not totals.
+#[test]
+fn trickling_body_faster_than_the_gap_succeeds() {
+    let (addr, _admin, log, _server) = start_server_ex(
+        "trickleok",
+        &[("DWARA_REQUEST_BODY_TIMEOUT_MS", "500")],
+        false,
+        Duration::from_secs(3),
+    );
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"POST /trickle HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\n")
+        .expect("headers");
+    for byte in b"0123456789" {
+        std::thread::sleep(Duration::from_millis(300));
+        stream.write_all(&[*byte]).expect("trickled byte");
+    }
+    let response = read_one_response(&mut stream, Duration::from_secs(10));
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a trickling body with gaps under the timeout must succeed, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /trickle")),
+        "trickled request reached the upstream whole: {requests:?}"
+    );
+}
+
+/// A body that STALLS beyond the gap (one write, then 2 s of nothing)
+/// is cut off quickly after the gap elapses, and the concurrency slot is
+/// released (follow-up request succeeds).
+#[test]
+fn body_stall_beyond_the_gap_is_cut_quickly() {
+    let (addr, _admin, log, _server) = start_server_ex(
+        "slowstall",
+        &[("DWARA_REQUEST_BODY_TIMEOUT_MS", "500")],
+        false,
+        Duration::from_secs(3),
+    );
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"POST /stall HTTP/1.1\r\nHost: h\r\nContent-Length: 1000\r\n\r\n0123456789")
+        .expect("headers + first bytes");
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let status_line;
+    let elapsed;
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_millis(2400),
+            "no cutoff within 2.4 s of the body stalling"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                status_line = String::from_utf8_lossy(&out).into_owned();
+                elapsed = started.elapsed();
+                break;
+            }
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if out.windows(4).any(|w| w == b"\r\n\r\n") {
+                    status_line = String::from_utf8_lossy(&out).into_owned();
+                    elapsed = started.elapsed();
+                    break;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => {
+                status_line = String::from_utf8_lossy(&out).into_owned();
+                elapsed = started.elapsed();
+                break;
+            }
+        }
+    }
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "cut before the 500 ms gap could fire ({elapsed:?}); response: {status_line}"
+    );
+    let first_line = status_line.lines().next().unwrap_or_default();
+    assert!(
+        first_line.contains(" 5") || first_line.is_empty(),
+        "stalled body must produce a 5xx or close, got: {first_line}"
+    );
+    let ok = exchange(
+        &addr,
+        b"GET /after HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        Duration::from_secs(5),
+    )
+    .expect("follow-up request completes");
+    assert!(
+        ok.starts_with("HTTP/1.1 200"),
+        "follow-up after the cutoff must succeed, got: {ok}"
+    );
+    assert_not_smuggled(&log);
+}
+
+/// `DWARA_REQUEST_BODY_TIMEOUT_MS=0` disables the wrapper: a long
+/// mid-body stall (1.2 s, far beyond any plausible small gap) is
+/// tolerated and the upload completes.
+#[test]
+fn body_gap_timeout_zero_disables_the_wrapper() {
+    let (addr, _admin, log, _server) = start_server_ex(
+        "gapoff",
+        &[("DWARA_REQUEST_BODY_TIMEOUT_MS", "0")],
+        false,
+        Duration::from_secs(4),
+    );
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"POST /disabled HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n12")
+        .expect("first half");
+    std::thread::sleep(Duration::from_millis(1200));
+    stream.write_all(b"34").expect("second half");
+    let response = read_one_response(&mut stream, Duration::from_secs(10));
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "gap timeout 0 must disable the slow-body cutoff, got: {response}"
+    );
+    let requests = log.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /disabled")),
+        "stalled-then-resumed upload reached the upstream whole: {requests:?}"
+    );
+}
+
+// --- admin surface -----------------------------------------------------
+
+/// The admin listener (dev-mode plaintext loopback) applies the same
+/// slowloris header timeout as the data plane.
+#[test]
+fn admin_surface_applies_slowloris_timeout() {
+    let (_addr, admin, _log, _server) =
+        start_server_admin("adminslow", &[("DWARA_HTTP1_HEADER_TIMEOUT_MS", "400")]);
+    let mut stream = TcpStream::connect(&admin).expect("connect to admin");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: h\r\nX-Stall: ")
+        .expect("partial headers");
+    let started = Instant::now();
+    let mut buf = [0u8; 256];
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_millis(1400),
+            "admin did not close the stalled connection within 1.4 s"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(380),
+        "admin closed before the 400 ms header timeout could fire ({elapsed:?})"
+    );
+}
+
+/// The admin listener rejects a CL+TE smuggling attempt with the same
+/// pre-parse guard policy as the data plane (bare 400 + close).
+#[test]
+fn admin_surface_rejects_cl_te_smuggling() {
+    let (_addr, admin, _log, _server) = start_server_admin("adminclte", &[]);
+    let response =
+        exchange(&admin, CL_TE, Duration::from_secs(5)).expect("admin answers or closes");
+    assert!(
+        response.starts_with("HTTP/1.1 400") || response.is_empty(),
+        "admin surface must reject CL+TE ambiguity, got: {response}"
+    );
+}

@@ -9,6 +9,7 @@ pub mod balance;
 pub mod breaker;
 pub mod config;
 pub mod extensions;
+pub mod hardening;
 pub mod health;
 pub mod migrations;
 pub mod observability;

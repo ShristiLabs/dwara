@@ -38,6 +38,19 @@
 //! The admin listener has its own accept loop and graceful shutdown;
 //! its bind set is fixed at startup (config changes to `admin.bind`
 //! take effect on restart).
+//!
+//! Hardening posture (DW-023): the admin listener shares the
+//! dataplane's parser/amplification bounds and its pre-parse smuggling
+//! guard (the same `dwara_core::hardening::HttpHardening` is applied to
+//! its connection builder), with ONE deliberate asymmetry: request
+//! bodies are NOT wrapped in the slow-body gap wrapper
+//! (`hardening::InboundBody`). The admin surface is mTLS-only (decision
+//! 6 — every client holds a CA-chained certificate), and its bodies are
+//! small JSON/YAML documents already capped DURING streaming by
+//! `MAX_PATCH_BODY`'s `Limited` wrapper, so the per-connection
+//! body-inactivity defense of the data plane would add nothing the TLS
+//! requirement and the mid-stream cap do not already pin; body-stall
+//! protection remains a data-plane concern.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -373,6 +386,26 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
     let request_id = resolve_request_id(req.headers());
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // Same framing-ambiguity rejection as the dataplane (DW-023): a
+    // request carrying both Content-Length and Transfer-Encoding is the
+    // smuggling primitive; the admin surface applies the identical policy.
+    // UNREACHABLE BY DESIGN — belt-and-suspenders insurance (same
+    // reasoning as the dataplane's in-handler check): the pre-parse
+    // sniff in `serve_conn` below rejects the pair on the connection's
+    // first head, hyper's parser refuses it on later keep-alive heads,
+    // and TE-preference normalization strips the Content-Length before
+    // this handler runs. Kept so a future parser change fails CLOSED
+    // here instead of re-admitting the smuggling primitive.
+    if req.headers().contains_key(hyper::header::CONTENT_LENGTH)
+        && req.headers().contains_key(hyper::header::TRANSFER_ENCODING)
+    {
+        return envelope(
+            400,
+            "ambiguous_framing",
+            "request declares both Content-Length and Transfer-Encoding",
+            &request_id,
+        );
+    }
     match (method.as_str(), path.as_str()) {
         // GET /config: credential material (secrets, passwords, keys) is
         // returned in PLAINTEXT — any admin client-cert holder can read
@@ -439,6 +472,10 @@ pub async fn serve(
     mut shutdown: watch::Receiver<()>,
 ) -> std::io::Result<()> {
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    // Same protocol-hardening posture as the data plane (DW-023): the
+    // admin surface parses the same untrusted wire bytes, so the parser
+    // bounds and slowloris timeout apply here too. Read once per serve().
+    let hardening = std::sync::Arc::new(dwara_core::hardening::HttpHardening::from_env());
     let tls_config: Option<Arc<rustls::ServerConfig>> = match mode {
         ListenMode::Mtls(config) => Some(Arc::new(*config)),
         ListenMode::DevPlaintext => None,
@@ -456,6 +493,7 @@ pub async fn serve(
         };
         let watcher = graceful.watcher();
         let ctx = Arc::clone(&ctx);
+        let hardening = Arc::clone(&hardening);
         match &tls_config {
             Some(config) => {
                 let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(config));
@@ -463,12 +501,12 @@ pub async fn serve(
                     // A failed handshake here is the mTLS gate doing its
                     // job (no client cert, or a cert from the wrong CA).
                     if let Ok(tls_stream) = acceptor.accept(stream).await {
-                        serve_conn(watcher, ctx, tls_stream).await;
+                        serve_conn(watcher, ctx, tls_stream, Arc::clone(&hardening)).await;
                     }
                 });
             }
             None => {
-                tokio::spawn(serve_conn(watcher, ctx, stream));
+                tokio::spawn(serve_conn(watcher, ctx, stream, hardening));
             }
         }
     }
@@ -486,10 +524,19 @@ async fn serve_conn<S>(
     watcher: hyper_util::server::graceful::Watcher,
     ctx: Arc<AdminContext>,
     stream: S,
+    hardening: std::sync::Arc<dwara_core::hardening::HttpHardening>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let auto = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    let mut auto =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    hardening.apply(&mut auto);
+    // Pre-parse smuggling guard (DW-023), same policy as the dataplane: a
+    // first request head with both Content-Length and Transfer-Encoding
+    // is answered 400 and closed before the parser ever sees it.
+    let Some(stream) = hardening.guard_connection(stream).await else {
+        return;
+    };
     let conn = watcher.watch(auto.serve_connection(
         hyper_util::rt::TokioIo::new(stream),
         hyper::service::service_fn(move |req| {

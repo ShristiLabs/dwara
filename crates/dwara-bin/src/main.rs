@@ -43,6 +43,19 @@
 //!   admin bind, and must never be set in production (mTLS is the
 //!   admin surface's only authentication). Default: unset = mTLS-only.
 //!   See the `dwara-admin` crate docs for the endpoint set.
+//! - Protocol hardening (DW-023, feature analysis 4.20): every serving
+//!   surface (data-plane listeners AND the admin listener) applies the
+//!   knob set documented in dwara-core's `hardening` module — HTTP/1
+//!   header-count / read-buffer caps and the slowloris header-read
+//!   timeout (`DWARA_HTTP1_MAX_HEADERS`, `DWARA_HTTP1_MAX_BUF_KIB`,
+//!   `DWARA_HTTP1_HEADER_TIMEOUT_MS`), HTTP/2 stream/window/send-buffer
+//!   caps (`DWARA_H2_MAX_CONCURRENT_STREAMS`, `DWARA_H2_STREAM_WINDOW_KIB`,
+//!   `DWARA_H2_CONNECTION_WINDOW_KIB`, `DWARA_H2_MAX_SEND_BUF_KIB`), and
+//!   the inbound request-body inactivity gap
+//!   (`DWARA_REQUEST_BODY_TIMEOUT_MS`, 0 disables). CL+TE smuggling needs
+//!   no knob: hyper 1.x rejects such requests and the gateway rebuilds
+//!   every forwarded request from parsed parts (never raw passthrough);
+//!   both properties are pinned by dwara-bin's protocol-hardening tests.
 //!
 //! Listener modes (DW-007, feature analysis 4.10 / 4.13):
 //! - `http` listener: cleartext; hyper-util's auto builder sniffs the
@@ -86,6 +99,7 @@ use std::time::Duration;
 
 use dwara_core::config::{Listener, ListenerProtocol, TlsMode};
 use dwara_core::extensions::config_source::{ConfigSource, FileConfigSource};
+use dwara_core::hardening::HttpHardening;
 use dwara_core::proxy::{self, DataPlane};
 use dwara_core::snapshot::{ConfigState, Snapshot};
 use dwara_core::store::{sync_consumers_from_config, StateStore};
@@ -306,6 +320,7 @@ async fn bind_listener(
 /// Per-listener accept loop with its own backlog flush (the DW-006 drain
 /// sequence, per listener). Returns when shutdown is signalled and the
 /// backlog is flushed.
+#[allow(clippy::too_many_arguments)] // fixed accept-loop plumbing, DW-023 added the hardening handle
 async fn run_listener(
     bound: BoundListener,
     listener: TcpListener,
@@ -314,6 +329,7 @@ async fn run_listener(
     graceful: Arc<GracefulShutdown>,
     mut shutdown: watch::Receiver<()>,
     timeout: Duration,
+    hardening: Arc<HttpHardening>,
 ) {
     loop {
         let (mut stream, peer) = tokio::select! {
@@ -333,6 +349,7 @@ async fn run_listener(
                 stream,
                 peer,
                 std::sync::Arc::from(bound.name.as_str()),
+                Arc::clone(&hardening),
             ),
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
@@ -379,11 +396,12 @@ async fn run_listener(
                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                 let watcher = graceful.watcher();
                 let dp = Arc::clone(&dp);
+                let hardening = Arc::clone(&hardening);
                 let listener: std::sync::Arc<str> = std::sync::Arc::from(bound.name.as_str());
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
-                            serve_http_tls(watcher, dp, tls_stream, peer, listener);
+                            serve_http_tls(watcher, dp, tls_stream, peer, listener, hardening);
                         }
                         Err(err) => tracing::warn!("tls handshake error: {err}"),
                     }
@@ -423,18 +441,20 @@ async fn run_listener(
                             stream,
                             peer,
                             std::sync::Arc::from(bound.name.as_str()),
+                            Arc::clone(&hardening),
                         ),
                         ListenerMode::Terminate(term) => {
                             let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                             let watcher = graceful.watcher();
                             let dp = Arc::clone(&dp);
+                            let hardening = Arc::clone(&hardening);
                             let listener: std::sync::Arc<str> =
                                 std::sync::Arc::from(bound.name.as_str());
                             tokio::spawn(async move {
                                 match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => {
-                                        serve_http_tls(watcher, dp, tls_stream, peer, listener)
-                                    }
+                                    Ok(tls_stream) => serve_http_tls(
+                                        watcher, dp, tls_stream, peer, listener, hardening,
+                                    ),
                                     Err(err) => {
                                         tracing::warn!("tls handshake error: {err}")
                                     }
@@ -476,30 +496,48 @@ fn serve_http_tls<S>(
     stream: S,
     peer: SocketAddr,
     listener: std::sync::Arc<str>,
+    hardening: Arc<HttpHardening>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // The auto Connection borrows its Builder, so both live inside the
     // spawned task.
     tokio::spawn(async move {
-        let auto = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        let conn =
-            watcher.watch(auto.serve_connection_with_upgrades(
-                TokioIo::new(stream),
-                service_fn(move |mut req| {
-                    let dp = Arc::clone(&dp);
-                    let peer_ip = peer.ip();
-                    let listener = Arc::clone(&listener);
-                    // The listener label rides the request extensions so
-                    // the per-request metrics/logs can attribute traffic
-                    // to the accepting listener (DW-021).
-                    req.extensions_mut()
-                        .insert(dwara_core::observability::ListenerLabel(listener));
-                    async move {
-                        Ok::<_, std::convert::Infallible>(proxy::handle(&dp, peer_ip, req).await)
-                    }
-                }),
-            ));
+        // Pre-parse smuggling guard (DW-023): rejects a first request head
+        // carrying both Content-Length and Transfer-Encoding before hyper
+        // normalizes it away. Rejected connections were already answered.
+        let Some(stream) = hardening.guard_connection(stream).await else {
+            return;
+        };
+        let mut auto = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        // Protocol hardening (DW-023): parser/amplification bounds and the
+        // slowloris header timeout on every serving connection. See
+        // dwara-core's hardening module for the knob table.
+        hardening.apply(&mut auto);
+        let conn = watcher.watch(auto.serve_connection_with_upgrades(
+            TokioIo::new(stream),
+            service_fn(move |mut req| {
+                let dp = Arc::clone(&dp);
+                let hardening = Arc::clone(&hardening);
+                let peer_ip = peer.ip();
+                let listener = Arc::clone(&listener);
+                // The listener label rides the request extensions so
+                // the per-request metrics/logs can attribute traffic
+                // to the accepting listener (DW-021).
+                req.extensions_mut()
+                    .insert(dwara_core::observability::ListenerLabel(listener));
+                async move {
+                    // Slow-body defense (DW-023): the inbound body is
+                    // wrapped with the inactivity-gap timeout BEFORE
+                    // the dataplane sees it, so every downstream
+                    // consumer (streaming passthrough, retry
+                    // buffering) is bounded by the same gap.
+                    let (parts, body) = req.into_parts();
+                    let req = hyper::Request::from_parts(parts, hardening.wrap_request_body(body));
+                    Ok::<_, std::convert::Infallible>(proxy::handle(&dp, peer_ip, req).await)
+                }
+            }),
+        ));
         if let Err(err) = conn.await {
             tracing::warn!("connection error: {err}");
         }
@@ -814,14 +852,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // One accept task per listener; each runs its own backlog flush.
     let timeout = shutdown_timeout();
+    // Protocol hardening (DW-023): read once, shared by every serving
+    // surface (data-plane listeners; the admin listener reads the same
+    // env knobs itself — see the dwara-admin serve path).
+    let hardening = Arc::new(HttpHardening::from_env());
+    tracing::info!(
+        code = "protocol_hardening",
+        http1_max_headers = hardening.http1_max_headers,
+        http1_max_buf_bytes = hardening.http1_max_buf_size,
+        http1_header_timeout_ms = hardening.http1_header_read_timeout.as_millis() as u64,
+        h2_max_concurrent_streams = hardening.h2_max_concurrent_streams,
+        request_body_gap_ms = hardening
+            .request_body_gap
+            .map(|g| g.as_millis() as u64)
+            .unwrap_or(0),
+        "protocol hardening enabled (DW-023)"
+    );
     let mut tasks = Vec::new();
     for (bound, tcp) in bound_listeners {
         let state = Arc::clone(&state);
         let dp = Arc::clone(&dp);
         let graceful = Arc::clone(&graceful);
         let rx = shutdown_rx.clone();
+        let hardening = Arc::clone(&hardening);
         tasks.push(tokio::spawn(run_listener(
-            bound, tcp, state, dp, graceful, rx, timeout,
+            bound, tcp, state, dp, graceful, rx, timeout, hardening,
         )));
     }
 

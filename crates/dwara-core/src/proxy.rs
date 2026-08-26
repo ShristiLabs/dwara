@@ -618,6 +618,40 @@ where
     let gateway = gen.snapshot.gateway();
     let path = req.uri().path().to_string();
 
+    // Framing ambiguity rejection (DW-023): hyper's HTTP/1 parser gives
+    // Transfer-Encoding precedence over Content-Length (RFC 7230 3.3.3
+    // "careful" framing), which is desync-SAFE behind this gateway because
+    // every forwarded request is rebuilt from parsed parts — but the
+    // AMBIGUOUS header pair is itself the smuggling primitive, so the
+    // documented policy is outright rejection: a request carrying both
+    // headers never reaches a route or an upstream. (Response-side and
+    // h2 paths are unaffected; hyper never synthesizes the pair.)
+    //
+    // UNREACHABLE BY DESIGN — belt-and-suspenders insurance: the
+    // pre-parse sniff (hardening::guard_connection) rejects the pair on
+    // the first head of every connection, hyper's parser refuses it on
+    // any later keep-alive head, and even a surviving pair would lose
+    // its Content-Length to hyper's TE-preference normalization before
+    // this handler runs. The check stays so a future parser change that
+    // alters any of those layers (e.g. TE-preference no longer stripping
+    // the redundant Content-Length) fails CLOSED here instead of quietly
+    // re-admitting the smuggling primitive to the route layer.
+    if req.headers().contains_key(hyper::header::CONTENT_LENGTH)
+        && req.headers().contains_key(hyper::header::TRANSFER_ENCODING)
+    {
+        tracing::warn!(
+            code = "request_framing_ambiguous",
+            request_id = %rid,
+            "request carries both Content-Length and Transfer-Encoding; rejecting"
+        );
+        return simple(
+            StatusCode::BAD_REQUEST,
+            "ambiguous_framing",
+            "request declares both Content-Length and Transfer-Encoding",
+            rid,
+        );
+    }
+
     // Reserved gateway paths first: they shadow any configured route.
     if let Some(resp) = reserved_path(dp, &path, rid) {
         return resp;

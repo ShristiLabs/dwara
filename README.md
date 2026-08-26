@@ -1138,6 +1138,51 @@ Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 `DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
 past the budget are force-closed.
 
+### Protocol hardening
+
+Every serving surface — all data-plane listeners AND the admin listener —
+applies one protocol-hardening posture (DW-023): parser and amplification
+bounds on hyper's connection builders, plus a request-body inactivity
+timeout. The knobs are environment variables, read once at startup
+(an invalid value falls back to the default) and process-wide, not
+per-listener: hardening is a property of the parser, not of the route.
+The resolved values are logged at startup under the
+`protocol_hardening` code.
+
+| Knob (env) | Default | Attack it bounds |
+| --- | --- | --- |
+| `DWARA_HTTP1_MAX_HEADERS` | 100 | header-count bombs (N header lines per request) |
+| `DWARA_HTTP1_MAX_BUF_KIB` | 64 | single-header/line size bombs (hyper's HTTP/1 read-buffer cap in KiB; a header line that does not fit is a 431-class parse failure) |
+| `DWARA_HTTP1_HEADER_TIMEOUT_MS` | 10000 | SLOWLORIS: a connection whose headers take longer than this to arrive is closed before the request ever reaches a route |
+| `DWARA_H2_MAX_CONCURRENT_STREAMS` | 128 | HTTP/2 stream floods over one connection (also advertised to the peer in SETTINGS) |
+| `DWARA_H2_STREAM_WINDOW_KIB` | 1024 (1 MiB) | per-stream receive buffering a malicious h2 peer can force |
+| `DWARA_H2_CONNECTION_WINDOW_KIB` | 4096 (4 MiB) | connection-wide h2 receive buffering |
+| `DWARA_H2_MAX_SEND_BUF_KIB` | 1024 (1 MiB) | outbound h2 send buffer per connection (write amplification / memory pinning by a peer that never reads) |
+
+**CL+TE request smuggling.** A request head carrying BOTH
+`Content-Length` and `Transfer-Encoding` (either order, names matched
+case-insensitively) is rejected before parsing with a bare
+`400 Bad Request` and the connection is closed — it never reaches a
+route or an upstream. The check inspects only the FIRST request head
+on a connection: later keep-alive requests rely on hyper's own
+framing, which cannot desync behind this gateway because every
+forwarded request is rebuilt from hyper-parsed parts — there is no
+raw-passthrough path. h2c connections (the `PRI` preface) are exempt:
+Transfer-Encoding is illegal in HTTP/2 framing and hyper rejects it
+there.
+
+**Slow-body defense.** `DWARA_REQUEST_BODY_TIMEOUT_MS` (default 30000,
+`0` disables) bounds the INACTIVITY GAP between two frames of an
+inbound request body — not the total streaming time. A legitimate
+slow upload that keeps making progress (a large file over a slow
+link, trickling a frame every few seconds) never trips it; a client
+that sends headers and then stalls for longer than the gap is cut
+off, the in-flight upstream attempt fails
+as a transport error (the client sees a classified 5xx), and the
+request's concurrency slot is released. The semantics mirror the
+response-side `timeouts.write_ms` on upstreams; this is the
+request-side mirror.
+
 ## Admin API
 
 The admin API (DW-022) is a separate, small operator surface served by
