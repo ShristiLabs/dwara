@@ -22,14 +22,14 @@ implemented.
 | Path | Contents |
 |---|---|
 | `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
-| `crates/dwara-bin` | The `dwara` gateway binary: listeners, hot reload, graceful shutdown, admin spawn |
+| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh) |
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
-| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`) and the `dwara-loadgen` load generator |
+| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
 | `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |
 | `quickstart/` | One-command docker-compose TLS demo |
 | `packaging/` | systemd unit + packaging notes |
 | `grafana/` | Starter dashboard for the /metrics families |
-| `scripts/` | Macro bench rig + baseline gate |
+| `scripts/` | Macro bench rig + baseline gate + dependency-direction guard |
 | `config-reference.json` | Generated JSON Schema (repo root; see freshness gate) |
 
 ## Code organization
@@ -40,24 +40,35 @@ facade `lib.rs` as the only intended public surface:
 
 ```
 crates/dwara-core/src/
-  lib.rs              facade: declares the domain modules, re-exports
-                      the legacy top-level module aliases, documents
-                      the dependency direction
-  config/             configuration schema types and YAML parsing
+  lib.rs              facade: declares the domain modules and the
+                      aggregate error type, re-exports #[doc(hidden)]
+                      legacy top-level aliases, documents the
+                      dependency direction
+  error.rs            facade-level Error enum over the eight domain
+                      error types (boundary propagation; domains keep
+                      their typed errors for recoverable matches)
+  config/             schema types, YAML parsing, and the shared
+                      grammar everything validates against: net.rs
+                      (IP/CIDR utilities), limits.rs (schema
+                      validation bounds), credentials.rs (credential
+                      selector/hash formats)
   snapshot/           validate -> compile -> publish pipeline; the
                       immutable Snapshot behind ArcSwap
   extensions/         the five swappable subsystem traits
                       (RateLimiter, ConfigSource, CacheStore,
                       AnalyticsSink, SecretSource) + local impls
-  observability.rs    spans, access logs, metrics registry, envelope
+  observability.rs    spans, access logs, metrics registry, envelope;
+                      exposes plain setters only, depends on nothing
   state/              SQLite store + migrations
   security/           tls, authn, authz
-  resilience/         health, active probes, retries, breaker
-  dataplane/          proxy, upstream, balance, hardening
+  resilience/         health, retries, breaker (passive observation)
+  dataplane/          proxy, upstream, balance, hardening, and
+                      active.rs (probe loops drive the registry —
+                      dataplane lifecycle)
 ```
 
-Dependency direction is strictly downward (enforced by convention until
-a lint/guard is added):
+Dependency direction is strictly downward and **enforced in CI** by
+`scripts/check_deps.py` (the verify job fails on any upward import):
 
 ```
 config          <- everything
@@ -78,12 +89,19 @@ Rules for new code:
   lower one and is consumed by the higher one.
 - **Never import upward.** `config` imports nothing from sibling
   domains; `dataplane` may import anything. A change that forces an
-  upward import is a design smell — restructure instead.
+  upward import is a design smell — restructure instead. The guard
+  (`python3 scripts/check_deps.py`, wired into CI) fails the build on
+  violations; if a genuinely new dependency is needed, move the shared
+  item DOWN into the lowest consuming domain (the precedent: IP/CIDR
+  grammar, validation limits, and credential hash formats all live in
+  `config`).
 - **The facade is the API.** Public items are reachable via the domain
   modules; the root also re-exports legacy flat aliases
-  (`dwara_core::proxy`, `dwara_core::tls`, ...) kept for compatibility.
-  New external code should prefer the canonical domain paths
-  (`dwara_core::dataplane::proxy`).
+  (`dwara_core::proxy`, `dwara_core::tls`, ...) — `#[doc(hidden)]`,
+  kept for compatibility. New external code should use the canonical
+  domain paths (`dwara_core::dataplane::proxy`). For error
+  propagation across boundaries, `dwara_core::error::Error` aggregates
+  the eight domain error types via `From`.
 - **Domain promotion path.** When a domain grows an independent release
   cadence or a heavy dependency tree (e.g. `state` pulling rusqlite),
   promote `src/<domain>/` to `crates/dwara-<domain>` and re-export it
@@ -92,14 +110,17 @@ Rules for new code:
   manifest work, not a rewrite.
 - **Tests live in `tests/`, not `src/`.** `crates/dwara-core/tests/`
   holds integration suites (`<domain>.rs`, process-level where
-  possible) and the relocated unit tests (`tests/unit/`, one mod file
+  possible), the relocated unit tests (`tests/unit/`, one mod file
   per source module behind a single `main.rs` binary to bound CI link
-  time). The ONLY tests allowed in `src/` are white-box tests of
-  private internals that cannot be expressed through the public API —
-  each carries a comment saying why it stays (e.g. raw-SQL introspection
-  of the store's connection). Current residuals: `state/store.rs`,
-  `dataplane/{balance,upstream,proxy}.rs`, and the `dwara-loadgen` bin
-  (bin targets are not importable from `tests/`). New suites must be
+  time), and `tests/support/mod.rs` — the shared fixture module
+  (config builders, gateway/backend spawn helpers, HTTP client
+  helpers). New suites `mod support;` instead of re-declaring
+  fixtures; suite-specific variants stay local. The ONLY tests allowed
+  in `src/` are white-box tests of private internals that cannot be
+  expressed through the public API — each carries a comment saying why
+  it stays (e.g. raw-SQL introspection of the store's connection).
+  Current residuals: `state/store.rs`,
+  `dataplane/{balance,upstream,proxy}.rs`. New suites must be
   deterministic under load: bounded polls, unique ports, generous
   margins; see the Test map below.
 - **Feature flags** are declared in the owning crate's `Cargo.toml`

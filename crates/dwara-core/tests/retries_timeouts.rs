@@ -19,141 +19,37 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use dwara_core::config::parse_gateway;
-use dwara_core::proxy::{self, DataPlane};
-use dwara_core::snapshot::{validate, ConfigState};
+use dwara_core::snapshot::validate;
 use dwara_core::upstream::{UpstreamBodyError, UpstreamError, UpstreamRegistry};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+mod support;
+
+use support::{body_of, dataplane_from, h1_client, spawn_gateway, state_from, uri};
+
 // --- infrastructure -----------------------------------------------------
-
-fn state_from(yaml: &str) -> Arc<ConfigState> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    state
-}
-
-fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
-    DataPlane::new(state_from(yaml))
-}
-
-async fn spawn_gateway(dp: Arc<DataPlane>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let dp = Arc::clone(&dp);
-            tokio::spawn(async move {
-                let _ =
-                    AutoBuilder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(
-                            TokioIo::new(stream),
-                            service_fn(move |req| {
-                                let dp = Arc::clone(&dp);
-                                let peer_ip = peer.ip();
-                                async move {
-                                    Ok::<_, Infallible>(proxy::handle(&dp, peer_ip, req).await)
-                                }
-                            }),
-                        )
-                        .await;
-            });
-        }
-    });
-    port
-}
 
 /// Backend counting every request; the handler sees the FULL request body.
 /// `first` receives (method, path, body) per request and builds a response.
+/// This suite's backends never delay; see `support::spawn_backend`.
 async fn spawn_backend<F>(first: F) -> (u16, Arc<AtomicU64>)
 where
     F: Fn(u32, Method, String, Bytes) -> Response<Full<Bytes>> + Send + Sync + 'static,
 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let count = Arc::new(AtomicU64::new(0));
-    let counter = Arc::clone(&count);
-    let handler = Arc::new(first);
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let counter = Arc::clone(&counter);
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let _ = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(move |req: Request<Incoming>| {
-                            let counter = Arc::clone(&counter);
-                            let handler = Arc::clone(&handler);
-                            async move {
-                                let (parts, body) = req.into_parts();
-                                let bytes = body.collect().await.unwrap().to_bytes();
-                                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                                Ok::<_, Infallible>(handler(
-                                    n as u32,
-                                    parts.method,
-                                    parts.uri.path().to_string(),
-                                    bytes,
-                                ))
-                            }
-                        }),
-                    )
-                    .await;
-            });
-        }
-    });
-    (port, count)
-}
-
-fn h1_client() -> Client<HttpConnector, Full<Bytes>> {
-    Client::builder(TokioExecutor::new()).build_http()
-}
-
-fn uri(port: u16, path: &str) -> hyper::Uri {
-    format!("http://127.0.0.1:{port}{path}").parse().unwrap()
+    support::spawn_backend(first, Duration::ZERO).await
 }
 
 /// Gateway YAML with one route to one upstream plus per-test extras spliced
 /// into the upstream block.
 fn gateway_yaml(backend_port: u16, upstream_extra: &str) -> String {
-    format!(
-        "routes:\n\
-         - name: all\n\
-         \x20 service: svc\n\
-         \x20 match:\n\
-         \x20   path:\n\
-         \x20     type: prefix\n\
-         \x20     value: /api\n\
-         \x20 action:\n\
-         \x20   type: proxy\n\
-         services:\n\
-         - name: svc\n\
-         \x20 upstream: up\n\
-         upstreams:\n\
-         - name: up\n\
-         \x20 endpoints:\n\
-         \x20   - address: 127.0.0.1\n\
-         \x20     port: {backend_port}\n{upstream_extra}"
-    )
+    support::gateway_yaml("", backend_port, None, upstream_extra)
 }
 
 fn retries_yaml(attempts: u32, retry_post: bool, budget_percent: u32) -> String {
@@ -166,16 +62,6 @@ fn retries_yaml(attempts: u32, retry_post: bool, budget_percent: u32) -> String 
          \x20   budget_percent: {budget_percent}\n\
          \x20   buffer_max_bytes: 65536\n"
     )
-}
-
-async fn body_of<B>(resp: Response<B>) -> (StatusCode, Bytes)
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug + Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let (parts, body) = resp.into_parts();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (parts.status, bytes)
 }
 
 // --- 1. read timeout (per-attempt, before headers) ------------------------

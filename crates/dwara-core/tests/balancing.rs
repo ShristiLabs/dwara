@@ -21,64 +21,33 @@ use std::time::Duration;
 use bytes::Bytes;
 use dwara_core::balance::UpstreamLb;
 use dwara_core::config::{parse_gateway, Endpoint, ListenerTls, LoadBalancer, SniRoute, TlsMode};
-use dwara_core::proxy::{self, DataPlane};
+use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
 use dwara_core::tls::resolve_passthrough;
 use dwara_core::upstream::UpstreamRegistry;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::header::HOST;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-// --- infrastructure (mirrors tests/proxy.rs) -----------------------------
+mod support;
 
-fn state_from(yaml: &str) -> Arc<ConfigState> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    state
-}
+use support::{body_text, h1_client, state_from, uri};
+
+// --- infrastructure (mirrors tests/proxy.rs) -----------------------------
 
 async fn spawn_gateway(dp: Arc<DataPlane>) -> u16 {
     spawn_gateway_on(dp, "127.0.0.1").await
 }
 
+/// Gateway on a bare bind IP with an ephemeral port; returns the port
+/// (the caller already knows the host it asked for).
 async fn spawn_gateway_on(dp: Arc<DataPlane>, bind: &str) -> u16 {
-    let listener = TcpListener::bind((bind, 0)).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let dp = Arc::clone(&dp);
-            tokio::spawn(async move {
-                let _ =
-                    AutoBuilder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(
-                            TokioIo::new(stream),
-                            service_fn(move |req| {
-                                let dp = Arc::clone(&dp);
-                                let peer_ip = peer.ip();
-                                async move {
-                                    Ok::<_, Infallible>(proxy::handle(&dp, peer_ip, req).await)
-                                }
-                            }),
-                        )
-                        .await;
-            });
-        }
-    });
-    port
+    support::spawn_gateway_on(dp, &format!("{bind}:0")).await.1
 }
 
 /// Recording backend: increments `hits` and answers
@@ -136,14 +105,6 @@ async fn spawn_backends(specs: &[(u64, u64)]) -> (Vec<Arc<AtomicU64>>, Vec<u16>)
     (counters, ports)
 }
 
-fn h1_client() -> Client<HttpConnector, Full<Bytes>> {
-    Client::builder(TokioExecutor::new()).build_http()
-}
-
-fn uri(port: u16, path: &str) -> hyper::Uri {
-    format!("http://127.0.0.1:{port}{path}").parse().unwrap()
-}
-
 /// YAML: route everything to upstream `up` with the given algorithm,
 /// endpoint weights, and optional slow_start_ms.
 fn lb_yaml(algorithm: &str, weights: &[u32], ports: &[u16], slow_start_ms: Option<u64>) -> String {
@@ -177,14 +138,6 @@ fn lb_yaml(algorithm: &str, weights: &[u32], ports: &[u16], slow_start_ms: Optio
          {eps}\
          {slow}"
     )
-}
-
-async fn body_text<B>(body: B) -> String
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug,
-{
-    String::from_utf8_lossy(&body.collect().await.unwrap().to_bytes()).into_owned()
 }
 
 /// One raw HTTP/1.1 request from a chosen loopback source IP (ip_hash keys

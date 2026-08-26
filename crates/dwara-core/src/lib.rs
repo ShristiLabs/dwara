@@ -16,6 +16,8 @@
 //! - [`resilience`] — passive health, retries, circuit breaker
 //! - [`dataplane`] — the reverse-proxy request path, its upstreams, and
 //!   active health probing
+//! - [`error`] — the facade-level aggregate [`error::Error`] over the
+//!   domain error types, for boundary propagation
 //!
 //! # Dependency direction
 //!
@@ -50,6 +52,7 @@
 
 pub mod config;
 pub mod dataplane;
+pub mod error;
 pub mod extensions;
 pub mod observability;
 pub mod resilience;

@@ -26,23 +26,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::header::{HeaderMap, RETRY_AFTER};
 use hyper::{Request, StatusCode};
 
-/// DW-021: gateway-generated error bodies are the JSON envelope; compare
-/// by its stable `code` field.
-fn envelope_code(body: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
+mod support;
 
-fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    DataPlane::new(state)
-}
+use support::{dataplane_from, envelope_code};
 
 fn req(path: &str) -> Request<Full<Bytes>> {
     Request::builder()

@@ -37,6 +37,10 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tracing_subscriber::layer::SubscriberExt as _;
 
+mod support;
+
+use support::dead_port;
+
 fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -732,14 +736,6 @@ async fn redaction_poisons_never_reach_logs_or_metrics() {
             "{name} leaked into /metrics:\n{metrics}\n{metrics2}"
         );
     }
-}
-
-/// A dead port (nothing bound) for failure-path dataplanes.
-fn dead_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 /// Parse `name{labels} value` / `name value` sample lines of the

@@ -27,14 +27,9 @@ use tokio::net::TcpListener;
 
 const API_KEY: &str = "test-key-12345";
 
-fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    DataPlane::new(state)
-}
+mod support;
+
+use support::dataplane_from;
 
 fn basic_config(auth_required: bool) -> String {
     format!(

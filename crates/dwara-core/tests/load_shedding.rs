@@ -22,71 +22,20 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use dwara_core::config::parse_gateway;
 use dwara_core::proxy::{DataPlane, DEFAULT_PRIORITY};
-use dwara_core::snapshot::{validate, ConfigState};
-use http_body_util::{BodyExt, Full};
+use dwara_core::snapshot::validate;
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::TcpListener;
 
-/// DW-021: gateway-generated error bodies are the JSON envelope; compare
-/// by its stable `code` field.
-fn envelope_code(body: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
+mod support;
+
+use support::{body_of, dataplane_from, envelope_code, h1_client, spawn_gateway, state_from, uri};
 
 // --- infrastructure (mirrors breaker_caps.rs) ------------------------
-
-fn state_from(yaml: &str) -> Arc<ConfigState> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    state
-}
-
-fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
-    DataPlane::new(state_from(yaml))
-}
-
-async fn spawn_gateway(dp: Arc<DataPlane>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let dp = Arc::clone(&dp);
-            tokio::spawn(async move {
-                let _ = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection_with_upgrades(
-                        TokioIo::new(stream),
-                        service_fn(move |req| {
-                            let dp = Arc::clone(&dp);
-                            let peer_ip = peer.ip();
-                            async move {
-                                Ok::<_, Infallible>(
-                                    dwara_core::proxy::handle(&dp, peer_ip, req).await,
-                                )
-                            }
-                        }),
-                    )
-                    .await;
-            });
-        }
-    });
-    port
-}
 
 /// Backend answering 200 after `delay` per request.
 async fn spawn_slow_backend(delay: Duration) -> u16 {
@@ -113,14 +62,6 @@ async fn spawn_slow_backend(delay: Duration) -> u16 {
         }
     });
     port
-}
-
-fn h1_client() -> Client<HttpConnector, Full<Bytes>> {
-    Client::builder(TokioExecutor::new()).build_http()
-}
-
-fn uri(port: u16, path: &str) -> hyper::Uri {
-    format!("http://127.0.0.1:{port}{path}").parse().unwrap()
 }
 
 /// A config with one normal route (`/api`, default priority) and one
@@ -159,16 +100,6 @@ fn shedding_yaml(backend_port: u16, gateway_extra: &str, hi_priority: Option<u8>
          \x20   - address: 127.0.0.1\n\
          \x20     port: {backend_port}\n"
     )
-}
-
-async fn body_of<B>(resp: Response<B>) -> (StatusCode, Bytes)
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug + Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let (parts, body) = resp.into_parts();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (parts.status, bytes)
 }
 
 // --- 1. config validation ---------------------------------------------------

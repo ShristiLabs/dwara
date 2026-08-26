@@ -20,180 +20,29 @@ use bytes::Bytes;
 use dwara_core::config::net;
 use dwara_core::config::parse_gateway;
 use dwara_core::proxy::{self, DataPlane};
-use dwara_core::snapshot::ConfigState;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::header::HOST;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode, Uri, Version};
+use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
-/// DW-021: gateway-generated error bodies are the JSON envelope; compare
-/// by its stable `code` field.
-fn envelope_code(body: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["code"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
+mod support;
+
+use support::{
+    body_text, dataplane_from, envelope_code, h1_client, proxy_yaml, spawn_backend_async,
+    spawn_backend_full, spawn_gateway, state_from, uri,
+};
 
 // --- infrastructure -----------------------------------------------------
-
-fn state_from(yaml: &str) -> Arc<ConfigState> {
-    let gateway = parse_gateway(yaml).expect("test config parses");
-    let state = Arc::new(ConfigState::new());
-    state
-        .compile_and_publish(&gateway)
-        .expect("test config publishes");
-    state
-}
-
-fn dataplane_from(yaml: &str) -> Arc<DataPlane> {
-    DataPlane::new(state_from(yaml))
-}
-
-/// Serve the proxy dataplane on an ephemeral port (h1 + h2c + upgrades).
-async fn spawn_gateway(dp: Arc<DataPlane>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let dp = Arc::clone(&dp);
-            tokio::spawn(async move {
-                let _ =
-                    AutoBuilder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(
-                            TokioIo::new(stream),
-                            service_fn(move |req| {
-                                let dp = Arc::clone(&dp);
-                                let peer_ip = peer.ip();
-                                async move {
-                                    Ok::<_, Infallible>(proxy::handle(&dp, peer_ip, req).await)
-                                }
-                            }),
-                        )
-                        .await;
-            });
-        }
-    });
-    port
-}
-
-/// Backend whose handler synchronously builds a full response.
-async fn spawn_backend_full(
-    handler: Arc<dyn Fn(Request<Incoming>) -> Response<Full<Bytes>> + Send + Sync>,
-) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let _ = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(move |req: Request<Incoming>| {
-                            let handler = Arc::clone(&handler);
-                            async move { Ok::<_, Infallible>(handler(req)) }
-                        }),
-                    )
-                    .await;
-            });
-        }
-    });
-    port
-}
-
-/// Backend with an async handler (body streaming, upgrades, byte counting).
-async fn spawn_backend_async<F, Fut, B>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Response<B>, Infallible>> + Send,
-    B: hyper::body::Body + Send + 'static,
-    B::Data: Send,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
-            };
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let _ = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection_with_upgrades(
-                        TokioIo::new(stream),
-                        service_fn(move |req: Request<Incoming>| {
-                            let handler = Arc::clone(&handler);
-                            async move { handler(req).await }
-                        }),
-                    )
-                    .await;
-            });
-        }
-    });
-    port
-}
-
-fn h1_client() -> Client<HttpConnector, Full<Bytes>> {
-    Client::builder(TokioExecutor::new()).build_http()
-}
 
 fn h2c_client() -> Client<HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new())
         .http2_only(true)
         .build_http()
-}
-
-fn uri(port: u16, path: &str) -> Uri {
-    format!("http://127.0.0.1:{port}{path}").parse().unwrap()
-}
-
-fn proxy_yaml(backend_port: u16) -> String {
-    format!(
-        "routes:\n\
-         - name: all\n\
-         \x20 service: svc\n\
-         \x20 match:\n\
-         \x20   path:\n\
-         \x20     type: prefix\n\
-         \x20     value: /v1\n\
-         \x20 action:\n\
-         \x20   type: proxy\n\
-         services:\n\
-         - name: svc\n\
-         \x20 upstream: up\n\
-         upstreams:\n\
-         - name: up\n\
-         \x20 endpoints:\n\
-         \x20   - address: 127.0.0.1\n\
-         \x20     port: {backend_port}\n"
-    )
-}
-
-async fn body_text<B>(body: B) -> String
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug,
-{
-    String::from_utf8_lossy(&body.collect().await.unwrap().to_bytes()).into_owned()
 }
 
 // --- happy paths ---------------------------------------------------------

@@ -24,6 +24,10 @@ use dwara_core::proxy::{self, DataPlane, ProxyBody};
 use dwara_core::snapshot::{self, ConfigState};
 use dwara_core::upstream::UpstreamRegistry;
 
+mod support;
+
+use support::dead_port;
+
 // ---------------------------------------------------------------- helpers
 
 /// HTTP/1.1 server answering every request with 200 or 500 depending on
@@ -61,14 +65,6 @@ async fn serve_switchable(healthy: Arc<AtomicBool>) -> u16 {
         }
     });
     port
-}
-
-/// A port that nothing listens on (bind-then-drop).
-fn dead_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
