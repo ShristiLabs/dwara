@@ -1039,7 +1039,7 @@ async fn saturated_rejections_do_not_trip_the_breaker() {
     // still reaches the backend.
     let (port, count) = spawn_backend(
         |_n, _m, _p, _b| status_only(200),
-        Duration::from_millis(600),
+        Duration::from_millis(2500),
     )
     .await;
     let yaml = gateway_yaml(
@@ -1051,11 +1051,29 @@ async fn saturated_rejections_do_not_trip_the_breaker() {
     let gw = spawn_gateway(dp).await;
 
     // A: holds the sole connection. B: holds the sole pending slot.
+    // Seat deterministically by OBSERVED saturation: the spawned B task
+    // can be scheduling-starved under load, leaving the pending slot
+    // briefly free — a probe then gets 200 legitimately. Warm up with
+    // probe requests until one is Saturated; only then is the state
+    // (connection + pending held) established for the strict burst.
     let ca = h1_client();
     let a = tokio::spawn(async move { ca.get(uri(gw, "/api/slow")).await.unwrap() });
     let cb = h1_client();
     let b = tokio::spawn(async move { cb.get(uri(gw, "/api/slow")).await.unwrap() });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let warmup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let c = h1_client();
+        let (status, body, _) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(envelope_code(&body), "upstream_saturated");
+            break;
+        }
+        assert_eq!(status, StatusCode::OK, "warmup request: {body}");
+        assert!(
+            tokio::time::Instant::now() < warmup_deadline,
+            "gateway never saturated while the slow pair held the slots"
+        );
+    }
 
     // Six more concurrent requests: all must be Saturated 503s (three
     // would trip the breaker if wrongly counted).
@@ -1124,7 +1142,7 @@ async fn saturated_rejections_do_not_eject_endpoints() {
     // endpoint, so ejections() must stay 0.
     let (port, count) = spawn_backend(
         |_n, _m, _p, _b| status_only(200),
-        Duration::from_millis(600),
+        Duration::from_millis(2500),
     )
     .await;
     let yaml = gateway_yaml(
@@ -1140,19 +1158,24 @@ async fn saturated_rejections_do_not_eject_endpoints() {
     let cb = h1_client();
     let b = tokio::spawn(async move { cb.get(uri(gw, "/api/slow")).await.unwrap() });
 
-    // Seat A and B deterministically before asserting saturation: wait
-    // until the backend has SEEN A's request (the connection is held for
-    // its 600 ms response), then give B a short grace to take the single
-    // pending slot. A fixed sleep alone races task startup under load.
-    let seat_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while count.load(Ordering::SeqCst) < 1 {
+    // Seat deterministically by OBSERVED saturation (the spawned B task
+    // can be scheduling-starved under load, briefly leaving the pending
+    // slot free — a probe then gets 200 legitimately). Warm up until one
+    // request is Saturated, then the strict loop holds.
+    let warmup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let c = h1_client();
+        let (status, body, _) = body_of(c.get(uri(gw, "/api/slow")).await.unwrap()).await;
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(envelope_code(&body), "upstream_saturated");
+            break;
+        }
+        assert_eq!(status, StatusCode::OK, "warmup request: {body}");
         assert!(
-            tokio::time::Instant::now() < seat_deadline,
-            "slow pair never reached the backend"
+            tokio::time::Instant::now() < warmup_deadline,
+            "gateway never saturated while the slow pair held the slots"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
     for _ in 0..5 {
         let c = h1_client();
