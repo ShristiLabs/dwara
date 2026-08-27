@@ -126,6 +126,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        allow_empty_routes: false,
     }
 }
 

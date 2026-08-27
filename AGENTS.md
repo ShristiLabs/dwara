@@ -210,6 +210,10 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
   semantic validation (refs, bounds, cross-field rules) lives in
   `snapshot.rs::validate` and must produce `ValidationIssue`s naming the
   offending field. Invalid regexes fail at compile in `snapshot.rs`.
+  Zero-route configs are guarded (#129): validation rejects an empty
+  `routes` list unless the additive top-level `allow_empty_routes:
+  true` flag is set — test configs that legitimately declare no routes
+  (admin-only, SNI-passthrough-only fixtures) must carry the flag.
   After schema changes, regenerate `config-reference.json`
   (`dwara-cli schema > config-reference.json`) — CI fails on drift.
 - **Ops knobs are env vars** (`DWARA_*`), topology is YAML. Do not add

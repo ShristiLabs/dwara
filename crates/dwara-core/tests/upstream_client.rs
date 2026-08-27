@@ -45,6 +45,9 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        // Genuinely zero-route: upstream connector/pool behavior, not
+        // routing (#129 opt-in).
+        allow_empty_routes: true,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -691,6 +694,9 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
             admin: None,
+            // Zero-route: the exact-count assertion scopes to the one
+            // timeout field under test (#129 opt-in).
+            allow_empty_routes: true,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert_eq!(fields, vec![field], "exactly {field} flagged");
@@ -734,6 +740,9 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        // Zero-route (#129 opt-in): must validate clean, so the routes
+        // guard itself must not fire here.
+        allow_empty_routes: true,
     });
     assert!(issues.is_empty(), "positive values valid: {issues:?}");
 }

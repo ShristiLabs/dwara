@@ -669,7 +669,8 @@ fn slow_start_ms_above_ten_minutes_is_rejected() {
 type UpsSpec<'a> = (&'a str, &'a str, &'a [(&'a str, u16, u32)]);
 
 fn upstreams_yaml(ups: &[UpsSpec]) -> String {
-    let mut s = String::from("routes: []\nservices: []\nupstreams:\n");
+    // Zero-route by design (LB endpoint validation only): #129 opt-in.
+    let mut s = String::from("routes: []\nservices: []\nallow_empty_routes: true\nupstreams:\n");
     for (name, algo, eps) in ups {
         s.push_str(&format!(
             "- name: {name}\n  load_balancer: {algo}\n  endpoints:\n"

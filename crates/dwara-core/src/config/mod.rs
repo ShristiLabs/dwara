@@ -136,6 +136,21 @@ pub struct Gateway {
     /// at startup; changes take effect on restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<AdminConfig>,
+    /// Deliberate opt-in to running a gateway with ZERO routes (#129,
+    /// maintainer decision). Default false: validation rejects a
+    /// route-less config. An empty route set is schema-valid (every
+    /// collection defaults empty), and a truncated or torn config
+    /// write (truncate-then-save, common in naive editors) is
+    /// schema-valid too — publishing it would drop ALL routing
+    /// mid-run (every request 404s while the file "looks fine"). The
+    /// guard applies to cold start AND hot reload alike; a rejected
+    /// reload keeps the running generation serving. Set this to true
+    /// only for deliberate route-less shapes (e.g. a gateway whose
+    /// sole job is the admin API): with the flag set, unrouted
+    /// requests answer 404 after listener/global policy checks, per
+    /// the documented request-path order.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_empty_routes: bool,
 }
 
 /// Admin listener configuration (DW-022).

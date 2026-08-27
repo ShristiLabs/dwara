@@ -102,6 +102,7 @@ fn base_gateway() -> Gateway {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        allow_empty_routes: false,
     }
 }
 
@@ -1422,4 +1423,131 @@ fn validation_rejects_unresolved_authz_references_at_each_new_level() {
         authorization: Some(authz),
     });
     assert_single_issue(&gw, "consumer", "c", "authorization.ip_acl.allow[0]");
+}
+
+// ---------------------------------------------------------------------------
+// 10. Zero-route guard (#129)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_route_gateway_is_rejected_naming_routes() {
+    // The torn-write shape: an otherwise-valid gateway whose routes list
+    // is empty and which has NOT opted in. Exactly one issue, on the
+    // root entity, naming the offending field and the remedy.
+    let mut gw = base_gateway();
+    gw.routes.clear();
+    assert_single_issue(&gw, "gateway", "(root)", "routes");
+    let issues = validate(&gw);
+    assert!(
+        issues[0].message.contains("drops all routing")
+            && issues[0].message.contains("allow_empty_routes: true"),
+        "the message must explain the guard and name the opt-in: {}",
+        issues[0].message
+    );
+}
+
+#[test]
+fn allow_empty_routes_opt_in_validates_and_publishes_clean() {
+    // The deliberate admin-only shape: same zero routes, explicit opt-in.
+    // Validates clean, compiles, and publishes a generation with zero
+    // routes (unrouted requests then 404 per the request-path order).
+    let mut gw = base_gateway();
+    gw.routes.clear();
+    gw.allow_empty_routes = true;
+    assert!(validate(&gw).is_empty(), "opted-in shape is valid");
+    let state = ConfigState::new();
+    let info = state
+        .compile_and_publish(&gw)
+        .expect("opted-in zero-route config publishes");
+    assert_eq!(info.route_count, 0);
+    assert_eq!(state.snapshot().route_table().find("/x"), None);
+}
+
+#[test]
+fn allow_empty_routes_with_routes_present_is_a_no_op() {
+    // The flag ONLY opens the zero-route shape: with routes present it
+    // must change nothing — validation stays clean and every route still
+    // publishes and matches.
+    let mut gw = base_gateway();
+    gw.allow_empty_routes = true;
+    assert!(
+        validate(&gw).is_empty(),
+        "flag with routes present is clean"
+    );
+    let state = ConfigState::new();
+    let info = state
+        .compile_and_publish(&gw)
+        .expect("publishes with the flag set and routes present");
+    assert_eq!(info.route_count, gw.routes.len());
+    assert_eq!(state.snapshot().route_table().find("/x"), Some(0));
+    assert!(state.snapshot().match_route("/x").is_some());
+}
+
+#[test]
+fn zero_routes_with_other_entities_present_is_still_rejected() {
+    // The guard is about ROUTES: listeners, consumers, and upstreams
+    // being present does not make a route-less config publishable.
+    let mut gw = base_gateway();
+    gw.routes.clear();
+    gw.listeners.push(listener("l2", "127.0.0.1", 9090));
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        priority: None,
+        groups: vec![],
+        credentials: vec![],
+        policies: vec![],
+        authorization: None,
+    });
+    assert_single_issue(&gw, "gateway", "(root)", "routes");
+}
+
+#[test]
+fn zero_route_yaml_round_trip_covers_serde_default_and_opt_in() {
+    // YAML level: an empty document parses to the all-defaults Gateway
+    // (allow_empty_routes defaults FALSE) and is rejected by validation;
+    // the same document with the flag set parses and validates clean.
+    let parsed = dwara_core::config::parse_gateway("").expect("empty document parses");
+    assert!(!parsed.allow_empty_routes, "serde default is false");
+    let issues = validate(&parsed);
+    assert_eq!(issues.len(), 1, "one issue: {issues:?}");
+    assert_eq!(issues[0].field, "routes");
+
+    let opted_in = dwara_core::config::parse_gateway("allow_empty_routes: true\n")
+        .expect("opt-in document parses");
+    assert!(opted_in.allow_empty_routes);
+    assert!(validate(&opted_in).is_empty(), "opt-in validates clean");
+}
+
+#[test]
+fn zero_route_publish_is_rejected_and_keeps_the_running_generation() {
+    // The hot-reload half at the ConfigState level (dwara-bin's
+    // reload_edges.rs pins the same through the real file watcher):
+    // compile_and_publish errs, the swap never happens, the old
+    // generation keeps serving.
+    let state = ConfigState::new();
+    state.compile_and_publish(&base_gateway()).unwrap();
+    let old = state.snapshot();
+
+    let mut torn = base_gateway();
+    torn.routes.clear();
+    let err = state
+        .compile_and_publish(&torn)
+        .expect_err("zero-route publish must be rejected");
+    assert!(
+        matches!(err, CompileError::Validation(_)),
+        "rejected at validation, got: {err}"
+    );
+    let text = format!("{err}");
+    assert!(
+        text.contains("routes is empty") && text.contains("allow_empty_routes"),
+        "the rejection names the guard and the remedy: {text}"
+    );
+
+    let after = state.snapshot();
+    assert_eq!(after.generation(), old.generation());
+    assert_eq!(after.content_hash(), old.content_hash());
+    assert!(
+        after.match_route("/x").is_some(),
+        "the old generation still routes"
+    );
 }

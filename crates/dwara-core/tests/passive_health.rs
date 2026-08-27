@@ -605,6 +605,9 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        // Genuinely zero-route: this suite exercises upstream passive
+        // health, not routing (#129 opt-in).
+        allow_empty_routes: true,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -795,6 +798,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        allow_empty_routes: true,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1043,6 +1047,9 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        // Zero-route: validates health knobs only; the opt-in keeps the
+        // suite's issue assertions scoped to the upstream entity (#129).
+        allow_empty_routes: true,
     }
 }
 
@@ -1118,7 +1125,7 @@ fn failure_ratio_nan_string_is_rejected_at_the_schema_level() {
     // bare YAML .nan literal DOES parse as f64::NAN and is then rejected
     // by validation (covered structurally above); pinned here at the text
     // level both ways.
-    let base = "listeners: []\nroutes: []\nservices: []\nconsumers: []\npolicies: []\nupstreams:\n  - name: pool\n    load_balancer: round_robin\n    protocol: http1\n    endpoints:\n      - address: 127.0.0.1\n        port: 9000\n    health:\n";
+    let base = "listeners: []\nroutes: []\nservices: []\nconsumers: []\npolicies: []\nallow_empty_routes: true\nupstreams:\n  - name: pool\n    load_balancer: round_robin\n    protocol: http1\n    endpoints:\n      - address: 127.0.0.1\n        port: 9000\n    health:\n";
     assert!(
         parse_gateway(&format!("{base}      failure_ratio: \"NaN\"\n")).is_err(),
         "string ratio rejected at parse time"

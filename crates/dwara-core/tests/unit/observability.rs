@@ -118,6 +118,9 @@ fn render_contains_families() {
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
             admin: None,
+            // Genuinely zero-route: only the registry-driven gauges matter
+            // (#129 opt-in).
+            allow_empty_routes: true,
         })
         .expect("publish");
     let registry =

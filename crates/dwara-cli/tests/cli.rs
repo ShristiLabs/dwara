@@ -47,6 +47,32 @@ fn validate_reports_semantic_issues_all_at_once() {
     }
 }
 
+#[test]
+fn validate_reports_the_zero_route_guard_unless_opted_in() {
+    // #129: a zero-route config (the torn-write shape) is invalid and the
+    // issue names the offending field and the allow_empty_routes remedy;
+    // the explicit opt-in validates and reports zero routes.
+    match validate_config_text("listeners: []\n") {
+        ValidateOutcome::Invalid(issues) => {
+            assert!(
+                issues.iter().any(|i| i.contains("routes is empty")),
+                "issues must name the empty routes guard: {issues:?}"
+            );
+            assert!(
+                issues
+                    .iter()
+                    .any(|i| i.contains("allow_empty_routes: true")),
+                "issues must name the opt-in remedy: {issues:?}"
+            );
+        }
+        ValidateOutcome::Valid { .. } => panic!("expected invalid"),
+    }
+    match validate_config_text("allow_empty_routes: true\n") {
+        ValidateOutcome::Valid { routes } => assert_eq!(routes, 0),
+        ValidateOutcome::Invalid(issues) => panic!("opted-in shape is valid, got {issues:?}"),
+    }
+}
+
 // --- fmt --------------------------------------------------------------------
 
 #[test]

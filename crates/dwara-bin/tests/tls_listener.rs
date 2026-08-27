@@ -466,6 +466,8 @@ async fn tls_passthrough_routes_by_sni_to_backend() {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
     let config = dir.join("dwara.yaml");
+    // Genuinely zero-route (#129 opt-in): passthrough routing is by SNI
+    // (sni_routes), so the HTTP route table is empty by design.
     std::fs::write(
         &config,
         format!(
@@ -485,6 +487,7 @@ upstreams:
     endpoints:
       - address: 127.0.0.1
         port: {back_port}
+allow_empty_routes: true
 "
         ),
     )

@@ -15,6 +15,10 @@
         }
       ]
     },
+    "allow_empty_routes": {
+      "description": "Deliberate opt-in to running a gateway with ZERO routes (#129,\nmaintainer decision). Default false: validation rejects a\nroute-less config. An empty route set is schema-valid (every\ncollection defaults empty), and a truncated or torn config\nwrite (truncate-then-save, common in naive editors) is\nschema-valid too — publishing it would drop ALL routing\nmid-run (every request 404s while the file \"looks fine\"). The\nguard applies to cold start AND hot reload alike; a rejected\nreload keeps the running generation serving. Set this to true\nonly for deliberate route-less shapes (e.g. a gateway whose\nsole job is the admin API): with the flag set, unrouted\nrequests answer 404 after listener/global policy checks, per\nthe documented request-path order.",
+      "type": "boolean"
+    },
     "authorization": {
       "description": "Gateway-level (global) authorization rules (#123): the least\nspecific link of the authorization precedence chain\nconsumer > route > service > listener > global (see [`Authz`] for\nthe rule semantics and the `authz` module for the merge: a deny at\nANY level wins; otherwise the most specific level with rules\ngoverns). Applies to every request that resolved a route\n(authorization runs after route resolution per the documented\nrequest-path order). Same validation rules as route-level\nauthorization; see [`Authz`].",
       "anyOf": [

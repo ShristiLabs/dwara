@@ -108,6 +108,7 @@ fn bench_gateway() -> Gateway {
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
+        allow_empty_routes: false,
     }
 }
 

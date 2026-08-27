@@ -3,13 +3,15 @@
 //!
 //! - watcher edge cases: config DELETED, config replaced via atomic
 //!   rename (write tmp + rename), config truncated to empty mid-write
-//!   (empty doc is a valid empty Gateway per DW-003 — pin what happens),
+//!   (a torn write — #129 REJECTS the zero-route reload unless
+//!   `allow_empty_routes: true` opts in; both paths are pinned here),
 //! - debounce correctness: a burst of writes inside the 250 ms window
 //!   must coalesce to ONE reload,
 //! - shutdown edge: a half-open connection (partial request, held) with
 //!   `DWARA_SHUTDOWN_TIMEOUT_SECS=1` must not prevent exit,
 //! - startup matrix: no config anywhere, config path pointing at a
-//!   directory, and a relative config path,
+//!   directory, a relative config path, and a zero-route config
+//!   refusing cold start (#129),
 //! - single keepalive connection issuing sequential requests across a
 //!   reload (connection reuse under generation swap).
 
@@ -340,12 +342,12 @@ fn config_replaced_via_atomic_rename_triggers_reload() {
 }
 
 #[test]
-fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
-    // Pins the implemented behavior: an empty document is a valid empty
-    // Gateway (DW-003 serde defaults), so truncating the config
-    // mid-write advances the generation to an empty config rather than
-    // rejecting the reload. Documented as a finding for the reviewer —
-    // a torn write would transiently publish an empty gateway.
+fn torn_write_to_empty_config_is_rejected_and_old_generation_keeps_serving() {
+    // #129 (maintainer decision): an empty document parses as a valid
+    // empty Gateway (DW-003 serde defaults), which is exactly the shape
+    // a truncated/torn write (truncate-then-save) leaves on disk. The
+    // reload must be REJECTED naming the guard, and the old generation
+    // keeps serving — a torn write can never drop all routing mid-run.
     let addr = format!("127.0.0.1:{}", free_port());
     let dir = unique_temp_dir("empty");
     let config = dir.join("dwara.yaml");
@@ -356,15 +358,68 @@ fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
         "dwara did not become ready on {addr}"
     );
 
+    // The torn write: config truncated to an empty document mid-run.
     std::fs::write(&config, "").unwrap();
     std::thread::sleep(Duration::from_millis(1500));
 
-    // The empty gateway has no routes, so the dataplane answers a clean
-    // 404 — still an HTTP response from the running generation.
+    // Rejected reload = rollback-is-not-published: the old generation
+    // still routes and serves the pre-tear body.
+    let text = one_shot_retrying(&addr);
+    assert!(
+        served_ok(&text),
+        "old generation keeps serving after the rejected torn-write reload: {text}"
+    );
+
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(status.success(), "expected clean exit, got {status}");
+    let text = out.read_all();
+    assert!(
+        text.contains("config reload rejected"),
+        "the torn write must be rejected at validation:\n{text}"
+    );
+    assert!(
+        text.contains("routes is empty") && text.contains("allow_empty_routes"),
+        "the rejection names the guard and the opt-in:\n{text}"
+    );
+    assert!(
+        text.contains("keeping running generation 1"),
+        "the keep-running log pins which generation survived:\n{text}"
+    );
+    assert_eq!(
+        count_occurrences(&text, r#""code":"config_reloaded""#),
+        0,
+        "a rejected reload must not publish a generation:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn opted_in_empty_config_reload_publishes_empty_generation_serving_404() {
+    // The deliberate side of #129: the same zero-route shape WITH
+    // `allow_empty_routes: true` publishes. The empty route set is then
+    // live: unrouted requests stop at route resolution with a clean 404
+    // (listener/global policies would rate-limit first per the
+    // request-path order; none are configured here).
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("optin");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, config_v1()).unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr}"
+    );
+
+    std::fs::write(&config, "allow_empty_routes: true\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // The published empty generation has no routes: the dataplane
+    // answers a clean 404 — still an HTTP response from generation 2.
     let text = one_shot_retrying(&addr);
     assert!(
         text.starts_with("HTTP/1.1 404"),
-        "empty generation serves 404 no-route: {text}"
+        "opted-in empty generation serves 404 no-route: {text}"
     );
 
     kill_signal(guard.0.id(), "TERM");
@@ -374,15 +429,15 @@ fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
     assert!(
         text.contains("config reloaded: generation 1 -> 2")
             && text.contains(r#""trigger":"file-watch""#),
-        "empty doc must reload (valid empty Gateway) in:\n{text}"
+        "the opted-in config must reload in:\n{text}"
     );
     assert!(
         text.contains(r#""routes":0"#),
-        "empty config reload must report zero routes:\n{text}"
+        "the empty generation must report zero routes:\n{text}"
     );
     assert!(
         !text.contains("config reload rejected"),
-        "empty doc is valid per DW-003; rejection would be a contract change:\n{text}"
+        "the explicit opt-in suppresses the guard:\n{text}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -524,6 +579,40 @@ fn config_path_pointing_at_directory_exits_nonzero() {
     assert!(
         text.contains("startup config load failed"),
         "expected startup load failure for directory path in:\n{text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn zero_route_config_refuses_cold_start_and_names_the_guard() {
+    // #129: the cold-start half of the zero-route guard. A config that
+    // PARSES (empty Gateway, the torn-write shape) but carries no routes
+    // and no opt-in must fail validation at startup: exit non-zero, the
+    // startup-invalid log present, and the issue text naming routes and
+    // the allow_empty_routes remedy. The JSON error line lands on the
+    // process's log stream (stdout); Output::read_all covers both.
+    let addr = format!("127.0.0.1:{}", free_port());
+    let dir = unique_temp_dir("noroutes");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(&config, "listeners: []\n").unwrap();
+    let (mut guard, mut out) = spawn_server(&addr, &config, &[], None);
+    let status = wait_exit(&mut guard.0, Duration::from_secs(10));
+    assert!(
+        !status.success(),
+        "a zero-route config without the opt-in must refuse to start, got {status}"
+    );
+    let text = out.read_all();
+    assert!(
+        text.contains("startup config invalid"),
+        "expected the startup-invalid failure log in:\n{text}"
+    );
+    assert!(
+        text.contains("routes is empty") && text.contains("allow_empty_routes"),
+        "the startup failure must carry the validation issue naming the guard:\n{text}"
+    );
+    assert!(
+        !wait_for_ready(&addr, Instant::now() + Duration::from_millis(300)),
+        "nothing may listen when startup is refused"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

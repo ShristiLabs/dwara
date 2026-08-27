@@ -187,8 +187,10 @@ Config passes through a fixed pipeline before the gateway serves it:
   the offending node.
 - **Validate** (semantic): duplicate names, unknown upstream/service/
   policy references, listener address+port conflicts, empty or invalid
-  credentials and endpoint weights are checked, and every issue is
-  reported at once rather than one per attempt.
+  credentials and endpoint weights are checked, an empty `routes` list
+  is rejected unless `allow_empty_routes: true` is set (see "Global
+  settings"), and every issue is reported at once rather than one per
+  attempt.
 - **Compile**: route paths are built into lookup structures. This is
   where schema-valid config can still fail (an invalid regex or
   conflicting path template names the route and pattern at fault).
@@ -354,6 +356,26 @@ upstream TLS configuration errors -> `500`.
 
 ```yaml
 max_concurrent_requests: 4096
+```
+
+- `allow_empty_routes` (top-level, #129): deliberate opt-in to running
+  a gateway with ZERO routes. Default `false`: validation rejects a
+  config whose `routes` list is empty. The guard exists because an
+  empty route set is schema-valid (every collection defaults empty),
+  and so is a truncated or torn config write (truncate-then-save,
+  common in naive editors) — publishing it would silently drop ALL
+  routing mid-run while the file "looks fine" (every request 404s).
+  The rejection applies to cold start (exit 1), hot reload, and admin
+  `PATCH /config` alike; a rejected reload or PATCH keeps the previous
+  generation serving. Set it to `true` only for deliberate route-less
+  shapes — a gateway whose sole job is the admin API, or an
+  SNI-passthrough-only gateway routing entirely via `sni_routes`
+  (see "TLS"). With the flag set, unrouted requests answer 404 after
+  listener/global policy checks, per the documented request-path
+  order.
+
+```yaml
+allow_empty_routes: true
 ```
 
 ### Load shedding and priority
@@ -1300,9 +1322,13 @@ unmatched name has its connection closed. A ClientHello fragmented
 across TLS records (larger than one 16 KiB record) is waited for and
 reassembled, bounded at 64 KiB, rather than closed as no-SNI.
 Certificate fields are rejected in this mode; `sni_routes` are rejected
-in terminate mode.
+in terminate mode. A passthrough-only gateway (routing entirely via
+`sni_routes`, the HTTP route table empty by design) is a zero-route
+config: it must set `allow_empty_routes: true` (see "Global
+settings").
 
 ```yaml
+allow_empty_routes: true    # passthrough-only: no HTTP routes by design
 listeners:
   - name: edge
     address: 0.0.0.0

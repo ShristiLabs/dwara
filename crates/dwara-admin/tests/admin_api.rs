@@ -435,6 +435,87 @@ async fn patch_invalid_config_is_400_with_all_issues() {
 }
 
 #[tokio::test]
+async fn patch_with_zero_routes_is_400_naming_the_guard_and_keeps_generation() {
+    // #129 through the admin path: the PATCH dry run inherits the
+    // snapshot zero-route guard — a route-less body (the torn-write
+    // shape) is a 400 naming routes and the allow_empty_routes remedy,
+    // with nothing published and nothing written to disk.
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let bad = "listeners: []\n";
+    let body = format!(
+        "PATCH /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/yaml\r\nContent-Length: {}\r\n\r\n{}",
+        bad.len(),
+        bad
+    );
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&pem(&cert), &pem(&key))),
+        &body,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400);
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(v["error"]["code"], "config_invalid");
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("routes is empty"),
+        "message should name the zero-route guard: {msg}"
+    );
+    assert!(
+        msg.contains("allow_empty_routes"),
+        "message should name the opt-in remedy: {msg}"
+    );
+    // The old generation keeps serving and the file was not touched.
+    assert_eq!(server.state.snapshot().generation(), 1);
+    assert_eq!(server.state.snapshot().route_table().find("/api"), Some(0));
+    let on_disk = std::fs::read_to_string(&server.config_path).unwrap();
+    assert!(on_disk.contains("name: echo"));
+}
+
+#[tokio::test]
+async fn patch_opted_in_empty_config_publishes_and_reports_zero_routes() {
+    // The opt-in side of #129 through the admin path: the same
+    // route-less body WITH allow_empty_routes publishes — generation 2,
+    // zero routes in the response, and the flag lands on disk.
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let doc = "allow_empty_routes: true\n";
+    let body = format!(
+        "PATCH /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/yaml\r\nContent-Length: {}\r\n\r\n{}",
+        doc.len(),
+        doc
+    );
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&pem(&cert), &pem(&key))),
+        &body,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "resp: {resp}");
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(v["generation"], 2);
+    assert_eq!(v["routes"], 0);
+    assert_eq!(server.state.snapshot().generation(), 2);
+    assert!(server.state.snapshot().route_table().find("/api").is_none());
+    let on_disk = std::fs::read_to_string(&server.config_path).unwrap();
+    assert!(
+        on_disk.contains("allow_empty_routes: true"),
+        "the opt-in is persisted: {on_disk}"
+    );
+}
+
+#[tokio::test]
 async fn patch_valid_config_writes_file_and_publishes_to_dataplane() {
     let dir = tempfile::tempdir().unwrap();
     let pki = Pki::new(dir.path());

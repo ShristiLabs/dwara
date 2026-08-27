@@ -919,6 +919,39 @@ upstreams:
 }
 
 #[tokio::test]
+async fn global_policy_limits_the_opted_in_empty_generation_before_its_404() {
+    // #129 interplay: an opted-in ZERO-route generation (a genuinely
+    // empty route table, not merely an unmatched path) still runs the
+    // global policy link before its 404 — the documented request-path
+    // order holds when allow_empty_routes published the empty shape.
+    let yaml = "
+allow_empty_routes: true
+policies:
+  - name: global-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+global_policies: [global-per-ip]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..2 {
+        let (status, _, _) = status_body(send(&dp, ip(7), "/anything").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, headers, body) = status_body(send(&dp, ip(7), "/anything").await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the empty generation's 404 flood is throttled by the global policy"
+    );
+    assert_eq!(envelope_code(body.as_bytes()), "rate_limit_exceeded");
+    assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    // A different peer has an independent bucket (selector [ip]).
+    let (status, _, _) = status_body(send(&dp, ip(8), "/anything").await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn reserved_paths_stay_exempt_from_global_policies() {
     let yaml = "
 policies:

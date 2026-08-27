@@ -314,6 +314,23 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // Zero-route guard (#129, maintainer decision): a route-less config is
+    // schema-valid, and a truncated/torn write (truncate-then-save) lands
+    // exactly here — publishing it would drop all routing mid-run. Rejected
+    // unless the operator explicitly opted in for a deliberate admin-only
+    // shape. Applies to cold start and hot reload alike (compile runs both).
+    if gateway.routes.is_empty() && !gateway.allow_empty_routes {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "routes",
+            "routes is empty: publishing an empty route set drops all routing \
+             (every request would 404), and a truncated or torn config write \
+             is schema-valid here — set allow_empty_routes: true if this \
+             route-less shape is deliberate",
+        ));
+    }
+
     // Duplicate names within each entity kind.
     let mut check_dups = |kind: &str, field: &str, names: Vec<&str>| {
         let mut seen = std::collections::BTreeSet::new();
@@ -1702,6 +1719,7 @@ impl Snapshot {
                 max_concurrent_requests: None,
                 jwt_providers: Vec::new(),
                 admin: None,
+                allow_empty_routes: false,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

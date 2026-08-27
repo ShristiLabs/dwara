@@ -634,19 +634,22 @@ async fn bearer_passes_through_when_no_provider_configured() {
 
 #[test]
 fn jwt_provider_validation_rejects_bad_configs() {
-    let base = "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n";
+    // All configs in this provider-validation section are genuinely
+    // zero-route (provider-only fixtures; #129 opt-in keeps the routes
+    // guard from polluting the provider issue assertions).
+    let base = "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n";
     let gateway = parse_gateway(base).unwrap();
     assert!(dwara_core::snapshot::validate(&gateway).is_empty());
 
     let gateway = parse_gateway(
-        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    algorithms: [HS256]\n",
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    algorithms: [HS256]\n",
     )
     .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
     assert!(issues.iter().any(|i| i.message.contains("asymmetric")));
 
     let gateway = parse_gateway(
-        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    consumer: ghost\n",
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    consumer: ghost\n",
     )
     .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
@@ -654,8 +657,10 @@ fn jwt_provider_validation_rejects_bad_configs() {
         .iter()
         .any(|i| i.message.contains("unknown consumer")));
 
-    let gateway =
-        parse_gateway("jwt_providers:\n  - name: idp\n    jwks_url: not-a-url\n").unwrap();
+    let gateway = parse_gateway(
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: not-a-url\n",
+    )
+    .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
     assert!(issues.iter().any(|i| i.message.contains("absolute http")));
 }
@@ -663,20 +668,24 @@ fn jwt_provider_validation_rejects_bad_configs() {
 #[test]
 fn jwt_provider_validation_rejects_url_algorithm_and_refresh_edge_cases() {
     // Relative URL: no scheme.
-    let gateway =
-        parse_gateway("jwt_providers:\n  - name: idp\n    jwks_url: /jwks.json\n").unwrap();
+    let gateway = parse_gateway(
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: /jwks.json\n",
+    )
+    .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
     assert!(issues.iter().any(|i| i.message.contains("absolute http")));
 
     // Non-http scheme.
-    let gateway =
-        parse_gateway("jwt_providers:\n  - name: idp\n    jwks_url: ftp://idp/jwks\n").unwrap();
+    let gateway = parse_gateway(
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: ftp://idp/jwks\n",
+    )
+    .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
     assert!(issues.iter().any(|i| i.message.contains("absolute http")));
 
     // Empty algorithm list.
     let gateway = parse_gateway(
-        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    algorithms: []\n",
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    algorithms: []\n",
     )
     .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);
@@ -686,7 +695,7 @@ fn jwt_provider_validation_rejects_url_algorithm_and_refresh_edge_cases() {
 
     // Zero refresh cadence.
     let gateway = parse_gateway(
-        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    refresh_secs: 0\n",
+        "allow_empty_routes: true\njwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:1/jwks\n    refresh_secs: 0\n",
     )
     .unwrap();
     let issues = dwara_core::snapshot::validate(&gateway);

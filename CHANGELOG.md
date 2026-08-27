@@ -271,6 +271,13 @@ the project follows semantic versioning once 1.0 is reached.
   bounds entries, not bytes), evicting the least-recently-used entry
   past it with `get`/`set` refreshing recency. It still sits behind the
   trait seam, wired into no request path (#128).
+- Zero-route configs are no longer published: an empty `routes` list
+  fails validation unless the new additive top-level
+  `allow_empty_routes: true` opt-in is set — at cold start (exit 1)
+  and on reload or admin `PATCH /config` (rejected; the previous
+  generation keeps serving). A truncated or torn config write is
+  schema-valid and previously published an empty gateway, silently
+  dropping all routing (#129).
 
 ### Security
 
