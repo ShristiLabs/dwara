@@ -230,6 +230,13 @@ the project follows semantic versioning once 1.0 is reached.
   passed validation as two endpoints against one shared balancer state
   (the identical spelling was already rejected). The duplicate target is
   now compared trimmed, like the empty-address check (#128).
+- The admin API's accept loop had no panic supervision: a panicked
+  accept task killed the admin listener silently for the rest of the
+  process lifetime. The admin accept loop now runs under the same
+  bounded supervision as the data-plane listeners — the supervisor is
+  shared in `dwara-core`, respawns a panicked incarnation on the same
+  bound socket up to 8 times, then gives up with an ERROR log while
+  the gateway keeps serving (#130).
 
 ### Changed
 

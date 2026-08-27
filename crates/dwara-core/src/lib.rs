@@ -16,6 +16,8 @@
 //! - [`resilience`] — passive health, retries, circuit breaker
 //! - [`dataplane`] — the reverse-proxy request path, its upstreams, and
 //!   active health probing
+//! - [`supervision`] — bounded panic-respawn supervision for accept
+//!   loops, shared by the bin and admin accept surfaces
 //! - [`error`] — the facade-level aggregate [`error::Error`] over the
 //!   domain error types, for boundary propagation
 //!
@@ -34,6 +36,7 @@
 //! | `security` | `config`, `state`, `observability` |
 //! | `resilience` | `config`, `snapshot`, `extensions`, `observability` |
 //! | `dataplane` | all of the above |
+//! | `supervision` | (nothing — pure task plumbing, no domain imports) |
 //!
 //! (`dwara-bin`, `dwara-admin`, and `dwara-cli` depend on this crate.)
 //!
@@ -59,6 +62,7 @@ pub mod resilience;
 pub mod security;
 pub mod snapshot;
 pub mod state;
+pub mod supervision;
 
 // Path-compatibility aliases: these re-exports keep the historical
 // top-level module paths (`dwara_core::proxy`, `dwara_core::tls`, ...)

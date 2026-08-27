@@ -38,7 +38,12 @@
 //!
 //! The admin listener has its own accept loop and graceful shutdown;
 //! its bind set is fixed at startup (config changes to `admin.bind`
-//! take effect on restart).
+//! take effect on restart). The accept loop runs under the same
+//! bounded panic-respawn supervision as the gateway listeners (#130,
+//! via dwara-core's shared supervisor from #120): a panicked accept
+//! incarnation is respawned on the same socket up to a fixed budget,
+//! after which the admin listener is given up on with a loud ERROR log
+//! instead of dying silently for the rest of the process lifetime.
 //!
 //! Hardening posture (DW-023): the admin listener shares the
 //! dataplane's parser/amplification bounds and its pre-parse smuggling
@@ -101,6 +106,7 @@ impl AdminContext {
 }
 
 /// How the admin listener accepts connections.
+#[derive(Clone)]
 pub enum ListenMode {
     /// mTLS: rustls `ServerConfig` requiring client certificates that
     /// chain to the configured CA (the production shape; decision 6).
@@ -463,19 +469,80 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
     }
 }
 
+/// #130 panic policy for the admin accept loop, mirroring the gateway
+/// listeners' #120 budget: how many times a panicked accept incarnation
+/// is respawned before the admin listener is given up on. Total for the
+/// process lifetime (a simple bounded budget; a crash-looping accept
+/// loop stops after this many respawns instead of spinning forever).
+const MAX_ADMIN_RESPAWNS: u32 = 8;
+
 /// Serve the admin API on an already-bound listener until `shutdown`
 /// fires, then drain gracefully (in-flight requests complete; anything
 /// still draining when the process exits is closed by process exit).
+///
+/// The accept loop runs under panic supervision (#130) with the same
+/// semantics as the gateway listeners (#120): a panicked incarnation is
+/// respawned on the SAME bound socket up to MAX_ADMIN_RESPAWNS times,
+/// then the admin listener is given up on with a loud ERROR log
+/// (the gateway's data plane keeps serving; the process stays up).
 pub async fn serve(
     ctx: Arc<AdminContext>,
     listener: TcpListener,
     mode: ListenMode,
-    mut shutdown: watch::Receiver<()>,
+    shutdown: watch::Receiver<()>,
 ) -> std::io::Result<()> {
+    let label = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "admin".to_string());
+    let listener = Arc::new(listener);
+    supervise_admin_accept(&label, move || {
+        tokio::spawn(accept_incarnation(
+            Arc::clone(&ctx),
+            Arc::clone(&listener),
+            mode.clone(),
+            shutdown.clone(),
+        ))
+    })
+    .await;
+    Ok(())
+}
+
+/// Bind the supervision of the admin accept task (#130): every respawn
+/// reuses the same bound socket (shared `Arc`) and clones of the serve
+/// plumbing, so a panicked accept loop cannot kill the admin listener
+/// silently for the rest of the process lifetime. The supervisor is
+/// dwara-core's shared [`dwara_core::supervision::supervise_panics`];
+/// only the admin budget and wiring live here.
+///
+/// Pin: never poll a `shutdown` receiver held OUTSIDE the spawn
+/// closure (changed()/borrow_and_update) — each clone inside the
+/// closure inherits its seen version, and only the never-updated
+/// initial version makes a respawned incarnation's changed() fire
+/// immediately for an already-sent shutdown (the same pin as the
+/// listener supervisor in dwara-bin).
+async fn supervise_admin_accept<F>(label: &str, spawn: F)
+where
+    F: FnMut() -> tokio::task::JoinHandle<()>,
+{
+    dwara_core::supervision::supervise_panics("admin", label, MAX_ADMIN_RESPAWNS, spawn).await;
+}
+
+/// One incarnation of the admin accept loop: serve until `shutdown`
+/// fires, then drain gracefully. Panicking here (a bug in the loop
+/// body) hands control back to the supervisor, which respawns on the
+/// same socket.
+async fn accept_incarnation(
+    ctx: Arc<AdminContext>,
+    listener: Arc<TcpListener>,
+    mode: ListenMode,
+    mut shutdown: watch::Receiver<()>,
+) {
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     // Same protocol-hardening posture as the data plane (DW-023): the
     // admin surface parses the same untrusted wire bytes, so the parser
-    // bounds and slowloris timeout apply here too. Read once per serve().
+    // bounds and slowloris timeout apply here too. Read once per
+    // incarnation (a respawned incarnation picks up fresh bounds).
     let hardening = std::sync::Arc::new(dwara_core::hardening::HttpHardening::from_env());
     let tls_config: Option<Arc<rustls::ServerConfig>> = match mode {
         ListenMode::Mtls(config) => Some(Arc::new(*config)),
@@ -511,14 +578,14 @@ pub async fn serve(
             }
         }
     }
-    drop(listener);
     // Drain: in-flight admin requests complete; anything still open when
     // the process exits is closed by process exit (the binary's overall
-    // shutdown budget governs).
+    // shutdown budget governs). The socket itself closes when the last
+    // Arc reference drops — the supervisor's, immediately after this
+    // clean return ends supervision.
     let drain = graceful.shutdown();
     drain.await;
     tracing::info!(code = "admin_drained", "admin listener drained");
-    Ok(())
 }
 
 async fn serve_conn<S>(
@@ -547,5 +614,239 @@ async fn serve_conn<S>(
     ));
     if let Err(err) = conn.await {
         tracing::warn!(code = "admin_conn_error", "admin connection error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    // White-box tests staying in src/ per AGENTS.md: the admin
+    // supervision wiring is private to this crate, and inducing a REAL
+    // accept-loop panic through the public surface is not externally
+    // expressible (the same reasoning as dwara-bin's listener
+    // supervision, #120). The shared supervisor's own semantics are
+    // pinned in dwara-core's supervision module; these pin what admin
+    // adds on top: the respawn budget and the clean-shutdown path
+    // through the real serve().
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::{serve, supervise_admin_accept, ListenMode, MAX_ADMIN_RESPAWNS};
+
+    /// Silences (and counts) the default panic hook for spawned-task
+    /// panics so these tests do not spray backtraces into the log; the
+    /// original hook is restored on drop.
+    struct PanicHookQuiet {
+        prev: Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>,
+    }
+
+    impl PanicHookQuiet {
+        fn install() -> Self {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_info| {}));
+            PanicHookQuiet { prev }
+        }
+    }
+
+    impl Drop for PanicHookQuiet {
+        fn drop(&mut self) {
+            let prev = std::mem::replace(
+                &mut self.prev,
+                Box::new(|_info: &std::panic::PanicHookInfo| {}),
+            );
+            std::panic::set_hook(prev);
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_admin_incarnations_respawn_to_the_admin_budget_then_give_up() {
+        let _quiet = PanicHookQuiet::install();
+        let spawns = AtomicU32::new(0);
+        supervise_admin_accept("127.0.0.1:0", || {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async { panic!("induced admin accept-loop panic") })
+        })
+        .await;
+        // One initial incarnation plus MAX_ADMIN_RESPAWNS respawns; the
+        // next panic exhausts the budget and supervision gives up
+        // (admin listener left down loudly, process keeps running).
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            MAX_ADMIN_RESPAWNS + 1,
+            "admin supervision respawns exactly to the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_returns_ok_after_a_clean_shutdown() {
+        // The full public path: serve() runs its accept incarnation
+        // under supervision; a shutdown signal must end the incarnation
+        // cleanly (drain included), end supervision, and return Ok —
+        // never a silent death, never a hang.
+        let state = std::sync::Arc::new(dwara_core::snapshot::ConfigState::new());
+        state
+            .compile_and_publish(
+                &dwara_core::config::parse_gateway(
+                    "listeners:\n  - name: main\n    address: 127.0.0.1\n    port: 18080\n\
+                     routes:\n  - name: r1\n    service: svc\n\
+                     \x20   match:\n      path:\n        type: prefix\n        value: /api\n\
+                     \x20   action:\n        type: proxy\n\
+                     services:\n  - name: svc\n    upstream: echo\n\
+                     upstreams:\n  - name: echo\n    endpoints:\n      - { address: 127.0.0.1, port: 1 }\n",
+                )
+                .expect("config parses"),
+            )
+            .expect("config publishes");
+        let dp = dwara_core::proxy::DataPlane::new(std::sync::Arc::clone(&state));
+        let ctx = std::sync::Arc::new(super::AdminContext::new(
+            state,
+            dp,
+            std::path::PathBuf::from("unused-dwara.yaml"),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let handle = tokio::spawn(serve(ctx, listener, ListenMode::DevPlaintext, rx));
+        // Signal shutdown; the receiver was never polled before this,
+        // so the incarnation's changed() fires even though it may not
+        // have entered its select yet.
+        tx.send(()).expect("shutdown signal sent");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("serve finishes after shutdown");
+        assert!(outcome.expect("serve task must not panic").is_ok());
+    }
+
+    #[tokio::test]
+    async fn respawned_admin_incarnation_serves_on_the_same_socket() {
+        // The #130 acceptance property: a panicked accept incarnation is
+        // respawned on the SAME bound socket (no re-bind, no port loss)
+        // and the respawned incarnation keeps serving. Modelled through
+        // the admin supervision wiring with a real listener: incarnation
+        // one serves one connection then panics; the respawn must serve
+        // the next connection on the same port.
+        let _quiet = PanicHookQuiet::install();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let shared = std::sync::Arc::new(listener);
+        let spawns = std::sync::Arc::new(AtomicU32::new(0));
+        let counter = std::sync::Arc::clone(&spawns);
+        let supervision = tokio::spawn(async move {
+            supervise_admin_accept("same-socket-test", move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let listener = std::sync::Arc::clone(&shared);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Accept-loop shape: one accepted connection per
+                    // incarnation, mirroring accept_incarnation's
+                    // accept-then-spawn rhythm without the hyper body.
+                    let (mut sock, _) = listener.accept().await.expect("accept");
+                    let mut one = [0u8; 1];
+                    sock.read_exact(&mut one).await.expect("read probe");
+                    if one[0] == b'1' {
+                        // First incarnation: served its connection, now
+                        // dies like a buggy accept loop.
+                        panic!("induced admin accept-loop panic");
+                    }
+                    // Respawned incarnation: same socket, keeps serving.
+                    sock.write_all(b"up").await.expect("reply write");
+                })
+            })
+            .await;
+            spawns.load(Ordering::SeqCst)
+        });
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Connection one: consumed (and closed) by the panicking
+        // incarnation. EOF proves the panic completed before the
+        // respawn is probed.
+        let mut first = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .expect("first connect within timeout")
+        .expect("first connect succeeds");
+        first.write_all(b"1").await.expect("first probe write");
+        let mut eof = [0u8; 1];
+        first
+            .read_exact(&mut eof)
+            .await
+            .expect_err("panicking incarnation closed the connection");
+
+        // Connection two: must be served by the RESPAWNED incarnation
+        // accepting on the same bound socket (the kernel backlog holds
+        // it until the respawn enters accept()).
+        let mut second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .expect("second connect within timeout")
+        .expect("second connect succeeds on the same port");
+        second.write_all(b"2").await.expect("second probe write");
+        let mut got = [0u8; 2];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            second.read_exact(&mut got),
+        )
+        .await
+        .expect("respawn reply within timeout")
+        .expect("respawn reply read");
+        assert_eq!(
+            &got, b"up",
+            "respawned incarnation serves on the same socket"
+        );
+
+        let count = tokio::time::timeout(std::time::Duration::from_secs(2), supervision)
+            .await
+            .expect("supervision ends after the respawn serves and returns cleanly")
+            .expect("supervision task ended cleanly");
+        assert_eq!(count, 2, "exactly one respawn, then a clean end");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signaled_before_a_respawn_ends_the_incarnation_immediately() {
+        // Pins the receiver-clone semantics documented on
+        // supervise_admin_accept: a respawn created AFTER shutdown was
+        // signaled must observe the already-sent signal at once (the
+        // clone inherits the never-updated seen version) instead of
+        // waiting for a second signal that never comes. Without this,
+        // a panic racing shutdown would strand a respawned accept loop
+        // forever.
+        let _quiet = PanicHookQuiet::install();
+        let (tx, rx) = tokio::sync::watch::channel(());
+        // Signal BEFORE any incarnation exists.
+        tx.send(()).expect("shutdown signal sent");
+        let spawns = std::sync::Arc::new(AtomicU32::new(0));
+        let counter = std::sync::Arc::clone(&spawns);
+        let done = tokio::spawn(async move {
+            supervise_admin_accept("race-shutdown-test", move || {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let mut shutdown = rx.clone();
+                tokio::spawn(async move {
+                    if n == 0 {
+                        // First incarnation: dies like a buggy accept
+                        // loop that raced the shutdown signal.
+                        panic!("induced admin accept-loop panic");
+                    }
+                    // Respawn: an accept-loop-shaped task that exits on
+                    // shutdown — which was ALREADY signaled.
+                    shutdown
+                        .changed()
+                        .await
+                        .expect("already-sent shutdown observed");
+                })
+            })
+            .await;
+            spawns.load(Ordering::SeqCst)
+        });
+        let count = tokio::time::timeout(std::time::Duration::from_secs(2), done)
+            .await
+            .expect("supervision ends: respawn observed the already-sent shutdown")
+            .expect("supervision task ended cleanly");
+        assert_eq!(count, 2, "one panic, one immediate-exit respawn");
     }
 }

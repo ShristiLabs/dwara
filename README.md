@@ -1407,6 +1407,14 @@ Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
 `DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
 past the budget are force-closed.
 
+Accept-loop supervision: every serving surface's accept loop — the
+data-plane listeners and the admin listener — runs under a shared panic
+supervisor. A panicked accept incarnation is respawned on the same
+bound socket (no re-bind, no port loss) up to 8 times per surface for
+the process lifetime, with a warning log per respawn; once the budget
+is spent the surface is given up on with an ERROR log and stays down —
+loudly — while the process and the other surfaces keep serving.
+
 ### Protocol hardening
 
 Every serving surface — all data-plane listeners AND the admin listener —
