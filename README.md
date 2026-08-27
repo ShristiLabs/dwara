@@ -1708,7 +1708,13 @@ built-in exporter speaks plain `http://` only: an `https://` endpoint
 fails fast at startup with one ERROR log and the gateway serves
 without trace export; the feature enabled with the endpoint unset is a
 no-op (one INFO line). Spans are batched and flushed (bounded by the
-graceful-drain budget) on the SIGTERM/SIGINT path.
+graceful-drain budget) on the SIGTERM/SIGINT path. Transient collector
+answers (429/502/503/504) and transport failures are retried inside
+one export — up to three attempts with exponential backoff honoring a
+seconds-form `Retry-After`, all sharing the export's one total
+deadline — so a briefly unavailable collector no longer drops the
+batch (delivery is at-least-once: a retry after a lost response may
+duplicate spans).
 
 ## State store
 

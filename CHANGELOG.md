@@ -254,6 +254,18 @@ the project follows semantic versioning once 1.0 is reached.
   `authentication_unavailable` (reachable only via the
   validate-vs-build race; #121 rejects broken bundles at validation)
   (#131).
+- The OTLP exporter client dropped a span batch permanently on any
+  retryable collector answer (429/503) or transport failure — nothing
+  behind it re-queues, so a briefly unavailable collector lost traces.
+  The client now retries transient answers (429/502/503/504) and
+  transport failures inside one export: up to three attempts with
+  exponential backoff honoring a seconds-form `Retry-After`, every
+  attempt sharing the export's one total deadline. The same change
+  bounds request writes: a 64 KiB-chunked, deadline-rechecked write
+  loop replaces single `write_all`s, so a peer making steady minimal
+  TCP-window progress inside one write can no longer stretch the
+  exchange past the deadline. Delivery is at-least-once — a retry
+  after a lost response may duplicate spans (#133).
 
 ### Changed
 

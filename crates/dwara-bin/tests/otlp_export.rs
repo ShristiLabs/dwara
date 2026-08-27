@@ -1042,3 +1042,83 @@ fn ipv6_literal_endpoint_exports_to_loopback_sink() {
         "no enable line: {logs}"
     );
 }
+
+/// Sink answering the FIRST TWO connections with 503 + `Retry-After: 0`
+/// and every later one with the healthy 200 (a collector briefly out
+/// for quota, then recovered) — the retry shape of #133.
+fn spawn_transient_then_healthy_sink() -> (u16, Arc<Mutex<Vec<Captured>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("sink bind on 127.0.0.1:0");
+    let port = listener.local_addr().expect("sink addr").port();
+    let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink_captured = Arc::clone(&captured);
+    let connections = Arc::new(AtomicUsize::new(0));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let nth = connections.fetch_add(1, Ordering::SeqCst);
+            let cap = Arc::clone(&sink_captured);
+            std::thread::spawn(move || {
+                if let Some(record) = read_one_request(&mut stream) {
+                    cap.lock().unwrap().push(record);
+                }
+                let response: &[u8] = if nth < 2 {
+                    b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            });
+        }
+    });
+    (port, captured)
+}
+
+/// #133: a transiently-unavailable collector must not lose the batch.
+/// The sink refuses the first two exports with 503 + Retry-After: 0,
+/// then recovers. The discriminator is TIME: the retrying client
+/// re-sends within one export call (backoff 100ms + 200ms), so the
+/// third POST arrives within seconds of the first — while a
+/// client that DROPPED the batch would not export again until the
+/// batch processor's next 5s tick. Serving and the clean exit hold
+/// throughout.
+#[test]
+fn transient_collector_answers_are_retried_within_one_export() {
+    let (sink_port, captured) = spawn_transient_then_healthy_sink();
+    let (addr, mut guard, _output) = spawn_gateway(
+        "transient503",
+        &[(
+            "DWARA_OTLP_ENDPOINT",
+            &format!("http://127.0.0.1:{sink_port}"),
+        )],
+    );
+
+    // Seed spans; bounded poll for the FIRST (refused) export.
+    assert!(get(&addr).starts_with("HTTP/1.1 200"));
+    assert!(
+        wait_for_captures(&captured, 1, Instant::now() + Duration::from_secs(20)),
+        "the exporter never attempted the refused export"
+    );
+
+    // The retrying client must deliver POSTs 2 and 3 (the second 503
+    // and the accepted one) well inside one batch tick.
+    assert!(
+        wait_for_captures(&captured, 3, Instant::now() + Duration::from_secs(4)),
+        "no in-export retry: the batch was dropped instead (captured: {:?})",
+        captured.lock().unwrap().len()
+    );
+
+    // The third POST was accepted (200) — serving continues and the
+    // process still exits cleanly.
+    for _ in 0..3 {
+        let response = get(&addr);
+        assert!(
+            response.starts_with("HTTP/1.1 200") && response.ends_with("dwara"),
+            "serving must continue through transient collector refusals: {response}"
+        );
+    }
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(20));
+    assert!(status.success(), "clean exit after the retried exports");
+    drop(guard);
+}
