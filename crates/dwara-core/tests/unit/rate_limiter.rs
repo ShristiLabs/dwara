@@ -885,3 +885,54 @@ async fn engine_credential_rule_keys_by_consumer_and_rules_are_isolated() {
     // State-level isolation: two ip cells + three credential cells.
     assert_eq!(engine.live_keys(), 5);
 }
+
+/// #132: the eviction and live-key accessors surface as /metrics
+/// families. The scrape-time walk (`refresh_rate_limiter_gauges`, on
+/// the dataplane — the engine must not import observability) reads the
+/// engine's aggregates and sets the two unlabeled gauges; this drives a
+/// real key spray past the sharded-store bound and pins that the
+/// rendered text carries the engine's actual figures.
+#[tokio::test]
+async fn evictions_and_live_keys_surface_through_the_scrape_walk() {
+    let obs = dwara_core::observability::Observability::new();
+    // Zero engine: the walk reports an empty aggregate. A config with
+    // no policies compiles an engine with no rules.
+    let empty = engine_from("routes:\n  - name: r\n    service: s\n    match:\n      path: { type: prefix, value: / }\n    action: { type: proxy }\nservices:\n  - name: s\n    upstream: u\nupstreams:\n  - name: u\n    endpoints:\n      - { address: 127.0.0.1, port: 1 }\n");
+    dwara_core::dataplane::proxy::refresh_rate_limiter_gauges(&empty, &obs);
+    let text = obs.render();
+    assert!(
+        text.contains("dwara_rate_limiter_evictions_total 0"),
+        "empty engine renders zero evictions:\n{text}"
+    );
+    assert!(
+        text.contains("dwara_rate_limiter_live_keys 0"),
+        "empty engine renders zero live keys:\n{text}"
+    );
+
+    // Spray distinct peer IPs past the sharded-store bound: shards fill,
+    // the size pass evicts, and the aggregates go non-zero.
+    let engine = engine_from(IP_RULES_YAML);
+    let per_ip: Vec<String> = vec!["per-ip".into()];
+    for i in 0..100_000u32 {
+        let ip = format!("10.{}.{}.{}", i >> 16, (i >> 8) & 0xff, i & 0xff);
+        let _ = engine.check(&ctx(&ip, "a"), &[], &[], &per_ip, &[], &[]);
+    }
+    assert!(engine.evictions() > 0, "spray must have evicted");
+    assert!(engine.live_keys() <= store_bound());
+    dwara_core::dataplane::proxy::refresh_rate_limiter_gauges(&engine, &obs);
+    let text = obs.render();
+    assert!(
+        text.contains(&format!(
+            "dwara_rate_limiter_evictions_total {}",
+            engine.evictions()
+        )),
+        "eviction gauge carries the engine's figure:\n{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "dwara_rate_limiter_live_keys {}",
+            engine.live_keys()
+        )),
+        "live-keys gauge carries the engine's figure:\n{text}"
+    );
+}

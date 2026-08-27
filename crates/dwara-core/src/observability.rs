@@ -64,6 +64,14 @@
 //! - `active_requests` gauge
 //! - `config_generation` gauge
 //! - `jwks_refresh_total{provider}` counter
+//! - `dwara_rate_limiter_evictions_total` gauge (scrape-time snapshot
+//!   of the rate-limit engine's monotonic eviction counter, aggregated
+//!   over every compiled rule; resets when a reload rebuilds the
+//!   engine; a gauge rather than a counter so the hot check path stays
+//!   free of registry coupling)
+//! - `dwara_rate_limiter_live_keys` gauge (live per-key cells across
+//!   every compiled rule, approximate, bounded by the sharded store
+//!   cap; aggregate and unlabeled — cardinality is never per key)
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -285,6 +293,10 @@ pub struct Observability {
     jwks_refresh_total: IntCounterVec,
     active_requests: IntGauge,
     config_generation: IntGauge,
+    /// #132: rate-limiter eviction/live-key snapshot gauges — aggregate,
+    /// unlabeled (config-bounded cardinality: never per key).
+    rate_limiter_evictions: IntGauge,
+    rate_limiter_live_keys: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -402,6 +414,20 @@ impl Observability {
             "Currently published configuration generation number.",
         )
         .expect("valid metric definition");
+        let rate_limiter_evictions = IntGauge::new(
+            "dwara_rate_limiter_evictions_total",
+            "Rate-limiter per-key cells dropped by eviction sweeps, aggregated over \
+             every compiled rule (scrape-time snapshot of the engine's monotonic \
+             counter; resets when a reload rebuilds the engine).",
+        )
+        .expect("valid metric definition");
+        let rate_limiter_live_keys = IntGauge::new(
+            "dwara_rate_limiter_live_keys",
+            "Live per-key rate-limiter cells across every compiled rule \
+             (approximate under concurrent checks; bounded by the sharded \
+             store cap per window).",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -417,6 +443,8 @@ impl Observability {
             Box::new(jwks_refresh_total.clone()),
             Box::new(active_requests.clone()),
             Box::new(config_generation.clone()),
+            Box::new(rate_limiter_evictions.clone()),
+            Box::new(rate_limiter_live_keys.clone()),
         ] {
             registry
                 .register(m)
@@ -436,6 +464,8 @@ impl Observability {
             jwks_refresh_total,
             active_requests,
             config_generation,
+            rate_limiter_evictions,
+            rate_limiter_live_keys,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -532,6 +562,25 @@ impl Observability {
         self.fail_open_picks
             .with_label_values(&[upstream])
             .set(picks);
+    }
+
+    /// Set the `dwara_rate_limiter_evictions_total` gauge: aggregate
+    /// cells dropped by eviction sweeps across every compiled rule
+    /// (#132). Scrape-time snapshot of the engine's monotonic counter —
+    /// a gauge rather than a counter so the hot check path stays free
+    /// of metrics coupling; the value resets when a reload rebuilds the
+    /// engine. See [`Self::set_breaker_state`] for the refresh model.
+    pub fn set_rate_limiter_evictions(&self, evictions: i64) {
+        self.rate_limiter_evictions.set(evictions);
+    }
+
+    /// Set the `dwara_rate_limiter_live_keys` gauge: live per-key cells
+    /// across every compiled rule, approximate under concurrent checks
+    /// and bounded by the sharded store cap (#132). Aggregate and
+    /// unlabeled by design — cardinality is never per key. Scrape-time
+    /// snapshot setter; see [`Self::set_breaker_state`].
+    pub fn set_rate_limiter_live_keys(&self, keys: i64) {
+        self.rate_limiter_live_keys.set(keys);
     }
 
     /// Set the `endpoint_health` gauge for one endpoint (1 available,

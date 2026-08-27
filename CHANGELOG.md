@@ -168,6 +168,13 @@ the project follows semantic versioning once 1.0 is reached.
   to any collector receiver, flushed bounded by the shutdown drain
   budget; the default build is unchanged (the variable stays
   reserved-but-inert).
+- Rate-limiter eviction and key-count metrics (#132):
+  `dwara_rate_limiter_evictions_total` (cells dropped by eviction
+  sweeps, aggregated over every compiled rule; resets when a reload
+  rebuilds the engine) and `dwara_rate_limiter_live_keys` (live
+  per-key cells, bounded by the sharded store cap) — both scrape-time
+  snapshot gauges on `/metrics`, aggregate and unlabeled so metric
+  cardinality is never per key.
 
 ### Fixed
 

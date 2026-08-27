@@ -442,9 +442,22 @@ async fn metrics_endpoint_serves_families_and_counts_traffic() {
         "# TYPE active_requests gauge",
         "# TYPE config_generation gauge",
         "# TYPE jwks_refresh_total counter",
+        "# TYPE dwara_rate_limiter_evictions_total gauge",
+        "# TYPE dwara_rate_limiter_live_keys gauge",
     ] {
         assert!(text.contains(name), "missing {name}");
     }
+    // #132: this config compiles no rate-limit policies, so the
+    // scrape-time walk reports an empty engine — zero evictions, zero
+    // live keys (aggregate gauges; cardinality never per key).
+    assert!(
+        text.contains("dwara_rate_limiter_evictions_total 0"),
+        "empty engine reports zero evictions:\n{text}"
+    );
+    assert!(
+        text.contains("dwara_rate_limiter_live_keys 0"),
+        "empty engine reports zero live keys:\n{text}"
+    );
     assert!(
         text.contains("requests_total{listener=\"unknown\",route=\"main\",status_class=\"2xx\"} 2"),
         "route counter must reflect traffic:\n{text}"
@@ -1269,4 +1282,52 @@ fn sampling_always_logs_errors_and_unit_semantics() {
     assert_eq!(logged_2xx, 0, "sample 0.0 drops non-errors");
     obs.set_access_sample(1.0);
     assert!(obs.should_log_access(200));
+}
+
+/// #132: with a rate-limit policy attached, real proxied traffic from
+/// distinct peers leaves live per-key cells, and the /metrics scrape
+/// surfaces them through the full reserved-path pipeline — exactly one
+/// unlabeled aggregate sample per family (cardinality is never per
+/// key), zero evictions under a two-key load.
+#[tokio::test]
+async fn rate_limiter_families_scrape_live_traffic_with_rules() {
+    let port = spawn_ok_backend().await;
+    let dp = proxy_config_with(
+        port,
+        "    policies: [rl]\n",
+        "policies:\n  - name: rl\n    rate_limits:\n      - selector: [ip]\n        \
+         requests_per: { minute: 100 }\n",
+    );
+    let peers = [
+        IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    for p in peers {
+        let resp = dwara_core::proxy::handle(&dp, p, req("/api/x")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_text(resp).await;
+    }
+    let resp = dwara_core::proxy::handle(&dp, peer(), req("/metrics")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = body_text(resp).await;
+    assert!(
+        text.contains("dwara_rate_limiter_live_keys 2"),
+        "two distinct peer cells live:\n{text}"
+    );
+    assert!(
+        text.contains("dwara_rate_limiter_evictions_total 0"),
+        "no eviction under a two-key load:\n{text}"
+    );
+    for family in [
+        "dwara_rate_limiter_live_keys",
+        "dwara_rate_limiter_evictions_total",
+    ] {
+        let samples = parse_samples(&text, family);
+        assert_eq!(
+            samples.len(),
+            1,
+            "one aggregate sample for {family}:\n{text}"
+        );
+        assert_eq!(samples[0].0, "", "no labels on {family}");
+    }
 }

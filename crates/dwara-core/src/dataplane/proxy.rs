@@ -596,6 +596,8 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
         "/metrics" => {
             let obs = &dp.obs;
             refresh_observation_gauges(&dp.current().registry, obs);
+            let rate_limits = dp.rate_limits.load_full();
+            refresh_rate_limiter_gauges(&rate_limits, obs);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -604,6 +606,20 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
         }
         _ => None,
     }
+}
+
+/// Refresh the rate-limiter observation gauges from the CURRENT
+/// engine at scrape time (#132) — the same snapshot model as
+/// [`refresh_observation_gauges`]: the walk lives on the dataplane
+/// (the extensions-side engine must stay free of observability
+/// imports), the hot check path stays pure atomics with zero metrics
+/// coupling, and the observability side only records what it is
+/// handed. Both gauges are aggregate and unlabeled — cardinality is
+/// never per key. The eviction figure resets when a reload rebuilds
+/// the engine (documented family caveat).
+pub fn refresh_rate_limiter_gauges(engine: &RateLimitEngine, obs: &Observability) {
+    obs.set_rate_limiter_evictions(engine.evictions() as i64);
+    obs.set_rate_limiter_live_keys(engine.live_keys() as i64);
 }
 
 /// The response for UNROUTED traffic (#123): a request whose path

@@ -1657,11 +1657,17 @@ families:
   completion)
 - `config_generation` — gauge (currently published generation)
 - `jwks_refresh_total{provider}` — counter (JWKS fetch attempts)
+- `dwara_rate_limiter_evictions_total` — gauge (scrape-time snapshot
+  of the rate-limit engine's eviction counter, aggregated over every
+  compiled rule; resets when a reload rebuilds the engine)
+- `dwara_rate_limiter_live_keys` — gauge (live per-key rate-limiter
+  cells across every compiled rule; aggregate and unlabeled —
+  cardinality is never per key)
 
-Breaker, endpoint-health, and fail-open series are refreshed at scrape
-time from live state; series for upstreams/endpoints removed by a
-reload linger until process restart (a Prometheus caveat, not a leak
-in the gateway's own state).
+Breaker, endpoint-health, fail-open, and rate-limiter series are
+refreshed at scrape time from live state; series for
+upstreams/endpoints removed by a reload linger until process restart
+(a Prometheus caveat, not a leak in the gateway's own state).
 
 A starter Grafana dashboard (`grafana/dwara-overview.json`, metric
 names matching the list above) ships in the repo: in Grafana, import
