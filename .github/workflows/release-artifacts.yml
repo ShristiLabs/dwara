@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
 
       - name: Download size-bar-verified musl artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pinned: v4 @ d3f86a10
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pinned: v4 @ d3f86a10
         with:
           # Both matrix legs (dwara-linux-musl-amd64 / -arm64) uploaded
           # tarball + .sha256; merged into one directory, no collisions
