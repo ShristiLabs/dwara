@@ -488,6 +488,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "rustls",
+ "rustls-pki-types",
  "schemars",
  "serde",
  "serde_json",

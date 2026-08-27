@@ -8,6 +8,11 @@
 //!   [`ListenerTls`] terminate block, with SNI-based certificate selection
 //!   (the single `cert_file`/`key_file` pair is the fallback certificate,
 //!   `certificates` entries are matched by SNI),
+//! - outbound TRUST for https dials (#121): the default webpki public
+//!   root set, PEM-bundle root stores for the `trusted_ca_file` config
+//!   field (private CAs), and the shared HTTP/1.1 client-config shape
+//!   used by upstream connectors, active health probes, and the JWKS
+//!   fetcher,
 //! - a minimal TLS ClientHello SNI parser used by passthrough routing,
 //!   and the passthrough byte-splice itself.
 //!
@@ -47,6 +52,9 @@ pub enum TlsError {
         what: &'static str,
     },
     Rustls(rustls::Error),
+    /// A certificate from a trusted-CA PEM file was rejected by the
+    /// root store (not usable as a trust anchor).
+    RootUnusable(String),
     /// The admin mTLS client-CA verifier could not be built (root
     /// loading or verifier construction failed).
     ClientAuth(String),
@@ -69,6 +77,9 @@ impl std::fmt::Display for TlsError {
                 write!(f, "no {what} found in PEM file {}", path.display())
             }
             TlsError::Rustls(e) => write!(f, "tls error: {e}"),
+            TlsError::RootUnusable(m) => {
+                write!(f, "certificate not usable as a trust anchor: {m}")
+            }
             TlsError::ClientAuth(m) => write!(f, "admin client-auth setup failed: {m}"),
             TlsError::NoCertificates => {
                 write!(f, "tls terminate block has no certificate material")
@@ -107,6 +118,63 @@ pub fn install_aws_lc_rs_provider() {
     // install_default returns Err(previous provider) when one is already
     // installed; that is the idempotent success case for us.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// The Mozilla (webpki) public root set as a rustls `RootCertStore`: the
+/// DEFAULT trust for every outbound https dial — upstream connectors,
+/// active health probes, and the JWKS fetcher (#121 made the per-entity
+/// override configurable; this remains what an entity without a
+/// `trusted_ca_file` verifies against). Lives here, next to the other
+/// root-store machinery, so all outbound callers share one definition
+/// instead of each rebuilding it inline.
+pub fn webpki_root_store() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+/// Build a rustls `RootCertStore` from a PEM file of CA certificates
+/// (#121). The file may carry SEVERAL certificates — a typical CA bundle
+/// lists an anchor plus intermediates — and every certificate in it
+/// becomes a trust anchor. Fails with [`TlsError::Io`] when the file
+/// cannot be read or parsed, and with [`TlsError::EmptyPem`] when it
+/// parses to zero certificates (an empty trust set is always a
+/// configuration mistake, never a valid "trust nothing" — that would
+/// silently fail every TLS handshake).
+pub fn root_store_from_pem_file(path: &str) -> Result<rustls::RootCertStore, TlsError> {
+    let ppath = PathBuf::from(path);
+    let certs = CertificateDer::pem_file_iter(&ppath)
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
+    if certs.is_empty() {
+        return Err(TlsError::EmptyPem {
+            path: ppath,
+            what: "CA certificates",
+        });
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for c in certs {
+        roots
+            .add(c)
+            .map_err(|e| TlsError::RootUnusable(e.to_string()))?;
+    }
+    Ok(roots)
+}
+
+/// HTTP/1.1-ALPN rustls client config over the given trust roots: the
+/// shared shape for every outbound https dial that speaks HTTP/1.1 —
+/// `https`-protocol upstream connectors, active health probes, and the
+/// JWKS fetcher (#121). Keeping one constructor here means a config
+/// generation applies IDENTICAL trust and handshake policy across the
+/// pooled client, the probes, and the fetcher; `http2` upstreams build
+/// their own config (same roots, `h2` ALPN).
+pub fn https_h1_client_config(roots: rustls::RootCertStore) -> rustls::ClientConfig {
+    let mut cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    cfg
 }
 
 fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsError> {
@@ -377,23 +445,10 @@ pub fn admin_mtls_server_config(
     tls: &crate::config::AdminTlsConfig,
 ) -> Result<ServerConfig, TlsError> {
     let certified = load_certified_key(&tls.cert_file, &tls.key_file)?;
-    let ca_path = PathBuf::from(&tls.client_ca_file);
-    let ca_certs = CertificateDer::pem_file_iter(&ca_path)
-        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
-    if ca_certs.is_empty() {
-        return Err(TlsError::EmptyPem {
-            path: ca_path,
-            what: "client CA certificates",
-        });
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for c in ca_certs {
-        roots
-            .add(c)
-            .map_err(|e| TlsError::ClientAuth(format!("adding root for admin verifier: {e}")))?;
-    }
+    // Same PEM-bundle loading as the outbound trusted_ca_file path (#121):
+    // one root-store-from-file helper, shared by admin mTLS and outbound
+    // connectors, so bundle semantics cannot drift between them.
+    let roots = root_store_from_pem_file(&tls.client_ca_file)?;
     let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;

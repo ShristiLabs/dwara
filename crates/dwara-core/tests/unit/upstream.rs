@@ -73,6 +73,7 @@ fn test_upstream(
         }),
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     }
 }
 
@@ -395,6 +396,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             }),
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],

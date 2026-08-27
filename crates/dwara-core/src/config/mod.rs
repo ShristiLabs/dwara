@@ -158,6 +158,16 @@ pub struct JwtProvider {
     /// the first Bearer request, refreshed after `refresh_secs`, and
     /// re-fetched on an unknown `kid` (key rotation mid-flight).
     pub jwks_url: String,
+    /// Path to a PEM file of CA certificates the JWKS fetcher trusts for
+    /// its `https://` connection INSTEAD of the default public (webpki)
+    /// root set (#121): for JWKS endpoints served over TLS by a private
+    /// CA. The file may carry several certificates (a typical CA bundle).
+    /// Only meaningful with an `https://` jwks_url — no TLS is negotiated
+    /// toward an `http://` endpoint, so validation rejects that
+    /// combination. The file must exist and be readable at config compile
+    /// time; validation names this field otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_ca_file: Option<String>,
     /// Required token issuer (`iss` claim). Absent: any issuer accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
@@ -606,6 +616,18 @@ pub struct Upstream {
     /// Protocol used toward upstream endpoints.
     #[serde(default = "default_upstream_protocol")]
     pub protocol: UpstreamProtocol,
+    /// Path to a PEM file of CA certificates this upstream's TLS
+    /// connections trust INSTEAD of the default public (webpki) root set
+    /// (#121): the way to proxy an `https`/`http2` upstream whose server
+    /// certificate chains to a private CA. The file may carry several
+    /// certificates (a typical CA bundle). Only meaningful for the TLS
+    /// protocols — no TLS is negotiated toward `http1` endpoints, so
+    /// validation rejects that combination. Active `http` health probes
+    /// for this upstream verify against the same roots. The file must
+    /// exist and be readable at config compile time; validation names
+    /// this field otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_ca_file: Option<String>,
     pub endpoints: Vec<Endpoint>,
     /// Maximum number of concurrent outbound connections to this upstream
     /// (active plus pooled idle). Defaults to 64 when absent. Enforced by

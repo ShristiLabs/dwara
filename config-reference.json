@@ -504,6 +504,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "trusted_ca_file": {
+          "description": "Path to a PEM file of CA certificates the JWKS fetcher trusts for\nits `https://` connection INSTEAD of the default public (webpki)\nroot set (#121): for JWKS endpoints served over TLS by a private\nCA. The file may carry several certificates (a typical CA bundle).\nOnly meaningful with an `https://` jwks_url — no TLS is negotiated\ntoward an `http://` endpoint, so validation rejects that\ncombination. The file must exist and be readable at config compile\ntime; validation names this field otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -1431,6 +1438,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "trusted_ca_file": {
+          "description": "Path to a PEM file of CA certificates this upstream's TLS\nconnections trust INSTEAD of the default public (webpki) root set\n(#121): the way to proxy an `https`/`http2` upstream whose server\ncertificate chains to a private CA. The file may carry several\ncertificates (a typical CA bundle). Only meaningful for the TLS\nprotocols — no TLS is negotiated toward `http1` endpoints, so\nvalidation rejects that combination. Active `http` health probes\nfor this upstream verify against the same roots. The file must\nexist and be readable at config compile time; validation names\nthis field otherwise.",
+          "type": [
+            "string",
+            "null"
           ]
         }
       },

@@ -14,18 +14,17 @@
 //! balancing and the pooled upstream client — a probe must examine one
 //! specific endpoint, not whoever the balancer would pick. Each `http`
 //! probe speaks HTTP/1.1 over its own connection (plaintext toward `http1`
-//! upstreams, rustls with the same webpki root set and the endpoint
-//! address as server name toward `https`/`http2` upstreams), issues
-//! `GET {path}` with `Connection: close`, and classifies the FIRST status
-//! line it reads: 2xx = success; anything else (3xx included — redirects
-//! are not followed — 4xx, 5xx, truncation, timeout, transport error) =
-//! failure. `tcp` probes succeed when the TCP connect completes within
+//! upstreams, rustls over the SAME trust roots as the pooled connector —
+//! webpki by default, the upstream's `trusted_ca_file` bundle when
+//! configured, #121 — with the endpoint address as server name toward
+//! `https`/`http2` upstreams), issues `GET {path}` with
+//! `Connection: close`, and classifies the FIRST status line it reads:
+//! 2xx = success; anything else (3xx included — redirects are not
+//! followed — 4xx, 5xx, truncation, timeout, transport error) = failure.
+//! `tcp` probes succeed when the TCP connect completes within
 //! `timeout_ms`. Documented limitation: `http2`-protocol upstreams that
 //! refuse HTTP/1.1 on a separate connection will read as failing; use
-//! `kind: tcp` for those. Likewise, upstreams whose certificates chain to
-//! a PRIVATE CA (not the webpki root set) cannot be probed with `kind:
-//! http` — the TLS handshake fails validation; use `kind: tcp` until
-//! custom probe trust roots exist.
+//! `kind: tcp` for those.
 //!
 //! # Timing
 //!
@@ -191,11 +190,15 @@ where
 }
 
 /// One direct probe of `address:port`, bounded by `timeout` (connect plus
-/// response for http). `scheme` is the upstream's dial scheme ("http" or
-/// "https"). Returns whether the endpoint answered healthy.
+/// response for http). `tls` is the upstream's outbound TLS client config:
+/// Some for `https`/`http2` upstreams (built from the SAME root store as
+/// the pooled connector — webpki by default, the upstream's
+/// `trusted_ca_file` bundle when configured, #121 — with HTTP/1.1 ALPN),
+/// None for plaintext `http1` upstreams. Returns whether the endpoint
+/// answered healthy.
 pub async fn probe_once(
     kind: ProbeKind,
-    scheme: &str,
+    tls: Option<&Arc<rustls::ClientConfig>>,
     address: &str,
     port: u16,
     path: &str,
@@ -210,28 +213,28 @@ pub async fn probe_once(
         ProbeKind::Http => {
             let attempt = async {
                 let tcp = tokio::net::TcpStream::connect((address, port)).await?;
-                if scheme != "https" {
-                    let mut io = tcp;
-                    let ok = http_status_ok(&mut io, &authority(address, port), path).await?;
-                    let _ = io.shutdown().await;
-                    Ok::<bool, std::io::Error>(ok)
-                } else {
-                    // Same trust model as the pooled client: webpki roots,
-                    // endpoint address as server name (works for hostname
-                    // endpoints and IP endpoints with IP-SAN certificates).
-                    let mut cfg = rustls::ClientConfig::builder()
-                        .with_root_certificates(webpki_roots_store())
-                        .with_no_client_auth();
-                    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-                    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
-                    let name = match rustls::pki_types::ServerName::try_from(address.to_string()) {
-                        Ok(n) => n,
-                        Err(_) => return Ok(false),
-                    };
-                    let mut tls = connector.connect(name, tcp).await?;
-                    let ok = http_status_ok(&mut tls, &authority(address, port), path).await?;
-                    let _ = tls.shutdown().await;
-                    Ok(ok)
+                match tls {
+                    None => {
+                        let mut io = tcp;
+                        let ok = http_status_ok(&mut io, &authority(address, port), path).await?;
+                        let _ = io.shutdown().await;
+                        Ok::<bool, std::io::Error>(ok)
+                    }
+                    Some(cfg) => {
+                        // Same trust as the pooled client; endpoint address
+                        // as server name (works for hostname endpoints and
+                        // IP endpoints with IP-SAN certificates).
+                        let connector = tokio_rustls::TlsConnector::from(Arc::clone(cfg));
+                        let name =
+                            match rustls::pki_types::ServerName::try_from(address.to_string()) {
+                                Ok(n) => n,
+                                Err(_) => return Ok(false),
+                            };
+                        let mut tls = connector.connect(name, tcp).await?;
+                        let ok = http_status_ok(&mut tls, &authority(address, port), path).await?;
+                        let _ = tls.shutdown().await;
+                        Ok(ok)
+                    }
                 }
             };
             tokio::time::timeout(timeout, attempt)
@@ -240,12 +243,6 @@ pub async fn probe_once(
                 .unwrap_or(false)
         }
     }
-}
-
-fn webpki_roots_store() -> rustls::RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    roots
 }
 
 // Process-local xorshift64* seed for full jitter (no `rand` dependency;
@@ -312,7 +309,7 @@ async fn probe_loop(
     tracker: Arc<EndpointHealth>,
     active: ActiveParams,
     passive: HealthParams,
-    scheme: &'static str,
+    tls: Option<Arc<rustls::ClientConfig>>,
 ) {
     let report = report_params(&active, &passive);
     let mut success_streak: u32 = 0;
@@ -324,7 +321,7 @@ async fn probe_loop(
         let iteration = async {
             let ok = probe_once(
                 active.kind,
-                scheme,
+                tls.as_ref(),
                 &address,
                 port,
                 &active.path,
@@ -410,11 +407,16 @@ impl ActiveProbes {
             };
             let active = ActiveParams::from_config(active_cfg);
             let passive = HealthParams::from_config(passive_cfg);
-            let scheme: &'static str = if handle.scheme() == "https" {
-                "https"
-            } else {
-                "http"
-            };
+            // Same trust as the pooled connector (#121): the probe client
+            // config is built from the HANDLE's root store, so an upstream
+            // with a `trusted_ca_file` bundle is probed over https with
+            // exactly the trust its proxied traffic uses. ALPN stays
+            // http/1.1 here regardless of the upstream's protocol (a probe
+            // is always a plain HTTP/1.1 exchange; see the module docs for
+            // the http2 caveat).
+            let tls = handle
+                .tls_roots()
+                .map(|roots| Arc::new(crate::security::tls::https_h1_client_config(roots.clone())));
             for (address, port, tracker) in handle.lb().health_targets() {
                 let Some(tracker) = tracker else { continue };
                 self.tasks.spawn(probe_loop(
@@ -424,7 +426,7 @@ impl ActiveProbes {
                     tracker,
                     active.clone(),
                     passive,
-                    scheme,
+                    tls.clone(),
                 ));
             }
         }

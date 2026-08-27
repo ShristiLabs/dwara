@@ -19,6 +19,10 @@ regex = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+# #121: PEM parsing for the trusted_ca_file validation-time check in
+# snapshot::validate (an external crate, so the crate:: dependency
+# direction between domains is unaffected).
+rustls-pki-types = { workspace = true }
 # #120: zeroizes PEM/DER private-key buffers on drop in security::tls.
 zeroize = { workspace = true }
 hyper = { workspace = true }

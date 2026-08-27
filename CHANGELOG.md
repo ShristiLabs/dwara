@@ -113,6 +113,16 @@ the project follows semantic versioning once 1.0 is reached.
   distroless images, a one-command docker-compose TLS quickstart, a
   hardened systemd unit, and a tag-only release workflow with a 25 MB
   size bar and GHCR multi-arch images (DW-026).
+- Per-entity private-CA trust: `trusted_ca_file` on upstreams and JWT
+  providers — a PEM CA bundle (multi-cert supported) that REPLACES the
+  webpki public roots for that upstream's TLS connections AND its https
+  active-health probes, and for that provider's https JWKS fetches.
+  Unset keeps the public roots; validation rejects a bundle that is
+  missing, unreadable, or PEM-unparseable (zero certificates), so one
+  that goes bad after publish is caught at reload and the old
+  generation keeps serving — the runtime fail-closed paths (upstream
+  TLS dials refused / provider disabled) remain only as a
+  validate-vs-build race backstop, never a silent fallback (#121).
 
 ### Fixed
 

@@ -403,6 +403,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -666,4 +667,123 @@ fn build_fails_on_corrupt_private_key_pem_without_leaking_material() {
     assert!(matches!(err, TlsError::Io(_) | TlsError::Rustls(_)));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- trusted-CA bundle loading (#121: root_store_from_pem_file) ---------
+
+/// One self-signed CA (the same shape as the integration fixture): a
+/// bundle of these is what a trusted_ca_file carries.
+fn bundle_ca(cn: &str) -> String {
+    let key = rcgen::KeyPair::generate().expect("ca key");
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.self_signed(&key).expect("ca cert").pem()
+}
+
+#[test]
+fn root_store_loads_every_certificate_in_a_multi_cert_bundle() {
+    let dir = temp_dir();
+    // Real bundles list several anchors with comment filler between the
+    // blocks; every certificate must become a trust anchor, in any order.
+    let bundle = dir.join("two-anchors.pem");
+    std::fs::write(
+        &bundle,
+        format!(
+            "{}# several anchors follow\n{}",
+            bundle_ca("unit-ca-a"),
+            bundle_ca("unit-ca-b")
+        ),
+    )
+    .unwrap();
+    let store = root_store_from_pem_file(bundle.to_str().unwrap()).expect("bundle loads");
+    assert_eq!(store.len(), 2, "both anchors are in the store");
+
+    // A single-anchor file is the degenerate bundle.
+    let single = dir.join("one-anchor.pem");
+    std::fs::write(&single, bundle_ca("unit-ca-single")).unwrap();
+    let store = root_store_from_pem_file(single.to_str().unwrap()).expect("single loads");
+    assert_eq!(store.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn root_store_rejects_unusable_bundle_files() {
+    let dir = temp_dir();
+
+    // Missing path: io error.
+    assert!(matches!(
+        root_store_from_pem_file("/nonexistent/dwara-test-ca.pem"),
+        Err(TlsError::Io(_))
+    ));
+
+    // A directory opens for read but yields no certificates: io error
+    // here (snapshot validation also rejects it now — its PEM parse
+    // dies on the same EISDIR read — but the io-error MAPPING is owned
+    // by this layer).
+    let subdir = dir.join("is-a-directory.pem");
+    std::fs::create_dir(&subdir).unwrap();
+    assert!(matches!(
+        root_store_from_pem_file(subdir.to_str().unwrap()),
+        Err(TlsError::Io(_))
+    ));
+
+    // Empty file: parses to zero anchors — never a valid "trust nothing".
+    let empty = dir.join("empty.pem");
+    std::fs::write(&empty, b"").unwrap();
+    assert!(matches!(
+        root_store_from_pem_file(empty.to_str().unwrap()),
+        Err(TlsError::EmptyPem {
+            what: "CA certificates",
+            ..
+        })
+    ));
+
+    // Non-PEM garbage: no certificate sections at all, so the iterator
+    // yields zero certificates — the same EmptyPem failure (non-PEM
+    // text is skipped, not fatal, matching the key-file semantics).
+    let garbage = dir.join("garbage.pem");
+    std::fs::write(&garbage, "definitely not a pem file\n").unwrap();
+    assert!(matches!(
+        root_store_from_pem_file(garbage.to_str().unwrap()),
+        Err(TlsError::EmptyPem {
+            what: "CA certificates",
+            ..
+        })
+    ));
+
+    // A CERTIFICATE section whose base64 body is not a certificate at
+    // all: the PEM layer hands back the decoded bytes (validation's
+    // parse check accepts them — it parses PEM, not anchors), and the
+    // root store is what rejects them — the unusable-anchor dimension
+    // mapped to RootUnusable. This is the fail-closed backstop's error
+    // surface for a bundle that breaks between validate and build.
+    let bogus = dir.join("bogus-anchor.pem");
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    std::fs::write(
+        &bogus,
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            B64.encode(b"definitely not a der certificate")
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        root_store_from_pem_file(bogus.to_str().unwrap()),
+        Err(TlsError::RootUnusable(_))
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn webpki_root_store_matches_the_public_root_set() {
+    // The DEFAULT outbound trust (entities without trusted_ca_file) is
+    // the Mozilla set, built once here for connectors, probes, and the
+    // JWKS fetcher.
+    assert!(!webpki_root_store().is_empty());
 }

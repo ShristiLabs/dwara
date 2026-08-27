@@ -56,7 +56,12 @@
 //!   HTTP/2; `http1` upstreams dial plaintext. Server certificates are
 //!   verified against the Mozilla webpki root set by default (chosen over
 //!   system roots for determinism in tests; system roots are a follow-up).
-//!   Private-CA upstreams work via [`UpstreamRegistry::with_root_certificates`].
+//!   Private-CA upstreams are configured per upstream via
+//!   `trusted_ca_file` (#121): the PEM bundle REPLACES the public roots
+//!   for that upstream, and its active https health probes verify against
+//!   the same roots (see the handle's [`UpstreamHandle::tls_roots`]).
+//!   Programmatic callers can still add extra roots on top of the public
+//!   set via [`UpstreamRegistry::with_root_certificates`].
 //!
 //! Load balancing (DW-011): every dispatch picks its endpoint through the
 //! upstream's [`crate::dataplane::balance::UpstreamLb`] (smooth weighted round-robin,
@@ -608,6 +613,12 @@ pub struct UpstreamHandle {
     lb: Arc<crate::dataplane::balance::UpstreamLb>,
     scheme: &'static str,
     http2_only: bool,
+    /// The trust roots this upstream's TLS connections verify against
+    /// (#121): None for plaintext `http1` upstreams, the configured
+    /// `trusted_ca_file` bundle when set, else the webpki public set.
+    /// Kept on the handle so the active https health probes use the
+    /// SAME trust as the pooled connector.
+    tls_roots: Option<rustls::RootCertStore>,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
@@ -695,6 +706,15 @@ impl UpstreamHandle {
     /// endpoint the same way) and for tests.
     pub fn lb(&self) -> &Arc<crate::dataplane::balance::UpstreamLb> {
         &self.lb
+    }
+
+    /// The trust roots this upstream's TLS connections verify against
+    /// (#121): None for plaintext `http1` upstreams, the configured
+    /// `trusted_ca_file` bundle when set, else the webpki public set.
+    /// Active https health probes clone this so a probe and a proxied
+    /// request can never disagree about who to trust.
+    pub fn tls_roots(&self) -> Option<&rustls::RootCertStore> {
+        self.tls_roots.as_ref()
     }
 
     /// Send a request through this upstream's pool without a hash key
@@ -939,23 +959,30 @@ fn build_handle(
                                     // this HttpConnector rejects non-http URIs before we ever see them.
     http.enforce_http(false);
 
-    let (scheme, tls, http2_only): (&'static str, Option<_>, bool) = match u.protocol {
-        UpstreamProtocol::Http1 => ("http", None, false),
-        UpstreamProtocol::Https => {
-            let mut cfg = rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-            cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-            ("https", Some(Arc::new(cfg)), false)
-        }
-        UpstreamProtocol::Http2 => {
-            let mut cfg = rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-            cfg.alpn_protocols = vec![b"h2".to_vec()];
-            ("https", Some(Arc::new(cfg)), true)
-        }
-    };
+    // `root_store` is the trust for THIS upstream (#121): the configured
+    // trusted_ca_file bundle when set, else webpki (+ any programmatic
+    // extras). Kept on the handle so probes share it (tls_roots).
+    let (scheme, tls, http2_only, tls_roots): (&'static str, Option<_>, bool, Option<_>) =
+        match u.protocol {
+            UpstreamProtocol::Http1 => ("http", None, false, None),
+            UpstreamProtocol::Https => (
+                "https",
+                Some(Arc::new(crate::security::tls::https_h1_client_config(
+                    root_store.clone(),
+                ))),
+                false,
+                Some(root_store),
+            ),
+            UpstreamProtocol::Http2 => {
+                // Same roots as https, but ALPN h2 and a client locked to
+                // HTTP/2 (see module docs).
+                let mut cfg = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store.clone())
+                    .with_no_client_auth();
+                cfg.alpn_protocols = vec![b"h2".to_vec()];
+                ("https", Some(Arc::new(cfg)), true, Some(root_store))
+            }
+        };
 
     let connector = UpstreamConnector {
         http,
@@ -1024,13 +1051,8 @@ fn build_handle(
         lb,
         scheme,
         http2_only,
+        tls_roots,
     })
-}
-
-fn webpki_root_store() -> rustls::RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    roots
 }
 
 /// Registry of per-upstream pooled clients, built from one published
@@ -1043,9 +1065,9 @@ pub struct UpstreamRegistry {
 
 impl UpstreamRegistry {
     /// Build from a snapshot, verifying upstream TLS certificates against
-    /// the Mozilla webpki root set.
+    /// the Mozilla webpki root set — except upstreams that configure
+    /// `trusted_ca_file`, which verify against their own bundle (#121).
     pub fn from_snapshot(snapshot: &Snapshot) -> Self {
-        // No extra roots are supplied, so the build cannot fail.
         Self::with_root_certificates(snapshot, &[])
             .expect("registry build without extra roots cannot fail")
     }
@@ -1056,7 +1078,6 @@ impl UpstreamRegistry {
     /// weight and endpoint changes take effect without a restart, and
     /// in-flight requests holding old handles are unaffected.
     pub fn from_snapshot_with_previous(snapshot: &Snapshot, previous: &UpstreamRegistry) -> Self {
-        // No extra roots are supplied, so the build cannot fail.
         Self::with_root_certificates_and_previous(snapshot, &[], Some(previous))
             .expect("registry build without extra roots cannot fail")
     }
@@ -1076,28 +1097,57 @@ impl UpstreamRegistry {
     /// `with_root_certificates` with optional balancer-state carry-over
     /// from a previous registry build (see
     /// [`UpstreamRegistry::from_snapshot_with_previous`]).
+    ///
+    /// Per-upstream `trusted_ca_file` (#121): when set, that upstream's
+    /// connector trusts the file's bundle INSTEAD of the webpki+extras
+    /// store — a private-CA upstream must not implicitly keep public-root
+    /// trust. Config-driven bundles that fail to load at build time do
+    /// NOT fail the build (the config was file-validated at publish, so
+    /// this is a torn state — the bundle was replaced/unlinked
+    /// underneath the gateway); the upstream FAILS CLOSED with an empty
+    /// root store and a loud error log, so no traffic is ever sent under
+    /// trust the operator did not configure. Programmatic `extra_roots`
+    /// keep the immediate-Err contract above.
     pub fn with_root_certificates_and_previous(
         snapshot: &Snapshot,
         extra_roots: &[CertificateDer<'_>],
         previous: Option<&UpstreamRegistry>,
     ) -> Result<Self, UpstreamError> {
-        let mut roots = webpki_root_store();
+        let mut default_roots = crate::security::tls::webpki_root_store();
         for c in extra_roots {
-            roots
+            default_roots
                 .add(c.clone())
                 .map_err(|e| UpstreamError::InvalidRootCertificate(e.to_string()))?;
         }
-        Ok(UpstreamRegistry {
-            handles: snapshot
-                .gateway()
-                .upstreams
-                .iter()
-                .map(|u| {
-                    let prev = previous.and_then(|p| p.handles.get(&u.name));
-                    (u.name.clone(), build_handle(u, roots.clone(), prev))
-                })
-                .collect(),
-        })
+        let handles = snapshot
+            .gateway()
+            .upstreams
+            .iter()
+            .map(|u| {
+                let roots = match &u.trusted_ca_file {
+                    Some(path) => match crate::security::tls::root_store_from_pem_file(path) {
+                        Ok(roots) => roots,
+                        Err(err) => {
+                            // See the method docs: fail closed, never
+                            // fall back to the public roots (that would
+                            // silently change who this upstream trusts).
+                            tracing::error!(
+                                code = "upstream_ca_unloadable",
+                                upstream = %u.name,
+                                path = %path,
+                                "trusted_ca_file unusable; failing closed (every TLS dial to \
+                                 this upstream will be refused): {err}"
+                            );
+                            rustls::RootCertStore::empty()
+                        }
+                    },
+                    None => default_roots.clone(),
+                };
+                let prev = previous.and_then(|p| p.handles.get(&u.name));
+                (u.name.clone(), build_handle(u, roots, prev))
+            })
+            .collect();
+        Ok(UpstreamRegistry { handles })
     }
 
     /// Handle for the named upstream, or None if the snapshot has no such
@@ -1175,8 +1225,9 @@ mod tests {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         };
-        let handle = build_handle(&up, webpki_root_store(), None);
+        let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None);
         assert!(matches!(
             handle.send(get_request("/x")).await,
             Err(UpstreamError::NoEndpoints)

@@ -124,6 +124,65 @@ fn issue(entity: &str, name: &str, field: &str, message: impl Into<String>) -> V
     }
 }
 
+/// Compile-time check for a `trusted_ca_file` (#121): the file must
+/// exist, be readable, and PARSE to at least one PEM certificate NOW, or
+/// the config generation is rejected naming the field. A missing,
+/// unreadable, or certificate-free trust bundle would otherwise publish
+/// fine and fail every TLS dial to the affected upstream at request time
+/// — and, the sharp case, DISABLE a JWT provider at authenticator build,
+/// after which Bearer tokens pass through UNVERIFIED. Closing that torn
+/// state here, at validation, is the whole point of the PEM dimension:
+/// the runtime fail-closed paths (empty root store / provider disabled,
+/// security/tls.rs and authn.rs) remain as a microsecond-race backstop
+/// for a bundle that breaks between validate and build. PEM parsing uses
+/// rustls-pki-types directly — an EXTERNAL crate, so this module's
+/// position in the facade's `crate::` dependency order is untouched —
+/// while anchor USABILITY (a parseable certificate the root store
+/// rejects) stays enforced where the rustls root store lives, at
+/// registry build.
+fn check_trusted_ca_file(entity: &str, name: &str, path: &str, issues: &mut Vec<ValidationIssue>) {
+    use rustls_pki_types::pem::PemObject;
+
+    if let Err(e) = std::fs::File::open(path) {
+        issues.push(issue(
+            entity,
+            name,
+            "trusted_ca_file",
+            format!("trusted_ca_file '{path}' is not a readable file: {e}"),
+        ));
+        return;
+    }
+    // Non-PEM text between blocks is skipped (real bundles carry
+    // comments), so `Ok([])` means the file holds no CERTIFICATE
+    // sections at all; an Err is a read failure (e.g. a directory:
+    // File::open succeeds on Unix, the read does not) or a malformed
+    // PEM block.
+    let parsed = rustls_pki_types::CertificateDer::pem_file_iter(path).and_then(|iter| {
+        iter.collect::<Result<Vec<rustls_pki_types::CertificateDer<'static>>, _>>()
+    });
+    match parsed {
+        Ok(certs) if !certs.is_empty() => {}
+        Ok(_) => issues.push(issue(
+            entity,
+            name,
+            "trusted_ca_file",
+            format!(
+                "trusted_ca_file '{path}' holds no usable CA certificates \
+                 (the PEM bundle must list at least one CERTIFICATE)"
+            ),
+        )),
+        Err(e) => issues.push(issue(
+            entity,
+            name,
+            "trusted_ca_file",
+            format!(
+                "trusted_ca_file '{path}' could not be parsed as a PEM \
+                 certificate bundle: {e}"
+            ),
+        )),
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -268,6 +327,32 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "consumer",
                     format!("references unknown consumer '{consumer}'"),
                 ));
+            }
+        }
+        // trusted_ca_file (#121): the JWKS fetcher's TLS trust override
+        // for private-CA issuers. It only applies to an `https://`
+        // jwks_url — no TLS is negotiated toward an `http://` endpoint,
+        // so there is nothing to verify and the field is an authoring
+        // mistake. When it does apply, the bundle must be on disk and
+        // readable at compile time (see check_trusted_ca_file).
+        if let Some(ca) = &p.trusted_ca_file {
+            // An unparseable URL already produced its own jwks_url issue
+            // above; piling a CA complaint on a broken URL is noise.
+            if let Ok(uri) = p.jwks_url.parse::<hyper::Uri>() {
+                if uri
+                    .scheme_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("https"))
+                {
+                    check_trusted_ca_file("jwt_provider", &p.name, ca, &mut issues);
+                } else {
+                    issues.push(issue(
+                        "jwt_provider",
+                        &p.name,
+                        "trusted_ca_file",
+                        "trusted_ca_file only applies to an https jwks_url (no TLS is \
+                         negotiated toward an http endpoint)",
+                    ));
+                }
             }
         }
     }
@@ -799,6 +884,30 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "endpoints",
                 "upstream has no endpoints",
             ));
+        }
+        // trusted_ca_file (#121): the connector's TLS trust override for
+        // private-CA upstreams. It only applies to the TLS protocols —
+        // no TLS is negotiated toward an `http1` upstream, so there is
+        // nothing to verify and the field is an authoring mistake (the
+        // same reading as a listener's "protocol http must not carry a
+        // tls block"). When it does apply, the bundle must be on disk
+        // and readable at compile time.
+        if let Some(ca) = &u.trusted_ca_file {
+            let tls = matches!(
+                u.protocol,
+                crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
+            );
+            if tls {
+                check_trusted_ca_file("upstream", &u.name, ca, &mut issues);
+            } else {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "trusted_ca_file",
+                    "trusted_ca_file only applies to TLS upstreams (protocol https or http2); no \
+                     TLS is negotiated toward an http1 upstream",
+                ));
+            }
         }
         let mut seen_targets = std::collections::BTreeSet::new();
         let mut total_vnodes: u64 = 0;

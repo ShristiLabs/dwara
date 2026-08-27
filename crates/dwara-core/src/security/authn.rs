@@ -336,8 +336,11 @@ impl hyper_util::client::legacy::connect::Connection for MaybeTls {
 }
 
 /// Plain-or-TLS connector for one-shot JWKS GETs (hyper-util legacy
-/// client plumbing; reuses the workspace rustls/webpki-roots stack, no
-/// new HTTP dependency).
+/// client plumbing; reuses the workspace rustls stack, no new HTTP
+/// dependency). Trust defaults to the webpki public roots; a provider's
+/// `trusted_ca_file` (#121) replaces them so an https JWKS endpoint
+/// behind a private CA is fetchable — the same trust model the upstream
+/// connector gives `trusted_ca_file` upstreams.
 #[derive(Clone)]
 struct JwksConnector {
     http: hyper_util::client::legacy::connect::HttpConnector,
@@ -345,21 +348,24 @@ struct JwksConnector {
 }
 
 impl JwksConnector {
-    fn new() -> Self {
+    /// `trusted_ca` is the provider's `trusted_ca_file` path when set.
+    /// Fails when the bundle cannot be loaded/parsed, so the provider is
+    /// disabled at build time (see `CompositeAuthenticator::build`)
+    /// instead of failing every fetch at request time.
+    fn new(trusted_ca: Option<&str>) -> Result<Self, AuthError> {
         let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
         http.enforce_http(false); // scheme routing happens here
-        let mut cfg = rustls::ClientConfig::builder()
-            .with_root_certificates({
-                let mut roots = rustls::RootCertStore::empty();
-                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-                roots
-            })
-            .with_no_client_auth();
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-        JwksConnector {
+        let roots = match trusted_ca {
+            Some(path) => crate::security::tls::root_store_from_pem_file(path).map_err(|e| {
+                AuthError::Unavailable(format!("trusted_ca_file '{path}' could not be loaded: {e}"))
+            })?,
+            None => crate::security::tls::webpki_root_store(),
+        };
+        let cfg = crate::security::tls::https_h1_client_config(roots);
+        Ok(JwksConnector {
             http,
             tls: tokio_rustls::TlsConnector::from(Arc::new(cfg)),
-        }
+        })
     }
 }
 
@@ -490,10 +496,16 @@ impl JwtVerifier {
         let jwks_refresh = obs.map(|o| o.jwks_refresh_counter(cfg.name.as_str()));
         let mut builder = Client::builder(TokioExecutor::new());
         builder.pool_timer(TokioTimer::new());
+        // #121: the provider's trusted_ca_file (private-CA JWKS
+        // endpoints) feeds the fetcher's TLS trust; a broken bundle
+        // disables this provider (see CompositeAuthenticator::build)
+        // rather than breaking every Bearer request with a fetch
+        // failure. Built before the struct so `cfg` is not yet moved.
+        let connector = JwksConnector::new(cfg.trusted_ca_file.as_deref())?;
         Ok(JwtVerifier {
             cfg,
             algorithms,
-            http: builder.build(JwksConnector::new()),
+            http: builder.build(connector),
             cache,
             jwks_refresh,
         })

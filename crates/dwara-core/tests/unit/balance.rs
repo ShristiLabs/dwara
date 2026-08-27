@@ -362,6 +362,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         retries: None,
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     }
 }
 

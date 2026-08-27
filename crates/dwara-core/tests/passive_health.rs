@@ -596,6 +596,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -774,6 +775,7 @@ fn upstream_cfg(
         timeouts: None,
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     }
 }
 
@@ -1028,6 +1030,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],

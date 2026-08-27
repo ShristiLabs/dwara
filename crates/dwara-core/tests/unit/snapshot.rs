@@ -102,6 +102,7 @@ fn good_gateway() -> Gateway {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],

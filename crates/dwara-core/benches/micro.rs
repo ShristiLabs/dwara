@@ -90,6 +90,7 @@ fn bench_gateway() -> Gateway {
             retries: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
             timeouts: None,
         })
         .collect();

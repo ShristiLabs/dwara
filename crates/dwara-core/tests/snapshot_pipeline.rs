@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dwara_core::config::{
-    Credential, Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer,
-    NameValueMatch, PathMatch, PathMatchKind, PathRewrite, Policy, RateLimit, Route, RouteAction,
-    RouteMatch, Service, TlsMode, Upstream, UpstreamProtocol,
+    Credential, Endpoint, Gateway, JwtProvider, Listener, ListenerProtocol, ListenerTls,
+    LoadBalancer, NameValueMatch, PathMatch, PathMatchKind, PathRewrite, Policy, RateLimit, Route,
+    RouteAction, RouteMatch, Service, TlsMode, Upstream, UpstreamProtocol,
 };
 use dwara_core::snapshot::{compile, validate, CompileError, ConfigState};
 
@@ -79,6 +79,7 @@ fn upstream(name: &str) -> Upstream {
         timeouts: None,
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     }
 }
 
@@ -831,6 +832,99 @@ fn validation_accepts_terminate_with_cert_and_key() {
         sni_routes: vec![],
     }));
     assert!(validate(&gw).is_empty());
+}
+
+// trusted_ca_file (#121): the private-CA trust override must be a
+// readable file, and only on entities that actually negotiate TLS.
+
+/// A path that does not exist (the same fixture style as the cert-file
+/// paths above; existence is exactly what these tests pin).
+const MISSING_CA: &str = "/certs/nonexistent-dwara-test-ca.pem";
+
+#[test]
+fn validation_rejects_missing_trusted_ca_file_on_upstream() {
+    let mut gw = base_gateway();
+    gw.upstreams[0].protocol = UpstreamProtocol::Https;
+    gw.upstreams[0].trusted_ca_file = Some(MISSING_CA.into());
+    assert_single_issue(&gw, "upstream", "pool", "trusted_ca_file");
+}
+
+#[test]
+fn validation_rejects_trusted_ca_file_on_cleartext_upstream() {
+    // protocol stays http1: no TLS toward this upstream, so the trust
+    // bundle cannot apply.
+    let mut gw = base_gateway();
+    gw.upstreams[0].trusted_ca_file = Some("/certs/some-ca.pem".into());
+    assert_single_issue(&gw, "upstream", "pool", "trusted_ca_file");
+}
+
+#[test]
+fn validation_rejects_missing_trusted_ca_file_on_jwt_provider() {
+    let mut gw = base_gateway();
+    gw.jwt_providers.push(JwtProvider {
+        name: "idp".into(),
+        jwks_url: "https://idp.example/jwks".into(),
+        trusted_ca_file: Some(MISSING_CA.into()),
+        issuer: None,
+        audience: None,
+        algorithms: vec!["RS256".into()],
+        refresh_secs: 300,
+        leeway_secs: 30,
+        consumer: None,
+    });
+    assert_single_issue(&gw, "jwt_provider", "idp", "trusted_ca_file");
+}
+
+#[test]
+fn validation_rejects_trusted_ca_file_with_http_jwks_url() {
+    // An http:// JWKS URL negotiates no TLS; the bundle cannot apply.
+    let mut gw = base_gateway();
+    gw.jwt_providers.push(JwtProvider {
+        name: "idp".into(),
+        jwks_url: "http://127.0.0.1:1/jwks".into(),
+        trusted_ca_file: Some("/certs/some-ca.pem".into()),
+        issuer: None,
+        audience: None,
+        algorithms: vec!["RS256".into()],
+        refresh_secs: 300,
+        leeway_secs: 30,
+        consumer: None,
+    });
+    assert_single_issue(&gw, "jwt_provider", "idp", "trusted_ca_file");
+}
+
+#[test]
+fn validation_rejects_missing_trusted_ca_file_on_http2_upstream() {
+    // http2 is a TLS protocol too: the bundle applies and must exist.
+    let mut gw = base_gateway();
+    gw.upstreams[0].protocol = UpstreamProtocol::Http2;
+    gw.upstreams[0].trusted_ca_file = Some(MISSING_CA.into());
+    assert_single_issue(&gw, "upstream", "pool", "trusted_ca_file");
+}
+
+/// Validation owns the full bundle CHECK — existence, readability, AND
+/// the PEM parse to at least one certificate — so a readable-but-
+/// certificate-free file is rejected HERE and the torn runtime state it
+/// used to publish into (upstream failing closed at request time; JWT
+/// provider disabled at build with Bearer pass-through) is unreachable
+/// from config. Anchor usability stays with the security layer at
+/// registry build. The directory variant is included because File::open
+/// succeeds on a readable directory on Unix — the PEM parse's read
+/// failure is what catches it.
+#[test]
+fn validation_rejects_readable_but_unparseable_trusted_ca_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let garbage = dir.path().join("garbage-ca.pem");
+    std::fs::write(&garbage, "not a pem bundle\n").unwrap();
+    let subdir = dir.path().join("a-directory.pem");
+    std::fs::create_dir(&subdir).unwrap();
+
+    for path in [garbage.to_str().unwrap(), subdir.to_str().unwrap()] {
+        let mut gw = base_gateway();
+        gw.upstreams[0].protocol = UpstreamProtocol::Https;
+        gw.upstreams[0].trusted_ca_file = Some(path.into());
+        assert_single_issue(&gw, "upstream", "pool", "trusted_ca_file");
+    }
 }
 
 #[test]

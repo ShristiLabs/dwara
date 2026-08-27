@@ -34,9 +34,10 @@ binary exceeds 25 MB); amd64 is typically a few MB larger than aarch64.
   aws-lc-rs (rustls provider) compiles C via cmake/perl; none of it
   reaches the final image.
 - Upstream TLS verification uses webpki-roots (Mozilla root set)
-  compiled into the binary, so images ship no CA bundle. To trust a
-  private CA for upstreams, that support must come from config (future
-  work), not the filesystem.
+  compiled into the binary, so images ship no CA bundle. Private-CA
+  trust is configured per upstream and per JWT provider via
+  `trusted_ca_file`: the bundle is read from a configured path, so a
+  deployment with private CAs mounts its own — none is baked in.
 - gnu builds are not shipped: dynamically linked, need a glibc runtime
   layer, and give no advantage for this deployment model.
 

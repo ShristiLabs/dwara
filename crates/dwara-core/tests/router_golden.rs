@@ -113,6 +113,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         timeouts: None,
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

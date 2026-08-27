@@ -78,6 +78,7 @@ fn upstream(
         }),
         breaker: None,
         max_pending: None,
+        trusted_ca_file: None,
     }
 }
 
@@ -679,6 +680,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 timeouts: Some(timeouts),
                 breaker: None,
                 max_pending: None,
+                trusted_ca_file: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -719,6 +721,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             }),
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],

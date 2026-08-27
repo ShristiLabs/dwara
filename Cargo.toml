@@ -45,6 +45,12 @@ notify = "8"
 # rcgen/jsonwebtoken). Mirrors the tokio-rustls declaration below.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "aws-lc-rs"] }
+# #121 validation-time PEM check: snapshot::validate parses trusted_ca_file
+# bundles with rustls-pki-types' PemObject (the same substrate rustls and
+# security/tls.rs use; already in the tree as a rustls dependency, so this
+# only makes it a direct one). License Apache-2.0 OR MIT (both allow-listed
+# in deny.toml).
+rustls-pki-types = "1"
 # Key-material hygiene (#120): Zeroizing wrappers wipe PEM/DER private-key
 # buffers on drop. License Apache-2.0 OR MIT (the Apache-2.0 branch is
 # allow-listed in deny.toml); already in the tree as a rustls /

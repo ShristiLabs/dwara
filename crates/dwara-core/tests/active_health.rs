@@ -91,6 +91,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             timeouts: None,
             breaker: None,
             max_pending: None,
+            trusted_ca_file: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -150,14 +151,14 @@ async fn http_probe_classifies_2xx_success_5xx_failure() {
     let port = serve_switchable(Arc::clone(&flag)).await;
     let t = Duration::from_secs(2);
 
-    assert!(probe_once(ProbeKind::Http, "http", "127.0.0.1", port, "/healthz", t).await);
+    assert!(probe_once(ProbeKind::Http, None, "127.0.0.1", port, "/healthz", t).await);
     flag.store(false, Ordering::Relaxed);
-    assert!(!probe_once(ProbeKind::Http, "http", "127.0.0.1", port, "/healthz", t).await);
+    assert!(!probe_once(ProbeKind::Http, None, "127.0.0.1", port, "/healthz", t).await);
     // Refused port: failure.
     assert!(
         !probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "127.0.0.1",
             dead_port(),
             "/healthz",
@@ -170,7 +171,7 @@ async fn http_probe_classifies_2xx_success_5xx_failure() {
     assert!(
         !probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "10.255.255.1",
             81,
             "/healthz",
@@ -188,7 +189,7 @@ async fn tcp_probe_classifies_connect_success_and_failure() {
     assert!(
         probe_once(
             ProbeKind::Tcp,
-            "http",
+            None,
             "127.0.0.1",
             port,
             "",
@@ -199,7 +200,7 @@ async fn tcp_probe_classifies_connect_success_and_failure() {
     assert!(
         !probe_once(
             ProbeKind::Tcp,
-            "http",
+            None,
             "127.0.0.1",
             dead_port(),
             "",
@@ -498,6 +499,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 timeouts: None,
                 breaker: None,
                 max_pending: None,
+                trusted_ca_file: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -809,7 +811,7 @@ async fn http_probe_times_out_against_stalling_server() {
     assert!(
         !probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "127.0.0.1",
             port,
             "/healthz",
@@ -870,7 +872,7 @@ async fn http_probe_is_twoxx_only_and_ignores_bodies() {
     for (i, want) in expected.iter().enumerate() {
         let got = probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "127.0.0.1",
             port,
             "/healthz",
@@ -892,12 +894,12 @@ async fn tcp_probe_classifies_refused_close_and_hold() {
     let t = Duration::from_secs(2);
 
     // tcp kind: connect is the only criterion.
-    assert!(probe_once(ProbeKind::Tcp, "http", "127.0.0.1", hold, "", t).await);
-    assert!(probe_once(ProbeKind::Tcp, "http", "127.0.0.1", close, "", t).await);
-    assert!(!probe_once(ProbeKind::Tcp, "http", "127.0.0.1", dead_port(), "", t).await);
+    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", hold, "", t).await);
+    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", close, "", t).await);
+    assert!(!probe_once(ProbeKind::Tcp, None, "127.0.0.1", dead_port(), "", t).await);
 
     // http kind: a connection that closes before a status line is a failure.
-    assert!(!probe_once(ProbeKind::Http, "http", "127.0.0.1", close, "/healthz", t).await);
+    assert!(!probe_once(ProbeKind::Http, None, "127.0.0.1", close, "/healthz", t).await);
 }
 
 // --------------------------------------------------------- ejection done-when
@@ -1342,7 +1344,7 @@ async fn fragmented_status_line_succeeds_and_mid_line_close_fails() {
     assert!(
         probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "127.0.0.1",
             fragmented,
             "/healthz",
@@ -1361,7 +1363,7 @@ async fn fragmented_status_line_succeeds_and_mid_line_close_fails() {
     assert!(
         !probe_once(
             ProbeKind::Http,
-            "http",
+            None,
             "127.0.0.1",
             truncated,
             "/healthz",

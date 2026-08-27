@@ -88,9 +88,11 @@ static musl binary:
 
 The binary is fully static (musl, bundled SQLite, aws-lc-rs compiled
 in), so the scratch image carries no libc and no base layer. Upstream
-TLS verification uses the Mozilla webpki root set compiled into the
-binary, so no CA bundle is shipped (or needed). Rationale, size notes,
-and the musl-vs-gnu tradeoff: `packaging/README.md`.
+TLS verification defaults to the Mozilla webpki root set compiled into
+the binary, so no CA bundle is shipped; private-CA upstreams (and JWKS
+endpoints) are trusted per entity via `trusted_ca_file`, a bundle the
+deployment itself provides. Rationale, size notes, and the musl-vs-gnu
+tradeoff: `packaging/README.md`.
 
 ### systemd
 
@@ -418,6 +420,8 @@ connection pool. Fields:
   `least_requests`, `random`, or `ip_hash` — see below.
 - `protocol`: `http1` (plaintext, default), `https` (TLS, ALPN
   `http/1.1`), or `http2` (TLS, ALPN `h2`, HTTP/2 only).
+- `trusted_ca_file`: path to a PEM CA bundle this upstream's TLS
+  connections verify against INSTEAD of the public root set. See below.
 - `connection_cap`: maximum concurrent outbound connections to the
   upstream (active plus pooled idle). Excess connection attempts wait
   for a slot rather than fail. Defaults to 64.
@@ -453,8 +457,23 @@ connection pool. Fields:
 
 Each endpoint carries a `weight` (default 1, must be > 0). For
 `https`/`http2` upstreams, server certificates are verified against the
-Mozilla (webpki) public CA root set. Zero values for `connection_cap`
-and the timeout fields are rejected by validation.
+Mozilla (webpki) public CA root set; an upstream with `trusted_ca_file`
+set verifies against that PEM bundle INSTEAD — the bundle's roots
+REPLACE the public roots for that upstream's connections (and its https
+active-health probes), they are not added to them, so a private-CA
+upstream never keeps implicit public-root trust. The bundle may carry
+several certificates (a typical CA chain); every certificate in it
+becomes a trust anchor. Validation rejects the field on `http1`
+upstreams and for a bundle that is missing, unreadable, or not parseable
+as PEM holding at least one CERTIFICATE; a bundle that goes bad after
+publish is rejected the same way at reload, and the old generation keeps
+serving. Should a bundle break between validation and snapshot build (a
+microsecond race), the upstream fails CLOSED — every TLS dial to the
+upstream is refused, with an ERROR log — never a silent fallback to the
+public roots. Bundle paths are not file-watched (only the config file
+and terminate cert/key files are); rotating a bundle on disk requires
+SIGHUP or a config change to take effect. Zero values for
+`connection_cap` and the timeout fields are rejected by validation.
 
 ```yaml
 upstreams:
@@ -548,10 +567,13 @@ windows). One probe loop per endpoint sleeps `interval_ms` plus a
 uniform random `0..jitter_ms` (full jitter) and then probes the endpoint
 DIRECTLY — bypassing load balancing and the connection pool, since a
 probe must examine one specific endpoint. An `http` probe issues
-`GET {path}` over HTTP/1.1 on its own connection (TLS with webpki root
-verification toward `https`/`http2` upstreams) and counts a 2xx status
-as success; anything else — 3xx included, redirects are not followed —
-4xx, 5xx, truncation, timeout, or transport error is a failure. A `tcp`
+`GET {path}` over HTTP/1.1 on its own connection (TLS toward
+`https`/`http2` upstreams, verifying against the SAME trust as the
+pooled connector — the webpki public roots, or the upstream's
+`trusted_ca_file` bundle when configured, so https probes work against
+private-CA upstreams) and counts a 2xx status as success; anything
+else — 3xx included, redirects are not followed — 4xx, 5xx,
+truncation, timeout, or transport error is a failure. A `tcp`
 probe succeeds when the TCP connect completes within `timeout_ms`; use
 it for `http2` upstreams whose servers refuse HTTP/1.1 on a separate
 connection.
@@ -990,6 +1012,18 @@ Concurrent refreshes coalesce into one fetch. JWKS caches survive config
 reloads (keyed by URL), so rotation state outlives a reload. A JWKS
 fetch has a 5-second connect timeout and a 1 MiB body cap; a failed
 fetch is a 500 (gateway-side failure), not a 401.
+
+An `https` JWKS endpoint served by a private CA is reached through the
+provider's `trusted_ca_file` — the same field upstreams take: a PEM CA
+bundle whose roots REPLACE the public roots for that provider's JWKS
+fetches. Validation rejects it on an `http://` jwks_url and for a
+bundle that is missing, unreadable, or not parseable as PEM holding at
+least one CERTIFICATE — so a bundle that goes bad after publish is
+rejected at reload and the old generation keeps authenticating. Only if
+a bundle breaks between validation and build (the microsecond race) is
+the provider disabled (ERROR logged) rather than failing every fetch.
+Bundle paths are not file-watched; rotating one requires SIGHUP or a
+config change, as with upstream bundles.
 
 **X-Consumer hygiene.** The gateway strips every client-supplied
 `X-Consumer-*` header from proxied requests (a client must never reach

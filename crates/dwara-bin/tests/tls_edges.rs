@@ -256,6 +256,15 @@ fn client_hello(sni: Option<&str>, pad_len: usize) -> Vec<u8> {
 
 /// Write `bytes`, then read until EOF or `timeout`; returns the bytes read
 /// before EOF (empty when the connection was closed without a response).
+/// A ConnectionReset counts as CLOSED, not a failure: the passthrough
+/// peek deliberately never consumes bytes (so the hello can be replayed
+/// upstream), so when the gateway closes a REFUSED connection its
+/// receive buffer still holds the client's payload and the kernel sends
+/// RST in place of (or racing with) the shutdown FIN — under load the
+/// client's read can observe ECONNRESET before the clean close. Either
+/// flavor still satisfies what every caller pins: the connection did
+/// not stay open serving, no response bytes arrived, and the exchange
+/// was bounded by `timeout`.
 async fn write_then_read_to_eof(addr: &str, bytes: &[u8], timeout: Duration) -> Vec<u8> {
     let mut tcp = TcpStream::connect(addr).await.expect("connect");
     tcp.write_all(bytes).await.unwrap();
@@ -267,6 +276,9 @@ async fn write_then_read_to_eof(addr: &str, bytes: &[u8], timeout: Duration) -> 
         let n = match tokio::time::timeout_at(deadline, tcp.read(&mut chunk)).await {
             Ok(Ok(0)) | Err(_) => break,
             Ok(Ok(n)) => n,
+            // Reset-instead-of-FIN on a closing connection (see above):
+            // a close flavor, not a test failure.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
             Ok(Err(e)) => panic!("read error: {e}"),
         };
         buf.extend_from_slice(&chunk[..n]);

@@ -246,7 +246,7 @@ implementations without touching call sites — extend, do not break them.
 | Config schema / validation | `config_schema`, `config_schema_extended`, `snapshot_pipeline` |
 | Routing | `router_golden` (golden files), `proxy_coverage` |
 | Proxy behavior | `proxy`, `proxy_coverage` |
-| TLS | `tls_validation`, `tls_listener`, `tls_edges` |
+| TLS | `tls_validation`, `tls_listener`, `tls_edges`, `trusted_ca` |
 | Upstreams / LB | `upstream_client`, `balancing` |
 | Health | `passive_health`, `active_health` |
 | Resilience | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
@@ -283,6 +283,20 @@ implementations without touching call sites — extend, do not break them.
   TLS records, bounded at 64 KiB (`MAX_HELLO_BYTES` in `tls.rs`); the
   peek never consumes bytes, so the original hello is replayed to the
   upstream by the splice.
+- Outbound https trust is per entity (#121): a `trusted_ca_file` PEM
+  bundle on an upstream or JWT provider REPLACES the webpki public roots
+  for that entity only (additive trust exists solely for the
+  programmatic `with_root_certificates` API), and active https health
+  probes inherit their upstream's roots (kept on the upstream handle).
+  Validation owns PEM-level rejection — `check_trusted_ca_file` in
+  snapshot/mod.rs parses the bundle (rustls-pki-types) and rejects
+  missing, unreadable, or certificate-free files naming the field; the
+  runtime fail-closed paths (empty root store plus ERROR log for the
+  upstream, provider disabled for a JWT provider) are only a
+  microsecond validate-vs-build race backstop, never a fallback to the
+  public roots. Bundle paths are NOT file-watched (only the config file
+  and terminate cert/key files are): a rotation needs SIGHUP or a
+  config change to apply.
 
 ## CI posture (compute-conscious)
 
