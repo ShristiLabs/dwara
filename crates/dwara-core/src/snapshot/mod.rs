@@ -183,6 +183,102 @@ fn check_trusted_ca_file(entity: &str, name: &str, path: &str, issues: &mut Vec<
     }
 }
 
+/// Validate one `authorization` block (#123: shared by every attachment
+/// level — route, service, listener, consumer, and gateway/global). The
+/// checks are identical at every level: consumer/group references must
+/// resolve against the configured consumers, every IP ACL entry must
+/// parse as an IP/CIDR (the trusted-proxies parser), a block carrying NO
+/// rules at all is rejected (always an authoring mistake — omit the
+/// block), and a `/0` entry in the ALLOW list is rejected (allow-all
+/// filters nothing; the intended shape is `default: allow`; `/0` in the
+/// DENY list is meaningful — deny-all — and accepted).
+fn validate_authz(
+    entity: &str,
+    name: &str,
+    authz: &crate::config::Authz,
+    consumers: &std::collections::BTreeSet<&str>,
+    consumer_groups: &std::collections::BTreeSet<&str>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let field_prefix = "authorization".to_string();
+    let empty = authz.allowed_consumers.is_empty()
+        && authz.denied_consumers.is_empty()
+        && authz.allowed_groups.is_empty()
+        && authz.denied_groups.is_empty()
+        && authz.required_scopes.is_empty()
+        && authz.required_claims.is_empty()
+        && authz.ip_acl.is_none();
+    if empty {
+        issues.push(issue(
+            entity,
+            name,
+            "authorization",
+            "carries no rules (no consumers, groups, scopes, claims, or ip_acl) \
+             and is always a mistake: omit the authorization block entirely",
+        ));
+    }
+    for (side, entries) in [
+        ("allowed_consumers", &authz.allowed_consumers),
+        ("denied_consumers", &authz.denied_consumers),
+    ] {
+        for entry in entries.iter() {
+            if !consumers.contains(entry.as_str()) {
+                issues.push(issue(
+                    entity,
+                    name,
+                    &format!("{field_prefix}.{side}"),
+                    format!("references unknown consumer '{entry}'"),
+                ));
+            }
+        }
+    }
+    for (side, entries) in [
+        ("allowed_groups", &authz.allowed_groups),
+        ("denied_groups", &authz.denied_groups),
+    ] {
+        for group in entries.iter() {
+            if !consumer_groups.contains(group.as_str()) {
+                issues.push(issue(
+                    entity,
+                    name,
+                    &format!("{field_prefix}.{side}"),
+                    format!("references group '{group}' that no consumer is a member of"),
+                ));
+            }
+        }
+    }
+    if let Some(acl) = &authz.ip_acl {
+        for (side, entries) in [("ip_acl.allow", &acl.allow), ("ip_acl.deny", &acl.deny)] {
+            for (i, entry) in entries.iter().enumerate() {
+                if crate::config::net::parse_ip_or_cidr(entry).is_none() {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        &format!("{field_prefix}.{side}[{i}]"),
+                        format!(
+                            "'{entry}' is not an IP address or CIDR (e.g. 10.0.0.0/8 \
+                             or 2001:db8::/32)"
+                        ),
+                    ));
+                } else if side == "ip_acl.allow"
+                    && crate::config::net::parse_ip_or_cidr(entry)
+                        .is_some_and(|(_, prefix)| prefix == 0)
+                {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        &format!("{field_prefix}.{side}[{i}]"),
+                        format!(
+                            "'{entry}' allows every address and filters nothing; \
+                             use 'default: allow' instead of an allow-all entry"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -580,6 +676,31 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         .collect();
 
     for l in &gateway.listeners {
+        // Listener policy attachment (#123): same resolution rule as
+        // route/service/consumer refs. Runs for EVERY listener (the
+        // tls-scoped checks below skip tls-less listeners early).
+        for p in &l.policies {
+            if !policies.contains(p.as_str()) {
+                issues.push(issue(
+                    "listener",
+                    &l.name,
+                    "policies",
+                    format!("references unknown policy '{p}'"),
+                ));
+            }
+        }
+        // Listener authorization (#123): shared shape checks with every
+        // other attachment level.
+        if let Some(authz) = &l.authorization {
+            validate_authz(
+                "listener",
+                &l.name,
+                authz,
+                &consumers,
+                &consumer_groups,
+                &mut issues,
+            );
+        }
         let Some(tls) = &l.tls else { continue };
         for (i, r) in tls.sni_routes.iter().enumerate() {
             if !upstreams.contains(r.upstream.as_str()) {
@@ -591,6 +712,30 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+    }
+
+    // Gateway-level (global) policy attachment (#123): named
+    // `global_policies` because `policies` at this level is the registry.
+    for p in &gateway.global_policies {
+        if !policies.contains(p.as_str()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "global_policies",
+                format!("references unknown policy '{p}'"),
+            ));
+        }
+    }
+    // Gateway-level (global) authorization (#123).
+    if let Some(authz) = &gateway.authorization {
+        validate_authz(
+            "gateway",
+            "(root)",
+            authz,
+            &consumers,
+            &consumer_groups,
+            &mut issues,
+        );
     }
 
     for s in &gateway.services {
@@ -611,6 +756,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     format!("references unknown policy '{p}'"),
                 ));
             }
+        }
+        // Service authorization (#123): shared shape checks with every
+        // other attachment level.
+        if let Some(authz) = &s.authorization {
+            validate_authz(
+                "service",
+                &s.name,
+                authz,
+                &consumers,
+                &consumer_groups,
+                &mut issues,
+            );
         }
     }
 
@@ -643,93 +800,17 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
-        // Route authorization (DW-020): every IP ACL entry must parse as
-        // an IP/CIDR (the trusted-proxies parser), and consumer/group
-        // references must resolve against the configured consumers. An
-        // authorization block carrying NO rules at all (empty lists, no
-        // ip_acl) is rejected: it is always an authoring mistake (a rule
-        // block with no rules) — omit the block instead. A `/0` entry in
-        // the ALLOW list is likewise always a mistake (allow-all filters
-        // nothing; the intended shape is `default: allow`) and is
-        // rejected; `/0` in the DENY list is meaningful (deny-all).
+        // Route authorization (DW-020): shared shape checks with every
+        // other attachment level (see validate_authz).
         if let Some(authz) = &r.authorization {
-            let field_prefix = "authorization".to_string();
-            let empty = authz.allowed_consumers.is_empty()
-                && authz.denied_consumers.is_empty()
-                && authz.allowed_groups.is_empty()
-                && authz.denied_groups.is_empty()
-                && authz.required_scopes.is_empty()
-                && authz.required_claims.is_empty()
-                && authz.ip_acl.is_none();
-            if empty {
-                issues.push(issue(
-                    "route",
-                    &r.name,
-                    "authorization",
-                    "carries no rules (no consumers, groups, scopes, claims, or ip_acl) \
-                     and is always a mistake: omit the authorization block entirely",
-                ));
-            }
-            for (side, entries) in [
-                ("allowed_consumers", &authz.allowed_consumers),
-                ("denied_consumers", &authz.denied_consumers),
-            ] {
-                for name in entries.iter() {
-                    if !consumers.contains(name.as_str()) {
-                        issues.push(issue(
-                            "route",
-                            &r.name,
-                            &format!("{field_prefix}.{side}"),
-                            format!("references unknown consumer '{name}'"),
-                        ));
-                    }
-                }
-            }
-            for (side, entries) in [
-                ("allowed_groups", &authz.allowed_groups),
-                ("denied_groups", &authz.denied_groups),
-            ] {
-                for group in entries.iter() {
-                    if !consumer_groups.contains(group.as_str()) {
-                        issues.push(issue(
-                            "route",
-                            &r.name,
-                            &format!("{field_prefix}.{side}"),
-                            format!("references group '{group}' that no consumer is a member of"),
-                        ));
-                    }
-                }
-            }
-            if let Some(acl) = &authz.ip_acl {
-                for (side, entries) in [("ip_acl.allow", &acl.allow), ("ip_acl.deny", &acl.deny)] {
-                    for (i, entry) in entries.iter().enumerate() {
-                        if crate::config::net::parse_ip_or_cidr(entry).is_none() {
-                            issues.push(issue(
-                                "route",
-                                &r.name,
-                                &format!("{field_prefix}.{side}[{i}]"),
-                                format!(
-                                    "'{entry}' is not an IP address or CIDR (e.g. 10.0.0.0/8 \
-                                     or 2001:db8::/32)"
-                                ),
-                            ));
-                        } else if side == "ip_acl.allow"
-                            && crate::config::net::parse_ip_or_cidr(entry)
-                                .is_some_and(|(_, prefix)| prefix == 0)
-                        {
-                            issues.push(issue(
-                                "route",
-                                &r.name,
-                                &format!("{field_prefix}.{side}[{i}]"),
-                                format!(
-                                    "'{entry}' allows every address and filters nothing; \
-                                     use 'default: allow' instead of an allow-all entry"
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
+            validate_authz(
+                "route",
+                &r.name,
+                authz,
+                &consumers,
+                &consumer_groups,
+                &mut issues,
+            );
         }
         let m = &r.r#match.path;
         for (field, entries) in [
@@ -1235,6 +1316,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // Consumer authorization (#123): shared shape checks with every
+        // other attachment level.
+        if let Some(authz) = &c.authorization {
+            validate_authz(
+                "consumer",
+                &c.name,
+                authz,
+                &consumers,
+                &consumer_groups,
+                &mut issues,
+            );
+        }
     }
 
     for p in &gateway.policies {
@@ -1538,6 +1631,8 @@ impl Snapshot {
                 upstreams: Vec::new(),
                 consumers: Vec::new(),
                 policies: Vec::new(),
+                global_policies: Vec::new(),
+                authorization: None,
                 max_concurrent_requests: None,
                 jwt_providers: Vec::new(),
                 admin: None,

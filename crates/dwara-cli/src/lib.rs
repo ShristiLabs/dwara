@@ -155,12 +155,13 @@ impl std::fmt::Display for LintWarning {
 /// - `regex-shadowed-by-exact`: an exact route whose path fully matches
 ///   a regex route's pattern; that path is always served by the exact
 ///   route (lookup precedence), so the regex can never see it.
-/// - `consumer-unused`: no route authorization (allowed/denied lists)
-///   and no JWT provider binds the consumer. Static over-approximation:
-///   a consumer can also be used purely by presenting credentials at
-///   runtime, so this is advisory, not an error.
-/// - `policy-unused`: the policy is attached to no route, service, or
-///   consumer.
+/// - `consumer-unused`: no authorization rule at any level (allowed/
+///   denied lists) and no JWT provider binds the consumer. Static
+///   over-approximation: a consumer can also be used purely by
+///   presenting credentials at runtime, so this is advisory, not an
+///   error.
+/// - `policy-unused`: the policy is attached to no consumer, route,
+///   service, listener, or gateway (global).
 /// - `upstream-unreferenced`: no service targets the upstream.
 ///
 /// Listener port duplication across listeners is deliberately NOT a
@@ -220,18 +221,41 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
         }
     }
 
-    // consumer-unused: referenced by no authorization rule and bound to
-    // no JWT provider.
+    // consumer-unused: referenced by no authorization rule (at ANY
+    // attachment level — route, service, listener, gateway, or another
+    // consumer's block) and bound to no JWT provider.
     let mut consumers_used: BTreeSet<&str> = BTreeSet::new();
+    let mut authz_blocks: Vec<&dwara_core::config::Authz> = Vec::new();
     for route in &gateway.routes {
-        if let Some(authz) = &route.authorization {
-            for c in authz
-                .allowed_consumers
-                .iter()
-                .chain(&authz.denied_consumers)
-            {
-                consumers_used.insert(c);
-            }
+        if let Some(a) = &route.authorization {
+            authz_blocks.push(a);
+        }
+    }
+    for s in &gateway.services {
+        if let Some(a) = &s.authorization {
+            authz_blocks.push(a);
+        }
+    }
+    for l in &gateway.listeners {
+        if let Some(a) = &l.authorization {
+            authz_blocks.push(a);
+        }
+    }
+    if let Some(a) = &gateway.authorization {
+        authz_blocks.push(a);
+    }
+    for c in &gateway.consumers {
+        if let Some(a) = &c.authorization {
+            authz_blocks.push(a);
+        }
+    }
+    for authz in authz_blocks {
+        for c in authz
+            .allowed_consumers
+            .iter()
+            .chain(&authz.denied_consumers)
+        {
+            consumers_used.insert(c);
         }
     }
     for p in &gateway.jwt_providers {
@@ -245,14 +269,15 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 kind: "consumer",
                 name: c.name.clone(),
                 message:
-                    "unused: referenced by no route authorization and bound to no jwt provider \
+                    "unused: referenced by no authorization rule and bound to no jwt provider \
                           (advisory: runtime credential use is not statically visible)"
                         .to_string(),
             });
         }
     }
 
-    // policy-unused.
+    // policy-unused (#123: every attachment level counts — consumer,
+    // route, service, listener, and gateway/global).
     let mut policies_used: BTreeSet<&str> = BTreeSet::new();
     for r in &gateway.routes {
         policies_used.extend(r.policies.iter().map(String::as_str));
@@ -263,12 +288,18 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
     for c in &gateway.consumers {
         policies_used.extend(c.policies.iter().map(String::as_str));
     }
+    for l in &gateway.listeners {
+        policies_used.extend(l.policies.iter().map(String::as_str));
+    }
+    policies_used.extend(gateway.global_policies.iter().map(String::as_str));
     for p in &gateway.policies {
         if !policies_used.contains(p.name.as_str()) {
             warnings.push(LintWarning {
                 kind: "policy",
                 name: p.name.clone(),
-                message: "unused: attached to no route, service, or consumer".to_string(),
+                message: "unused: attached to no consumer, route, service, listener, or \
+                          gateway"
+                    .to_string(),
             });
         }
     }

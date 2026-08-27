@@ -313,21 +313,51 @@ async fn engine_selector_ip_keys_clients_independently() {
     let per_ip: Vec<String> = vec!["per-ip".into()];
     for _ in 0..3 {
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip),
+            engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip, &[], &[]),
             RateLimitOutcome::Allowed { .. }
         ));
     }
     assert!(matches!(
-        engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip),
+        engine.check(&ctx("10.0.0.1", "a"), &[], &[], &per_ip, &[], &[]),
         RateLimitOutcome::Denied { limit: 3, .. }
     ));
     assert!(
         matches!(
-            engine.check(&ctx("10.0.0.2", "a"), &[], &[], &per_ip),
+            engine.check(&ctx("10.0.0.2", "a"), &[], &[], &per_ip, &[], &[]),
             RateLimitOutcome::Allowed { .. }
         ),
         "a different client IP has an independent key"
     );
+}
+
+#[tokio::test]
+async fn engine_resolves_a_policy_listed_at_two_levels_once() {
+    // The SAME policy attached at two levels (here consumer AND global)
+    // is ONE evaluation: the name resolves at its first — most
+    // specific — chain position only, so the minute:3 budget admits
+    // exactly three requests with Remaining stepping 2 -> 1 -> 0 and
+    // denies the fourth. The pre-dedup engine evaluated the rule once
+    // per attaching level and throttled at request 2.
+    let engine = engine_from(IP_RULES_YAML);
+    let per_ip: Vec<String> = vec!["per-ip".into()];
+    for expected_remaining in [2, 1, 0] {
+        assert!(
+            matches!(
+                engine.check(&ctx("10.0.0.1", "a"), &per_ip, &[], &[], &[], &per_ip),
+                RateLimitOutcome::Allowed { remaining, .. }
+                    if remaining == expected_remaining
+            ),
+            "single evaluation: remaining must be {expected_remaining} after one admission"
+        );
+    }
+    assert!(matches!(
+        engine.check(&ctx("10.0.0.1", "a"), &per_ip, &[], &[], &[], &per_ip),
+        RateLimitOutcome::Denied {
+            limit: 3,
+            remaining: 0,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -336,17 +366,17 @@ async fn engine_selector_ip_route_keys_pairs_independently() {
     let ip_route: Vec<String> = vec!["ip-route".into()];
     for _ in 0..3 {
         assert!(matches!(
-            engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[]),
+            engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[], &[], &[]),
             RateLimitOutcome::Allowed { .. }
         ));
     }
     assert!(matches!(
-        engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[]),
+        engine.check(&ctx("10.0.0.1", "a"), &[], &ip_route, &[], &[], &[]),
         RateLimitOutcome::Denied { .. }
     ));
     // Same IP, different route: independent (ip, route) key.
     assert!(matches!(
-        engine.check(&ctx("10.0.0.1", "b"), &[], &ip_route, &[]),
+        engine.check(&ctx("10.0.0.1", "b"), &[], &ip_route, &[], &[], &[]),
         RateLimitOutcome::Allowed { .. }
     ));
 }
@@ -356,7 +386,7 @@ async fn engine_without_matching_policy_is_not_limited() {
     let engine = engine_from(IP_RULES_YAML);
     for _ in 0..10 {
         assert_eq!(
-            engine.check(&ctx("10.0.0.1", "a"), &[], &[], &[]),
+            engine.check(&ctx("10.0.0.1", "a"), &[], &[], &[], &[], &[]),
             RateLimitOutcome::NotLimited
         );
     }
@@ -373,17 +403,17 @@ policies:
     );
     let legacy: Vec<String> = vec!["legacy".into()];
     assert!(matches!(
-        engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[]),
+        engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[], &[], &[]),
         RateLimitOutcome::Allowed { .. }
     ));
     assert!(matches!(
-        engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[]),
+        engine.check(&ctx("10.0.0.1", "r"), &[], &legacy, &[], &[], &[]),
         RateLimitOutcome::Allowed { .. }
     ));
     // Legacy field keys by ROUTE: a second client on the same route
     // shares the budget (the documented [route] mapping).
     assert!(matches!(
-        engine.check(&ctx("10.0.0.2", "r"), &[], &legacy, &[]),
+        engine.check(&ctx("10.0.0.2", "r"), &[], &legacy, &[], &[], &[]),
         RateLimitOutcome::Denied { limit: 2, .. }
     ));
 }
@@ -392,8 +422,8 @@ policies:
 async fn engine_reports_decreasing_remaining_and_reset() {
     let engine = engine_from(IP_RULES_YAML);
     let per_ip: Vec<String> = vec!["per-ip".into()];
-    let first = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip);
-    let second = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip);
+    let first = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip, &[], &[]);
+    let second = engine.check(&ctx("10.0.0.9", "a"), &[], &[], &per_ip, &[], &[]);
     match (first, second) {
         (
             RateLimitOutcome::Allowed {
@@ -586,9 +616,9 @@ async fn engine_ip_spray_key_set_is_bounded_and_hot_ip_enforced() {
     let mut hot_allowed = 0;
     for i in 0..100_000u32 {
         let ip = format!("10.{}.{}.{}", i >> 16, (i >> 8) & 0xff, i & 0xff);
-        let _ = engine.check(&ctx(&ip, "a"), &[], &[], &per_ip);
+        let _ = engine.check(&ctx(&ip, "a"), &[], &[], &per_ip, &[], &[]);
         if matches!(
-            engine.check(&ctx(hot, "a"), &[], &[], &per_ip),
+            engine.check(&ctx(hot, "a"), &[], &[], &per_ip, &[], &[]),
             RateLimitOutcome::Allowed { .. }
         ) {
             hot_allowed += 1;
@@ -605,7 +635,7 @@ async fn engine_ip_spray_key_set_is_bounded_and_hot_ip_enforced() {
     // IP stays denied (its state was never the eviction victim).
     assert_eq!(hot_allowed, 3);
     assert!(matches!(
-        engine.check(&ctx(hot, "a"), &[], &[], &per_ip),
+        engine.check(&ctx(hot, "a"), &[], &[], &per_ip, &[], &[]),
         RateLimitOutcome::Denied { .. }
     ));
 }
@@ -760,7 +790,7 @@ async fn engine_credential_rule_keys_by_consumer_and_rules_are_isolated() {
     let alice = ctx_consumer("10.0.0.1", Some("alice"));
     // Both rules apply; the credential rule (cap 2) is the tighter one.
     assert!(matches!(
-        engine.check(&alice, &[], &both, &[]),
+        engine.check(&alice, &[], &both, &[], &[], &[]),
         RateLimitOutcome::Allowed {
             limit: 2,
             remaining: 1,
@@ -768,7 +798,7 @@ async fn engine_credential_rule_keys_by_consumer_and_rules_are_isolated() {
         }
     ));
     assert!(matches!(
-        engine.check(&alice, &[], &both, &[]),
+        engine.check(&alice, &[], &both, &[], &[], &[]),
         RateLimitOutcome::Allowed {
             limit: 2,
             remaining: 0,
@@ -778,31 +808,59 @@ async fn engine_credential_rule_keys_by_consumer_and_rules_are_isolated() {
     // Third check: the credential rule denies (cap 2) while the ip rule
     // still had budget — rules evaluate independently.
     assert!(matches!(
-        engine.check(&alice, &[], &both, &[]),
+        engine.check(&alice, &[], &both, &[], &[], &[]),
         RateLimitOutcome::Denied { limit: 2, .. }
     ));
     // Same consumer from a fresh IP: still denied — the credential key
     // is the consumer, not the peer.
     assert!(matches!(
-        engine.check(&ctx_consumer("10.0.0.2", Some("alice")), &[], &both, &[]),
+        engine.check(
+            &ctx_consumer("10.0.0.2", Some("alice")),
+            &[],
+            &both,
+            &[],
+            &[],
+            &[]
+        ),
         RateLimitOutcome::Denied { limit: 2, .. }
     ));
     // Same IP, different consumer: denied by the IP rule (3/3 spent by
     // alice's checks) while bob's credential budget is untouched.
     assert!(matches!(
-        engine.check(&ctx_consumer("10.0.0.1", Some("bob")), &[], &both, &[]),
+        engine.check(
+            &ctx_consumer("10.0.0.1", Some("bob")),
+            &[],
+            &both,
+            &[],
+            &[],
+            &[]
+        ),
         RateLimitOutcome::Denied { limit: 3, .. }
     ));
     // Anonymous traffic under the credential rule falls back to the
     // peer IP string and gets its own independent cap-2 budget.
     for _ in 0..2 {
         assert!(matches!(
-            engine.check(&ctx_consumer("10.0.0.2", None), &[], &per_cred_only, &[]),
+            engine.check(
+                &ctx_consumer("10.0.0.2", None),
+                &[],
+                &per_cred_only,
+                &[],
+                &[],
+                &[]
+            ),
             RateLimitOutcome::Allowed { .. }
         ));
     }
     assert!(matches!(
-        engine.check(&ctx_consumer("10.0.0.2", None), &[], &per_cred_only, &[]),
+        engine.check(
+            &ctx_consumer("10.0.0.2", None),
+            &[],
+            &per_cred_only,
+            &[],
+            &[],
+            &[]
+        ),
         RateLimitOutcome::Denied { limit: 2, .. }
     ));
     // Isolation with identical key strings: the per-ip rule's
@@ -814,6 +872,8 @@ async fn engine_credential_rule_keys_by_consumer_and_rules_are_isolated() {
             &ctx_consumer("10.0.0.2", Some("carol")),
             &[],
             &per_ip_only,
+            &[],
+            &[],
             &[]
         ),
         RateLimitOutcome::Allowed {

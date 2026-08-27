@@ -4,17 +4,18 @@
 //! (space-separated AND array claims), exact-match claims, IP ACLs
 //! (allow-list-only, deny-wins, closed default), the effective-IP
 //! resolution through a trusted-proxy XFF chain, anonymous access on an
-//! ip_acl-only route, and the 403-vs-401 semantics. Precedence-chain
-//! merge (consumer deny beats route allow etc.) is unit-tested in
-//! `dwara_core::authz` — the consumer/service/listener/global links
-//! have no config attachment points yet, so only the route link is
-//! exercisable end-to-end (documented-pending).
+//! ip_acl-only route, and the 403-vs-401 semantics. Since #123 every
+//! precedence-chain link has a config attachment — consumer, route,
+//! service, listener, and gateway (global) — and the #123 section below
+//! exercises each end-to-end plus the deny-anywhere-wins merge across
+//! levels.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use dwara_core::config::parse_gateway;
+use dwara_core::observability::ListenerLabel;
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
 use http_body_util::{BodyExt, Full};
@@ -814,4 +815,391 @@ fn validation_rejects_bad_ip_entries_and_unresolved_refs() {
         "      allowed_consumers: [acme]\n      ip_acl:\n        deny: [10.0.0.99]\n",
     ));
     assert!(!issues.iter().any(|i| i.field.contains("authorization")));
+}
+
+// ---- #123: authorization at every level + deny-anywhere-wins merge -----------
+
+/// Indent a YAML fragment (field lines at relative indent) into a slot.
+fn indent(fragment: &str, pad: usize) -> String {
+    let pad = " ".repeat(pad);
+    fragment
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Config with an authorization block at each level (#123): `consumer`
+/// applies to acme only (beta carries no block), `route`/`service`/
+/// `listener` attach to the single route/service/listener "edge", and
+/// `global` is the gateway-level block. `""` omits the block. Fragments
+/// are authz FIELD lines at indent 0 (e.g. `"denied_consumers: [acme]"`);
+/// `block` renders the whole `authorization:` key at the entity's field
+/// indent.
+fn levels_config(
+    consumer: &str,
+    route: &str,
+    service: &str,
+    listener: &str,
+    global: &str,
+) -> String {
+    let block = |frag: &str, pad: usize| -> String {
+        if frag.is_empty() {
+            String::new()
+        } else {
+            let pad_s = " ".repeat(pad);
+            format!("{pad_s}authorization:\n{}\n", indent(frag, pad + 2))
+        }
+    };
+    format!(
+        "consumers:
+  - name: acme
+    groups: [gold]
+    credentials:
+      - type: api_key
+        key: acme-key
+{c}  - name: beta
+    credentials:
+      - type: api_key
+        key: beta-key
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18090
+{l}routes:
+  - name: r
+    service: svc
+    match:
+      path: {{ type: regex, value: /.* }}
+    action: {{ type: respond, status: 200 }}
+{r}services:
+  - name: svc
+    upstream: pool
+{s}upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+{g}",
+        c = block(consumer, 4),
+        r = block(route, 4),
+        s = block(service, 4),
+        l = block(listener, 4),
+        g = block(global, 0),
+    )
+}
+
+async fn send_labeled(
+    dp: &DataPlane,
+    listener: Option<&str>,
+    headers: Vec<(&str, &str)>,
+) -> (StatusCode, HeaderMap, String) {
+    let mut builder = Request::builder().uri("/x");
+    if let Some(name) = listener {
+        builder = builder.extension(ListenerLabel(std::sync::Arc::from(name)));
+    }
+    for (n, v) in headers {
+        builder = builder.header(n, v);
+    }
+    let req = builder.body(Full::new(Bytes::new())).unwrap();
+    let resp = dwara_core::proxy::handle(dp, ip(10, 0, 0, 1), req).await;
+    let (parts, body) = resp.into_parts();
+    let text =
+        String::from_utf8(body.collect().await.expect("body read").to_bytes().to_vec()).unwrap();
+    (parts.status, parts.headers, text)
+}
+
+#[tokio::test]
+async fn consumer_level_authorization_applies_to_its_own_requests() {
+    // The MOST specific link: acme's own block denies its group, so
+    // acme is 403 everywhere it authenticates; beta carries no block
+    // and passes untouched.
+    let yaml = levels_config("denied_groups: [gold]", "", "", "", "");
+    let dp = dataplane_from(&yaml);
+    let (s, _, _) = send(&dp, vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the consumer's own block denies it"
+    );
+    let (s, _, _) = send(&dp, vec![("x-api-key", "beta-key")]).await;
+    assert_eq!(s, StatusCode::OK, "beta's lack of a block is transparent");
+}
+
+#[tokio::test]
+async fn service_level_authorization_applies() {
+    let yaml = levels_config("", "", "denied_consumers: [beta]", "", "");
+    let dp = dataplane_from(&yaml);
+    let (s, _, _) = send(&dp, vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, _) = send(&dp, vec![("x-api-key", "beta-key")]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the service block denies beta");
+}
+
+#[tokio::test]
+async fn listener_level_authorization_applies_by_listener_label() {
+    let yaml = levels_config("", "", "", "denied_consumers: [acme]", "");
+    let dp = dataplane_from(&yaml);
+    // The label the real listener frontend inserts names the accepting
+    // listener; its authorization block applies.
+    let (s, _, _) = send_labeled(&dp, Some("edge"), vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the edge listener's block denies acme"
+    );
+    // A label naming no configured listener: transparent.
+    let (s, _, _) = send_labeled(&dp, Some("ghost"), vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(s, StatusCode::OK);
+    // No label at all (handle driven directly): transparent.
+    let (s, _, _) = send(&dp, vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn global_level_authorization_applies_and_implies_authentication() {
+    let yaml = levels_config("", "", "", "", "allowed_consumers: [beta]");
+    let dp = dataplane_from(&yaml);
+    let (s, _, _) = send(&dp, vec![("x-api-key", "beta-key")]).await;
+    assert_eq!(s, StatusCode::OK, "beta is inside the global allowed set");
+    let (s, h, _) = send(&dp, vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "acme misses the global closed set"
+    );
+    assert!(!h.contains_key("www-authenticate"), "403, not a challenge");
+    // Identity rules at ANY level imply authentication: anonymous -> 401.
+    let (s, h, _) = send(&dp, vec![]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(h.contains_key("www-authenticate"));
+}
+
+#[tokio::test]
+async fn a_deny_at_any_level_wins_over_an_allow_at_another() {
+    // The frozen merge: denials are absolute across levels. Each mini
+    // case pairs an allow at one level with a deny at another; the deny
+    // wins regardless of which level carries it.
+    let cases: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
+        // (consumer, route, service, listener, global, key, comment)
+        (
+            "",
+            "allowed_consumers: [acme]",
+            "",
+            "",
+            "denied_consumers: [acme]",
+            "acme-key",
+            "global deny beats route allow",
+        ),
+        (
+            "",
+            "denied_consumers: [acme]",
+            "",
+            "",
+            "allowed_consumers: [acme, beta]",
+            "acme-key",
+            "route deny beats global allow",
+        ),
+        (
+            "ip_acl:\n  deny: [10.0.0.0/8]",
+            "allowed_consumers: [acme]",
+            "",
+            "",
+            "",
+            "acme-key",
+            "consumer deny beats route allow",
+        ),
+        (
+            "",
+            "allowed_consumers: [acme, beta]",
+            "denied_consumers: [beta]",
+            "",
+            "",
+            "beta-key",
+            "service deny beats route allow",
+        ),
+        (
+            "",
+            "allowed_consumers: [acme]",
+            "",
+            "denied_consumers: [acme]",
+            "",
+            "acme-key",
+            "listener deny beats route allow",
+        ),
+    ];
+    for (consumer, route, service, listener, global, key, comment) in cases {
+        let yaml = levels_config(consumer, route, service, listener, global);
+        let dp = dataplane_from(&yaml);
+        let listener_label = if listener.is_empty() {
+            None
+        } else {
+            Some("edge")
+        };
+        let (s, _, _) = send_labeled(&dp, listener_label, vec![("x-api-key", key)]).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "case: {comment}");
+    }
+}
+
+#[tokio::test]
+async fn cross_level_allow_sets_intersect_via_deny_anywhere() {
+    // A less specific level's CLOSED SET still denies: an allow-list
+    // miss at ANY level is a deny at that level, so two closed sets at
+    // different levels effectively intersect. Route allows [acme,
+    // gamma], global allows [beta, gamma]: only gamma (in both) passes.
+    let yaml = "
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: acme-key
+  - name: beta
+    credentials:
+      - type: api_key
+        key: beta-key
+  - name: gamma
+    credentials:
+      - type: api_key
+        key: gamma-key
+authorization:
+  allowed_consumers: [beta, gamma]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: regex, value: /.* } }
+    action: { type: respond, status: 200 }
+    authorization:
+      allowed_consumers: [acme, gamma]
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+";
+    let dp = dataplane_from(yaml);
+    let (s, _, _) = send(&dp, vec![("x-api-key", "gamma-key")]).await;
+    assert_eq!(s, StatusCode::OK, "gamma is inside both closed sets");
+    let (s, _, _) = send(&dp, vec![("x-api-key", "acme-key")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the route's allow does not bypass the global closed set"
+    );
+    let (s, _, _) = send(&dp, vec![("x-api-key", "beta-key")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the global allow does not bypass the route's closed set"
+    );
+}
+
+#[tokio::test]
+async fn authorization_does_not_run_on_unrouted_traffic() {
+    // The documented request-path order: route resolution precedes
+    // authN/authZ, so a deny-all GLOBAL block does not turn 404s into
+    // 403s — unrouted requests answer 404 (only listener/global
+    // POLICIES apply pre-route, see rate_limit.rs). The route here is a
+    // narrow prefix so /no-such-path is genuinely unrouted; the same
+    // request on the ROUTE is 403 (the global block does apply once a
+    // route resolved).
+    let yaml = "
+authorization:
+  ip_acl:
+    default: deny
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200 }
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+";
+    let dp = dataplane_from(yaml);
+    let req = Request::builder()
+        .uri("/no-such-path")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = dwara_core::proxy::handle(&dp, ip(10, 0, 0, 1), req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let req = Request::builder()
+        .uri("/r")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = dwara_core::proxy::handle(&dp, ip(10, 0, 0, 1), req).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn listener_authorization_does_not_run_on_unrouted_traffic() {
+    // Companion to the global-link test above, pinning the LISTENER
+    // link: a deny-all authorization on the listener that accepted the
+    // request still never runs pre-route (authorization sits after
+    // route resolution in the documented request-path order), so an
+    // unrouted request on that listener answers 404, not 403 — while
+    // the same request on a resolved route of that listener is 403,
+    // proving the block itself does apply once a route exists.
+    let yaml = "
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18091
+    authorization:
+      ip_acl:
+        default: deny
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200 }
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+";
+    let dp = dataplane_from(yaml);
+    let unrouted = || {
+        Request::builder()
+            .uri("/no-such-path")
+            .extension(ListenerLabel(std::sync::Arc::from("edge")))
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    };
+    let routed = || {
+        Request::builder()
+            .uri("/r")
+            .extension(ListenerLabel(std::sync::Arc::from("edge")))
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    };
+    let resp = dwara_core::proxy::handle(&dp, ip(10, 0, 0, 2), unrouted()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "the listener's deny-all block never runs on unrouted traffic"
+    );
+    let resp = dwara_core::proxy::handle(&dp, ip(10, 0, 0, 2), routed()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the same block applies once a route resolved"
+    );
 }

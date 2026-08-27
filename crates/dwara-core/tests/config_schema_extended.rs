@@ -493,6 +493,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 certificates: vec![],
                 sni_routes: vec![],
             }),
+            policies: vec![],
+            authorization: None,
         }],
         routes: vec![Route {
             name: "r".into(),
@@ -547,6 +549,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             groups: vec![],
             policies: vec![],
             priority: None,
+            authorization: None,
         }],
         policies: vec![Policy {
             name: "p".into(),
@@ -557,6 +560,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             rate_limits: vec![],
             timeouts: None,
         }],
+        global_policies: vec![],
+        authorization: None,
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
@@ -645,4 +650,86 @@ fn validation_rejects_empty_authorization_block_and_allow_all_cidr() {
         !issues.iter().any(|i| i.field.contains("authorization")),
         "/0 in the deny list is legitimate: {issues:?}"
     );
+}
+
+// --- #123: policy/authorization attachment at every level ---------------------
+
+#[test]
+fn policy_and_authorization_attachment_fields_parse_at_every_level() {
+    // Gateway-level `global_policies` + `authorization`, listener
+    // `policies` + `authorization`, service `authorization`, consumer
+    // `authorization` — all additive, all strict.
+    let gw = parse_ok(
+        "global_policies: [baseline]
+authorization:
+  denied_consumers: [blocked]
+policies:
+  - name: baseline
+    rate_limit: { requests: 10, window_seconds: 60 }
+listeners:
+  - name: edge
+    address: 0.0.0.0
+    port: 8080
+    policies: [baseline]
+    authorization:
+      ip_acl:
+        deny: [10.9.9.9]
+consumers:
+  - name: acme
+    authorization:
+      required_scopes: [read]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200 }
+services:
+  - name: svc
+    upstream: up
+    authorization:
+      allowed_groups: [gold]
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+",
+    );
+    assert_eq!(gw.global_policies, vec!["baseline".to_string()]);
+    assert_eq!(
+        gw.authorization.as_ref().unwrap().denied_consumers,
+        vec!["blocked".to_string()]
+    );
+    assert_eq!(gw.listeners[0].policies, vec!["baseline".to_string()]);
+    assert!(gw.listeners[0].authorization.is_some());
+    assert_eq!(
+        gw.consumers[0]
+            .authorization
+            .as_ref()
+            .unwrap()
+            .required_scopes,
+        vec!["read".to_string()]
+    );
+    assert_eq!(
+        gw.services[0]
+            .authorization
+            .as_ref()
+            .unwrap()
+            .allowed_groups,
+        vec!["gold".to_string()]
+    );
+    // Round-trip: the new fields survive normalization (gateway_to_yaml
+    // keeps non-defaulted values).
+    let once = gateway_to_yaml(&gw).unwrap();
+    assert_eq!(gw, parse_ok(&once));
+}
+
+#[test]
+fn unknown_fields_are_still_rejected_on_the_new_attachments() {
+    // Strict serde holds: `policies` (not `global_policies`) at the
+    // gateway root with a name-list shape must fail — the registry
+    // expects policy OBJECTS.
+    assert!(parse_gateway("policies: [baseline]\n").is_err());
+    let err = parse_err(
+        "listeners:\n  - name: edge\n    address: 0.0.0.0\n    port: 1\n    policy: [x]\n",
+    );
+    assert_eq!(err.path, "listeners[0].policy");
 }

@@ -132,6 +132,7 @@ fn inject_default_services(gateway: &mut Gateway) {
             base_path: None,
             version: None,
             policies: vec![],
+            authorization: None,
         });
     }
 }

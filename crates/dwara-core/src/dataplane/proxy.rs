@@ -69,16 +69,19 @@
 //! retry budget; exhaustion fails requests through to the client.
 //!
 //! Authorization (DW-020): immediately after authN (and before rate
-//! limiting), a route carrying an `authorization` block is checked by
-//! the `authz` module — consumer/group/scope/claim rules against the
-//! authenticated identity, IP ACLs against the EFFECTIVE client IP
-//! (XFF-resolved behind a trusted proxy, see DW-009). Denials answer
-//! 403 (generic body, reason logged server-side only); identity rules
-//! imply authentication, so an anonymous caller gets 401. An `ip_acl`-
-//! only block is the one authorization shape that can admit anonymous
-//! traffic. Precedence chain (consumer > route > service > listener >
-//! global) lives in `authz::AuthzChain`; only the route link has a
-//! config attachment today.
+//! limiting), the request runs through the `authz` module's precedence
+//! chain — consumer > route > service > listener > global
+//! (`authz::AuthzChain`; every link has a config attachment:
+//! `consumers[].authorization`, `routes[].authorization`,
+//! `services[].authorization`, `listeners[].authorization`, and the
+//! gateway-level `authorization`) — consumer/group/scope/claim rules
+//! against the authenticated identity, IP ACLs against the EFFECTIVE
+//! client IP (XFF-resolved behind a trusted proxy, see DW-009). A deny
+//! at ANY level wins; otherwise the most specific level with rules
+//! governs. Denials answer 403 (generic body, reason logged server-side
+//! only); identity rules imply authentication, so an anonymous caller
+//! gets 401. An `ip_acl`-only block is the one authorization shape that
+//! can admit anonymous traffic.
 //!
 //! Local rate limiting (DW-017): after route resolution (and its
 //! criteria checks) but BEFORE cap admission, the request runs through
@@ -97,18 +100,22 @@
 //! actually applied — a no-match request carries no rate headers).
 //! `X-RateLimit-Reset` is Unix epoch seconds of the binding window's
 //! estimated full replenishment. Policy resolution follows the frozen
-//! precedence chain consumer > route > service > listener > global; the
-//! consumer link goes live with authN (DW-019), listener/global links
-//! with their (future) config attachment points — today route- and
-//! service-attached policies apply. When several rules deny, Retry-After
-//! is the maximum wait across denying rules while the Limit/Remaining
-//! headers come from the first binding one (see the rate_limiter module
-//! docs for multi-rule denial semantics). Known gap: because route
-//! resolution precedes the rate check, 404/unrouted requests bypass
-//! rate limiting entirely; the gap closes when listener/global policy
-//! attachment gets its config fields. When rate headers are applied the
-//! GATEWAY is the source of truth for `X-RateLimit-*`: any upstream
-//! values are silently replaced.
+//! precedence chain consumer > route > service > listener > global:
+//! every level with an attachment applies and the applicable rules
+//! AND together; the resolution order binds the 429 headers (the first
+//! denying rule wins them — see the rate_limiter module docs). UNROUTED
+//! traffic (no route / criteria miss) is NOT exempt: the listener and
+//! global links apply to it before the 404 is answered (rate limiting
+//! at minimum; the consumer/route/service links are unknowable before
+//! routing, and authentication sits after route resolution in the
+//! documented order), so 404 floods cannot bypass the limiter. The
+//! reserved paths (`/healthz`, `/readyz`, `/metrics`) stay exempt. When
+//! several rules deny, Retry-After is the maximum wait across denying
+//! rules while the Limit/Remaining headers come from the first binding
+//! one (see the rate_limiter module docs for multi-rule denial
+//! semantics). When rate headers are applied the GATEWAY is the source
+//! of truth for `X-RateLimit-*`: any upstream values are silently
+//! replaced.
 //!
 //! Observability (DW-021): every request opens a root `request` span
 //! (request id, method, path WITHOUT the query string, consumer, route,
@@ -553,6 +560,69 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
     }
 }
 
+/// The response for UNROUTED traffic (#123): a request whose path
+/// resolved to no route (no path match, a dangling route index, or a
+/// non-path criteria miss) is still subject to the LISTENER- and
+/// GLOBAL-attached policies before its 404 is answered — the documented
+/// gap that unrouted 404 floods bypassed rate limiting entirely. Only
+/// those two links apply: the consumer, route, and service links are
+/// unknowable before routing, and the documented request-path order
+/// places authentication (and therefore identity) after route
+/// resolution. A denied request answers 429 exactly like routed traffic
+/// (`Retry-After` + the binding rule's `X-RateLimit-*` headers); an
+/// admitted-but-unrouted request carries the rate headers on its 404
+/// (the same "only when a policy actually matched" rule as routed
+/// responses). The reserved paths never reach here. The `route` key
+/// component of the rate context is the empty string (see
+/// `RateLimitKeyContext::route`).
+fn unrouted_response(
+    dp: &DataPlane,
+    gateway: &Gateway,
+    listener_cfg: Option<&crate::config::Listener>,
+    peer: IpAddr,
+    rid: &str,
+    rec: &mut AccessRecord,
+) -> Response<ProxyBody> {
+    let listener_policies: &[String] = listener_cfg.map(|l| l.policies.as_slice()).unwrap_or(&[]);
+    let global_policies: &[String] = &gateway.global_policies;
+    if listener_policies.is_empty() && global_policies.is_empty() {
+        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+    }
+    let engine = dp.rate_limits.load_full();
+    if engine.is_empty() {
+        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+    }
+    let ctx = crate::extensions::rate_limiter::RateLimitKeyContext {
+        peer,
+        consumer: None,
+        route: "",
+    };
+    match engine.check(&ctx, &[], &[], &[], listener_policies, global_policies) {
+        crate::extensions::rate_limiter::RateLimitOutcome::Denied {
+            limit,
+            remaining,
+            reset_epoch_s,
+            retry_after_s,
+        } => {
+            rec.rate_limited = true;
+            dp.obs.record_rate_limited("unrouted");
+            rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid)
+        }
+        crate::extensions::rate_limiter::RateLimitOutcome::Allowed {
+            limit,
+            remaining,
+            reset_epoch_s,
+        } => {
+            let mut resp = simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+            apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
+            resp
+        }
+        crate::extensions::rate_limiter::RateLimitOutcome::NotLimited => {
+            simple(StatusCode::NOT_FOUND, "no_route", "no route", rid)
+        }
+    }
+}
+
 /// Handle one request against the current generation. Never panics; every
 /// failure path is a classified response. Generic over the request body so
 /// tests and alternative frontends can drive it with any streaming body.
@@ -662,6 +732,19 @@ where
         return resp;
     }
 
+    // The listener that accepted this request (#123): its policies and
+    // authorization apply to every request it accepts. The label rides
+    // the request extensions from the listener frontend (dwara-bin);
+    // absent when `handle` is driven directly (tests) — no listener
+    // config matches, so listener-level rules are transparent, exactly
+    // like the "unknown" metrics label.
+    let listener_cfg = req.extensions().get::<ListenerLabel>().and_then(|l| {
+        gateway
+            .listeners
+            .iter()
+            .find(|li| li.name.as_str() == &*l.0)
+    });
+
     // Route resolution BEFORE cap admission (DW-016): the request's
     // priority class comes from the matched route, so the cap can shed
     // route-aware. Two consequences: 404s (no route / criteria miss) never
@@ -669,14 +752,14 @@ where
     // admit-at-entry ordering — and unknown paths cost nothing under
     // saturation.
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
-        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
     };
     let Some(route) = gateway.routes.get(idx) else {
-        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
     };
 
     if !route_applies(&route.r#match, &req) {
-        return simple(StatusCode::NOT_FOUND, "no_route", "no route", rid);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
     }
     rec.route = route.name.clone();
     root.record("route", route.name.as_str());
@@ -731,21 +814,42 @@ where
             .iter()
             .find(|c| c.name == id.consumer_name)
     });
+    // The route's service: resolved here (before authorization and rate
+    // limiting) because both consume its attachments (#123 — service
+    // authorization and service policies). Validation guarantees the
+    // reference resolves; a miss is a generation tear and simply means
+    // no service-level rules apply (the proxy send below answers 500 on
+    // the same tear).
+    let service = gateway.services.iter().find(|s| s.name == route.service);
 
     // Authorization (DW-020): after authN, before rate limiting. The
     // precedence chain is consumer > route > service > listener >
-    // global; today only the ROUTE link has a config attachment
-    // (`routes[].authorization`) — the others are documented-pending and
-    // activate when their config fields land. Denials of authenticated
-    // (or IP-gated anonymous) requests are 403; identity rules imply
-    // authentication (anonymous -> 401 with the challenge). The IP ACL
-    // is evaluated against the EFFECTIVE client IP: the
+    // global; every link has a config attachment (#123):
+    // `consumers[].authorization`, `routes[].authorization`,
+    // `services[].authorization`, `listeners[].authorization`, and the
+    // gateway-level `authorization`. A deny at ANY level wins;
+    // otherwise the most specific level with rules governs. Denials of
+    // authenticated (or IP-gated anonymous) requests are 403; identity
+    // rules imply authentication (anonymous -> 401 with the challenge).
+    // The IP ACL is evaluated against the EFFECTIVE client IP: the
     // X-Forwarded-For-resolved client when the peer is a trusted proxy
     // (DW-009 chain), else the peer. No reason detail reaches the
     // client (generic 403 body).
+    let consumer_authz = consumer_cfg.and_then(|c| c.authorization.as_ref());
+    let service_authz = service.and_then(|s| s.authorization.as_ref());
+    let listener_authz = listener_cfg.and_then(|l| l.authorization.as_ref());
+    let global_authz = gateway.authorization.as_ref();
+    // The authz phase span (DW-021) opens unconditionally — the phase
+    // runs on every routed request (a chain with no rules allows), and
+    // the trace contract pins its presence.
     let authz_decision = {
         let _authz_phase = tracing::info_span!("authz").entered();
-        if route.authorization.is_some() {
+        if consumer_authz.is_some()
+            || route.authorization.is_some()
+            || service_authz.is_some()
+            || listener_authz.is_some()
+            || global_authz.is_some()
+        {
             let inbound_xff = req
                 .headers()
                 .get(&X_FORWARDED_FOR)
@@ -762,11 +866,11 @@ where
                 effective_ip,
             };
             let chain = crate::security::authz::AuthzChain {
-                consumer: None,
+                consumer: consumer_authz,
                 route: route.authorization.as_ref(),
-                service: None,
-                listener: None,
-                global: None,
+                service: service_authz,
+                listener: listener_authz,
+                global: global_authz,
             };
             crate::security::authz::authorize(&chain, &authz_ctx)
         } else {
@@ -799,12 +903,13 @@ where
     // Local rate limiting (DW-017): BEFORE cap admission — a 429 is the
     // cheapest rejection the gateway can emit, so it precedes the permit
     // acquisition below (rate-limited requests never hold a cap slot).
-    // Policy resolution: consumer (DW-019) > route > service; all
-    // applicable rules AND together. The `credential` selector falls
-    // back to the peer IP until authN identifies consumers.
-    let service = gateway.services.iter().find(|s| s.name == route.service);
+    // Policy resolution: consumer (DW-019) > route > service > listener
+    // > global; all applicable rules AND together, and the resolution
+    // order binds the 429 headers. The `credential` selector falls back
+    // to the peer IP until authN identifies consumers.
     let service_policies: &[String] = service.map(|s| s.policies.as_slice()).unwrap_or(&[]);
     let consumer_policies: &[String] = consumer_cfg.map(|c| c.policies.as_slice()).unwrap_or(&[]);
+    let listener_policies: &[String] = listener_cfg.map(|l| l.policies.as_slice()).unwrap_or(&[]);
     // The ratelimit phase span (DW-021); sync bookkeeping, so a plain
     // entered guard is correct (nothing is awaited under it).
     let rate_headers = {
@@ -818,7 +923,14 @@ where
                 consumer: identity.as_ref().map(|id| id.consumer_name.as_str()),
                 route: &route.name,
             };
-            match engine.check(&ctx, consumer_policies, &route.policies, service_policies) {
+            match engine.check(
+                &ctx,
+                consumer_policies,
+                &route.policies,
+                service_policies,
+                listener_policies,
+                &gateway.global_policies,
+            ) {
                 RateLimitOutcome::Denied {
                     limit,
                     remaining,

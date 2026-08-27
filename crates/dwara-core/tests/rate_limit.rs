@@ -13,13 +13,25 @@
 //! - selector keying: `[ip]` isolates client IPs, `[ip, route]` isolates
 //!   (client, route) pairs;
 //! - the legacy `rate_limit` policy field still limits (route-scoped);
-//! - requests with no matching policy carry no rate headers.
+//! - requests with no matching policy carry no rate headers;
+//! - every attachment level applies (#123): a policy attached at the
+//!   consumer, route, service, listener, or gateway (global) level
+//!   demonstrably limits, with the frozen resolution order
+//!   consumer > route > service > listener > global binding the 429
+//!   headers when several levels deny at once (all levels AND together;
+//!   a policy attached at SEVERAL levels is evaluated once — its
+//!   budget spent once per request, the most specific position the one
+//!   that binds);
+//! - UNROUTED traffic (no route) is limited by the listener and global
+//!   links before its 404 is answered (the closed DW-017 gap), while
+//!   the reserved paths stay exempt.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use dwara_core::config::parse_gateway;
+use dwara_core::observability::ListenerLabel;
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
 use http_body_util::{BodyExt, Full};
@@ -33,6 +45,17 @@ use support::{dataplane_from, envelope_code};
 fn req(path: &str) -> Request<Full<Bytes>> {
     Request::builder()
         .uri(path)
+        .body(Full::new(Bytes::new()))
+        .unwrap()
+}
+
+/// A request carrying the listener label the real listener frontend
+/// (dwara-bin listeners.rs) inserts — how a test names the accepting
+/// listener for listener-level policy resolution (#123).
+fn req_labeled(listener: &str, path: &str) -> Request<Full<Bytes>> {
+    Request::builder()
+        .uri(path)
+        .extension(ListenerLabel(std::sync::Arc::from(listener)))
         .body(Full::new(Bytes::new()))
         .unwrap()
 }
@@ -803,4 +826,819 @@ upstreams:
         vec!["3"],
         "the gateway's value replaces the upstream's 999 (single header)"
     );
+}
+
+// ---- #123: every attachment level applies; unrouted traffic is limited ----
+
+async fn send_request(
+    dp: &DataPlane,
+    peer: IpAddr,
+    request: Request<Full<Bytes>>,
+) -> hyper::Response<dwara_core::proxy::ProxyBody> {
+    dwara_core::proxy::handle(dp, peer, request).await
+}
+
+#[tokio::test]
+async fn global_policy_limits_routed_traffic_without_lower_attachments() {
+    // `gateway.global_policies` is the least specific link: it applies to
+    // a route that attaches nothing itself.
+    let yaml = "
+policies:
+  - name: global-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 3 }
+global_policies: [global-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for expected_remaining in [2, 1, 0] {
+        let (status, headers, _) = status_body(send(&dp, ip(1), "/r").await).await;
+        assert_eq!(status, StatusCode::OK);
+        let (limit, remaining, _) = rate_headers(&headers).expect("global policy reports headers");
+        assert_eq!(limit, 3);
+        assert_eq!(remaining, expected_remaining);
+    }
+    let (status, headers, _) = status_body(send(&dp, ip(1), "/r").await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rate_headers(&headers).unwrap().0, 3);
+}
+
+#[tokio::test]
+async fn global_policy_limits_unrouted_traffic_before_the_404() {
+    // The closed DW-017 gap: requests to a path no route matches are
+    // rate-limited by the global link BEFORE the 404 is answered. A
+    // denied unrouted request is a 429 (Retry-After + rate headers +
+    // the error envelope), an admitted one is the plain 404.
+    let yaml = "
+policies:
+  - name: global-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+global_policies: [global-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..2 {
+        let (status, _, _) = status_body(send(&dp, ip(2), "/no-such-path").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, headers, body) = status_body(send(&dp, ip(2), "/no-such-path").await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the unrouted 404 flood is throttled by the global policy"
+    );
+    assert_eq!(envelope_code(body.as_bytes()), "rate_limit_exceeded");
+    assert!(headers.get(RETRY_AFTER).is_some());
+    assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    // A different peer has an independent bucket (selector [ip]).
+    let (status, _, _) = status_body(send(&dp, ip(3), "/no-such-path").await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reserved_paths_stay_exempt_from_global_policies() {
+    let yaml = "
+policies:
+  - name: global-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { s: 1 }
+global_policies: [global-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    // Far beyond the s:1 budget, all reserved paths still answer.
+    for _ in 0..6 {
+        assert_eq!(
+            status_body(send(&dp, ip(4), "/healthz").await).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_body(send(&dp, ip(4), "/readyz").await).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_body(send(&dp, ip(4), "/metrics").await).await.0,
+            StatusCode::OK
+        );
+    }
+    // While ordinary unrouted traffic on the same peer is throttled:
+    // the s:1 burst admits the first request, the second 429s.
+    assert_eq!(
+        status_body(send(&dp, ip(4), "/nothing").await).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status_body(send(&dp, ip(4), "/nothing").await).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn listener_policy_applies_to_the_labeled_listener_only() {
+    // `listeners[].policies` resolves by the listener label the real
+    // frontend inserts: requests on "edge" are limited, requests with
+    // no (or a non-matching) label attach nothing.
+    let yaml = "
+policies:
+  - name: edge-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 3 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18080
+    policies: [edge-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..3 {
+        let (status, headers, _) =
+            status_body(send_request(&dp, ip(5), req_labeled("edge", "/r")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rate_headers(&headers).unwrap().0, 3);
+    }
+    let (status, headers, _) =
+        status_body(send_request(&dp, ip(5), req_labeled("edge", "/r")).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rate_headers(&headers).unwrap().0, 3);
+    // No label (handle driven directly): the listener link is
+    // transparent, so the same peer is unbounded and headerless.
+    for _ in 0..5 {
+        let (status, headers, _) = status_body(send(&dp, ip(5), "/r").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(rate_headers(&headers).is_none());
+    }
+    // A label naming no configured listener attaches nothing either.
+    let (status, headers, _) =
+        status_body(send_request(&dp, ip(5), req_labeled("ghost", "/r")).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(rate_headers(&headers).is_none());
+}
+
+#[tokio::test]
+async fn listener_policy_limits_unrouted_traffic() {
+    let yaml = "
+policies:
+  - name: edge-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18081
+    policies: [edge-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..2 {
+        let (status, _, _) =
+            status_body(send_request(&dp, ip(6), req_labeled("edge", "/nothing")).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(6), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "unrouted traffic on the labeled listener is throttled"
+    );
+    // The same path without the label: no listener link, plain 404.
+    let (status, _, _) = status_body(send(&dp, ip(6), "/nothing").await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn consumer_policy_applies_and_binds_headers_over_route_policy() {
+    // Precedence for the 429 HEADERS: all levels AND together, but the
+    // FIRST denying rule in resolution order (consumer > route >
+    // service > listener > global) binds Limit/Remaining. The consumer
+    // rule (s:2) denies before the route rule (minute:5) is consulted
+    // for headers, so Limit reports 2, not 5.
+    let yaml = "
+policies:
+  - name: fast-consumer
+    rate_limits:
+      - selector: [credential]
+        requests_per: { s: 2 }
+  - name: slow-route
+    rate_limits:
+      - selector: [credential]
+        requests_per: { minute: 5 }
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: acme-key
+    policies: [fast-consumer]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+    policies: [slow-route]
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    // The consumer link only exists once authn identifies the consumer:
+    // every request presents acme's API key.
+    async fn as_acme(dp: &DataPlane) -> hyper::Response<dwara_core::proxy::ProxyBody> {
+        let req = Request::builder()
+            .uri("/r")
+            .header("x-api-key", "acme-key")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        dwara_core::proxy::handle(dp, ip(7), req).await
+    }
+    for _ in 0..2 {
+        let (status, headers, _) = status_body(as_acme(&dp).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    }
+    let (status, headers, _) = status_body(as_acme(&dp).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        rate_headers(&headers).unwrap().0,
+        2,
+        "the consumer-level rule binds the 429 headers over the route rule (5)"
+    );
+}
+
+#[tokio::test]
+async fn route_policy_binds_headers_over_global_policy() {
+    // The same header precedence one link down: route (s:2) binds over
+    // the global rule (minute:5) when both apply.
+    let yaml = "
+policies:
+  - name: fast-route
+    rate_limits:
+      - selector: [ip]
+        requests_per: { s: 2 }
+  - name: slow-global
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 5 }
+global_policies: [slow-global]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+    policies: [fast-route]
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..2 {
+        let (status, headers, _) = status_body(send(&dp, ip(8), "/r").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    }
+    let (status, headers, _) = status_body(send(&dp, ip(8), "/r").await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        rate_headers(&headers).unwrap().0,
+        2,
+        "the route-level rule binds the 429 headers over the global rule (5)"
+    );
+}
+
+/// Config for the precedence-pair test: a `fast` policy (minute: 2) at
+/// `fast_level` and a `slow` policy (minute: 5) at `slow_level`, one of
+/// each of "consumer", "route", "service", "listener", "global". Every
+/// other level attaches nothing. A consumer with credentials exists so
+/// the consumer link CAN attach (its resolution requires authn), and
+/// every request of the pair tests presents the key plus the "edge"
+/// listener label, so all five links are live in every case.
+fn precedence_pair_yaml(fast_level: &str, slow_level: &str) -> String {
+    let attach = |level: &str| -> String {
+        let mut names: Vec<&str> = Vec::new();
+        if level == fast_level {
+            names.push("fast");
+        }
+        if level == slow_level {
+            names.push("slow");
+        }
+        if names.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[{}]", names.join(", "))
+        }
+    };
+    format!(
+        "policies:
+  - name: fast
+    rate_limits:
+      - selector: [ip]
+        requests_per: {{ minute: 2 }}
+  - name: slow
+    rate_limits:
+      - selector: [ip]
+        requests_per: {{ minute: 5 }}
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: acme-key
+    policies: {consumer}
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18082
+    policies: {listener}
+global_policies: {global}
+routes:
+  - name: r
+    service: svc
+    match: {{ path: {{ type: prefix, value: /r }} }}
+    action: {{ type: respond, status: 200, body: ok }}
+    policies: {route}
+services:
+  - name: svc
+    upstream: up
+    policies: {service}
+upstreams:
+  - name: up
+    endpoints: [{{ address: 127.0.0.1, port: 1 }}]
+",
+        consumer = attach("consumer"),
+        route = attach("route"),
+        service = attach("service"),
+        listener = attach("listener"),
+        global = attach("global"),
+    )
+}
+
+#[tokio::test]
+async fn resolution_order_binds_429_headers_when_two_levels_deny_at_once() {
+    // The strong form of the header-precedence pin: at the SIXTH request
+    // of one peer BOTH rules deny simultaneously (fast exhausted since
+    // request 3; slow — minute: 5 — spent its budget on the admissions
+    // of requests 1-5), so X-RateLimit-Limit can only come from the
+    // rule the engine consults FIRST. Every adjacent pair of the frozen
+    // chain plus the consumer-vs-service skip pair reports the MORE
+    // specific level's limit (2), not the less specific one's (5).
+    // Minute windows throughout: no refill can race the test.
+    let cases: &[(&str, &str)] = &[
+        ("consumer", "route"),
+        ("consumer", "service"),
+        ("route", "service"),
+        ("service", "listener"),
+        ("listener", "global"),
+    ];
+    for (fast_level, slow_level) in cases {
+        let dp = dataplane_from(&precedence_pair_yaml(fast_level, slow_level));
+        let peer = ip(9);
+        for i in 0..6u32 {
+            let req = Request::builder()
+                .uri("/r")
+                .header("x-api-key", "acme-key")
+                .extension(ListenerLabel(std::sync::Arc::from("edge")))
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let (status, headers, _) =
+                status_body(dwara_core::proxy::handle(&dp, peer, req).await).await;
+            let expected = if i < 2 {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            assert_eq!(
+                status,
+                expected,
+                "case {fast_level}>{slow_level}, request {}: fast is minute:2",
+                i + 1
+            );
+            if i == 5 {
+                assert_eq!(
+                    rate_headers(&headers).unwrap().0,
+                    2,
+                    "case {fast_level}>{slow_level}: both rules deny at once, so the \
+                     more specific level ({fast_level}, limit 2) must bind the 429 \
+                     headers over {slow_level} (limit 5)"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn same_policy_at_two_levels_consumes_its_budget_once() {
+    // The dedup pin: ONE policy attached at BOTH the listener and the
+    // global link is ONE evaluation per request, not one per link. The
+    // pre-dedup engine resolved the shared name at every attaching
+    // level, so a minute:3 policy throttled at request 2 (each
+    // admission spent the budget twice). Now the full burst of 3 is
+    // admitted with Remaining stepping 2 -> 1 -> 0 — under double
+    // consumption request 1 would already report 1 — and only the
+    // FOURTH request 429s. With a single shared rule the header VALUES
+    // are level-independent by construction, so WHICH occurrence binds
+    // the headers is only observable with distinct policies (pinned by
+    // the precedence matrix above); what this test pins is the single
+    // consumption, on the routed path (all five links resolve, the
+    // chain holds the name twice) and on the unrouted one (listener +
+    // global only, the pre-404 limiter).
+    let yaml = "
+policies:
+  - name: shared
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 3 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18086
+    policies: [shared]
+global_policies: [shared]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    // Routed traffic on the labeled listener: consumer/route/service
+    // attach nothing, so the chain is [listener: shared, global:
+    // shared] and the name appears twice.
+    for expected_remaining in [2, 1, 0] {
+        let (status, headers, _) =
+            status_body(send_request(&dp, ip(18), req_labeled("edge", "/r")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let (limit, remaining, _) = rate_headers(&headers).expect("rate headers on success");
+        assert_eq!(limit, 3);
+        assert_eq!(
+            remaining, expected_remaining,
+            "the shared policy spends its budget once per request"
+        );
+    }
+    let (status, headers, _) =
+        status_body(send_request(&dp, ip(18), req_labeled("edge", "/r")).await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "minute:3 denies the FOURTH request, not the second"
+    );
+    let (limit, remaining, _) = rate_headers(&headers).expect("rate headers on 429");
+    assert_eq!(limit, 3);
+    assert_eq!(remaining, 0);
+    assert!(headers.get(RETRY_AFTER).is_some());
+    // Unrouted traffic (fresh peer: independent [ip] budget): only the
+    // listener and global links resolve — both attach the same policy —
+    // and the pre-404 limiter spends the budget once (the bug 429'd
+    // the SECOND unrouted request).
+    for _ in 0..3 {
+        let (status, headers, _) =
+            status_body(send_request(&dp, ip(19), req_labeled("edge", "/nothing")).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(rate_headers(&headers).unwrap().0, 3);
+    }
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(19), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn listener_binds_429_headers_over_global_on_unrouted_traffic() {
+    // The unrouted counterpart of the header-precedence pin: listener
+    // (minute: 2) AND global (minute: 5) policies both apply to unrouted
+    // traffic on the labeled listener; at the sixth unrouted request both
+    // deny at once and the LISTENER rule — earlier in the frozen chain —
+    // must bind the 429 headers (Limit 2, not 5). The unrouted 429 also
+    // carries the JSON error envelope, exactly like a routed one.
+    let yaml = "
+policies:
+  - name: fast-edge
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+  - name: slow-global
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 5 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18083
+    policies: [fast-edge]
+global_policies: [slow-global]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for i in 0..6u32 {
+        let (status, headers, body) =
+            status_body(send_request(&dp, ip(11), req_labeled("edge", "/nothing")).await).await;
+        let expected = if i < 2 {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(status, expected, "unrouted request {}", i + 1);
+        if i == 5 {
+            assert_eq!(
+                rate_headers(&headers).unwrap().0,
+                2,
+                "both links deny at once; the listener rule binds the unrouted 429 \
+                 headers over the global rule (5)"
+            );
+            assert_eq!(envelope_code(body.as_bytes()), "rate_limit_exceeded");
+            assert!(headers.get(RETRY_AFTER).is_some());
+        }
+    }
+    // A different peer has independent [ip] budgets at BOTH links: its
+    // first unrouted request is a plain admitted 404, not a 429.
+    let (status, headers, _) =
+        status_body(send_request(&dp, ip(15), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        rate_headers(&headers).unwrap().0,
+        2,
+        "the admitted unrouted 404 still reports the applied policy's headers"
+    );
+}
+
+#[tokio::test]
+async fn reserved_paths_stay_exempt_on_a_listener_with_policies() {
+    // Listener-level mirror of the global exemption test: the reserved
+    // paths never reach the limiter even on a listener carrying
+    // policies — far beyond the minute:2 budget they all answer 200
+    // WITHOUT rate headers, while ordinary unrouted traffic on the same
+    // peer and listener is throttled.
+    let yaml = "
+policies:
+  - name: edge-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18084
+    policies: [edge-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    for _ in 0..3 {
+        for path in ["/healthz", "/readyz", "/metrics"] {
+            let (status, headers, _) =
+                status_body(send_request(&dp, ip(16), req_labeled("edge", path)).await).await;
+            assert_eq!(status, StatusCode::OK, "{path} stays exempt");
+            assert!(
+                rate_headers(&headers).is_none(),
+                "{path} never reaches the limiter, so it carries no rate headers"
+            );
+        }
+    }
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(16), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(16), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(16), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "ordinary unrouted traffic on the same peer exhausts the minute:2 budget"
+    );
+}
+
+#[tokio::test]
+async fn unrouted_route_selector_keys_one_shared_bucket_across_peers() {
+    // Which key does an unrouted request get? The [ip] selector keys per
+    // peer (pinned above); the [route] selector keys the EMPTY route
+    // component on unrouted traffic (documented), i.e. ONE bucket shared
+    // by every unrouted request of the policy: peer A's single admitted
+    // unrouted request spends the minute:1 budget and a DIFFERENT peer's
+    // unrouted request 429s — the shared-bucket shape an operator must
+    // know about before attaching a [route]-keyed policy globally.
+    let yaml = "
+policies:
+  - name: per-route
+    rate_limits:
+      - selector: [route]
+        requests_per: { minute: 1 }
+global_policies: [per-route]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let dp = dataplane_from(yaml);
+    let (status, headers, _) = status_body(send(&dp, ip(13), "/a-not-found").await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        rate_headers(&headers).is_some(),
+        "the applied policy reports its headers on the admitted 404"
+    );
+    let (status, _, _) = status_body(send(&dp, ip(14), "/b-not-found").await).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a different peer shares the same unrouted bucket: the [route] key has no \
+         per-peer component before routing (the empty-string route)"
+    );
+}
+
+#[tokio::test]
+async fn reload_attaches_global_and_listener_policies_without_restart() {
+    // Hot reload of the NEW attachment fields: a policy that exists but
+    // is attached nowhere limits nothing; one compile_and_publish plus
+    // the dataplane refresh (what the reload watcher and the admin API
+    // both drive) attaches it at the global AND listener levels and both
+    // links go live on the next request — routed traffic gains the
+    // global link, unrouted traffic gains both.
+    let v1 = "
+policies:
+  - name: per-ip-2
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18085
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let state = Arc::new(ConfigState::new());
+    state
+        .compile_and_publish(&parse_gateway(v1).unwrap())
+        .unwrap();
+    let dp = DataPlane::new(Arc::clone(&state));
+    for _ in 0..5 {
+        let (status, headers, _) = status_body(send(&dp, ip(12), "/r").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            rate_headers(&headers).is_none(),
+            "attached nowhere: no limit"
+        );
+        let (status, headers, _) =
+            status_body(send_request(&dp, ip(12), req_labeled("edge", "/nothing")).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(rate_headers(&headers).is_none());
+    }
+    // The reload: same entities, DISTINCT policies now attached at the
+    // two new levels — one per link keeps each link's attachment
+    // independently observable across the reload (the same policy at
+    // both levels would now correctly evaluate once per request; see
+    // `same_policy_at_two_levels_consumes_its_budget_once`). The engine
+    // is rebuilt per generation (buckets reset).
+    let v2 = "
+policies:
+  - name: global-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+  - name: edge-per-ip
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 2 }
+global_policies: [global-per-ip]
+listeners:
+  - name: edge
+    address: 127.0.0.1
+    port: 18085
+    policies: [edge-per-ip]
+routes:
+  - name: r
+    service: svc
+    match: { path: { type: prefix, value: /r } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    state
+        .compile_and_publish(&parse_gateway(v2).unwrap())
+        .unwrap();
+    dp.refresh();
+    // Routed traffic: the global link now limits (minute: 2).
+    for _ in 0..2 {
+        let (status, headers, _) = status_body(send(&dp, ip(12), "/r").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    }
+    let (status, headers, _) = status_body(send(&dp, ip(12), "/r").await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rate_headers(&headers).unwrap().0, 2);
+    // Unrouted traffic on the labeled listener: the listener link now
+    // limits BEFORE the 404 (fresh peer: independent [ip] budget).
+    for _ in 0..2 {
+        let (status, _, _) =
+            status_body(send_request(&dp, ip(17), req_labeled("edge", "/nothing")).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, _, _) =
+        status_body(send_request(&dp, ip(17), req_labeled("edge", "/nothing")).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }

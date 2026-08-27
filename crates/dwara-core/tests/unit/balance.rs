@@ -377,6 +377,8 @@ async fn dataplane_reload_changes_weights_without_restart() {
         upstreams: vec![upstream_with_weights((2, 1))],
         consumers: vec![],
         policies: vec![],
+        global_policies: Vec::new(),
+        authorization: None,
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,

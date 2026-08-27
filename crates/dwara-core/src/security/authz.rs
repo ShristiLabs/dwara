@@ -51,11 +51,13 @@
 //!    less-specific levels are not consulted. A level without an
 //!    [`Authz`] (or with an empty one) is transparent.
 //!
-//! Live links today: the ROUTE level (`routes[].authorization`). The
-//! consumer, service, listener, and global links have no config
-//! attachment points yet — the chain structure exists and unit tests
-//! exercise the merge with synthetic links; each link activates when
-//! its config field lands.
+//! Live links (#123): every level has a config attachment —
+//! `consumers[].authorization` (applies once authentication identifies
+//! the consumer), `routes[].authorization`, `services[].authorization`,
+//! `listeners[].authorization` (the accepting listener), and the
+//! gateway-level `authorization` (global). Authorization runs on
+//! requests that resolved a route, per the documented request-path
+//! order; unrouted 404s never reach the chain.
 //!
 //! # Failure posture
 //!

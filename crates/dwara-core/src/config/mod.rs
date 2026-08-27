@@ -69,6 +69,31 @@ pub struct Gateway {
     /// Named reusable rule bundles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<Policy>,
+    /// Gateway-level (global) policy attachment (#123): names of policies
+    /// from the `policies` list that apply to EVERY request the gateway
+    /// serves — the LEAST specific link of the frozen precedence chain
+    /// consumer > route > service > listener > global. Named
+    /// `global_policies` (not `policies`, which is the policy REGISTRY at
+    /// this level) so the two roles cannot be confused. All applicable
+    /// levels' rules AND together (see the rate-limiter module docs), so a
+    /// global policy is an additional constraint on every request, not a
+    /// default that more specific levels replace. Global policies also
+    /// apply to UNROUTED traffic: a request whose path matches no route
+    /// is rate-limited by them before the 404 is answered (the reserved
+    /// paths /healthz, /readyz, and /metrics stay exempt).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_policies: Vec<String>,
+    /// Gateway-level (global) authorization rules (#123): the least
+    /// specific link of the authorization precedence chain
+    /// consumer > route > service > listener > global (see [`Authz`] for
+    /// the rule semantics and the `authz` module for the merge: a deny at
+    /// ANY level wins; otherwise the most specific level with rules
+    /// governs). Applies to every request that resolved a route
+    /// (authorization runs after route resolution per the documented
+    /// request-path order). Same validation rules as route-level
+    /// authorization; see [`Authz`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authz>,
     /// IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims
     /// are trusted (gateway-level; the direct connection peer must be in
     /// this list for an inbound XFF chain to be preserved and extended).
@@ -232,6 +257,24 @@ pub struct Listener {
     pub protocol: ListenerProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<ListenerTls>,
+    /// Policies attached to this listener (#123): names from the
+    /// gateway's `policies` list, applying to every request the listener
+    /// accepts (the second-least specific link of the frozen chain
+    /// consumer > route > service > listener > global; all applicable
+    /// levels' rules AND together — see the rate-limiter module docs).
+    /// Listener policies also apply to UNROUTED traffic accepted by this
+    /// listener: a request whose path matches no route is rate-limited by
+    /// them before the 404 is answered (reserved paths stay exempt).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<String>,
+    /// Listener-level authorization rules (#123): applies to every
+    /// request this listener accepts that resolved a route (authorization
+    /// runs after route resolution per the documented request-path
+    /// order). Link of the frozen chain consumer > route > service >
+    /// listener > global; see [`Authz`] for the rule semantics and the
+    /// `authz` module for the merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authz>,
 }
 
 fn default_listener_protocol() -> ListenerProtocol {
@@ -314,8 +357,9 @@ pub struct Route {
     pub service: String,
     pub r#match: RouteMatch,
     pub action: RouteAction,
-    /// Attached policy names (most specific wins: consumer > route > service
-    /// > listener > global).
+    /// Attached policy names. All applicable levels' rules AND together
+    /// (see the rate-limiter module docs); the resolution order is
+    /// consumer > route > service > listener > global.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
     /// Request priority class for load shedding (DW-016): 0 (lowest) to 10
@@ -349,9 +393,10 @@ pub struct Route {
     /// rejected 401); an `ip_acl`-only block is the one case that can
     /// permit anonymous access (from an allowed IP). Precedence across
     /// levels (consumer > route > service > listener > global) is
-    /// resolved by the `authz` module's resolver; today only the route
-    /// link has a config attachment point — the other links activate
-    /// when their config fields land.
+    /// resolved by the `authz` module's resolver; every level has a
+    /// config attachment point (`consumers[].authorization`,
+    /// `services[].authorization`, `listeners[].authorization`, and the
+    /// gateway-level `authorization`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
 }
@@ -604,6 +649,14 @@ pub struct Service {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
+    /// Service-level authorization rules (#123): applies to every request
+    /// whose route targets this service. Link of the frozen chain
+    /// consumer > route > service > listener > global (a deny at any
+    /// level wins; otherwise the most specific level with rules governs —
+    /// see [`Authz`] and the `authz` module). Same validation rules as
+    /// route-level authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authz>,
 }
 
 /// Load-balancing pool: algorithm, protocol, endpoints.
@@ -1126,6 +1179,15 @@ pub struct Consumer {
     /// membership.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Consumer-level authorization rules (#123): the MOST specific link
+    /// of the frozen chain consumer > route > service > listener >
+    /// global — applies to every request authenticated as this consumer
+    /// (naturally only once authentication has identified it). A deny at
+    /// any level wins; otherwise the most specific level with rules
+    /// governs (see [`Authz`] and the `authz` module). Same validation
+    /// rules as route-level authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authz>,
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience

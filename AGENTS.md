@@ -214,7 +214,9 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 - **Request-path order** (do not reorder casually): reserved paths
   (/healthz, /readyz, /metrics) → route resolution → authn → authz →
   rate limit → gateway cap admission (priority-aware) → breaker →
-  endpoint pick → pending cap → connect.
+  endpoint pick → pending cap → connect. Unrouted traffic stops at
+  route resolution: listener- and global-attached policies rate-limit
+  the request before the 404; authn/authz never run pre-route.
 - **Gateway-generated responses** use the JSON error envelope
   `{error:{code,message,request_id}}`; never leak upstream internals.
 - **Secrets:** never logged, never in Debug output, redaction is exhaustive

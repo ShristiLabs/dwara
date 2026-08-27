@@ -15,11 +15,29 @@
         }
       ]
     },
+    "authorization": {
+      "description": "Gateway-level (global) authorization rules (#123): the least\nspecific link of the authorization precedence chain\nconsumer > route > service > listener > global (see [`Authz`] for\nthe rule semantics and the `authz` module for the merge: a deny at\nANY level wins; otherwise the most specific level with rules\ngoverns). Applies to every request that resolved a route\n(authorization runs after route resolution per the documented\nrequest-path order). Same validation rules as route-level\nauthorization; see [`Authz`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Authz"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "consumers": {
       "description": "API caller identities.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Consumer"
+      }
+    },
+    "global_policies": {
+      "description": "Gateway-level (global) policy attachment (#123): names of policies\nfrom the `policies` list that apply to EVERY request the gateway\nserves — the LEAST specific link of the frozen precedence chain\nconsumer > route > service > listener > global. Named\n`global_policies` (not `policies`, which is the policy REGISTRY at\nthis level) so the two roles cannot be confused. All applicable\nlevels' rules AND together (see the rate-limiter module docs), so a\nglobal policy is an additional constraint on every request, not a\ndefault that more specific levels replace. Global policies also\napply to UNROUTED traffic: a request whose path matches no route\nis rate-limited by them before the 404 is answered (the reserved\npaths /healthz, /readyz, and /metrics stay exempt).",
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     },
     "jwt_providers": {
@@ -282,6 +300,17 @@
       "description": "Identity of an API caller (app/team/user); owns credentials, quotas, and\nthe analytics identity.",
       "type": "object",
       "properties": {
+        "authorization": {
+          "description": "Consumer-level authorization rules (#123): the MOST specific link\nof the frozen chain consumer > route > service > listener >\nglobal — applies to every request authenticated as this consumer\n(naturally only once authentication has identified it). A deny at\nany level wins; otherwise the most specific level with rules\ngoverns (see [`Authz`] and the `authz` module). Same validation\nrules as route-level authorization.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "credentials": {
           "type": "array",
           "items": {
@@ -527,8 +556,26 @@
           "description": "Bind address, e.g. `0.0.0.0` or `127.0.0.1`.",
           "type": "string"
         },
+        "authorization": {
+          "description": "Listener-level authorization rules (#123): applies to every\nrequest this listener accepts that resolved a route (authorization\nruns after route resolution per the documented request-path\norder). Link of the frozen chain consumer > route > service >\nlistener > global; see [`Authz`] for the rule semantics and the\n`authz` module for the merge.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "name": {
           "type": "string"
+        },
+        "policies": {
+          "description": "Policies attached to this listener (#123): names from the\ngateway's `policies` list, applying to every request the listener\naccepts (the second-least specific link of the frozen chain\nconsumer > route > service > listener > global; all applicable\nlevels' rules AND together — see the rate-limiter module docs).\nListener policies also apply to UNROUTED traffic accepted by this\nlistener: a request whose path matches no route is rate-limited by\nthem before the 404 is answered (reserved paths stay exempt).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "port": {
           "type": "integer",
@@ -1016,7 +1063,7 @@
           "type": "boolean"
         },
         "authorization": {
-          "description": "Route-level authorization rules (DW-020, feature analysis 4.7).\nAbsent (the default) imposes no authorization on the route. A\nPRESENT-but-entirely-empty block (no consumers, groups, scopes,\nclaims, or `ip_acl`) is likewise a no-op at evaluation time —\nit imposes nothing, exactly like an absent one — but it is\nalways a config-authoring mistake (a rule block with no rules),\nso validation REJECTS it: omit the block instead of emptying it.\nWhen present (and non-empty), the rules are evaluated after\nauthentication and BEFORE\nrate limiting; see [`Authz`] for the rule semantics. Presence of\nany identity rule implies authentication (an anonymous request is\nrejected 401); an `ip_acl`-only block is the one case that can\npermit anonymous access (from an allowed IP). Precedence across\nlevels (consumer > route > service > listener > global) is\nresolved by the `authz` module's resolver; today only the route\nlink has a config attachment point — the other links activate\nwhen their config fields land.",
+          "description": "Route-level authorization rules (DW-020, feature analysis 4.7).\nAbsent (the default) imposes no authorization on the route. A\nPRESENT-but-entirely-empty block (no consumers, groups, scopes,\nclaims, or `ip_acl`) is likewise a no-op at evaluation time —\nit imposes nothing, exactly like an absent one — but it is\nalways a config-authoring mistake (a rule block with no rules),\nso validation REJECTS it: omit the block instead of emptying it.\nWhen present (and non-empty), the rules are evaluated after\nauthentication and BEFORE\nrate limiting; see [`Authz`] for the rule semantics. Presence of\nany identity rule implies authentication (an anonymous request is\nrejected 401); an `ip_acl`-only block is the one case that can\npermit anonymous access (from an allowed IP). Precedence across\nlevels (consumer > route > service > listener > global) is\nresolved by the `authz` module's resolver; every level has a\nconfig attachment point (`consumers[].authorization`,\n`services[].authorization`, `listeners[].authorization`, and the\ngateway-level `authorization`).",
           "anyOf": [
             {
               "$ref": "#/$defs/Authz"
@@ -1033,7 +1080,7 @@
           "type": "string"
         },
         "policies": {
-          "description": "Attached policy names (most specific wins: consumer > route > service\n> listener > global).",
+          "description": "Attached policy names. All applicable levels' rules AND together\n(see the rate-limiter module docs); the resolution order is\nconsumer > route > service > listener > global.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1214,6 +1261,17 @@
       "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream.",
       "type": "object",
       "properties": {
+        "authorization": {
+          "description": "Service-level authorization rules (#123): applies to every request\nwhose route targets this service. Link of the frozen chain\nconsumer > route > service > listener > global (a deny at any\nlevel wins; otherwise the most specific level with rules governs —\nsee [`Authz`] and the `authz` module). Same validation rules as\nroute-level authorization.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "base_path": {
           "description": "Base path prefix the API is served under (e.g. `/v1`).",
           "type": [

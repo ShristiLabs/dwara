@@ -113,6 +113,8 @@ fn render_contains_families() {
             }],
             consumers: vec![],
             policies: vec![],
+            global_policies: Vec::new(),
+            authorization: None,
             max_concurrent_requests: None,
             jwt_providers: Vec::new(),
             admin: None,

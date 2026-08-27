@@ -69,6 +69,7 @@ fn bench_gateway() -> Gateway {
             base_path: None,
             version: None,
             policies: Vec::new(),
+            authorization: None,
         })
         .collect();
     let upstreams = (0..5)
@@ -101,6 +102,8 @@ fn bench_gateway() -> Gateway {
         upstreams,
         consumers: Vec::new(),
         policies: Vec::new(),
+        global_policies: Vec::new(),
+        authorization: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),

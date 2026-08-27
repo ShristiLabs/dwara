@@ -108,6 +108,36 @@ fn lint_flags_unused_consumer_policy_and_unreferenced_upstream() {
 }
 
 #[test]
+fn lint_counts_the_new_attachment_levels_as_usage() {
+    // #123: a policy attached ONLY at the listener or gateway (global)
+    // level is used, and a consumer referenced only by an authorization
+    // rule at any level (here: the gateway's) is used — neither may be
+    // flagged. The policy is attached at BOTH new levels to pin that
+    // each counts.
+    let doc = "listeners:\n  - name: main\n    address: 127.0.0.1\n    port: 18080\n    policies: [baseline]\n\
+         global_policies: [baseline]\n\
+         policies:\n  - name: baseline\n    rate_limit: { requests: 1, window_seconds: 1 }\n\
+         consumers:\n  - name: acme\n    credentials:\n      - { type: api_key, key: k }\n\
+         authorization:\n  denied_consumers: [acme]\n\
+         routes:\n  - name: r1\n    service: svc\n\
+         \x20   match:\n      path:\n        type: prefix\n        value: /api\n\
+         \x20   action:\n      type: proxy\n\
+         services:\n  - name: svc\n    upstream: echo\n\
+         upstreams:\n  - name: echo\n    endpoints:\n      - { address: 127.0.0.1, port: 1 }\n";
+    let gateway = dwara_core::config::parse_gateway(doc).expect("parses");
+    let warnings = lint_config(&gateway);
+    let texts: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+    assert!(
+        !texts.iter().any(|t| t.contains("policy/")),
+        "baseline is attached (listener + global): {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("consumer/acme")),
+        "acme is referenced by the global authorization: {texts:?}"
+    );
+}
+
+#[test]
 fn lint_flags_regex_shadowed_by_exact_and_duplicate_prefix() {
     let doc = "listeners:\n  - name: main\n    address: 127.0.0.1\n    port: 18080\n\
          routes:\n\

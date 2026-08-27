@@ -25,6 +25,8 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
         port,
         protocol: ListenerProtocol::Http,
         tls: None,
+        policies: vec![],
+        authorization: None,
     }
 }
 
@@ -58,6 +60,7 @@ fn service(name: &str, upstream: &str) -> Service {
         base_path: None,
         version: None,
         policies: vec![],
+        authorization: None,
     }
 }
 
@@ -94,6 +97,8 @@ fn base_gateway() -> Gateway {
         upstreams: vec![upstream("pool")],
         consumers: vec![],
         policies: vec![],
+        global_policies: Vec::new(),
+        authorization: None,
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
@@ -157,6 +162,7 @@ fn validation_rejects_duplicate_consumer_name() {
         groups: vec![],
         credentials: vec![],
         policies: vec![],
+        authorization: None,
     });
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
@@ -164,6 +170,7 @@ fn validation_rejects_duplicate_consumer_name() {
         groups: vec![],
         credentials: vec![],
         policies: vec![],
+        authorization: None,
     });
     assert_single_issue(&gw, "consumer", "c", "name");
 }
@@ -304,6 +311,7 @@ fn validation_rejects_empty_api_key_credential() {
         groups: vec![],
         credentials: vec![Credential::ApiKey { key: String::new() }],
         policies: vec![],
+        authorization: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -320,6 +328,7 @@ fn validation_rejects_empty_jwt_issuer() {
             audiences: vec![],
         }],
         policies: vec![],
+        authorization: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -335,6 +344,7 @@ fn validation_rejects_empty_mtls_fingerprint() {
             fingerprint: String::new(),
         }],
         policies: vec![],
+        authorization: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -348,6 +358,7 @@ fn validation_rejects_dangling_consumer_policy_reference() {
         groups: vec![],
         credentials: vec![],
         policies: vec!["ghost".into()],
+        authorization: None,
     });
     assert_single_issue(&gw, "consumer", "c", "policies");
 }
@@ -1253,4 +1264,130 @@ fn publish_failure_on_new_rule_violation_keeps_old_snapshot_and_generation() {
         old.content_hash(),
         "old snapshot content must be retained"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #123: validation of the new policy/authorization attachment levels
+// ---------------------------------------------------------------------------
+
+/// An `Authz` with every list empty (the always-rejected authoring
+/// mistake) plus optional consumer entries.
+fn empty_authz() -> dwara_core::config::Authz {
+    dwara_core::config::Authz {
+        allowed_consumers: vec![],
+        denied_consumers: vec![],
+        allowed_groups: vec![],
+        denied_groups: vec![],
+        required_scopes: vec![],
+        required_claims: Default::default(),
+        ip_acl: None,
+    }
+}
+
+#[test]
+fn validation_rejects_dangling_global_policy_reference() {
+    let mut gw = base_gateway();
+    gw.global_policies = vec!["ghost".into()];
+    assert_single_issue(&gw, "gateway", "(root)", "global_policies");
+}
+
+#[test]
+fn validation_rejects_dangling_listener_policy_reference() {
+    let mut gw = base_gateway();
+    gw.listeners[0].policies = vec!["ghost".into()];
+    assert_single_issue(&gw, "listener", "l", "policies");
+}
+
+#[test]
+fn validation_accepts_resolved_global_and_listener_policy_references() {
+    let mut gw = base_gateway();
+    gw.policies = vec![Policy {
+        name: "p".into(),
+        rate_limit: Some(RateLimit {
+            requests: 3,
+            window_seconds: 60,
+        }),
+        rate_limits: vec![],
+        timeouts: None,
+    }];
+    gw.global_policies = vec!["p".into()];
+    gw.listeners[0].policies = vec!["p".into()];
+    assert!(
+        validate(&gw).is_empty(),
+        "resolved refs at both levels pass"
+    );
+}
+
+#[test]
+fn validation_rejects_empty_authorization_at_each_new_level() {
+    // An authorization block with no rules is always a mistake — at the
+    // listener, service, consumer, and gateway levels alike.
+    let mut gw = base_gateway();
+    gw.listeners[0].authorization = Some(empty_authz());
+    assert_single_issue(&gw, "listener", "l", "authorization");
+
+    let mut gw = base_gateway();
+    gw.services[0].authorization = Some(empty_authz());
+    assert_single_issue(&gw, "service", "svc", "authorization");
+
+    let mut gw = base_gateway();
+    gw.authorization = Some(empty_authz());
+    assert_single_issue(&gw, "gateway", "(root)", "authorization");
+
+    let mut gw = base_gateway();
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        priority: None,
+        groups: vec![],
+        credentials: vec![],
+        policies: vec![],
+        authorization: Some(empty_authz()),
+    });
+    assert_single_issue(&gw, "consumer", "c", "authorization");
+}
+
+#[test]
+fn validation_rejects_unresolved_authz_references_at_each_new_level() {
+    // Unknown consumer at the SERVICE level.
+    let mut gw = base_gateway();
+    let mut authz = empty_authz();
+    authz.allowed_consumers = vec!["ghost".into()];
+    gw.services[0].authorization = Some(authz);
+    assert_single_issue(&gw, "service", "svc", "authorization.allowed_consumers");
+
+    // Unknown group at the GLOBAL level.
+    let mut gw = base_gateway();
+    let mut authz = empty_authz();
+    authz.denied_groups = vec!["nogroup".into()];
+    gw.authorization = Some(authz);
+    assert_single_issue(&gw, "gateway", "(root)", "authorization.denied_groups");
+
+    // Bad CIDR at the LISTENER level.
+    let mut gw = base_gateway();
+    let mut authz = empty_authz();
+    authz.ip_acl = Some(dwara_core::config::IpAcl {
+        allow: vec!["10.0.0.0/99".into()],
+        deny: vec![],
+        default: dwara_core::config::IpAclDefault::Allow,
+    });
+    gw.listeners[0].authorization = Some(authz);
+    assert_single_issue(&gw, "listener", "l", "authorization.ip_acl.allow[0]");
+
+    // Allow-all /0 entry at the CONSUMER level (steered to default: allow).
+    let mut gw = base_gateway();
+    let mut authz = empty_authz();
+    authz.ip_acl = Some(dwara_core::config::IpAcl {
+        allow: vec!["0.0.0.0/0".into()],
+        deny: vec![],
+        default: dwara_core::config::IpAclDefault::Allow,
+    });
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        priority: None,
+        groups: vec![],
+        credentials: vec![],
+        policies: vec![],
+        authorization: Some(authz),
+    });
+    assert_single_issue(&gw, "consumer", "c", "authorization.ip_acl.allow[0]");
 }

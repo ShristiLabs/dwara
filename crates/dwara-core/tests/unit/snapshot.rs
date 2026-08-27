@@ -15,6 +15,8 @@ fn good_gateway() -> Gateway {
             port: 8080,
             protocol: ListenerProtocol::Http,
             tls: None,
+            policies: vec![],
+            authorization: None,
         }],
         routes: vec![
             Route {
@@ -84,6 +86,7 @@ fn good_gateway() -> Gateway {
             base_path: None,
             version: None,
             policies: vec![],
+            authorization: None,
         }],
         upstreams: vec![Upstream {
             name: "users-pool".into(),
@@ -106,6 +109,8 @@ fn good_gateway() -> Gateway {
         }],
         consumers: vec![],
         policies: vec![],
+        global_policies: vec![],
+        authorization: None,
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,
@@ -126,6 +131,8 @@ fn validate_reports_all_semantic_issues() {
         port: 8080,
         protocol: ListenerProtocol::Http,
         tls: None,
+        policies: vec![],
+        authorization: None,
     });
     let issues = validate(&gw);
     assert!(issues

@@ -682,10 +682,12 @@ struct EngineRule {
 pub struct RateLimitKeyContext<'a> {
     /// Direct connection peer (the `ip` selector; same IP as X-Real-IP).
     pub peer: std::net::IpAddr,
-    /// Authenticated consumer name; `None` until DW-019 wires authN —
-    /// the `credential` selector then falls back to the peer IP.
+    /// Authenticated consumer name; `None` for anonymous traffic — the
+    /// `credential` selector then falls back to the peer IP.
     pub consumer: Option<&'a str>,
-    /// Name of the matched route (the `route` selector).
+    /// Name of the matched route (the `route` selector); the empty
+    /// string on unrouted traffic (no route resolved — the selector then
+    /// keys one bucket shared by all unrouted requests of that policy).
     pub route: &'a str,
 }
 
@@ -721,19 +723,25 @@ pub enum RateLimitOutcome {
 ///
 /// **Precedence chain** (frozen vocabulary: consumer, then route, then
 /// service, then listener, then global): rules from ALL applicable
-/// policies apply and are AND-ed; the resolution order is consumer (LIVE
-/// since DW-019: authenticated requests carry their consumer's policies),
-/// then route, then service. Listener- and global-attached policies have
-/// no config attachment point yet (v1 schema attaches policies only at
-/// consumers, routes, and services) — those links go live with their
-/// config fields.
+/// policies apply and are AND-ed; the resolution order is consumer
+/// (authenticated requests carry their consumer's policies), then route,
+/// then service, then listener (`listeners[].policies`, the listener
+/// that accepted the request), then global (`gateway.global_policies`).
+/// The order matters for the 429 HEADERS only (the first denying rule
+/// binds Limit/Remaining/Reset; see [`RateLimitEngine::check`]); every
+/// applicable rule still gates the request. On UNROUTED traffic
+/// (no route resolved) only the listener and global links apply —
+/// consumer, route, and service links are unknowable before routing,
+/// and the documented request-path order places authentication after
+/// route resolution.
 ///
 /// Key building per rule: each selector contributes one component
 /// (`ip` = peer, `credential` = consumer or peer fallback, `route` =
-/// route name); components are joined with `|` into one key. Rules
-/// attached to the same policy share a limiter instance, so two rules
-/// with identical selectors and windows would double-count — validation
-/// does not reject it (harmless), operators just should not write it.
+/// route name; the empty string for unrouted requests); components are
+/// joined with `|` into one key. Rules attached to the same policy
+/// share a limiter instance, so two rules with identical selectors and
+/// windows would double-count — validation does not reject it
+/// (harmless), operators just should not write it.
 pub struct RateLimitEngine {
     /// (policy name, rule) in config order; resolution scans by name.
     rules: Vec<(String, EngineRule)>,
@@ -843,9 +851,17 @@ impl RateLimitEngine {
     }
 
     /// Resolve the applicable rules for one request and check them.
-    /// `consumer_policies`/`route_policies`/`service_policies` are the
-    /// policy name lists attached to the authenticated consumer (DW-019;
-    /// empty for anonymous traffic), the matched route, and its service.
+    /// The policy name lists are those attached to the authenticated
+    /// consumer (DW-019; empty for anonymous traffic), the matched
+    /// route, its service, the accepting listener, and the gateway
+    /// (global) — in that resolution order (the frozen precedence
+    /// chain). On unrouted traffic the caller passes empty
+    /// consumer/route/service lists (`ctx.route` is then the empty
+    /// string) and only the listener/global links resolve.
+    /// A policy attached at multiple levels (or repeated within one
+    /// list) is evaluated ONCE per request; its first — most
+    /// specific — chain position is the occurrence that binds the
+    /// 429 headers.
     /// All applicable rules apply (AND); on success the reported
     /// constraint is the tightest one (least remaining budget). On denial
     /// the FIRST denying rule binds the Limit/Remaining/Reset headers,
@@ -859,21 +875,40 @@ impl RateLimitEngine {
         consumer_policies: &[String],
         route_policies: &[String],
         service_policies: &[String],
+        listener_policies: &[String],
+        global_policies: &[String],
     ) -> RateLimitOutcome {
-        // Resolution order (precedence): consumer > route > service.
+        // Resolution order (precedence): consumer > route > service >
+        // listener > global. One policy is ONE evaluation: a name listed
+        // at several levels (or twice in one list) resolves its rules
+        // once, at its FIRST chain position, so a shared policy spends
+        // its budget once per request and the most specific level's
+        // occurrence is the one that binds when it denies. The attached
+        // lists are tiny and config-bounded, so the dedup is an
+        // allocation-free rescan of the earlier positions — cheaper
+        // than any heap set on this per-request path.
+        //
         // Header binding: the FIRST denying rule supplies Limit /
         // Remaining / Reset (the tightest constraint in resolution
-        // order); Retry-After is the MAX wait across every denying rule,
-        // so a client honoring it never retries into a second 429 with
-        // an understated hint. Allowed outcomes are irrelevant once any
-        // rule has denied (the response is a 429 regardless).
+        // order); Retry-After is the MAX wait across every denying
+        // rule, so a client honoring it never retries into a second 429
+        // with an understated hint. Allowed outcomes are irrelevant
+        // once any rule has denied (the response is a 429 regardless).
+        let attached = [
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            global_policies,
+        ];
+        let attached_names = || attached.iter().flat_map(|l| l.iter());
         let mut acc: Option<RateLimitOutcome> = None;
         let mut denied: Option<RateLimitOutcome> = None;
-        for name in consumer_policies
-            .iter()
-            .chain(route_policies)
-            .chain(service_policies)
-        {
+        for (pos, name) in attached_names().enumerate() {
+            if attached_names().take(pos).any(|prev| prev == name) {
+                // Already resolved at a more specific position.
+                continue;
+            }
             for (policy_name, rule) in &self.rules {
                 if policy_name != name {
                     continue;

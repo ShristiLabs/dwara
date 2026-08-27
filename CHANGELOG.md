@@ -123,6 +123,22 @@ the project follows semantic versioning once 1.0 is reached.
   generation keeps serving — the runtime fail-closed paths (upstream
   TLS dials refused / provider disabled) remain only as a
   validate-vs-build race backstop, never a silent fallback (#121).
+- Policy attachment and authorization at every precedence level
+  (#123): gateway-level `global_policies` and `authorization`,
+  listener `policies` and `authorization`, and consumer/service
+  `authorization` join the existing route/service policy links and
+  route authorization, so both frozen chains (consumer > route >
+  service > listener > global) run end-to-end from config. Rate-limit
+  rules at all attached levels AND together, with the most specific
+  denying rule binding the 429 headers; an authorization deny at any
+  level wins. Unrouted 404 traffic no longer bypasses rate limiting:
+  listener- and global-attached policies apply before the 404 (429
+  when denied, else 404 with `X-RateLimit-*`), the reserved paths
+  stay exempt, and authn/authz still never run pre-route. A policy
+  attached at multiple levels is evaluated once per request (its most
+  specific occurrence binds the 429 headers), and
+  `RateLimitEngine::check` widened from three to five policy lists —
+  listener and global added (public surface).
 
 ### Fixed
 

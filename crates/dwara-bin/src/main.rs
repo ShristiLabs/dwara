@@ -216,6 +216,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 port,
                 protocol: ListenerProtocol::Http,
                 tls: None,
+                policies: Vec::new(),
+                authorization: None,
             }]
         }
         None => state.snapshot().gateway().listeners.clone(),

@@ -26,6 +26,8 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
         port,
         protocol: ListenerProtocol::Https,
         tls: Some(tls),
+        policies: vec![],
+        authorization: None,
     }
 }
 
@@ -94,6 +96,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             base_path: None,
             version: None,
             policies: vec![],
+            authorization: None,
         }],
         upstreams: vec![Upstream {
             name: "pool".into(),
@@ -116,6 +119,8 @@ fn base_gateway(listener: Listener) -> Gateway {
         }],
         consumers: vec![],
         policies: vec![],
+        global_policies: vec![],
+        authorization: None,
         max_concurrent_requests: None,
         jwt_providers: Vec::new(),
         admin: None,

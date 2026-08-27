@@ -44,7 +44,10 @@ Environment variables (all optional):
 - `DWARA_CONFIG`: path to the gateway YAML config, default `./dwara.yaml`.
 - `DWARA_BIND`: when set, overrides the config listeners with a single
   cleartext HTTP listener on that address (test/dev escape hatch;
-  default unset = bind every configured listener).
+  default unset = bind every configured listener). The synthetic
+  listener is not one of the configured listeners, so listener-level
+  `policies` and `authorization` attachments cannot apply to it —
+  those require configured listeners.
 - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on
   SIGTERM/SIGINT, default 10.
 - `DWARA_STATE_DB`: path to a SQLite state store (default unset = no
@@ -259,8 +262,10 @@ routes:
 ```
 
 Requests that match no route (path or criteria miss) get a `404` in
-the uniform JSON error envelope (see "Observability"). A route may also carry a `priority` (0-10, default 5) — see
-"Load shedding and priority" under Global settings.
+the uniform JSON error envelope (see "Observability"), after any
+listener/global rate limits apply (see "Rate limiting"). A route may
+also carry a `priority` (0-10, default 5) — see "Load shedding and
+priority" under Global settings.
 
 ### Path rewrite (proxy)
 
@@ -798,17 +803,35 @@ The admission layers stack in a fixed order, outermost first:
 ### Rate limiting
 
 Local, in-gateway rate limiting (DW-017) is configured on **policies**
-(top-level `policies` list) and applies to requests on routes and
-services that reference the policy by name via their `policies` list.
-Precedence follows the frozen chain consumer > route > service >
-listener > global, but limiting does NOT pick one winner: rules from
-every applicable policy ALL apply and are AND-ed — a request denied by
-any rule is denied. The consumer link is live: a policy attached to the
-authenticated consumer's `policies` list applies (consumer-attached
-policies run first in the chain); listener- and global-attached
-policies have no config attachment point yet. A request whose consumer,
-route, and service reference no policy with rate rules is not limited
-and carries no rate headers.
+(top-level `policies` list) and applies to requests on the entities
+that reference the policy by name. Every link of the chain has an
+attachment point: `consumers[].policies`, `routes[].policies`,
+`services[].policies`, `listeners[].policies`, and the gateway-level
+`global_policies` (so named because the top-level `policies` field is
+the policy REGISTRY). Precedence follows the frozen chain consumer >
+route > service > listener > global, but limiting does NOT pick one
+winner: rules from every applicable policy ALL apply and are AND-ed —
+a request denied by any rule is denied. A policy attached at several
+levels is evaluated once per request — its most specific attachment
+is the position that binds the `X-RateLimit-*` headers when it
+denies. The resolution order matters only for the 429 headers: when
+several rules deny, the FIRST denying rule in the chain (the most
+specific level) supplies `X-RateLimit-Limit`/`-Remaining`/`-Reset`,
+and `Retry-After` is the maximum wait across every denying rule. A
+request none of whose links reference a policy with rate rules is not
+limited and carries no rate headers.
+
+**Unrouted traffic.** A request whose path matches no route is still
+rate-limited by the LISTENER- and GLOBAL-attached policies before its
+`404` is answered — a 404 flood cannot bypass the limiter. Only those
+two links apply: the consumer, route, and service links are unknowable
+before routing, and authentication does not run pre-route. The
+selectors degrade accordingly: `credential` falls back to the client
+IP (anonymous), and `route` keys one bucket shared by every unrouted
+request. A denied request answers `429` with the same headers as
+routed traffic; an admitted one answers `404` carrying `X-RateLimit-*`
+when a policy with rate rules actually matched. The reserved paths
+(`/healthz`, `/readyz`, `/metrics`) stay exempt.
 
 A policy carries a list of rules under `rate_limits`; each rule has
 these fields:
@@ -1041,15 +1064,20 @@ anonymous traffic. Strip and inject, never pass-through.
 
 The authenticated consumer also drives behavior elsewhere: its
 `policies` join rate limiting with consumer precedence (see "Rate
-limiting"), and its `priority` overrides the route's for load shedding
-(see "Load shedding and priority").
+limiting"), its `authorization` is the most specific link of the
+authorization chain (see "Authorization and IP access control"), and
+its `priority` overrides the route's for load shedding (see "Load
+shedding and priority").
 
 ### Authorization and IP access control
 
 Authorization (DW-020) runs after authentication and before rate
 limiting: authentication answers "who is this caller?", authorization
-answers "is this caller allowed here?". Rules attach to a route via its
-`authorization` block:
+answers "is this caller allowed here?". The same `authorization` block
+attaches at every link of the chain — `consumers[].authorization`,
+`routes[].authorization`, `services[].authorization`,
+`listeners[].authorization`, and the gateway-level `authorization`
+(the route link shown here):
 
 ```yaml
 consumers:
@@ -1074,17 +1102,20 @@ routes:
         default: deny         # only allow-listed IPs pass
 ```
 
-All fields are optional; an `authorization` block with no rules imposes
-nothing, and so does an absent one. Within one block the rules evaluate
-in a fixed order — IP gate, consumers, groups, scopes, claims — and
-every rule must pass.
+All fields are optional; an absent block imposes nothing. Within one
+block the rules evaluate in a fixed order — IP gate, consumers, groups,
+scopes, claims — and every rule must pass.
 
 **Deny wins.** Within one rule set, `denied_consumers`/`denied_groups`
 beat `allowed_*`: a consumer both allowed and denied is denied, and in
 the IP ACL the deny list is checked before the allow list. An empty
 rule set allows — `allowed_consumers: []` is "any authenticated
-consumer", and `allowed_groups: []` imposes no group constraint. The
-empty `authorization: {}` block is therefore transparent.
+consumer", and `allowed_groups: []` imposes no group constraint. A
+rule-free `authorization: {}` block never reaches evaluation:
+validation rejects it at every attachment level — "carries no rules
+(no consumers, groups, scopes, claims, or ip_acl) and is always a
+mistake: omit the authorization block entirely" — so the no-op is an
+absent block, never an empty one.
 
 **Consumers and groups.** `allowed_consumers`, when non-empty, is a
 closed set: the authenticated consumer must be listed. Groups come from
@@ -1129,14 +1160,17 @@ the route to the entire internet without any credential; never do that —
 an IP gate with an allow-everything list is no gate at all.
 
 **Precedence.** Authorization levels stack with the frozen gateway
-chain consumer > route > service > listener > global. A deny at ANY
+chain consumer > route > service > listener > global, and every link
+has a config attachment: `consumers[].authorization` (applies once
+authentication identifies the consumer), `routes[].authorization`,
+`services[].authorization`, `listeners[].authorization` (the accepting
+listener), and the gateway-level `authorization`. A deny at ANY
 level wins absolutely (a consumer-level deny beats a route-level allow
 and vice versa); otherwise the most specific level WITH rules governs
-and less-specific levels are not consulted. Today only the ROUTE link
-(`routes[].authorization`) has a config attachment point — the
-consumer, service, listener, and global links activate when their
-config fields land; until then the chain effectively resolves the route
-block alone.
+and less-specific levels are not consulted. Validation applies the
+same shape checks at every level (unknown consumer/group references,
+unparseable ACL entries). Authorization runs after route resolution,
+so unrouted 404s never reach the chain.
 
 ### TLS
 
@@ -1423,10 +1457,11 @@ shared host.
   equal-length ties, so the later can never match),
   `regex-shadowed-by-exact` (an exact route fully matching a regex
   route's pattern shadows those paths),
-  `consumer-unused` (referenced by no route authorization and bound to
-  no JWT provider — advisory, runtime credential use is not statically
-  visible), `policy-unused` (attached to no route, service, or
-  consumer), `upstream-unreferenced` (no service targets it). Exit
+  `consumer-unused` (referenced by no authorization rule at any level
+  and bound to no JWT provider — advisory, runtime credential use is
+  not statically visible), `policy-unused` (attached to no consumer,
+  route, service, listener, or the gateway's `global_policies`),
+  `upstream-unreferenced` (no service targets it). Exit
   codes: 0 = clean, 2 = warnings found, 1 = the file could not be
   parsed/validated at all (fix that first — linting an invalid config
   would report noise). The distinct 2 keeps "your config is wrong" and
