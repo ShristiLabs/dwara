@@ -581,6 +581,15 @@ impl DataPlane {
     /// for unchanged endpoint addresses) carries over from the previous
     /// generation, so weight/endpoint changes take effect without a
     /// restart and without resetting live counters (DW-011).
+    ///
+    /// Contract (#46): the authenticator rebuild re-resolves `${...}`
+    /// secret references from the CURRENT snapshot's config, so a
+    /// refresh is only meaningful after the publish that validated
+    /// them. A bare refresh against a snapshot whose secret sources
+    /// have since broken loud-skips the affected credentials BY DESIGN
+    /// (the key stops authenticating; never stale plaintext). Both
+    /// call sites — the binary's reload path and the admin publish
+    /// path — invoke it only on the success side of a publish.
     pub fn refresh(&self) {
         let snapshot = self.state.snapshot();
         let generation = snapshot.generation();

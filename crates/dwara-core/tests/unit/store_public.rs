@@ -283,6 +283,98 @@ fn seeding_from_config_is_idempotent_and_hashed() {
 }
 
 #[test]
+fn revoke_by_source_retires_only_the_linked_rows_of_that_consumer() {
+    // The #46 skip-path linkage: `credentials.source_ref` (schema v4)
+    // scopes revocation to exactly the rows ONE consumer's config
+    // reference seeded. Rows of another consumer (even from the same
+    // reference text — each consumer's config slot governs its own
+    // row), rows without the linkage (inline keys, operator rows,
+    // pre-v4 rows), and other kinds are untouched, keeping the
+    // documented upsert-only posture.
+    let store = StateStore::open_in_memory().unwrap();
+    let acme = store.upsert_consumer("acme", None, &[]).unwrap();
+    let globex = store.upsert_consumer("globex", None, &[]).unwrap();
+    let reference = "${file:/run/dwara/acme.key}";
+    store
+        .add_credential_from_reference(
+            acme.id,
+            CredentialKind::ApiKey,
+            "sha256:h1".into(),
+            "sel-rotated-out".into(),
+            reference,
+        )
+        .unwrap();
+    store
+        .add_credential_from_reference(
+            acme.id,
+            CredentialKind::ApiKey,
+            "sha256:h2".into(),
+            "sel-live".into(),
+            reference,
+        )
+        .unwrap();
+    // Same reference text, DIFFERENT consumer: not this slot's row.
+    store
+        .add_credential_from_reference(
+            globex.id,
+            CredentialKind::ApiKey,
+            "sha256:h3".into(),
+            "sel-globex".into(),
+            reference,
+        )
+        .unwrap();
+    // No linkage: an inline-key row of the same consumer+kind.
+    store
+        .add_credential(
+            acme.id,
+            CredentialKind::ApiKey,
+            "sha256:h4".into(),
+            None,
+            "sel-inline".into(),
+        )
+        .unwrap();
+
+    let revoked = store
+        .revoke_credentials_by_source(acme.id, CredentialKind::ApiKey, reference)
+        .unwrap();
+    assert_eq!(revoked, 2, "both rows the reference seeded are retired");
+    assert!(store
+        .lookup_credentials_by_selector("sel-rotated-out")
+        .unwrap()
+        .is_empty());
+    assert!(
+        store
+            .lookup_credentials_by_selector("sel-live")
+            .unwrap()
+            .is_empty(),
+        "acme's linked live row is retired"
+    );
+    assert_eq!(
+        store
+            .lookup_credentials_by_selector("sel-globex")
+            .unwrap()
+            .len(),
+        1,
+        "globex's row from the same reference text survives"
+    );
+    assert_eq!(
+        store
+            .lookup_credentials_by_selector("sel-inline")
+            .unwrap()
+            .len(),
+        1,
+        "unlinked rows keep the upsert-only posture"
+    );
+    // No linkage to find: 0 revoked, not an error.
+    assert_eq!(
+        store
+            .revoke_credentials_by_source(acme.id, CredentialKind::ApiKey, "${file:/never/seeded}")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn sync_deletes_legacy_config_placeholder_api_key_rows() {
     // Legacy-cleanup rule: a pre-DW-019 build seeded api_key rows with
     // a PLAINTEXT selector and a `config:api_key:<key>` placeholder

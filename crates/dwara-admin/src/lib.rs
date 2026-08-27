@@ -4,12 +4,19 @@
 //!
 //! - `GET /config` — the CURRENT published gateway config as normalized
 //!   YAML, with `x-dwara-config-generation` / `x-dwara-config-hash`
-//!   headers identifying the generation. SECURITY EXPOSURE: the returned
-//!   document contains credential material (consumer secrets, basic-auth
-//!   passwords, HMAC keys, JWT secrets) in PLAINTEXT — any client
-//!   holding a valid admin client certificate can read it. Treat admin
-//!   client certificates as secret-bearing and distribute them
-//!   accordingly; the mTLS CA chain IS the access control here.
+//!   headers identifying the generation. SECRET REDACTION (DW-045): the
+//!   returned document is the TYPED-redacted copy
+//!   ([`Gateway::redacted`](dwara_core::config::Gateway::redacted)) —
+//!   inline `api_key` values become unresolvable
+//!   `${redacted:sha256:<prefix>}` placeholders (a short sha256 prefix so
+//!   operators can still compare which key a generation carries), and
+//!   `${...}` references echo as references (an env-var name or file
+//!   path is not secret bytes; the config file already carries it). No
+//!   secret VALUE is ever returned, by construction. Consequence, by
+//!   design: a GET-then-edit-then-PATCH round trip that carries a
+//!   placeholder back is REJECTED by validation (400 naming the field)
+//!   instead of silently installing placeholder bytes as a live key —
+//!   re-enter the secret or switch the field to a reference.
 //! - `PATCH /config` — FULL-document YAML replacement (v1 has no partial
 //!   merge: silent-merge of unknown subtrees is a footgun, so a PATCH
 //!   body must be the complete config). The body is parsed, validated,
@@ -414,12 +421,14 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         );
     }
     match (method.as_str(), path.as_str()) {
-        // GET /config: credential material (secrets, passwords, keys) is
-        // returned in PLAINTEXT — any admin client-cert holder can read
-        // it; treat admin certs as secret-bearing (see crate docs).
+        // GET /config (the config-dump surface, DW-045): the TYPED-redacted
+        // copy of the published gateway — inline api-key values become
+        // unresolvable ${redacted:...} placeholders, references echo as
+        // references. Redaction is structural (a schema transform, not a
+        // string scrub), so it cannot miss a field the schema knows about.
         ("GET", "/config") => {
             let snapshot = ctx.state.snapshot();
-            let body = gateway_to_yaml(snapshot.gateway()).unwrap_or_default();
+            let body = gateway_to_yaml(&snapshot.gateway().redacted()).unwrap_or_default();
             generation_headers(
                 Response::builder()
                     .status(200)

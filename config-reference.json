@@ -473,13 +473,13 @@
       ]
     },
     "Credential": {
-      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS client-certificate match.",
+      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS client-certificate match.\n\n`Debug` is manual (DW-045): the api-key value is SECRET and a derived\nimpl would print it — this keeps the config tree safe to Debug-log as\na whole (`Gateway` and every holder derive `Debug` over this type).",
       "oneOf": [
         {
           "type": "object",
           "properties": {
             "key": {
-              "description": "The API key; hashed at rest by the state layer, never logged.",
+              "description": "The API key; hashed at rest by the state layer, never logged.\nEither the value INLINE (accepted, but redacted to a\n`${redacted:...}` placeholder in every config echo — admin\n`GET /config`, DW-045) or a reference resolved at\nconfig-compile time: `${ENV_NAME}` (an environment variable)\nor `${file:/path/to/secret}` (one trailing newline trimmed).\nReferences are re-read on every reload; an unresolvable\nreference fails validation naming this field.",
               "type": "string"
             },
             "type": {

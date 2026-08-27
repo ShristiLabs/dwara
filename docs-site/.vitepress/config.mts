@@ -63,6 +63,7 @@ export default withMermaid(
                   text: "CORS, compression, limits",
                   link: "/guide/edge-policies",
                 },
+                { text: "Secrets", link: "/guide/secrets" },
                 { text: "Deployment", link: "/guide/deployment" },
                 { text: "Operations", link: "/guide/operations" },
                 { text: "Observability", link: "/guide/observability" },

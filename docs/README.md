@@ -34,6 +34,9 @@ Feature areas written up so far (M1 complete; M2 in progress):
   response compression, per-route request limits (DW-027).
 - [Authentication and authorization](./features/authn-authz.md) — the
   four credential families, the authz precedence chain, IP ACLs.
+- [Secrets](./features/secrets.md) — `${...}` secret references in
+  config, compile-time resolution, typed redaction of config echoes
+  (DW-045).
 - [State store](./features/state-store.md) — SQLite store, migrations,
   cache coherence model.
 - [Observability](./features/observability.md) — spans, logs, metrics,

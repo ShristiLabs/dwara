@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -103,6 +103,19 @@ const MIGRATION_002_QUOTA_WINDOW_INDEX: &str =
 const MIGRATION_003_CONSUMER_GROUPS: &str =
     "ALTER TABLE consumers ADD COLUMN groups TEXT NOT NULL DEFAULT '[]';";
 
+/// Migration 004 (#46/DW-045): `credentials.source_ref` — nullable TEXT
+/// recording WHICH `${...}` config reference seeded a row. The seed
+/// path's fail-closed skip (a re-seed whose reference no longer
+/// resolves) uses it to revoke exactly the row a previous generation of
+/// that same reference seeded, so a store-backed registry fails closed
+/// (the OLD key stops authenticating) instead of serving it forever.
+/// NULL = every pre-004 row, inline-key rows, and operator-managed
+/// rows: credentials the reference lifecycle does not govern, which
+/// keep the documented upsert-only posture. Additive (ADD COLUMN;
+/// existing rows default NULL = the pre-004 behavior of no linkage).
+const MIGRATION_004_CREDENTIAL_SOURCE_REF: &str =
+    "ALTER TABLE credentials ADD COLUMN source_ref TEXT;";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -110,6 +123,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_001_BASELINE),
         M::up(MIGRATION_002_QUOTA_WINDOW_INDEX),
         M::up(MIGRATION_003_CONSUMER_GROUPS),
+        M::up(MIGRATION_004_CREDENTIAL_SOURCE_REF),
     ])
 }
 

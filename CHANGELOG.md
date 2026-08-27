@@ -200,6 +200,38 @@ the project follows semantic versioning once 1.0 is reached.
   `max_header_bytes` answer 431 — all in the JSON error envelope.
   Codec dependencies flate2/brotli/zstd added (tower-http
   deliberately not); `config-reference.json` regenerated.
+- Secret references in config (#46): `consumers[].credentials[].api_key.key`
+  accepts the value inline (unchanged) or as a `${...}` reference —
+  `${ENV_NAME}` (an environment variable of the gateway process) or
+  `${file:/path}` (read at config-compile time; ONE trailing newline
+  trimmed per the mounted-secret convention; must be non-empty; the
+  read is bounded at 1 MiB and an oversized file fails closed naming
+  the path and the limit).
+  References resolve when a generation is built — cold start and every
+  hot reload / admin publish, never per request — and are re-read on
+  each reload, so rotating a secret file needs a SIGHUP, config change,
+  or PATCH to apply; the resolved bytes are hashed into selectors and
+  stored hashes and the plaintext dropped. Unresolvable (unset/empty
+  env var, missing/empty/oversized file) or malformed — including
+  never-closed — `${`-shaped values fail
+  validation closed naming the field — a typo'd reference is never
+  installed as a literal key. With `DWARA_STATE_DB`, a re-seed whose
+  reference no longer resolves also revokes the row previously seeded
+  from that reference (SQLite schema v4 adds `credentials.source_ref`
+  for the linkage), so a store-backed old key fails closed instead of
+  lingering. OPERATOR-VISIBLE BEHAVIOR CHANGE: admin
+  `GET /config` no longer returns credential material — inline api_key
+  values are served redacted as `${redacted:sha256:<8 hex>}`
+  fingerprints (same key = same fingerprint, so which key a generation
+  carries can be confirmed without seeing it) and references echo
+  verbatim; `Credential` `Debug` is redacted so the whole config tree
+  is Debug-safe. The placeholder is unresolvable by design: a
+  GET-then-PATCH round trip carrying it back is rejected with 400
+  naming the field instead of installing placeholder bytes as a live
+  key (re-enter the key or switch the field to a reference). New
+  `FileSecretSource` extension impl (re-reads per resolve, no caching;
+  a missing file is a fail-closed error naming the path);
+  `config-reference.json` regenerated.
 
 ### Fixed
 

@@ -137,7 +137,11 @@ resolved secret can't leak into a stray `{:?}` log line by accident;
 true zeroization-on-drop is flagged as a future hardening step (would
 change the wrapper's internals via the `secrecy` crate, not the
 trait's public shape). OSS ships `EnvSecretSource` (environment
-variables) and `StaticSecretSource` (an in-process map, for tests).
+variables), `FileSecretSource` (secret files by path, re-read on every
+resolve so a rotation lands on the next reload — DW-045), and
+`StaticSecretSource` (an in-process map, for tests). The `${...}`
+secret-reference grammar config fields accept resolves through the
+same env/file reading rules — see [Secrets](./secrets.md).
 
 ## Implementing a new backend
 

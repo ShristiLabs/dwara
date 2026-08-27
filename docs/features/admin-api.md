@@ -40,14 +40,20 @@ why `DWARA_ADMIN_DEV=1` (loopback-only plaintext) exists as an escape
 hatch for local development, and exactly why it must never be enabled
 outside one.
 
-**Security exposure worth internalizing as a contributor:** `GET
-/config` returns the current published config as YAML, and that
-document contains credential material (consumer secrets, Basic-auth
-passwords, HMAC keys, JWT secrets) in **plaintext** — any client
-holding a valid admin certificate can read it. The mTLS CA chain is
-the entire access-control boundary for that exposure; admin client
-certificates must be distributed and stored with the same care as the
-secrets they can read back out.
+**Security posture worth internalizing as a contributor:** `GET
+/config` returns the current published config as YAML from the
+TYPED-redacted copy (`Gateway::redacted()`, DW-045) — inline `api_key`
+values appear only as `${redacted:sha256:<8 hex>}` fingerprints, and
+`${...}` references echo as references; no secret value is returned,
+by construction. Before DW-045 this surface echoed inline credential
+material in plaintext, making the mTLS CA chain the sole access-control
+boundary for it — that is no longer the exposure, but the boundary
+still holds everything else the config reveals (topology, trust
+anchors, policy), so admin client certificates keep the same handling
+care. The placeholder is deliberately unresolvable: a GET-then-PATCH
+round trip carrying it back is rejected fail-closed instead of
+installing placeholder bytes as a live key — see
+[Secrets](./secrets.md#the-placeholder-round-trip-contract).
 
 ## `PATCH /config`: dry-run then atomic write, reusing one pipeline
 

@@ -49,7 +49,7 @@ CA) fails the TLS handshake before any HTTP is exchanged.
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /config` | current published config as normalized YAML; `x-dwara-config-generation` / `x-dwara-config-hash` headers identify the generation |
+| `GET /config` | current published config as normalized YAML, with secret values redacted (see [Secrets](./secrets#reading-get-config)); `x-dwara-config-generation` / `x-dwara-config-hash` headers identify the generation |
 | `PATCH /config` | full-document YAML replacement (no partial merge); dry-run parsed/validated/compiled first — any issue returns 400 with every problem; on success, written atomically to the config file and published |
 | `GET /health` | readiness, current generation, per-upstream per-endpoint health labels |
 | `GET /stats` | store schema version, per-upstream breaker state, `active_requests`, config generation |
@@ -60,6 +60,13 @@ dataplane (see [Observability](./observability#error-envelope)),
 including `405` for a known path with the wrong method and `404` for
 unknown admin paths — one error shape to grep across both surfaces.
 The admin listener drains gracefully on shutdown alongside the gateway.
+
+`GET /config` never returns secret values: inline API keys appear as
+`${redacted:sha256:<prefix>}` fingerprints and `${...}` references
+echo unchanged. A `PATCH` that carries a redacted placeholder back is
+rejected with `400` naming the field — a placeholder can never become
+a live key; re-enter the real key or switch the field to a reference
+(see [Secrets](./secrets#reading-get-config)).
 
 ## Dev fallback — never in production
 

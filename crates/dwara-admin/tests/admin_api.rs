@@ -1027,3 +1027,224 @@ async fn get_config_leaks_no_paths_or_secrets() {
     let parsed = dwara_core::config::parse_gateway(&body).expect("pure config document");
     assert!(parsed.admin.is_none());
 }
+
+// --- secret redaction (DW-045) ------------------------------------------------
+
+/// Canary bytes that must NEVER appear in an admin response carrying
+/// configuration.
+const DW045_CANARY: &str = "sk-live-canary-dw045-77e2b1aa";
+
+/// Publish a config carrying both secret shapes over the live server
+/// (an inline canary key and a `${file:...}` reference), exactly like a
+/// reload would.
+async fn publish_secrets_config(server: &Server) -> String {
+    let secret_file = server.config_path.parent().unwrap().join("acme.secret");
+    std::fs::write(&secret_file, "file-resolved-key\n").unwrap();
+    let yaml = format!(
+        "{}consumers:\n  - name: acme\n    credentials:\n      - type: api_key\n        key: {}\n      - type: api_key\n        key: ${{file:{}}}\n",
+        config_yaml(None),
+        DW045_CANARY,
+        secret_file.display()
+    );
+    let gateway = dwara_core::config::parse_gateway(&yaml).expect("secrets config parses");
+    server
+        .state
+        .compile_and_publish(&gateway)
+        .expect("secrets config publishes");
+    server.dp.refresh();
+    yaml
+}
+
+/// The DW-045 done-when, admin side: a canary secret written through
+/// config never appears in GET /config (the config-dump surface) —
+/// inline keys become unresolvable placeholders, references echo as
+/// references — while /health and /stats stay secret-free as always.
+#[tokio::test]
+async fn get_config_redacts_secrets_canary_grep() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    publish_secrets_config(&server).await;
+    let (cert, key) = pki.issue("admin-client");
+    let cert_pem = pem(&cert);
+    let key_pem = pem(&key);
+
+    let (_, _, config_body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&cert_pem, &key_pem)),
+        "GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !config_body.contains(DW045_CANARY),
+        "the inline canary must never appear in the config dump: {config_body}"
+    );
+    assert!(
+        config_body.contains("${redacted:sha256:"),
+        "the inline key appears as the fingerprinted placeholder: {config_body}"
+    );
+    assert!(
+        config_body.contains("${file:"),
+        "references echo as references (a path is not secret bytes): {config_body}"
+    );
+    // The redacted dump is still a parseable gateway document.
+    dwara_core::config::parse_gateway(&config_body).expect("redacted dump parses");
+
+    for path in ["/health", "/stats"] {
+        let (_, _, body) = request(
+            server.addr,
+            &pki.ca_path(),
+            Some((&cert_pem, &key_pem)),
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !body.contains(DW045_CANARY),
+            "no secret material in {path}: {body}"
+        );
+    }
+}
+
+/// The GET-then-PATCH footgun, closed: a document carrying a redaction
+/// placeholder back through PATCH is REJECTED with a precise issue —
+/// placeholder bytes must never install as a live key, and nothing is
+/// published or written.
+#[tokio::test]
+async fn patch_of_a_redacted_placeholder_is_rejected_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let before_publish = std::fs::read_to_string(&server.config_path).unwrap();
+    let (cert, key) = pki.issue("admin-client");
+
+    let body_yaml = format!(
+        "{}consumers:\n  - name: acme\n    credentials:\n      - type: api_key\n        key: ${{redacted:sha256:e3b0c442}}\n",
+        config_yaml(None)
+    );
+    let patch = format!(
+        "PATCH /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/yaml\r\nContent-Length: {}\r\n\r\n{}",
+        body_yaml.len(),
+        body_yaml
+    );
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&pem(&cert), &pem(&key))),
+        &patch,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "placeholder must be rejected: {resp}");
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("credentials[0]") && message.contains("redaction placeholder"),
+        "the issue names the field and the placeholder: {message}"
+    );
+    // Nothing published, nothing written.
+    assert_eq!(server.state.snapshot().generation(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&server.config_path).unwrap(),
+        before_publish,
+        "the rejected PATCH must not touch the config file"
+    );
+}
+
+/// The operator's escape hatch (DW-045): GET /config returns
+/// placeholders; swapping ONE placeholder for a `${file:...}` reference
+/// and PATCHing the document back publishes cleanly. This is the
+/// positive-path counterpart of the fail-closed pin — the round trip
+/// works exactly when the secret is re-expressed as a reference, and
+/// the inline secret leaves the config document for good.
+#[tokio::test]
+async fn patch_swapping_a_placeholder_for_a_reference_republishes_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let cert_pem = pem(&cert);
+    let key_pem = pem(&key);
+    let client = Some((cert_pem.as_str(), key_pem.as_str()));
+
+    // Generation 2: publish a config carrying an inline canary.
+    let yaml = format!(
+        "{}consumers:\n  - name: acme\n    credentials:\n      - type: api_key\n        key: {DW045_CANARY}\n",
+        config_yaml(None)
+    );
+    let gateway = dwara_core::config::parse_gateway(&yaml).expect("inline config parses");
+    server
+        .state
+        .compile_and_publish(&gateway)
+        .expect("inline config publishes");
+    server.dp.refresh();
+    assert_eq!(server.state.snapshot().generation(), 2);
+
+    // GET /config: the canary comes back only as a placeholder.
+    let (_, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        client,
+        "GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(body.contains("${redacted:sha256:"));
+    assert!(
+        !body.contains(DW045_CANARY),
+        "the canary never echoes: {body}"
+    );
+
+    // The operator's edit: replace the placeholder with a reference to
+    // a secret file next to the config.
+    let secret_file = server.config_path.parent().unwrap().join("rotated.secret");
+    std::fs::write(&secret_file, "reference-resolved-key\n").unwrap();
+    let start = body
+        .find("${redacted:sha256:")
+        .expect("placeholder present");
+    let end = start + body[start..].find('}').expect("placeholder ends");
+    let edited = format!(
+        "{}${{file:{}}}{}",
+        &body[..start],
+        secret_file.display(),
+        &body[end + 1..]
+    );
+    let patch = format!(
+        "PATCH /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/yaml\r\nContent-Length: {}\r\n\r\n{}",
+        edited.len(),
+        edited
+    );
+    let (status, _, resp) = request(server.addr, &pki.ca_path(), client, &patch)
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "the reference-swap PATCH must publish: {resp}");
+
+    // Published (generation 3), the file on disk carries the REFERENCE,
+    // and the canary has left the config document entirely.
+    assert_eq!(server.state.snapshot().generation(), 3);
+    let on_disk = std::fs::read_to_string(&server.config_path).unwrap();
+    assert!(
+        on_disk.contains("${file:") && !on_disk.contains(DW045_CANARY),
+        "the written config references the secret file, not the canary: {on_disk}"
+    );
+
+    // The new generation echoes as a reference — no placeholder, no
+    // secret — because no inline value exists anymore.
+    let (_, _, after) = request(
+        server.addr,
+        &pki.ca_path(),
+        client,
+        "GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(after.contains("${file:"));
+    assert!(
+        !after.contains("${redacted:sha256:") && !after.contains(DW045_CANARY),
+        "a reference-only config echoes with neither placeholder nor secret: {after}"
+    );
+}

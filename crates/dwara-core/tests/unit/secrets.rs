@@ -47,3 +47,63 @@ async fn static_source_builder_replaces_existing_key() {
     let value = source.resolve("k").await.unwrap().unwrap();
     assert_eq!(value.expose(), "second");
 }
+
+// ---- FileSecretSource (DW-045) ---------------------------------------------
+
+fn temp_secret_file(tag: &str, contents: &str) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "dwara-dw045-src-{}-{n}-{tag}.secret",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).unwrap();
+    path.display().to_string()
+}
+
+#[tokio::test]
+async fn file_source_reads_at_resolve_time_and_trims_one_newline() {
+    let path = temp_secret_file("hot", "file-secret-a\n");
+    let hit = FileSecretSource.resolve(&path).await.unwrap().unwrap();
+    assert_eq!(hit.expose(), "file-secret-a");
+    // No caching: a rotation is visible on the NEXT resolve (the
+    // hot-reload contract — secrets files are re-read per publish).
+    std::fs::write(&path, "file-secret-b\n").unwrap();
+    let rotated = FileSecretSource.resolve(&path).await.unwrap().unwrap();
+    assert_eq!(rotated.expose(), "file-secret-b");
+}
+
+#[tokio::test]
+async fn file_source_fails_closed_on_missing_or_empty() {
+    // The name IS the location for this source: a missing file is a
+    // fail-closed Io error naming the path, never a silent miss.
+    let missing = FileSecretSource
+        .resolve("/nonexistent/dwara-dw045/none.secret")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(missing, dwara_core::extensions::ExtensionsError::Io(ref m)
+            if m.contains("/nonexistent/dwara-dw045/none.secret")),
+        "Io error naming the path, got: {missing:?}"
+    );
+    let empty = temp_secret_file("empty", "\n");
+    let err = FileSecretSource.resolve(&empty).await.unwrap_err();
+    assert!(
+        matches!(err, dwara_core::extensions::ExtensionsError::Io(ref m) if m.contains("empty")),
+        "empty file is an error, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn file_source_fails_closed_on_an_unreadable_path() {
+    // A directory is deterministically unreadable as a secret file on
+    // every platform (EISDIR, root included) — pins the mid-run
+    // "file became unreadable" shape for the extension seam, not just
+    // the config grammar's copy of the rule.
+    let dir = std::env::temp_dir().display().to_string();
+    let err = FileSecretSource.resolve(&dir).await.unwrap_err();
+    assert!(
+        matches!(err, dwara_core::extensions::ExtensionsError::Io(ref m) if m.contains("cannot be read")),
+        "Io error naming the unreadable path, got: {err:?}"
+    );
+}

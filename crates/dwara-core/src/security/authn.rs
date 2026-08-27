@@ -376,9 +376,12 @@ impl CredentialRegistry {
     /// is hashed at startup (the config value is then dropped; the
     /// registry holds only selectors and hashes) — with the PEPPERED
     /// format when a pepper is configured (#124), the legacy sha256
-    /// format otherwise. `mtls` credentials are indexed by their match
-    /// value (subject CN or fingerprint). JWT credentials are bindings
-    /// consumed via the composite's issuer index, not this map.
+    /// format otherwise. `${...}` secret references (DW-045) are
+    /// resolved HERE, at build time, and the RESOLVED bytes hashed; the
+    /// plaintext never outlives the call. `mtls` credentials are indexed
+    /// by their match value (subject CN or fingerprint). JWT credentials
+    /// are bindings consumed via the composite's issuer index, not this
+    /// map.
     pub fn from_config(gateway: &Gateway, pepper: Option<&Pepper>) -> Self {
         let mut map: HashMap<String, Arc<Vec<KnownCredential>>> = HashMap::new();
         for consumer in &gateway.consumers {
@@ -388,11 +391,31 @@ impl CredentialRegistry {
                         if key.is_empty() {
                             continue;
                         }
-                        let hash = match pepper {
-                            Some(pepper) => hmac_stored_hash(pepper, key),
-                            None => sha256_stored_hash(key),
+                        // DW-045: the config value may be a ${...} reference
+                        // (env/file); resolve it and hash the RESOLVED bytes.
+                        // Validation already rejected unresolvable references
+                        // for this generation, so an error here is the
+                        // validate-vs-build microsecond race — fail CLOSED
+                        // (skip the credential: that key stops authenticating)
+                        // and say so loudly, never echoing the value. The
+                        // next successful publish re-resolves.
+                        let key = match crate::config::credentials::resolve_configured_secret(key) {
+                            Ok(resolved) => resolved,
+                            Err(err) => {
+                                tracing::error!(
+                                    code = "config_api_key_unresolvable",
+                                    consumer = %consumer.name,
+                                    "skipping api key credential (secret reference \
+                                     unresolvable at authenticator build): {err}"
+                                );
+                                continue;
+                            }
                         };
-                        (CredentialKind::ApiKey, credential_selector(key), hash)
+                        let hash = match pepper {
+                            Some(pepper) => hmac_stored_hash(pepper, &key),
+                            None => sha256_stored_hash(&key),
+                        };
+                        (CredentialKind::ApiKey, credential_selector(&key), hash)
                     }
                     Credential::Mtls {
                         subject,

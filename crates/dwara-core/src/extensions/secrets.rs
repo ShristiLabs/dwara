@@ -16,10 +16,24 @@
 //! or [`ExtensionsError::Backend`] — distinguishable from a plain miss
 //! (`Ok(None)`). No retries.
 //!
-//! **Editions:** OSS ships [`EnvSecretSource`] (environment variables) and
+//! **Editions:** OSS ships [`EnvSecretSource`] (environment variables),
+//! [`FileSecretSource`] (secret files by path, DW-045), and
 //! [`StaticSecretSource`] (in-process map, for tests). Additional managed
-//! secret-store backends may be provided separately in future editions. A
-//! file-based OSS source may be added later as another impl.
+//! secret-store backends may be provided separately in future editions.
+//!
+//! # Config integration (DW-045)
+//!
+//! The `${...}` secret-reference grammar that secret-bearing config
+//! fields (`api_key.key`) accept is defined in
+//! [`config::credentials`](crate::config::credentials) and resolves
+//! through the same env/file reading rules these local impls use, so
+//! the config grammar cannot drift from the extension seam. References
+//! are resolved at CONFIG-COMPILE time (cold start and every reload),
+//! never per request; see that module's docs for the read-time model
+//! and the fail-closed validation contract. [`FileSecretSource`]
+//! re-reads the file on every `resolve` call (no caching): resolution
+//! happens at publish cadence, so a rotation lands on the next reload
+//! for the cost of one small read per publish.
 //!
 //! # Secret handling
 //!
@@ -81,6 +95,29 @@ impl SecretSource for EnvSecretSource {
                 "environment variable {name} is set but not valid Unicode"
             ))),
         }
+    }
+}
+
+/// File secret source (OSS, DW-045): `name` IS the file path. The file
+/// is read on EVERY `resolve` call (no caching — a rotation lands on
+/// the next resolve) with the same rules the config grammar applies
+/// (see [`read_secret_file`][crate::config::credentials::read_secret_file]):
+/// one trailing newline trimmed, non-empty remainder, UTF-8.
+///
+/// Failure model: for this source the name is the LOCATION, so a
+/// missing or unreadable file is NOT a miss — it is a fail-closed
+/// [`ExtensionsError::Io`] whose message names the path (never any
+/// content). This mirrors validation's fail-closed contract: a secret
+/// the config references must exist when the generation is built.
+#[derive(Debug, Clone, Default)]
+pub struct FileSecretSource;
+
+#[async_trait]
+impl SecretSource for FileSecretSource {
+    async fn resolve(&self, name: &str) -> Result<Option<Secret>, ExtensionsError> {
+        crate::config::credentials::read_secret_file(name)
+            .map(|value| Some(Secret::new(value)))
+            .map_err(ExtensionsError::Io)
     }
 }
 

@@ -1579,8 +1579,26 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         for (i, cred) in c.credentials.iter().enumerate() {
             let field = format!("credentials[{i}]");
             let problem = match cred {
-                Credential::ApiKey { key } if key.is_empty() => Some("api key is empty"),
-                Credential::Jwt { issuer, .. } if issuer.is_empty() => Some("jwt issuer is empty"),
+                Credential::ApiKey { key } if key.is_empty() => {
+                    Some("api key is empty".to_string())
+                }
+                // DW-045: an api key may be a ${...} reference. Resolve it
+                // NOW (config-compile time) so an unresolvable secret fails
+                // the generation closed — the same contract as
+                // trusted_ca_file. Reference-shaped but malformed values
+                // fail equally: treating a typo'd reference as a literal
+                // key would silently install garbage bytes as the key.
+                // Messages name the reference, never a resolved value.
+                Credential::ApiKey { key } => {
+                    match crate::config::credentials::parse_secret_reference(key) {
+                        None => None,
+                        Some(Ok(reference)) => reference.resolve().err(),
+                        Some(Err(malformed)) => Some(malformed),
+                    }
+                }
+                Credential::Jwt { issuer, .. } if issuer.is_empty() => {
+                    Some("jwt issuer is empty".to_string())
+                }
                 // #124: an mtls credential matches a verified client
                 // certificate by subject CN or by fingerprint — exactly
                 // one of the two must carry a non-empty value. Both-set
@@ -1593,15 +1611,19 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     let s = subject.as_deref().unwrap_or("");
                     let f = fingerprint.as_deref().unwrap_or("");
                     if s.is_empty() && f.is_empty() {
-                        Some("mtls credential must set subject or fingerprint (both are empty)")
+                        Some(
+                            "mtls credential must set subject or fingerprint (both are empty)"
+                                .to_string(),
+                        )
                     } else if subject.is_some() && s.is_empty() {
-                        Some("mtls subject is empty")
+                        Some("mtls subject is empty".to_string())
                     } else if fingerprint.is_some() && f.is_empty() {
-                        Some("mtls fingerprint is empty")
+                        Some("mtls fingerprint is empty".to_string())
                     } else if subject.is_some() && fingerprint.is_some() {
                         Some(
                             "mtls credential must set subject or fingerprint, not both \
-                             (both are set; only the subject would be matched)",
+                             (both are set; only the subject would be matched)"
+                                .to_string(),
                         )
                     } else {
                         None

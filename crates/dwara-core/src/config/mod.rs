@@ -17,7 +17,8 @@
 //!
 //! Submodules carry the parts of the config CONTRACT that are more than
 //! serde shapes: [`credentials`] defines the credential selector/stored-hash
-//! formats every credential holder must agree on, [`limits`] the numeric
+//! formats every credential holder must agree on plus the `${...}`
+//! secret-reference grammar (DW-045), [`limits`] the numeric
 //! bounds validation enforces, and [`net`] the trusted-proxy IP/CIDR
 //! grammar shared by validation and the runtime matchers.
 
@@ -151,6 +152,31 @@ pub struct Gateway {
     /// the documented request-path order.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_empty_routes: bool,
+}
+
+impl Gateway {
+    /// A display-safe copy of this config (DW-045): every INLINE
+    /// `api_key` value is replaced by the
+    /// [`credentials::redact_inline_secret`] placeholder
+    /// (`${redacted:sha256:<prefix>}`); `${...}` references pass through
+    /// unchanged (an env-var name or file path is not secret bytes —
+    /// the config file itself carries it). This is the TYPED redaction
+    /// behind every surface that echoes configuration (admin
+    /// `GET /config`); it is deliberately a transform, not a custom
+    /// serializer, so it cannot drift from the schema — a future
+    /// secret-bearing field fails visibly (its value reaches the dump
+    /// unredacted) instead of silently escaping an allowlist regex.
+    pub fn redacted(&self) -> Gateway {
+        let mut redacted = self.clone();
+        for consumer in &mut redacted.consumers {
+            for credential in &mut consumer.credentials {
+                if let Credential::ApiKey { key } = credential {
+                    *key = credentials::redact_inline_secret(key);
+                }
+            }
+        }
+        redacted
+    }
 }
 
 /// Admin listener configuration (DW-022).
@@ -1584,11 +1610,22 @@ pub struct Consumer {
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience
 /// binding, or mTLS client-certificate match.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// `Debug` is manual (DW-045): the api-key value is SECRET and a derived
+/// impl would print it — this keeps the config tree safe to Debug-log as
+/// a whole (`Gateway` and every holder derive `Debug` over this type).
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
     ApiKey {
         /// The API key; hashed at rest by the state layer, never logged.
+        /// Either the value INLINE (accepted, but redacted to a
+        /// `${redacted:...}` placeholder in every config echo — admin
+        /// `GET /config`, DW-045) or a reference resolved at
+        /// config-compile time: `${ENV_NAME}` (an environment variable)
+        /// or `${file:/path/to/secret}` (one trailing newline trimmed).
+        /// References are re-read on every reload; an unresolvable
+        /// reference fails validation naming this field.
         key: String,
     },
     Jwt {
@@ -1615,6 +1652,35 @@ pub enum Credential {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject: Option<String>,
     },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // DW-045: the api-key value is the one piece of inline secret
+        // material in the schema; everything else is binding metadata
+        // (issuer, fingerprint, subject) that validation matches, not a
+        // secret. Redact exactly the key and keep the variant shape so
+        // debug output stays useful.
+        match self {
+            Credential::ApiKey { .. } => f
+                .debug_struct("ApiKey")
+                .field("key", &"[redacted]")
+                .finish(),
+            Credential::Jwt { issuer, audiences } => f
+                .debug_struct("Jwt")
+                .field("issuer", issuer)
+                .field("audiences", audiences)
+                .finish(),
+            Credential::Mtls {
+                subject,
+                fingerprint,
+            } => f
+                .debug_struct("Mtls")
+                .field("subject", subject)
+                .field("fingerprint", fingerprint)
+                .finish(),
+        }
+    }
 }
 
 /// Named reusable rule bundle (rate limit, timeouts, ...); attachable at

@@ -1512,7 +1512,10 @@ certificate (or one from the wrong CA) fails the TLS handshake.
 ### Endpoints
 
 - `GET /config` — the CURRENT published gateway config as normalized
-  YAML. The `x-dwara-config-generation` and `x-dwara-config-hash`
+  YAML, with secret values redacted: inline `api_key` values are
+  served as `${redacted:sha256:<8 hex>}` fingerprints and `${...}`
+  secret references echo verbatim (no secret value is ever returned).
+  The `x-dwara-config-generation` and `x-dwara-config-hash`
   headers identify the generation.
 - `PATCH /config` — FULL-document YAML replacement: the body must be
   the complete config (v1 has no partial merge — silent merging of

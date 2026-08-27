@@ -28,7 +28,9 @@ flowchart LR
 ```
 
 **API keys** (`X-API-Key: <key>`): the lookup selector is
-`hex(sha256(key))` — never the plaintext key. The stored hash is
+`hex(sha256(key))` — never the plaintext key. A config-declared key
+may be an inline value or a `${...}` secret reference resolved at
+config-compile time (DW-045) — see [Secrets](./secrets.md). The stored hash is
 `hmac-sha256:<hex(HMAC-SHA256(pepper, key))>` when the deployment sets
 `DWARA_CREDENTIAL_PEPPER` (#124), or legacy `sha256:<hex(sha256(key))>`
 otherwise; either form is checked with a constant-time compare

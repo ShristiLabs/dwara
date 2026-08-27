@@ -426,6 +426,40 @@ impl StateStore {
         salt: Option<String>,
         selector: String,
     ) -> Result<CredentialRecord> {
+        self.insert_credential(consumer_id, kind, hash, salt, selector, None)
+    }
+
+    /// [`Self::add_credential`] for a config credential seeded from a
+    /// `${...}` REFERENCE (DW-045, #46): records the reference text in
+    /// `credentials.source_ref` (schema v4) — the linkage
+    /// [`Self::revoke_credentials_by_source`] uses to retire THIS row
+    /// when a later seed of the same reference can no longer resolve
+    /// it. The reference text is config, not secret bytes (the
+    /// resolved value is hashed before it ever reaches the store).
+    pub fn add_credential_from_reference(
+        &self,
+        consumer_id: i64,
+        kind: CredentialKind,
+        hash: String,
+        selector: String,
+        source_ref: &str,
+    ) -> Result<CredentialRecord> {
+        self.insert_credential(consumer_id, kind, hash, None, selector, Some(source_ref))
+    }
+
+    /// Shared INSERT behind [`Self::add_credential`] and
+    /// [`Self::add_credential_from_reference`]; `source_ref` is the
+    /// config `${...}` reference text when the row was seeded from one
+    /// (NULL otherwise, including every pre-v4 row).
+    fn insert_credential(
+        &self,
+        consumer_id: i64,
+        kind: CredentialKind,
+        hash: String,
+        salt: Option<String>,
+        selector: String,
+        source_ref: Option<&str>,
+    ) -> Result<CredentialRecord> {
         let now = now_secs();
         let conn = self.conn.lock().expect("store connection poisoned");
         let consumer_name: Option<String> = conn
@@ -440,9 +474,17 @@ impl StateStore {
         };
         conn.execute(
             "INSERT INTO credentials
-                 (consumer_id, kind, hash, salt, selector, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![consumer_id, kind.as_str(), hash, salt, selector, now],
+                 (consumer_id, kind, hash, salt, selector, created_at, source_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                consumer_id,
+                kind.as_str(),
+                hash,
+                salt,
+                selector,
+                now,
+                source_ref
+            ],
         )?;
         let id = conn.last_insert_rowid();
         drop(conn);
@@ -484,6 +526,56 @@ impl StateStore {
         drop(conn);
         self.invalidate(&selector);
         Ok(true)
+    }
+
+    /// Revoke every ACTIVE credential of `consumer_id`/`kind` seeded
+    /// from the config reference `source_ref` (#46): the seed path's
+    /// fail-closed skip — a re-seed whose reference no longer resolves
+    /// — calls this so the row a PREVIOUS generation of the same
+    /// reference seeded stops authenticating through
+    /// `CredentialRegistry::Store` (the store-backed twin of the
+    /// config-registry build, which simply does not install the
+    /// credential). Uses the store's own revocation semantics
+    /// (`revoked_at`, per-selector cache invalidation), so a re-seed
+    /// after the source heals inserts a fresh row — revocation never
+    /// blocks config re-seeding. Rows WITHOUT the linkage (pre-v4
+    /// databases, inline keys, operator-managed rows) are untouched:
+    /// they keep the documented upsert-only posture. Returns the number
+    /// of rows revoked.
+    pub fn revoke_credentials_by_source(
+        &self,
+        consumer_id: i64,
+        kind: CredentialKind,
+        source_ref: &str,
+    ) -> Result<u64> {
+        let now = now_secs();
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let selectors: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT selector FROM credentials
+                 WHERE consumer_id = ?1 AND kind = ?2 AND source_ref = ?3
+                   AND revoked_at IS NULL",
+            )?;
+            let rows = stmt.query_map(params![consumer_id, kind.as_str(), source_ref], |r| {
+                r.get(0)
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        if selectors.is_empty() {
+            return Ok(0);
+        }
+        let revoked = u64::try_from(conn.execute(
+            "UPDATE credentials SET revoked_at = ?4
+             WHERE consumer_id = ?1 AND kind = ?2 AND source_ref = ?3
+               AND revoked_at IS NULL",
+            params![consumer_id, kind.as_str(), source_ref, now],
+        )?)
+        .unwrap_or(u64::MAX);
+        drop(conn);
+        for selector in selectors {
+            self.invalidate(&selector);
+        }
+        Ok(revoked)
     }
 
     /// Replace a credential's stored hash in place (#124 pepper
@@ -890,6 +982,16 @@ fn row_to_credential(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord
 /// their rows keep a binding-marker hash and the issuer / match-value
 /// selector.
 ///
+/// Fail-closed skip (#46): a `${...}` reference that no longer resolves
+/// at seed time is skipped loudly, AND the row a previous generation of
+/// the SAME reference seeded is revoked
+/// ([`StateStore::revoke_credentials_by_source`], linkage via
+/// `credentials.source_ref`, schema v4) — with the store live the
+/// registry serves rows rather than config, so a skip that left the old
+/// row active would keep the OLD key authenticating, the opposite of
+/// fail-closed. Rows without the linkage (pre-v4 databases, inline
+/// keys, operator-managed rows) keep the upsert-only posture below.
+///
 /// Legacy cleanup: rows seeded by the pre-DW-019 build (plaintext api-key
 /// selector + `config:api_key:` placeholder hash) are deleted on every
 /// sync — see
@@ -903,7 +1005,52 @@ pub fn sync_consumers_from_config(
     for consumer in &gateway.consumers {
         let record = store.upsert_consumer(&consumer.name, consumer.priority, &consumer.groups)?;
         for credential in &consumer.credentials {
-            let (kind, selector, hash) = credential_parts(credential, pepper);
+            // DW-045: resolve ${...} references before hashing; an error is
+            // the validate-vs-seed microsecond race (validation already
+            // rejected unresolvable references for this generation). Fail
+            // CLOSED — skip the row (that key stops authenticating) with a
+            // loud log naming the reference, never the value — AND retire
+            // what a previous generation of this reference seeded (see the
+            // fail-closed-skip note above). The next successful publish
+            // re-seeds. `source_ref` links the config's reference text to
+            // its row; a well-formed reference that RESOLVES records it on
+            // the seeded row so a later skip can find that row.
+            let source_ref = match credential {
+                Credential::ApiKey { key } => {
+                    match crate::config::credentials::parse_secret_reference(key) {
+                        Some(Ok(_)) => Some(key.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let (kind, selector, hash) = match credential_parts(credential, pepper) {
+                Ok(parts) => parts,
+                Err(err) => {
+                    tracing::error!(
+                        code = "config_api_key_unresolvable",
+                        consumer = %consumer.name,
+                        "skipping credential seed (secret reference unresolvable): {err}"
+                    );
+                    if let Some(source) = &source_ref {
+                        let retired = store.revoke_credentials_by_source(
+                            record.id,
+                            CredentialKind::ApiKey,
+                            source,
+                        )?;
+                        if retired > 0 {
+                            tracing::warn!(
+                                code = "config_api_key_previous_generation_revoked",
+                                consumer = %consumer.name,
+                                "revoked {retired} previous-generation credential row(s) \
+                                 seeded from the now-unresolvable reference (the old key \
+                                 stops authenticating)"
+                            );
+                        }
+                    }
+                    continue;
+                }
+            };
             let existing = store.lookup_credentials_by_selector(&selector)?;
             if existing
                 .iter()
@@ -911,30 +1058,48 @@ pub fn sync_consumers_from_config(
             {
                 continue;
             }
-            store.add_credential(record.id, kind, hash, None, selector.clone())?;
+            match &source_ref {
+                Some(source) => {
+                    store.add_credential_from_reference(
+                        record.id,
+                        kind,
+                        hash,
+                        selector.clone(),
+                        source,
+                    )?;
+                }
+                None => {
+                    store.add_credential(record.id, kind, hash, None, selector.clone())?;
+                }
+            }
         }
     }
     Ok(())
 }
 
+/// Hash one config credential into (kind, selector, stored-hash) parts.
+/// DW-045: `${...}` api-key references are RESOLVED here (env/file, the
+/// config grammar) and the resolved bytes hashed — the plaintext never
+/// reaches the store. `Err` names the reference, never a value.
 fn credential_parts(
     credential: &Credential,
     pepper: Option<&[u8]>,
-) -> (CredentialKind, String, String) {
+) -> std::result::Result<(CredentialKind, String, String), String> {
     match credential {
         Credential::ApiKey { key } => {
-            let selector = crate::config::credentials::credential_selector(key);
+            let key = crate::config::credentials::resolve_configured_secret(key)?;
+            let selector = crate::config::credentials::credential_selector(&key);
             let hash = match pepper {
-                Some(pepper) => crate::config::credentials::hmac_stored_hash(pepper, key),
-                None => crate::config::credentials::sha256_stored_hash(key),
+                Some(pepper) => crate::config::credentials::hmac_stored_hash(pepper, &key),
+                None => crate::config::credentials::sha256_stored_hash(&key),
             };
-            (CredentialKind::ApiKey, selector, hash)
+            Ok((CredentialKind::ApiKey, selector, hash))
         }
-        Credential::Jwt { issuer, .. } => (
+        Credential::Jwt { issuer, .. } => Ok((
             CredentialKind::Jwt,
             issuer.clone(),
             format!("config:jwt:{issuer}"),
-        ),
+        )),
         // The mTLS selector is the credential's MATCH VALUE (#124): the
         // subject CN when `subject` is set, else the certificate
         // fingerprint. The authenticator looks up a presented certificate
@@ -949,11 +1114,11 @@ fn credential_parts(
                 .clone()
                 .or_else(|| fingerprint.clone())
                 .unwrap_or_default();
-            (
+            Ok((
                 CredentialKind::Mtls,
                 match_value.clone(),
                 format!("config:mtls:{match_value}"),
-            )
+            ))
         }
     }
 }
@@ -1331,12 +1496,27 @@ mod tests {
                 dump_table(&conn, "consumers", "id, name, priority, created_at"),
                 before.0
             );
-            assert_eq!(dump_table(&conn, "credentials", "*"), before.1);
+            // 004 added `credentials.source_ref`; compare the columns the
+            // v1 schema already had, then the new column separately.
+            assert_eq!(
+                dump_table(
+                    &conn,
+                    "credentials",
+                    "id, consumer_id, kind, hash, salt, selector, created_at, revoked_at"
+                ),
+                before.1
+            );
             assert_eq!(dump_table(&conn, "quota_counters", "*"), before.2);
             // 003 added `consumers.groups` with the no-groups default:
             // every migrated v1 row reads back empty groups.
             let groups = dump_table(&conn, "consumers", "groups");
             assert_eq!(groups, vec![vec!["'[]'".to_string()]; 2]);
+            // 004 added `credentials.source_ref` with no linkage default:
+            // every migrated v1 row reads back NULL (pre-v4 rows keep the
+            // upsert-only posture; only rows seeded from a ${...}
+            // reference carry the linkage).
+            let sources = dump_table(&conn, "credentials", "source_ref");
+            assert_eq!(sources, vec![vec!["NULL".to_string()]; 3]);
         }
 
         // Both consumers present with their exact fields.
