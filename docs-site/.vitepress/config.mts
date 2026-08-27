@@ -22,6 +22,11 @@ export default withMermaid(
       description: "API gateway documentation",
       lastUpdated: true,
       cleanUrls: true,
+      // Published as a GitHub Pages PROJECT site
+      // (shristilabs.github.io/dwara/, not a user/org root site), so every
+      // asset/link must be rooted at /dwara/ or the CSS/JS 404 under the
+      // real path while looking fine in local dev (which serves from /).
+      base: "/dwara/",
       // README.md is this project's own (GitHub-rendered) contributor
       // README, not a page of the published site.
       srcExclude: ["README.md"],
