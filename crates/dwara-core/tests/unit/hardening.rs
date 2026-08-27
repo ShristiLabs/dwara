@@ -132,3 +132,66 @@ async fn wrapped_body_passes_frames_and_size_hint_through() {
     let bytes = body.collect().await.expect("collects").to_bytes();
     assert_eq!(&bytes[..], b"hello");
 }
+
+#[test]
+fn merge_vary_folds_all_existing_vary_lines() {
+    // RFC 9110 permits multiple Vary field lines; merging a token must
+    // fold EVERY line into one value, not read the first and drop the
+    // rest (which would corrupt cache keys).
+    let mut headers = hyper::HeaderMap::new();
+    headers.append(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Accept-Language"),
+    );
+    headers.append(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Cookie"),
+    );
+    merge_vary(&mut headers, "Accept-Encoding");
+    let lines: Vec<&str> = headers
+        .get_all(hyper::header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(lines, ["Accept-Language, Cookie, Accept-Encoding"]);
+}
+
+#[test]
+fn merge_vary_appends_to_a_single_line_and_creates_when_absent() {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Origin"),
+    );
+    merge_vary(&mut headers, "Accept-Encoding");
+    assert_eq!(
+        headers.get(hyper::header::VARY).unwrap(),
+        "Origin, Accept-Encoding"
+    );
+
+    let mut headers = hyper::HeaderMap::new();
+    merge_vary(&mut headers, "Accept-Encoding");
+    assert_eq!(headers.get(hyper::header::VARY).unwrap(), "Accept-Encoding");
+}
+
+#[test]
+fn merge_vary_leaves_lines_untouched_when_token_already_present() {
+    // The token anywhere across the folded lines (case-insensitive)
+    // means no rewrite at all: the existing lines stay as they are.
+    let mut headers = hyper::HeaderMap::new();
+    headers.append(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Origin"),
+    );
+    headers.append(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("accept-encoding"),
+    );
+    merge_vary(&mut headers, "Accept-Encoding");
+    let lines: Vec<&str> = headers
+        .get_all(hyper::header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(lines, ["Origin", "accept-encoding"]);
+}

@@ -300,6 +300,65 @@
       },
       "additionalProperties": false
     },
+    "Compression": {
+      "description": "Route-scoped response compression policy (DW-027, feature analysis\n4.13).\n\nSemantics (frozen; negotiation and encoding live in\n`dataplane::compression`):\n\n- `algorithms` is the PREFERENCE order: the first entry the request's\n  `Accept-Encoding` accepts wins. `q=0` entries in `Accept-Encoding`\n  are treated as refusal.\n- `level` is clamped per algorithm at encode time (gzip 0-9, brotli\n  0-11, zstd 0-22; validation bounds the field to 0-22). Absent: the\n  algorithm's library default.\n- `min_size` skips compression of responses whose size is known and\n  below it — a declared `Content-Length` or the exact size of the\n  gateway's own respond/redirect bodies. Responses of UNKNOWN length\n  (streaming) are always candidates.\n- `content_types` (when non-empty) restricts compression to responses\n  whose `Content-Type` starts with one of the entries; entries are\n  lowercase prefix matches (e.g. `text/`). `excluded_content_types`\n  is checked after the include list and wins (the way to express\n  \"compress everything text/ except `text/event-stream`\").\n- Responses carrying an existing `Content-Encoding`, 1xx/204/304\n  statuses, zero-length bodies, and 101 upgrade responses are never\n  compressed. `Vary: Accept-Encoding` is merged into every response\n  on a compression-configured route that is not already encoded —\n  compressed or not — so caches key correctly.\n- The compressed body streams chunk-by-chunk with a flush per chunk\n  (streaming/SSE-friendly, at a small compression-ratio cost); the\n  gateway never buffers the whole body to compress it. The frame\n  codec's internal buffer is bounded by the chunk size.",
+      "type": "object",
+      "properties": {
+        "algorithms": {
+          "description": "Enabled algorithms in preference order (default gzip, brotli,\nzstd). Must be non-empty and duplicate-free (validation).",
+          "type": "array",
+          "default": [
+            "gzip",
+            "brotli",
+            "zstd"
+          ],
+          "items": {
+            "$ref": "#/$defs/CompressionAlgorithm"
+          }
+        },
+        "content_types": {
+          "description": "Content-Type prefix include list (lowercase, e.g. `text/`,\n`application/json`); empty = every content type is a candidate.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_content_types": {
+          "description": "Content-Type prefix exclude list, checked after `content_types`;\na match passes the response through uncompressed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "level": {
+          "description": "Compression level; clamped per algorithm (gzip <= 9, brotli <= 11,\nzstd <= 22). Absent: library default per algorithm.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "min_size": {
+          "description": "Minimum response size (bytes) to compress, applied whenever the\nsize is known: a declared `Content-Length` or the body's exact\nsize (the gateway's own respond/redirect bodies, which carry no\n`Content-Length`). Below it the response passes through (still\ncarrying `Vary: Accept-Encoding`). Default 1024. Responses of\nunknown length (streaming) are always candidates.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1024,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompressionAlgorithm": {
+      "description": "One response compression algorithm (DW-027).",
+      "type": "string",
+      "enum": [
+        "gzip",
+        "brotli",
+        "zstd"
+      ]
+    },
     "Consumer": {
       "description": "Identity of an API caller (app/team/user); owns credentials, quotas, and\nthe analytics identity.",
       "type": "object",
@@ -351,6 +410,66 @@
       "additionalProperties": false,
       "required": [
         "name"
+      ]
+    },
+    "Cors": {
+      "description": "Route-scoped CORS policy (DW-027, feature analysis 4.14).\n\nSemantics (frozen; evaluation lives in `dataplane::cors`):\n\n- `allowed_origins` is a closed set of exact origins\n  (`https://api.example.com`, scheme + host + optional port, compared\n  in normalized form: lowercase scheme/host, default port dropped) or\n  the single entry `*` (any origin). It must be non-empty; `*`\n  combined with `allow_credentials: true` is rejected by validation\n  (the Fetch spec forbids wildcard-credentialed responses).\n- A PREFLIGHT (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)\n  on a CORS-configured route is answered 204 by the gateway —\n  validated against the policy, never forwarded upstream, and never\n  subject to authn/authz/rate limiting (browsers send preflights\n  without credentials). A preflight that fails validation (origin,\n  method, or requested headers not allowed) still short-circuits:\n  204 with NO CORS headers, which the browser reads as a failed\n  preflight. A plain `OPTIONS` without the preflight markers is NOT\n  intercepted; it proxies normally.\n- ACTUAL responses on the route carry `Access-Control-Allow-Origin`\n  (`*`, or the echoed request origin when the list is specific),\n  `Access-Control-Allow-Credentials: true` when configured,\n  `Access-Control-Expose-Headers` when configured, and `Vary: Origin`\n  (merged into any existing `Vary`). A request whose `Origin` is not\n  allowed simply gets no CORS headers — the response passes through\n  as-is (same-origin reads do not consult CORS at all).",
+      "type": "object",
+      "properties": {
+        "allow_credentials": {
+          "description": "Allow credentialed cross-origin requests (cookies, TLS client\ncertificates). Default false. When true, the origin list must be\nspecific (`*` is rejected by validation) and responses echo the\nrequest origin rather than sending `*`.",
+          "type": "boolean"
+        },
+        "allowed_headers": {
+          "description": "Request headers clients may send: exact header names, or `*` to\nallow any requested header (never `*` together with\n`allow_credentials`). Validated against the preflight's\n`Access-Control-Request-Headers` list; empty means no headers\nbeyond the CORS-safelisted set are permitted in preflight checks.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_methods": {
+          "description": "Methods allowed for cross-origin requests (preflight echo and\nactual-request check). Default: the common API set\nGET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS. Each entry must be a\nvalid HTTP method token; comparison is case-insensitive.",
+          "type": "array",
+          "default": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "HEAD",
+            "OPTIONS"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_origins": {
+          "description": "Origins allowed to call this route cross-origin: exact origin\nstrings (`https://api.example.com`, `http://localhost:8080`) or\n`*` (any origin; never together with `allow_credentials`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expose_headers": {
+          "description": "Response headers exposed to the browser (readable by cross-origin\nclient script). Absent: only the CORS-safelisted response headers\nare exposed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_age_secs": {
+          "description": "`Access-Control-Max-Age` for preflight responses, in seconds (how\nlong the browser may cache the preflight result). Absent: the\nheader is omitted (each preflight hits the gateway).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed_origins"
       ]
     },
     "Credential": {
@@ -1006,6 +1125,40 @@
       },
       "additionalProperties": false
     },
+    "RequestLimits": {
+      "description": "Route-scoped request size limits (DW-027, feature analysis 4.16).\n\nSemantics (frozen; enforcement lives in `dataplane::hardening`):\n\n- Header limits (`max_header_count`, `max_header_bytes`) are checked\n  immediately after route resolution, before CORS preflight handling\n  and authentication; a violation answers 431 with the JSON error\n  envelope. `max_header_bytes` is the SUM of all header name and\n  value bytes of the request (hyper's per-connection buffer limits\n  still apply beneath this, process-wide).\n- `max_body_bytes`: a request whose `Content-Length` declares more is\n  rejected 413 before any upstream contact. A body of UNKNOWN length\n  (chunked / h2 without content-length) is wrapped in a counting\n  guard: crossing the cap aborts the request (the upstream attempt\n  fails; the client receives 413 when the failure precedes the\n  upstream's response headers, a torn stream otherwise).\n- A block with NO field set is rejected by validation (always an\n  authoring mistake; omit the block).",
+      "type": "object",
+      "properties": {
+        "max_body_bytes": {
+          "description": "Maximum request body size in bytes (declared via `Content-Length`\nor enforced streaming). Absent: unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_header_bytes": {
+          "description": "Maximum total size of request headers (names + values, bytes).\nAbsent: unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_header_count": {
+          "description": "Maximum number of header fields on the request. Absent:\nunlimited (hyper's parser bound applies).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "RetryConfig": {
       "description": "Upstream retry knobs (DW-014). All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n  (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n  may be retried; an over-cap body streams without retry. Buffering is\n  opt-in: the default (0) buffers only empty bodies, so the default\n  proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n  attempt; a response body that dies mid-stream is never retried (its\n  failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n  retry budget (`budget_percent`).",
       "type": "object",
@@ -1087,6 +1240,39 @@
           "anyOf": [
             {
               "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compression": {
+          "description": "Route-scoped response compression (DW-027, feature analysis 4.13):\nnegotiates gzip/brotli/zstd against the request's `Accept-Encoding`\nand compresses the response body per policy. Streaming-safe: the\nbody is compressed chunk-by-chunk with a per-chunk flush, never\nbuffered whole. Disabled (absent) by default — the dataplane\nforwards bytes untouched.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cors": {
+          "description": "Route-scoped CORS policy (DW-027, feature analysis 4.14): controls\nhow the gateway answers browser cross-origin requests on this\nroute. When present, a CORS PREFLIGHT (`OPTIONS` carrying both\n`Origin` and `Access-Control-Request-Method`) is answered by the\ngateway itself, before authentication and never forwarded\nupstream; actual (non-preflight) responses carry the policy's\nCORS headers. Non-CORS requests are untouched. A preflight on a\nroute whose `match.methods` list excludes `OPTIONS` never matches\nthe route (the documented request-path order applies first) —\ninclude `OPTIONS` in the method list of CORS routes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cors"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "description": "Route-scoped request size limits (DW-027, feature analysis 4.16):\nper-route body and header caps enforced after route resolution.\nOver-limit requests are rejected by the gateway with the JSON\nerror envelope (413 for bodies, 431 for headers) before any\nupstream contact when the size is declared up front\n(`Content-Length`); streaming bodies of unknown length are\naborted as soon as they cross the cap.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestLimits"
             },
             {
               "type": "null"

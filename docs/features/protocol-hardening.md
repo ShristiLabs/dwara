@@ -4,7 +4,10 @@ Source: `crates/dwara-core/src/dataplane/hardening.rs` (DW-023).
 Tests: `protocol_hardening` (dwara-bin). Applied identically to every
 serving surface — data-plane listeners and the admin listener alike
 (see [Admin API: hardening posture](./admin-api.md#hardening-posture-and-its-one-asymmetry)
-for the one deliberate exception).
+for the one deliberate exception). The module also hosts DW-027's
+route-scoped request limits and the `merge_vary` helper — those are
+per-route config, not env knobs, and are covered in
+[edge policies](./edge-policies.md).
 
 The end-user-facing knob table already lives at
 [docs-site: Operations](../../docs-site/guide/operations.md#protocol-hardening)

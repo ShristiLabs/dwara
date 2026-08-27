@@ -187,12 +187,15 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use arc_swap::ArcSwap;
-use http_body_util::{Either, Full};
+use http_body_util::Full;
+use hyper::body::Body as _;
 use hyper::body::Bytes;
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONNECTION, COOKIE, HOST, LOCATION, UPGRADE,
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONNECTION, COOKIE, HOST, LOCATION,
+    ORIGIN, UPGRADE,
 };
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
@@ -218,11 +221,77 @@ use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
 use crate::state::store::StateStore;
 
-/// Body type of every proxied/gateway-generated response: either a small
-/// fully-buffered gateway message (`Full`) or the untouched streaming
+/// Body type of every proxied/gateway-generated response: a small
+/// fully-buffered gateway message (`Full`), the untouched streaming
 /// upstream body ([`UpstreamBody`]: the pooled stream wrapped with the
-/// DW-014 write-timeout / mid-body health-report knobs).
-pub type ProxyBody = Either<Full<Bytes>, UpstreamBody>;
+/// DW-014 write-timeout / mid-body health-report knobs), or a route-
+/// compressed stream ([`crate::dataplane::compression::CompressedBody`], DW-027 — the codec wrapper
+/// around either of the other two).
+pub enum ProxyBody {
+    /// Small fully-buffered gateway message (envelope, respond action,
+    /// metrics/health payloads).
+    Full(Full<Bytes>),
+    /// Untouched streaming upstream body.
+    Upstream(UpstreamBody),
+    /// Route-compressed response body (DW-027).
+    Compressed(Box<crate::dataplane::compression::CompressedBody>),
+}
+
+/// Error of a [`ProxyBody`]: upstream stream failure or a compression
+/// codec failure (DW-027). The `Full` variant is infallible.
+#[derive(Debug)]
+pub enum ProxyBodyError {
+    /// The upstream stream died (DW-014 knobs report health on their
+    /// way out; see [`UpstreamBody`]).
+    Upstream(crate::dataplane::upstream::UpstreamBodyError),
+    /// The compression codec failed mid-stream (DW-027). The stream
+    /// ends like an upstream abort: already-forwarded frames stand,
+    /// no synthesized tail.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ProxyBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyBodyError::Upstream(e) => write!(f, "{e}"),
+            ProxyBodyError::Io(e) => write!(f, "compression failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ProxyBodyError {}
+
+impl hyper::body::Body for ProxyBody {
+    type Data = Bytes;
+    type Error = ProxyBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, ProxyBodyError>>> {
+        match self.get_mut() {
+            ProxyBody::Full(b) => Pin::new(b).poll_frame(cx).map_err(|e| match e {}),
+            ProxyBody::Upstream(b) => Pin::new(b).poll_frame(cx).map_err(ProxyBodyError::Upstream),
+            ProxyBody::Compressed(b) => Pin::new(b.as_mut()).poll_frame(cx),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            ProxyBody::Full(b) => b.is_end_stream(),
+            ProxyBody::Upstream(b) => b.is_end_stream(),
+            ProxyBody::Compressed(b) => b.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            ProxyBody::Full(b) => b.size_hint(),
+            ProxyBody::Upstream(b) => b.size_hint(),
+            ProxyBody::Compressed(b) => b.size_hint(),
+        }
+    }
+}
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
@@ -601,7 +670,7 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
             Response::builder()
                 .status(StatusCode::OK)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
-                .body(Either::Left(Full::new(Bytes::from(obs.render()))))
+                .body(ProxyBody::Full(Full::new(Bytes::from(obs.render()))))
                 .ok()
         }
         _ => None,
@@ -825,6 +894,62 @@ where
     }
     rec.route = route.name.clone();
     root.record("route", route.name.as_str());
+
+    // Route-scoped request limits (DW-027): header caps and a declared
+    // (`Content-Length`) body cap are enforced immediately after route
+    // resolution — before CORS preflight handling, authentication, and
+    // any upstream contact. 431 for headers, 413 for the body, both in
+    // the JSON error envelope.
+    if let Some(limits) = &route.limits {
+        if let Some(violation) = crate::dataplane::hardening::check_route_limits(
+            limits,
+            req.headers(),
+            req.body().size_hint().exact(),
+        ) {
+            let (status, code, msg) = match violation {
+                crate::dataplane::hardening::RouteLimitViolation::HeaderCount { count, max } => (
+                    StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                    "request_headers_too_large",
+                    format!("request carries {count} header fields; the route allows {max}"),
+                ),
+                crate::dataplane::hardening::RouteLimitViolation::HeaderBytes { bytes, max } => (
+                    StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                    "request_headers_too_large",
+                    format!("request headers total {bytes} bytes; the route allows {max}"),
+                ),
+                crate::dataplane::hardening::RouteLimitViolation::BodyBytes { declared, max } => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request_body_too_large",
+                    format!("request body declares {declared} bytes; the route allows {max}"),
+                ),
+            };
+            tracing::warn!(
+                code = code,
+                request_id = %rid,
+                route = %route.name,
+                "request rejected by route limits"
+            );
+            return simple(status, code, &msg, rid);
+        }
+    }
+
+    // CORS preflight short-circuit (DW-027): an OPTIONS request with the
+    // preflight markers is answered by the gateway on CORS-configured
+    // routes — never forwarded upstream, never subject to authn/authz/
+    // rate limiting/cap admission (browsers send preflights without
+    // credentials; gating them on authn would break every credentialed
+    // route). Routes without a cors block proxy preflights normally.
+    if let Some(cors) = &route.cors {
+        if crate::dataplane::cors::is_preflight(req.method(), req.headers()) {
+            // The origin set is compiled in lockstep with `Route::cors`
+            // (RouteTable::cors_origins); a None here is unreachable for
+            // a published snapshot and falls through to a normal proxy.
+            if let Some(origins) = gen.snapshot.route_table().cors_origins(idx) {
+                return crate::dataplane::cors::preflight_response(cors, origins, req.headers())
+                    .map(ProxyBody::Full);
+            }
+        }
+    }
 
     // Authentication (DW-019): after route resolution, before rate
     // limiting and cap admission (the rate-limit `credential` selector
@@ -1095,8 +1220,27 @@ where
         }
     };
 
+    // Response edge policies (DW-027) consume request header values the
+    // actions below take ownership of — capture them first.
+    let req_origin = req.headers().get(&ORIGIN).cloned();
+    let req_accept_encoding = req
+        .headers()
+        .get(&ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     let mut resp = match &route.action {
         RouteAction::Proxy { .. } => {
+            // Streaming body limit (DW-027): the counting wrapper (a
+            // thin passthrough when the route sets no cap; the
+            // declared-length half was rejected above) guards requests
+            // of unknown length for the whole proxy path.
+            let req = req.map(|b| {
+                crate::dataplane::hardening::LimitedBody::new(
+                    b,
+                    route.limits.as_ref().and_then(|l| l.max_body_bytes),
+                )
+            });
             proxy_request(
                 &gen,
                 peer,
@@ -1131,6 +1275,59 @@ where
             headers,
         } => respond(*status, body.as_deref(), headers),
     };
+
+    // Response compression (DW-027): route-scoped, negotiated against
+    // the captured Accept-Encoding, applied after the action so every
+    // action reports identically. The content-type filter is compiled
+    // in lockstep with `Route::compression` (RouteTable::
+    // compression_types; None is unreachable and reads as "skip",
+    // landing in the Vary-only branch below). The body's exact size
+    // hint gates `min_size` for header-less gateway bodies (respond,
+    // redirect); unknown-length streams are always candidates.
+    // Already-encoded responses are left entirely untouched; every
+    // other response on the route carries at least `Vary:
+    // Accept-Encoding` (a candidate response must not be cached under
+    // another client's coding).
+    if let Some(policy) = &route.compression {
+        let already_encoded = resp.headers().contains_key(hyper::header::CONTENT_ENCODING);
+        if !already_encoded {
+            let decision = gen
+                .snapshot
+                .route_table()
+                .compression_types(idx)
+                .and_then(|types| {
+                    crate::dataplane::compression::decide(
+                        policy,
+                        types,
+                        resp.status(),
+                        resp.headers(),
+                        resp.body().size_hint().exact(),
+                        req_accept_encoding.as_deref(),
+                    )
+                });
+            match decision {
+                Some(plan) => {
+                    resp = crate::dataplane::compression::wrap_response(resp, &plan);
+                }
+                None => {
+                    crate::dataplane::hardening::merge_vary(resp.headers_mut(), "Accept-Encoding")
+                }
+            }
+        }
+    }
+
+    // CORS actual-response decoration (DW-027): policy headers on every
+    // response of a CORS route whose request origin is allowed.
+    if let Some(cors) = &route.cors {
+        if let Some(origins) = gen.snapshot.route_table().cors_origins(idx) {
+            crate::dataplane::cors::decorate_actual(
+                cors,
+                origins,
+                req_origin.as_ref(),
+                resp.headers_mut(),
+            );
+        }
+    }
     // Admitted requests carry the binding constraint's rate headers (only
     // when a policy actually matched — see DW-017 module docs). Applied
     // after the action so every action (including streaming proxy bodies
@@ -1148,7 +1345,7 @@ fn forbidden(rid: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(Either::Left(Full::new(observability::envelope_body(
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
             "forbidden",
             "forbidden",
             rid,
@@ -1164,7 +1361,7 @@ fn unauthorized(challenge: &str, rid: &str) -> Response<ProxyBody> {
         .status(StatusCode::UNAUTHORIZED)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(&WWW_AUTHENTICATE, challenge)
-        .body(Either::Left(Full::new(observability::envelope_body(
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
             "unauthorized",
             "unauthorized",
             rid,
@@ -1206,7 +1403,7 @@ fn rate_limited(
         .header(X_RATELIMIT_REMAINING, remaining.to_string())
         .header(X_RATELIMIT_RESET, reset_epoch_s.to_string());
     builder
-        .body(Either::Left(Full::new(observability::envelope_body(
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
             "rate_limit_exceeded",
             "rate limit exceeded",
             rid,
@@ -1786,6 +1983,18 @@ where
                     upstream = handle.name(),
                     "upstream request failed: {err}"
                 );
+                // Streaming body limit (DW-027): a request body that
+                // crossed the route cap mid-upload surfaces here (the
+                // client's failure, not the upstream's) — answer 413
+                // rather than a 5xx classification.
+                if request_limit_exceeded(&err) {
+                    return simple(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "request_body_too_large",
+                        "request body exceeded the route limit mid-stream",
+                        rid,
+                    );
+                }
                 let (status, code, msg) = classify_upstream_error(&err);
                 return simple(status, code, msg, rid);
             }
@@ -1805,7 +2014,7 @@ fn breaker_open(retry_after_ms: u64, rid: &str) -> Response<ProxyBody> {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::RETRY_AFTER, seconds.max(1).to_string())
-        .body(Either::Left(Full::new(observability::envelope_body(
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
             "upstream_circuit_open",
             "upstream circuit open",
             rid,
@@ -1852,13 +2061,39 @@ fn finish_proxy_response(
         if let Some(permit) = global_permit {
             resp.body_mut().set_release_permit(permit);
         }
-        return resp.map(Either::Right);
+        return resp.map(ProxyBody::Upstream);
     }
     let _ = strip_hop_by_hop(resp.headers_mut(), false);
     if let Some(permit) = global_permit {
         resp.body_mut().set_release_permit(permit);
     }
-    resp.map(Either::Right)
+    resp.map(ProxyBody::Upstream)
+}
+
+/// Whether an upstream send failed because the REQUEST body crossed the
+/// route's streaming limit (DW-027). The counting wrapper's error rides
+/// the hyper client error's source chain; walk it. Never confusable
+/// with an upstream failure: the marker type is only produced by the
+/// gateway's own request-body wrapper.
+fn request_limit_exceeded(err: &UpstreamError) -> bool {
+    let UpstreamError::Client(e) = err else {
+        return false;
+    };
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(s) = src {
+        if s.downcast_ref::<crate::dataplane::hardening::LimitedBodyError>()
+            .is_some_and(|l| {
+                matches!(
+                    l,
+                    crate::dataplane::hardening::LimitedBodyError::OverLimit { .. }
+                )
+            })
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
 }
 
 /// Whether an upstream error reflects a genuine transport/exchange
@@ -2094,7 +2329,7 @@ fn redirect<B>(
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND))
         .header(LOCATION, location)
-        .body(Either::Left(Full::new(Bytes::new())))
+        .body(ProxyBody::Full(Full::new(Bytes::new())))
         .expect("static redirect response is valid")
 }
 
@@ -2118,7 +2353,7 @@ fn respond(
         }
     }
     builder
-        .body(Either::Left(Full::new(Bytes::from(body.to_string()))))
+        .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
         .expect("static respond body is valid")
 }
 
@@ -2126,7 +2361,7 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
     Response::builder()
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(Either::Left(Full::new(observability::envelope_body(
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
             code, msg, rid,
         ))))
         .expect("static error body is valid")

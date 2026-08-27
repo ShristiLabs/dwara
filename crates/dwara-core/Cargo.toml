@@ -44,6 +44,10 @@ jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 prometheus = { workspace = true }
+# Response compression codecs (DW-027): see the workspace comment.
+flate2 = { workspace = true }
+brotli = { workspace = true }
+zstd = { workspace = true }
 # Concurrency model checker (DW-025, optional): MIT/Apache-2.0. Optional so
 # it never enters production builds; the `loom` feature gates the
 # primitive swap in health.rs/breaker.rs/retries.rs and the rate
@@ -62,6 +66,10 @@ tracing-subscriber = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# The DW-027 compression round-trip tests use flate2/brotli/zstd as
+# decoders; they are regular [dependencies] of this crate, and test
+# targets link against those too, so they are deliberately NOT repeated
+# here.
 serde_json = { workspace = true }
 tracing = { workspace = true }
 prometheus = { workspace = true }

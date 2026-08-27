@@ -287,6 +287,219 @@ fn validate_authz(
     }
 }
 
+/// Validate one `cors` block (DW-027). The origin list must be a
+/// non-empty closed set of well-formed `http(s)` origins (or `*`);
+/// wildcard origins/headers cannot combine with credentials (Fetch spec:
+/// `*` is not a valid allow-origin/allow-headers value on a credentialed
+/// response); methods must be valid HTTP tokens; header lists must hold
+/// valid header names (or `*` for `allowed_headers` only).
+fn validate_cors(name: &str, cors: &crate::config::Cors, issues: &mut Vec<ValidationIssue>) {
+    if cors.allowed_origins.is_empty() {
+        issues.push(issue(
+            "route",
+            name,
+            "cors.allowed_origins",
+            "allowed_origins is empty: a cors block with no origins filters nothing \
+             and is always a mistake; omit the cors block to disable CORS",
+        ));
+    }
+    let wildcard = cors.allowed_origins.iter().any(|o| o == "*");
+    if wildcard && cors.allow_credentials {
+        issues.push(issue(
+            "route",
+            name,
+            "cors.allowed_origins",
+            "'*' cannot be combined with allow_credentials (the Fetch spec forbids \
+             wildcard credentialed responses); list explicit origins instead",
+        ));
+    }
+    for (i, origin) in cors.allowed_origins.iter().enumerate() {
+        if origin == "*" {
+            continue;
+        }
+        // Normalize exactly like the runtime matcher: lowercase scheme
+        // and host, default port dropped. Anything the matcher would not
+        // itself accept is an authoring error caught here.
+        if crate::config::normalize_origin(origin).is_none() {
+            issues.push(issue(
+                "route",
+                name,
+                &format!("cors.allowed_origins[{i}]"),
+                format!(
+                    "'{origin}' is not a well-formed origin (expected scheme://host[:port] \
+                     with an http or https scheme and no path, e.g. https://api.example.com, \
+                     or the single entry '*')"
+                ),
+            ));
+        }
+    }
+    if wildcard && cors.allowed_origins.len() > 1 {
+        issues.push(issue(
+            "route",
+            name,
+            "cors.allowed_origins",
+            "'*' cannot be combined with other origins ('*' already matches everything)",
+        ));
+    }
+    for (i, m) in cors.allowed_methods.iter().enumerate() {
+        if hyper::Method::from_bytes(m.as_bytes()).is_err() {
+            issues.push(issue(
+                "route",
+                name,
+                &format!("cors.allowed_methods[{i}]"),
+                format!("'{m}' is not a valid HTTP method token"),
+            ));
+        }
+    }
+    let header_lists = [
+        ("cors.allowed_headers", &cors.allowed_headers, true),
+        ("cors.expose_headers", &cors.expose_headers, false),
+    ];
+    for (field, list, allows_wildcard) in header_lists {
+        for (i, h) in list.iter().enumerate() {
+            if h == "*" {
+                if !allows_wildcard {
+                    issues.push(issue(
+                        "route",
+                        name,
+                        &format!("{field}[{i}]"),
+                        "'*' is only valid in allowed_headers (expose_headers must name \
+                         the headers to expose)",
+                    ));
+                } else if cors.allow_credentials {
+                    issues.push(issue(
+                        "route",
+                        name,
+                        &format!("{field}[{i}]"),
+                        "'*' cannot be combined with allow_credentials (the Fetch spec \
+                         forbids wildcard allow-headers on credentialed preflights); \
+                         list explicit header names instead",
+                    ));
+                }
+                continue;
+            }
+            if hyper::header::HeaderName::from_bytes(h.as_bytes()).is_err() {
+                issues.push(issue(
+                    "route",
+                    name,
+                    &format!("{field}[{i}]"),
+                    format!("'{h}' is not a valid HTTP header name"),
+                ));
+            }
+        }
+    }
+}
+
+/// Validate one `compression` block (DW-027): non-empty duplicate-free
+/// algorithm list, level within 0-22 (per-algorithm clamping happens at
+/// encode time), and non-empty content-type prefixes.
+fn validate_compression(
+    name: &str,
+    compression: &crate::config::Compression,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if compression.algorithms.is_empty() {
+        issues.push(issue(
+            "route",
+            name,
+            "compression.algorithms",
+            "algorithms is empty: a compression block with no algorithms compresses \
+             nothing and is always a mistake; omit the compression block to disable it",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, a) in compression.algorithms.iter().enumerate() {
+        if !seen.insert(a) {
+            issues.push(issue(
+                "route",
+                name,
+                &format!("compression.algorithms[{i}]"),
+                format!("algorithm '{a:?}' is listed more than once"),
+            ));
+        }
+    }
+    if let Some(level) = compression.level {
+        if level > 22 {
+            issues.push(issue(
+                "route",
+                name,
+                "compression.level",
+                format!(
+                    "level {level} is out of range: 0-22 (clamped per algorithm: \
+                         gzip 0-9, brotli 0-11, zstd 0-22)"
+                ),
+            ));
+        }
+    }
+    for (field, entries) in [
+        ("compression.content_types", &compression.content_types),
+        (
+            "compression.excluded_content_types",
+            &compression.excluded_content_types,
+        ),
+    ] {
+        for (i, entry) in entries.iter().enumerate() {
+            let t = entry.trim().to_lowercase();
+            if t.is_empty() || t.contains(char::is_whitespace) {
+                issues.push(issue(
+                    "route",
+                    name,
+                    &format!("{field}[{i}]"),
+                    format!(
+                        "'{entry}' is not a content-type prefix (expected a non-empty \
+                         token like 'text/' or 'application/json')"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// Validate one `request_limits` block (DW-027): at least one limit set,
+/// every set limit >= 1.
+fn validate_request_limits(
+    name: &str,
+    limits: &crate::config::RequestLimits,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if limits.max_body_bytes.is_none()
+        && limits.max_header_count.is_none()
+        && limits.max_header_bytes.is_none()
+    {
+        issues.push(issue(
+            "route",
+            name,
+            "limits",
+            "carries no limits (no max_body_bytes, max_header_count, or max_header_bytes) \
+             and is always a mistake: omit the limits block entirely",
+        ));
+    }
+    if let Some(0) = limits.max_body_bytes {
+        issues.push(issue(
+            "route",
+            name,
+            "limits.max_body_bytes",
+            "max_body_bytes must be > 0 (0 would reject every request with a body)",
+        ));
+    }
+    if let Some(0) = limits.max_header_count {
+        issues.push(issue(
+            "route",
+            name,
+            "limits.max_header_count",
+            "max_header_count must be > 0",
+        ));
+    }
+    if let Some(0) = limits.max_header_bytes {
+        issues.push(issue(
+            "route",
+            name,
+            "limits.max_header_bytes",
+            "max_header_bytes must be > 0",
+        ));
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -867,6 +1080,17 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 &consumer_groups,
                 &mut issues,
             );
+        }
+        // Route-scoped edge policies (DW-027): CORS, response
+        // compression, request limits.
+        if let Some(cors) = &r.cors {
+            validate_cors(&r.name, cors, &mut issues);
+        }
+        if let Some(compression) = &r.compression {
+            validate_compression(&r.name, compression, &mut issues);
+        }
+        if let Some(limits) = &r.limits {
+            validate_request_limits(&r.name, limits, &mut issues);
         }
         let m = &r.r#match.path;
         for (field, entries) in [
@@ -1615,6 +1839,14 @@ pub struct RouteTable {
     /// the action carries no regex rewrite). Validation guarantees these
     /// compiled at config-compile time, never at request time.
     rewrite_regexes: Vec<Option<regex::Regex>>,
+    /// Precompiled CORS origin matcher per route index (DW-027): `None`
+    /// where the route carries no `cors` block, mirroring
+    /// `Route::cors` exactly so the proxy's config read and matcher
+    /// lookup stay in lockstep.
+    cors_origins: Vec<Option<crate::config::CompiledCorsOrigins>>,
+    /// Precompiled compression content-type filter per route index
+    /// (DW-027), mirroring `Route::compression` the same way.
+    compression_types: Vec<Option<crate::config::CompiledContentTypeFilter>>,
 }
 
 impl RouteTable {
@@ -1625,6 +1857,8 @@ impl RouteTable {
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
             rewrite_regexes: Vec::new(),
+            cors_origins: Vec::new(),
+            compression_types: Vec::new(),
         }
     }
 
@@ -1664,6 +1898,23 @@ impl RouteTable {
     /// carries a `path_rewrite.regex`.
     pub fn rewrite_regex(&self, idx: usize) -> Option<&regex::Regex> {
         self.rewrite_regexes.get(idx).and_then(|r| r.as_ref())
+    }
+
+    /// The precompiled CORS origin matcher for route `idx` (`None`: the
+    /// route carries no `cors` block — exactly mirroring
+    /// `gateway().routes[idx].cors`).
+    pub fn cors_origins(&self, idx: usize) -> Option<&crate::config::CompiledCorsOrigins> {
+        self.cors_origins.get(idx).and_then(|o| o.as_ref())
+    }
+
+    /// The precompiled compression content-type filter for route `idx`
+    /// (`None`: the route carries no `compression` block — exactly
+    /// mirroring `gateway().routes[idx].compression`).
+    pub fn compression_types(
+        &self,
+        idx: usize,
+    ) -> Option<&crate::config::CompiledContentTypeFilter> {
+        self.compression_types.get(idx).and_then(|t| t.as_ref())
     }
 }
 
@@ -1845,6 +2096,30 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
         .map_err(|e| CompileError::Internal(format!("normalization failed: {e}")))?;
     let content_hash = normalized_hash(&yaml);
 
+    // DW-027 edge-policy matching state, precompiled per route index in
+    // lockstep with `Route::cors` / `Route::compression` (built from the
+    // same route list, so lookups mirror the config the proxy reads):
+    // normalized CORS origins and lowercased content-type prefixes are
+    // computed once here instead of on every request.
+    let cors_origins = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.cors
+                .as_ref()
+                .map(crate::config::CompiledCorsOrigins::compile)
+        })
+        .collect();
+    let compression_types = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.compression
+                .as_ref()
+                .map(crate::config::CompiledContentTypeFilter::compile)
+        })
+        .collect();
+
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
         routes: Arc::new(RouteTable {
@@ -1853,6 +2128,8 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             regex_set,
             regex_indices,
             rewrite_regexes,
+            cors_origins,
+            compression_types,
         }),
         content_hash,
     })

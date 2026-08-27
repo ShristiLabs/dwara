@@ -412,6 +412,35 @@ pub struct Route {
     /// regardless of this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub auth_required: bool,
+    /// Route-scoped CORS policy (DW-027, feature analysis 4.14): controls
+    /// how the gateway answers browser cross-origin requests on this
+    /// route. When present, a CORS PREFLIGHT (`OPTIONS` carrying both
+    /// `Origin` and `Access-Control-Request-Method`) is answered by the
+    /// gateway itself, before authentication and never forwarded
+    /// upstream; actual (non-preflight) responses carry the policy's
+    /// CORS headers. Non-CORS requests are untouched. A preflight on a
+    /// route whose `match.methods` list excludes `OPTIONS` never matches
+    /// the route (the documented request-path order applies first) —
+    /// include `OPTIONS` in the method list of CORS routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<Cors>,
+    /// Route-scoped response compression (DW-027, feature analysis 4.13):
+    /// negotiates gzip/brotli/zstd against the request's `Accept-Encoding`
+    /// and compresses the response body per policy. Streaming-safe: the
+    /// body is compressed chunk-by-chunk with a per-chunk flush, never
+    /// buffered whole. Disabled (absent) by default — the dataplane
+    /// forwards bytes untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<Compression>,
+    /// Route-scoped request size limits (DW-027, feature analysis 4.16):
+    /// per-route body and header caps enforced after route resolution.
+    /// Over-limit requests are rejected by the gateway with the JSON
+    /// error envelope (413 for bodies, 431 for headers) before any
+    /// upstream contact when the size is declared up front
+    /// (`Content-Length`); streaming bodies of unknown length are
+    /// aborted as soon as they cross the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<RequestLimits>,
     /// Route-level authorization rules (DW-020, feature analysis 4.7).
     /// Absent (the default) imposes no authorization on the route. A
     /// PRESENT-but-entirely-empty block (no consumers, groups, scopes,
@@ -547,6 +576,331 @@ fn default_ip_acl_default() -> IpAclDefault {
 
 fn is_default_ip_acl_default(d: &IpAclDefault) -> bool {
     *d == IpAclDefault::Allow
+}
+
+/// Route-scoped CORS policy (DW-027, feature analysis 4.14).
+///
+/// Semantics (frozen; evaluation lives in `dataplane::cors`):
+///
+/// - `allowed_origins` is a closed set of exact origins
+///   (`https://api.example.com`, scheme + host + optional port, compared
+///   in normalized form: lowercase scheme/host, default port dropped) or
+///   the single entry `*` (any origin). It must be non-empty; `*`
+///   combined with `allow_credentials: true` is rejected by validation
+///   (the Fetch spec forbids wildcard-credentialed responses).
+/// - A PREFLIGHT (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)
+///   on a CORS-configured route is answered 204 by the gateway —
+///   validated against the policy, never forwarded upstream, and never
+///   subject to authn/authz/rate limiting (browsers send preflights
+///   without credentials). A preflight that fails validation (origin,
+///   method, or requested headers not allowed) still short-circuits:
+///   204 with NO CORS headers, which the browser reads as a failed
+///   preflight. A plain `OPTIONS` without the preflight markers is NOT
+///   intercepted; it proxies normally.
+/// - ACTUAL responses on the route carry `Access-Control-Allow-Origin`
+///   (`*`, or the echoed request origin when the list is specific),
+///   `Access-Control-Allow-Credentials: true` when configured,
+///   `Access-Control-Expose-Headers` when configured, and `Vary: Origin`
+///   (merged into any existing `Vary`). A request whose `Origin` is not
+///   allowed simply gets no CORS headers — the response passes through
+///   as-is (same-origin reads do not consult CORS at all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Cors {
+    /// Origins allowed to call this route cross-origin: exact origin
+    /// strings (`https://api.example.com`, `http://localhost:8080`) or
+    /// `*` (any origin; never together with `allow_credentials`).
+    pub allowed_origins: Vec<String>,
+    /// Methods allowed for cross-origin requests (preflight echo and
+    /// actual-request check). Default: the common API set
+    /// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS. Each entry must be a
+    /// valid HTTP method token; comparison is case-insensitive.
+    #[serde(default = "default_cors_methods")]
+    pub allowed_methods: Vec<String>,
+    /// Request headers clients may send: exact header names, or `*` to
+    /// allow any requested header (never `*` together with
+    /// `allow_credentials`). Validated against the preflight's
+    /// `Access-Control-Request-Headers` list; empty means no headers
+    /// beyond the CORS-safelisted set are permitted in preflight checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_headers: Vec<String>,
+    /// Response headers exposed to the browser (readable by cross-origin
+    /// client script). Absent: only the CORS-safelisted response headers
+    /// are exposed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<String>,
+    /// Allow credentialed cross-origin requests (cookies, TLS client
+    /// certificates). Default false. When true, the origin list must be
+    /// specific (`*` is rejected by validation) and responses echo the
+    /// request origin rather than sending `*`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_credentials: bool,
+    /// `Access-Control-Max-Age` for preflight responses, in seconds (how
+    /// long the browser may cache the preflight result). Absent: the
+    /// header is omitted (each preflight hits the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_secs: Option<u64>,
+}
+
+fn default_cors_methods() -> Vec<String> {
+    ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Canonical form of one origin (DW-027): lowercase scheme and host,
+/// default port dropped, no userinfo, no path/query — the exact string
+/// the runtime CORS matcher compares request `Origin` values against
+/// and validation checks config entries with. `None` when the input is
+/// not a well-formed `http(s)` origin. Lives in `config` (the lowest
+/// consuming domain) so validation (`snapshot::validate`) and matching
+/// (`dataplane::cors`) share one grammar, the same way `net.rs` owns the
+/// IP/CIDR grammar.
+pub fn normalize_origin(origin: &str) -> Option<String> {
+    let uri: hyper::Uri = origin.parse().ok()?;
+    let scheme = uri.scheme()?;
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return None;
+    }
+    // Browsers never serialize userinfo into an Origin (the grammar is
+    // scheme "://" host [":" port]); authority userinfo is a config
+    // authoring error or a smuggle attempt, never a real origin.
+    if uri.authority().is_some_and(|a| a.as_str().contains('@')) {
+        return None;
+    }
+    let host = uri.host()?;
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        _ => 443,
+    };
+    let port = uri
+        .port_u16()
+        .and_then(|p| (p != default_port).then_some(p));
+    // An origin carries no path, query, or fragment; tolerate only the
+    // empty path "/" (browsers serialize the origin WITHOUT it, but
+    // configs hand-writing "https://host/" are unambiguous).
+    match uri.path_and_query() {
+        None => {}
+        Some(pq) if pq.as_str() == "/" => {}
+        _ => return None,
+    }
+    Some(match port {
+        Some(p) => format!("{}://{}:{}", scheme.as_str(), host.to_lowercase(), p),
+        None => format!("{}://{}", scheme.as_str(), host.to_lowercase()),
+    })
+}
+
+/// Snapshot-compiled form of a `cors.allowed_origins` list (DW-027): the
+/// wildcard flag plus the normalized form of every specific entry,
+/// computed once at snapshot-compile time so the request path never
+/// re-parses config strings (per-request work is the request's own
+/// origin only). Lives in `config` beside [`normalize_origin`] because
+/// the compiled set is the grammar's runtime consumer: `snapshot`
+/// builds it into the route table (`snapshot::RouteTable`) and
+/// `dataplane::cors` matches against it. Validation has already
+/// rejected entries that do not normalize, so compilation drops
+/// nothing on any publishable config; entries that would fail
+/// normalization are skipped exactly as the pre-compiled matcher was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledCorsOrigins {
+    wildcard: bool,
+    origins: Vec<String>,
+}
+
+impl CompiledCorsOrigins {
+    /// Compile a (validated) policy's origin list.
+    pub fn compile(cors: &Cors) -> Self {
+        CompiledCorsOrigins {
+            wildcard: cors.allowed_origins.iter().any(|o| o == "*"),
+            origins: cors
+                .allowed_origins
+                .iter()
+                .filter(|o| *o != "*")
+                .filter_map(|o| normalize_origin(o))
+                .collect(),
+        }
+    }
+
+    /// Does a request `Origin` value match this set? `*` matches any
+    /// origin string; otherwise normalized exact match (the same
+    /// comparison the pre-compiled matcher ran, without re-normalizing
+    /// the config side per request).
+    pub fn allows(&self, origin: &str) -> bool {
+        if self.wildcard {
+            return true;
+        }
+        let Some(request_origin) = normalize_origin(origin) else {
+            return false;
+        };
+        self.origins.iter().any(|o| o == &request_origin)
+    }
+
+    /// Was the list the single entry `*`?
+    pub fn wildcard(&self) -> bool {
+        self.wildcard
+    }
+}
+
+/// Route-scoped response compression policy (DW-027, feature analysis
+/// 4.13).
+///
+/// Semantics (frozen; negotiation and encoding live in
+/// `dataplane::compression`):
+///
+/// - `algorithms` is the PREFERENCE order: the first entry the request's
+///   `Accept-Encoding` accepts wins. `q=0` entries in `Accept-Encoding`
+///   are treated as refusal.
+/// - `level` is clamped per algorithm at encode time (gzip 0-9, brotli
+///   0-11, zstd 0-22; validation bounds the field to 0-22). Absent: the
+///   algorithm's library default.
+/// - `min_size` skips compression of responses whose size is known and
+///   below it — a declared `Content-Length` or the exact size of the
+///   gateway's own respond/redirect bodies. Responses of UNKNOWN length
+///   (streaming) are always candidates.
+/// - `content_types` (when non-empty) restricts compression to responses
+///   whose `Content-Type` starts with one of the entries; entries are
+///   lowercase prefix matches (e.g. `text/`). `excluded_content_types`
+///   is checked after the include list and wins (the way to express
+///   "compress everything text/ except `text/event-stream`").
+/// - Responses carrying an existing `Content-Encoding`, 1xx/204/304
+///   statuses, zero-length bodies, and 101 upgrade responses are never
+///   compressed. `Vary: Accept-Encoding` is merged into every response
+///   on a compression-configured route that is not already encoded —
+///   compressed or not — so caches key correctly.
+/// - The compressed body streams chunk-by-chunk with a flush per chunk
+///   (streaming/SSE-friendly, at a small compression-ratio cost); the
+///   gateway never buffers the whole body to compress it. The frame
+///   codec's internal buffer is bounded by the chunk size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Compression {
+    /// Enabled algorithms in preference order (default gzip, brotli,
+    /// zstd). Must be non-empty and duplicate-free (validation).
+    #[serde(default = "default_compression_algorithms")]
+    pub algorithms: Vec<CompressionAlgorithm>,
+    /// Compression level; clamped per algorithm (gzip <= 9, brotli <= 11,
+    /// zstd <= 22). Absent: library default per algorithm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    /// Minimum response size (bytes) to compress, applied whenever the
+    /// size is known: a declared `Content-Length` or the body's exact
+    /// size (the gateway's own respond/redirect bodies, which carry no
+    /// `Content-Length`). Below it the response passes through (still
+    /// carrying `Vary: Accept-Encoding`). Default 1024. Responses of
+    /// unknown length (streaming) are always candidates.
+    #[serde(default = "default_compression_min_size")]
+    pub min_size: u64,
+    /// Content-Type prefix include list (lowercase, e.g. `text/`,
+    /// `application/json`); empty = every content type is a candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_types: Vec<String>,
+    /// Content-Type prefix exclude list, checked after `content_types`;
+    /// a match passes the response through uncompressed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_content_types: Vec<String>,
+}
+
+fn default_compression_algorithms() -> Vec<CompressionAlgorithm> {
+    vec![
+        CompressionAlgorithm::Gzip,
+        CompressionAlgorithm::Brotli,
+        CompressionAlgorithm::Zstd,
+    ]
+}
+
+fn default_compression_min_size() -> u64 {
+    1024
+}
+
+/// One response compression algorithm (DW-027).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionAlgorithm {
+    Gzip,
+    Brotli,
+    Zstd,
+}
+
+impl CompressionAlgorithm {
+    /// The `Accept-Encoding` / `Content-Encoding` token of the algorithm.
+    pub fn encoding_token(self) -> &'static str {
+        match self {
+            CompressionAlgorithm::Gzip => "gzip",
+            CompressionAlgorithm::Brotli => "br",
+            CompressionAlgorithm::Zstd => "zstd",
+        }
+    }
+}
+
+/// Snapshot-compiled form of a compression policy's content-type prefix
+/// lists (DW-027): every include/exclude entry trimmed and lowercased
+/// once at snapshot-compile time; the request path compares the
+/// response's (lowercased) media type against the precomputed prefixes
+/// instead of re-normalizing config strings per response. Same
+/// placement rationale as [`CompiledCorsOrigins`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledContentTypeFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl CompiledContentTypeFilter {
+    /// Compile a (validated) policy's prefix lists.
+    pub fn compile(policy: &Compression) -> Self {
+        fn normalize_list(list: &[String]) -> Vec<String> {
+            list.iter().map(|p| p.trim().to_lowercase()).collect()
+        }
+        CompiledContentTypeFilter {
+            include: normalize_list(&policy.content_types),
+            exclude: normalize_list(&policy.excluded_content_types),
+        }
+    }
+
+    /// Is `media_type` (lowercase, parameters stripped) a compression
+    /// candidate? An empty include list admits every type; the exclude
+    /// list is checked after it and wins.
+    pub fn allows(&self, media_type: &str) -> bool {
+        (self.include.is_empty() || self.include.iter().any(|p| media_type.starts_with(p)))
+            && !self.exclude.iter().any(|p| media_type.starts_with(p))
+    }
+}
+
+/// Route-scoped request size limits (DW-027, feature analysis 4.16).
+///
+/// Semantics (frozen; enforcement lives in `dataplane::hardening`):
+///
+/// - Header limits (`max_header_count`, `max_header_bytes`) are checked
+///   immediately after route resolution, before CORS preflight handling
+///   and authentication; a violation answers 431 with the JSON error
+///   envelope. `max_header_bytes` is the SUM of all header name and
+///   value bytes of the request (hyper's per-connection buffer limits
+///   still apply beneath this, process-wide).
+/// - `max_body_bytes`: a request whose `Content-Length` declares more is
+///   rejected 413 before any upstream contact. A body of UNKNOWN length
+///   (chunked / h2 without content-length) is wrapped in a counting
+///   guard: crossing the cap aborts the request (the upstream attempt
+///   fails; the client receives 413 when the failure precedes the
+///   upstream's response headers, a torn stream otherwise).
+/// - A block with NO field set is rejected by validation (always an
+///   authoring mistake; omit the block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestLimits {
+    /// Maximum request body size in bytes (declared via `Content-Length`
+    /// or enforced streaming). Absent: unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
+    /// Maximum number of header fields on the request. Absent:
+    /// unlimited (hyper's parser bound applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_header_count: Option<u32>,
+    /// Maximum total size of request headers (names + values, bytes).
+    /// Absent: unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_header_bytes: Option<u64>,
 }
 
 /// Matching rules for incoming requests.

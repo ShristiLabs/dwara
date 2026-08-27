@@ -175,6 +175,31 @@ the project follows semantic versioning once 1.0 is reached.
   per-key cells, bounded by the sharded store cap) — both scrape-time
   snapshot gauges on `/metrics`, aggregate and unlabeled so metric
   cardinality is never per key.
+- Route-scoped edge policies (#28): three additive optional Route
+  fields. `cors` — the gateway answers browser preflights itself
+  (204 right after route resolution and BEFORE authentication,
+  because browsers send preflights without credentials; never proxied;
+  a policy-rejected preflight is still 204 but carries no CORS
+  headers) and decorates actual responses with the policy headers +
+  `Vary: Origin`; origins are an exact allowlist matched in
+  normalized form (case-insensitive scheme/host, default port
+  dropped) or the single entry `*`, which validation never allows
+  together with `allow_credentials`; routes must list `OPTIONS` in
+  `match.methods` for preflights to resolve. `compression` — opt-in
+  per route; gzip/brotli/zstd negotiated against `Accept-Encoding`
+  (config preference order, `q=0` refusal, `*`), never applied to
+  204/304/101 or already-encoded bodies, `min_size` and
+  content-type include/exclude lists, one `level` clamped per
+  algorithm; the body streams through the codec chunk-by-chunk with a
+  per-chunk flush (SSE-safe, never buffered whole), and every
+  non-encoded response on the route carries `Vary: Accept-Encoding`.
+  `limits` — per-route request caps enforced right after route
+  resolution: declared `Content-Length` over `max_body_bytes` is a
+  413 before any upstream contact, unknown-length bodies abort 413
+  the moment they cross the cap, and `max_header_count` /
+  `max_header_bytes` answer 431 — all in the JSON error envelope.
+  Codec dependencies flate2/brotli/zstd added (tower-http
+  deliberately not); `config-reference.json` regenerated.
 
 ### Fixed
 

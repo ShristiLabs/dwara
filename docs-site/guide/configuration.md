@@ -129,6 +129,11 @@ taking precedence (deny-anywhere-wins). See the architecture doc's
 each stage runs, and the [configuration schema](../reference/configuration-schema)
 for the exact policy fields.
 
+Cross-origin access (CORS), response compression, and per-route
+request limits are not policy attachments — each is a single optional
+block on the route itself. See
+[CORS, compression, and request limits](./edge-policies).
+
 ## Authentication and authorization
 
 Consumers authenticate via API key, HTTP Basic, JWT Bearer (verified

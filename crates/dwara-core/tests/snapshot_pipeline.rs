@@ -8,9 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dwara_core::config::{
-    Credential, Endpoint, Gateway, JwtProvider, Listener, ListenerProtocol, ListenerTls,
-    LoadBalancer, NameValueMatch, PathMatch, PathMatchKind, PathRewrite, Policy, RateLimit, Route,
-    RouteAction, RouteMatch, Service, TlsMode, Upstream, UpstreamProtocol,
+    Compression, CompressionAlgorithm, Cors, Credential, Endpoint, Gateway, JwtProvider, Listener,
+    ListenerProtocol, ListenerTls, LoadBalancer, NameValueMatch, PathMatch, PathMatchKind,
+    PathRewrite, Policy, RateLimit, RequestLimits, Route, RouteAction, RouteMatch, Service,
+    TlsMode, Upstream, UpstreamProtocol,
 };
 use dwara_core::snapshot::{compile, validate, CompileError, ConfigState};
 
@@ -49,6 +50,9 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         policies: vec![],
         priority: None,
         auth_required: false,
+        cors: None,
+        compression: None,
+        limits: None,
         authorization: None,
     }
 }
@@ -1549,5 +1553,243 @@ fn zero_route_publish_is_rejected_and_keeps_the_running_generation() {
     assert!(
         after.match_route("/x").is_some(),
         "the old generation still routes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DW-027: route-scoped CORS / compression / request-limits validation
+// ---------------------------------------------------------------------------
+
+fn cors_route(cors: Cors) -> Gateway {
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.cors = Some(cors);
+    gw.routes = vec![r];
+    gw
+}
+
+#[test]
+fn validation_rejects_empty_cors_origin_list() {
+    let gw = cors_route(Cors {
+        allowed_origins: vec![],
+        allowed_methods: vec!["GET".into()],
+        allowed_headers: vec![],
+        expose_headers: vec![],
+        allow_credentials: false,
+        max_age_secs: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.entity == "route" && i.name == "r" && i.field == "cors.allowed_origins"),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn validation_rejects_wildcard_origin_or_headers_with_credentials() {
+    let gw = cors_route(Cors {
+        allowed_origins: vec!["*".into()],
+        allowed_methods: vec!["GET".into()],
+        allowed_headers: vec![],
+        expose_headers: vec![],
+        allow_credentials: true,
+        max_age_secs: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "cors.allowed_origins" && i.message.contains("allow_credentials")),
+        "issues: {issues:?}"
+    );
+
+    let gw = cors_route(Cors {
+        allowed_origins: vec!["https://a.example.com".into()],
+        allowed_methods: vec!["GET".into()],
+        allowed_headers: vec!["*".into()],
+        expose_headers: vec![],
+        allow_credentials: true,
+        max_age_secs: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues.iter().any(
+            |i| i.field == "cors.allowed_headers[0]" && i.message.contains("allow_credentials")
+        ),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn validation_rejects_malformed_cors_origins_and_methods() {
+    // "https://user@..." carries authority userinfo: browsers never
+    // serialize that into an Origin, so it is rejected like any other
+    // non-origin string rather than matched against the host.
+    for bad in [
+        "not-a-url",
+        "ftp://example.com",
+        "https://h/path/x",
+        "https://user@a.example.com",
+        "",
+    ] {
+        let gw = cors_route(Cors {
+            allowed_origins: vec![bad.into()],
+            allowed_methods: vec!["GET".into()],
+            allowed_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_secs: None,
+        });
+        let issues = validate(&gw);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field.starts_with("cors.allowed_origins[0]")),
+            "origin '{bad}' rejected: {issues:?}"
+        );
+    }
+    let gw = cors_route(Cors {
+        allowed_origins: vec!["https://a.example.com".into()],
+        allowed_methods: vec!["NOT A METHOD".into()],
+        allowed_headers: vec![],
+        expose_headers: vec![],
+        allow_credentials: false,
+        max_age_secs: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues.iter().any(|i| i.field == "cors.allowed_methods[0]"),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn validation_rejects_wildcard_mixed_with_specific_origins() {
+    let gw = cors_route(Cors {
+        allowed_origins: vec!["*".into(), "https://a.example.com".into()],
+        allowed_methods: vec!["GET".into()],
+        allowed_headers: vec![],
+        expose_headers: vec![],
+        allow_credentials: false,
+        max_age_secs: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "cors.allowed_origins" && i.message.contains("cannot be combined")),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn validation_accepts_a_well_formed_edge_policy_route() {
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.cors = Some(Cors {
+        allowed_origins: vec![
+            "https://app.example.com".into(),
+            "http://localhost:8080".into(),
+        ],
+        allowed_methods: vec!["GET".into(), "OPTIONS".into()],
+        allowed_headers: vec!["Authorization".into()],
+        expose_headers: vec!["X-Request-Id".into()],
+        allow_credentials: true,
+        max_age_secs: Some(600),
+    });
+    r.compression = Some(Compression {
+        algorithms: vec![CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd],
+        level: Some(9),
+        min_size: 128,
+        content_types: vec!["text/".into()],
+        excluded_content_types: vec!["text/event-stream".into()],
+    });
+    r.limits = Some(RequestLimits {
+        max_body_bytes: Some(1024),
+        max_header_count: Some(32),
+        max_header_bytes: Some(8192),
+    });
+    gw.routes = vec![r];
+    let issues = validate(&gw);
+    assert!(issues.is_empty(), "issues: {issues:?}");
+}
+
+#[test]
+fn validation_rejects_empty_or_malformed_compression_policy() {
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.compression = Some(Compression {
+        algorithms: vec![],
+        level: None,
+        min_size: 0,
+        content_types: vec![],
+        excluded_content_types: vec![],
+    });
+    gw.routes = vec![r];
+    let issues = validate(&gw);
+    assert!(
+        issues.iter().any(
+            |i| i.field == "compression.algorithms" && i.message.contains("compresses nothing")
+        ),
+        "issues: {issues:?}"
+    );
+
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.compression = Some(Compression {
+        algorithms: vec![CompressionAlgorithm::Gzip, CompressionAlgorithm::Gzip],
+        level: Some(23),
+        min_size: 0,
+        content_types: vec![],
+        excluded_content_types: vec![],
+    });
+    gw.routes = vec![r];
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "compression.algorithms[1]"),
+        "issues: {issues:?}"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "compression.level" && i.message.contains("out of range")),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn validation_rejects_limits_block_with_no_limits_or_zero_limits() {
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.limits = Some(RequestLimits {
+        max_body_bytes: None,
+        max_header_count: None,
+        max_header_bytes: None,
+    });
+    gw.routes = vec![r];
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "limits" && i.message.contains("carries no limits")),
+        "issues: {issues:?}"
+    );
+
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.limits = Some(RequestLimits {
+        max_body_bytes: Some(0),
+        max_header_count: None,
+        max_header_bytes: None,
+    });
+    gw.routes = vec![r];
+    let issues = validate(&gw);
+    assert!(
+        issues.iter().any(|i| i.field == "limits.max_body_bytes"),
+        "issues: {issues:?}"
     );
 }

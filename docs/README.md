@@ -15,7 +15,7 @@ AGENTS.md's index-level summaries.
 
 ## Status of this directory
 
-All M1 feature areas are written up:
+Feature areas written up so far (M1 complete; M2 in progress):
 
 - [Architecture](./architecture.md) — bounded-context layout, the
   config pipeline, dependency direction, and the request/reload
@@ -30,6 +30,8 @@ All M1 feature areas are written up:
   retries, circuit breaking, load shedding, and how the layers compose.
 - [Rate limiting](./features/rate-limiting.md) — GCRA, stacked
   windows, bounded key-space eviction.
+- [Route edge policies](./features/edge-policies.md) — CORS,
+  response compression, per-route request limits (DW-027).
 - [Authentication and authorization](./features/authn-authz.md) — the
   four credential families, the authz precedence chain, IP ACLs.
 - [State store](./features/state-store.md) — SQLite store, migrations,

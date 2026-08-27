@@ -106,6 +106,15 @@ jsonwebtoken = "9"
 # renders JSON logs with env filtering; prometheus with default features
 # OFF keeps the protobuf exporter out of the tree (text format only).
 tracing = "0.1"
+# Response compression codecs (DW-027): flate2 is MIT OR Apache-2.0
+# (rust_backend = pure-Rust miniz_oxide, no C); brotli is MIT (pure
+# Rust); zstd is MIT (zstd-sys binds the C libzstd, the same build
+# profile as rusqlite's bundled SQLite and aws-lc-rs). All three are
+# Write-based streaming encoders driven chunk-by-chunk by the dataplane's
+# compression wrapper — no whole-body buffering anywhere.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli = "8"
+zstd = "0.13"
 # OTLP trace export (#126, default-off `otlp` feature on dwara-bin): the
 # whole stack is feature-gated because it weighs on the musl release
 # binary against the DW-026 25MB budget. opentelemetry-otlp carries ONLY

@@ -58,6 +58,9 @@ fn bench_gateway() -> Gateway {
                 policies: Vec::new(),
                 priority: None,
                 auth_required: false,
+                cors: None,
+                compression: None,
+                limits: None,
                 authorization: None,
             });
         }

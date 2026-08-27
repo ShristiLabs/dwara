@@ -540,3 +540,191 @@ impl<B> std::fmt::Debug for InboundBody<B> {
             .finish_non_exhaustive()
     }
 }
+
+/// Merge one token into a response's `Vary` header (DW-027): appended to
+/// the existing comma-separated list when not already present
+/// (case-insensitive), created otherwise. RFC 9110 permits MULTIPLE
+/// `Vary` field lines; every line is folded into the membership check
+/// and the merged value, and the result replaces the set with one line —
+/// reading only the first line would drop the later lines' tokens and
+/// corrupt cache keys for upstreams that split their `Vary`. Correct
+/// `Vary` is what keeps a shared cache from serving a compressed (or
+/// origin-specific) response to a client that could not have received
+/// it.
+pub fn merge_vary(headers: &mut hyper::HeaderMap, token: &str) {
+    let mut present = false;
+    let mut merged = String::new();
+    for value in headers.get_all(hyper::header::VARY) {
+        let Ok(existing) = value.to_str() else {
+            continue;
+        };
+        if existing
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case(token))
+        {
+            present = true;
+        }
+        if !merged.is_empty() {
+            merged.push_str(", ");
+        }
+        merged.push_str(existing);
+    }
+    if present {
+        return;
+    }
+    if merged.is_empty() {
+        merged.push_str(token);
+    } else {
+        merged.push_str(", ");
+        merged.push_str(token);
+    }
+    if let Ok(v) = hyper::header::HeaderValue::from_str(&merged) {
+        headers.insert(hyper::header::VARY, v);
+    }
+}
+
+/// One route-scoped request-limit violation (DW-027): which cap was
+/// crossed, by what observed value. The proxy turns these into the 431
+/// (headers) / 413 (body) error-envelope responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteLimitViolation {
+    /// More header fields than `max_header_count`.
+    HeaderCount { count: usize, max: u32 },
+    /// Header name+value bytes sum above `max_header_bytes`.
+    HeaderBytes { bytes: u64, max: u64 },
+    /// A `Content-Length` body declared above `max_body_bytes` (rejected
+    /// before any upstream contact).
+    BodyBytes { declared: u64, max: u64 },
+}
+
+/// Check a request against a route's [`crate::config::RequestLimits`] (DW-027), right
+/// after route resolution. `content_length` is the request body's exact
+/// size when declared (`size_hint().exact()` — Content-Length for h1,
+/// the content-length pseudo-header for h2), `None` when the length is
+/// unknown (streaming). Header checks are header-count first (cheapest
+/// to report), then header bytes, then the declared body size.
+pub fn check_route_limits(
+    limits: &crate::config::RequestLimits,
+    headers: &hyper::HeaderMap,
+    content_length: Option<u64>,
+) -> Option<RouteLimitViolation> {
+    if let Some(max) = limits.max_header_count {
+        // FIELD LINES, not distinct names (the same reading as hyper's
+        // own max-headers parser bound): a header sent twice counts
+        // twice.
+        let count = headers.iter().count();
+        if count > max as usize {
+            return Some(RouteLimitViolation::HeaderCount { count, max });
+        }
+    }
+    if let Some(max) = limits.max_header_bytes {
+        let bytes: u64 = headers
+            .iter()
+            .map(|(name, value)| (name.as_str().len() + value.len()) as u64)
+            .sum();
+        if bytes > max {
+            return Some(RouteLimitViolation::HeaderBytes { bytes, max });
+        }
+    }
+    if let (Some(max), Some(declared)) = (limits.max_body_bytes, content_length) {
+        if declared > max {
+            return Some(RouteLimitViolation::BodyBytes { declared, max });
+        }
+    }
+    None
+}
+
+/// Error of the route-limited request body (DW-027).
+#[derive(Debug)]
+pub enum LimitedBodyError {
+    /// The streamed body crossed the route's `max_body_bytes` cap.
+    OverLimit { cap: u64 },
+    /// The underlying body stream errored.
+    Inner(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for LimitedBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LimitedBodyError::OverLimit { cap } => {
+                write!(f, "request body crossed the route limit of {cap} bytes")
+            }
+            LimitedBodyError::Inner(e) => write!(f, "request body failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LimitedBodyError {}
+
+/// Request body wrapped with a route's `max_body_bytes` cap (DW-027):
+/// counts streamed data frames and errors with
+/// [`LimitedBodyError::OverLimit`] the moment the running total crosses
+/// the cap — the streaming half of the body limit, for requests whose
+/// length is not declared up front (chunked, h2 without content-length).
+/// The error propagates through the dataplane's attempt machinery; the
+/// proxy recognizes it in the failure's source chain and answers 413
+/// (see `proxy::request_limit_exceeded`). `None` cap = thin passthrough
+/// (the same shape [`InboundBody`] takes with no gap configured), so the
+/// proxy can wrap unconditionally for proxied actions.
+pub struct LimitedBody<B> {
+    inner: Pin<Box<B>>,
+    seen: u64,
+    cap: Option<u64>,
+}
+
+impl<B> LimitedBody<B> {
+    pub fn new(inner: B, cap: Option<u64>) -> Self {
+        LimitedBody {
+            inner: Box::pin(inner),
+            seen: 0,
+            cap,
+        }
+    }
+}
+
+impl<B> Body for LimitedBody<B>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = LimitedBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, LimitedBodyError>>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let (Some(cap), Some(data)) = (this.cap, frame.data_ref()) {
+                    this.seen += data.len() as u64;
+                    if this.seen > cap {
+                        return Poll::Ready(Some(Err(LimitedBodyError::OverLimit { cap })));
+                    }
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(LimitedBodyError::Inner(e.into())))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+}
+
+impl<B> std::fmt::Debug for LimitedBody<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LimitedBody")
+            .field("cap", &self.cap)
+            .field("seen", &self.seen)
+            .finish_non_exhaustive()
+    }
+}

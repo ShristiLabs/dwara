@@ -74,6 +74,95 @@ fn unknown_field_is_rejected_with_path() {
 }
 
 #[test]
+fn dw027_edge_blocks_reject_unknown_fields_and_round_trip() {
+    // Strict unknown-field rejection on the new DW-027 route blocks.
+    let err = parse_gateway(
+        r#"
+routes:
+  - name: r
+    service: s
+    match: { path: { type: prefix, value: /x } }
+    action: { type: respond, status: 200 }
+    cors:
+      allowed_origins: ["*"]
+      preflight_depth: 2
+services:
+  - name: s
+    upstream: u
+upstreams:
+  - name: u
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+"#,
+    )
+    .expect_err("unknown cors field must be rejected");
+    assert!(
+        err.path.contains("cors"),
+        "path names the cors block: {err}"
+    );
+    assert!(
+        err.message.contains("preflight_depth"),
+        "error names the field: {err}"
+    );
+
+    // A fully-populated edge route survives the YAML round trip with
+    // defaults omitted.
+    let text = r#"
+routes:
+  - name: r
+    service: s
+    match: { path: { type: prefix, value: /x } }
+    action: { type: respond, status: 200 }
+    cors:
+      allowed_origins: ["https://app.example.com"]
+      allow_credentials: true
+      max_age_secs: 300
+    compression:
+      algorithms: [gzip, brotli, zstd]
+      level: 6
+      min_size: 64
+      content_types: ["text/"]
+      excluded_content_types: ["text/event-stream"]
+    limits:
+      max_body_bytes: 4096
+      max_header_count: 32
+      max_header_bytes: 8192
+services:
+  - name: s
+    upstream: u
+upstreams:
+  - name: u
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+"#;
+    let gateway = parse_gateway(text).expect("edge route parses");
+    let yaml_once = gateway_to_yaml(&gateway).expect("serialize");
+    let reparsed = parse_gateway(&yaml_once).expect("re-parse");
+    let yaml_twice = gateway_to_yaml(&reparsed).expect("re-serialize");
+    assert_eq!(yaml_once, yaml_twice, "round trip not stable");
+    assert_eq!(gateway, reparsed, "typed value changed across round trip");
+    let route = &reparsed.routes[0];
+    assert_eq!(
+        route.cors.as_ref().unwrap().allowed_methods,
+        vec!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        "default method set applies"
+    );
+    assert_eq!(
+        route.compression.as_ref().unwrap().min_size,
+        64,
+        "explicit min_size preserved"
+    );
+    assert_eq!(
+        route.limits.as_ref().unwrap().max_body_bytes,
+        Some(4096),
+        "limits preserved"
+    );
+    // Defaults omitted from the normalized form.
+    assert!(
+        !yaml_once.contains("max_age_secs: 600"),
+        "unrelated defaults stay omitted"
+    );
+}
+
+#[test]
 fn wrong_type_is_rejected_with_path() {
     let err = parse_gateway(&fixture("invalid_wrong_type.yaml"))
         .expect_err("wrong type must be rejected");

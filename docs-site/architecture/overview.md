@@ -48,7 +48,11 @@ flowchart TD
     B -->|yes| R[Reserved handler\nanswers directly]
     B -->|no| C[Route resolution]
     C -->|no match| N[404\nerror envelope]
-    C -->|match| D[Authentication]
+    C -->|match| RL[Route limits\nbody / header caps]
+    RL -->|over limit| EL[413 / 431]
+    RL --> PF{CORS preflight?}
+    PF -->|yes| PFR[204 answered by gateway\nnever proxied]
+    PF -->|no| D[Authentication]
     D -->|fails| U[401]
     D --> E[Authorization / IP ACL]
     E -->|fails| F[403]
@@ -61,6 +65,7 @@ flowchart TD
     I --> J[Endpoint pick\nload balancing]
     J --> K[Pending-request cap]
     K --> P[Connect + proxy\nstreaming, no buffering]
+    P --> RC[Response edge\ncompression + CORS headers]
 ```
 
 A few consequences worth knowing as an operator:
@@ -72,6 +77,13 @@ A few consequences worth knowing as an operator:
 - **Authentication and authorization never run for unrouted traffic** —
   they're per-route/service/listener concerns, so they only make sense
   once a route has matched.
+- **Route limits and CORS preflights run between routing and auth.**
+  A matched request is first checked against the route's `limits`
+  (413/431), and on a route with a `cors` block a browser preflight is
+  answered 204 by the gateway itself — before authentication, never
+  forwarded upstream. On the way out, a response can gain compression
+  and CORS headers. See
+  [CORS, compression, and request limits](../guide/edge-policies).
 - **Policy precedence is deny-anywhere-wins**, evaluated most-specific
   first: consumer > route > service > listener > global.
 

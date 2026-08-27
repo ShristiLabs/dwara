@@ -90,6 +90,9 @@ fn base_gateway(listener: Listener) -> Gateway {
             policies: vec![],
             priority: None,
             auth_required: false,
+            cors: None,
+            compression: None,
+            limits: None,
             authorization: None,
         }],
         services: vec![Service {

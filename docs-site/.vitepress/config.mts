@@ -59,6 +59,10 @@ export default withMermaid(
                 { text: "Getting started", link: "/guide/getting-started" },
                 { text: "Installation", link: "/guide/installation" },
                 { text: "Configuration", link: "/guide/configuration" },
+                {
+                  text: "CORS, compression, limits",
+                  link: "/guide/edge-policies",
+                },
                 { text: "Deployment", link: "/guide/deployment" },
                 { text: "Operations", link: "/guide/operations" },
                 { text: "Observability", link: "/guide/observability" },

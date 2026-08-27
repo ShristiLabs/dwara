@@ -22,7 +22,11 @@ breaker) around this diagram is documented from the operator's angle
 in the docs-site
 [architecture overview](../../docs-site/architecture/overview.md#request-pipeline); this
 page focuses on what happens inside the `proxy` action itself once
-policy has already let the request through.
+policy has already let the request through. Between route resolution
+and the action sit the DW-027 route limits and the CORS preflight
+short-circuit, and after the action the response gains compression
+and CORS decoration — see
+[edge policies](./edge-policies.md).
 
 ## Streaming, zero default buffering
 

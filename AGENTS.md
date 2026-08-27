@@ -99,9 +99,9 @@ crates/dwara-core/src/
   state/              SQLite store + migrations
   security/           tls, authn, authz
   resilience/         health, retries, breaker (passive observation)
-  dataplane/          proxy, upstream, balance, hardening, and
-                      active.rs (probe loops drive the registry —
-                      dataplane lifecycle)
+  dataplane/          proxy, upstream, balance, hardening, cors,
+                      compression, and active.rs (probe loops drive
+                      the registry — dataplane lifecycle)
 ```
 
 Dependency direction is strictly downward and **enforced in CI** by
@@ -188,11 +188,14 @@ Rules for new code:
   Consumer/Credential/Policy/Plugin/Workspace/Snapshot. Policy precedence:
   consumer > route > service > listener > global (deny-anywhere-wins).
 - **Request-path order** (do not reorder casually): reserved paths
-  (/healthz, /readyz, /metrics) → route resolution → authn → authz →
-  rate limit → gateway cap admission (priority-aware) → breaker →
-  endpoint pick → pending cap → connect. Unrouted traffic stops at
-  route resolution: listener- and global-attached policies rate-limit
-  the request before the 404; authn/authz never run pre-route.
+  (/healthz, /readyz, /metrics) → route resolution → route limits
+  (413/431) → CORS preflight short-circuit (204, pre-authn) → authn
+  → authz → rate limit → gateway cap admission (priority-aware) →
+  breaker → endpoint pick → pending cap → connect; responses then
+  gain route compression + CORS decoration (DW-027). Unrouted traffic
+  stops at route resolution: listener- and global-attached policies
+  rate-limit the request before the 404; authn/authz never run
+  pre-route.
 - **Gateway-generated responses** use the JSON error envelope
   `{error:{code,message,request_id}}`; never leak upstream internals.
 - **Secrets:** never logged, never in Debug output, redaction is exhaustive
@@ -266,6 +269,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Upstreams / LB | dwara-core | `upstream_client`, `balancing` |
 | Health | dwara-core | `passive_health`, `active_health` |
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
+| Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |
