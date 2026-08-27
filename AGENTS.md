@@ -170,7 +170,7 @@ backlog flush + drain. `POST` to the admin API is live-published.
 
 ```sh
 cargo build --workspace
-cargo test --workspace            # ~720 tests; suites spawn real servers/binaries
+cargo test --workspace            # ~867 tests; suites spawn real servers/binaries
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
