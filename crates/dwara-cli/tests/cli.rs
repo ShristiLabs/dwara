@@ -373,17 +373,127 @@ fn diff_detects_added_and_removed_route() {
     assert!(out.contains("- route r1"), "out: {out}");
 }
 
-/// PIN (documented limitation): a CHANGED upstream — same name,
-/// different endpoint — is NOT reported; diff compares name sets only.
-/// Content-level deltas are a gap, not a silent pass: this test pins
-/// the current behavior so any change is deliberate.
+/// #125: a CHANGED upstream — same name, different endpoint — is
+/// reported as `~ upstream <name>`; it is neither added nor removed.
 #[test]
-fn diff_pins_that_changed_upstream_content_is_not_reported() {
-    let b = VALID.replace("port: 1", "port: 2");
+fn diff_reports_same_name_upstream_endpoint_change() {
+    // The endpoint mapping is the only `port: 1 }` in VALID; the
+    // listener's `port: 18080` does not contain the trailing brace.
+    let b = VALID.replace("port: 1 }", "port: 2 }");
     let out = diff_configs(VALID, &b).expect("diffs");
+    assert!(out.contains("~ upstream echo"), "out: {out}");
+    assert!(!out.contains("+ upstream"), "out: {out}");
+    assert!(!out.contains("- upstream"), "out: {out}");
+}
+
+/// #125: a same-name upstream whose TIMEOUT knob changed is reported
+/// (endpoint changes are not the only visible content delta), and it
+/// is the only reported delta.
+#[test]
+fn diff_reports_same_name_upstream_timeout_change() {
+    let a = format!("{VALID}    timeouts: {{ connect_ms: 100, read_ms: 1000 }}\n");
+    let b = format!("{VALID}    timeouts: {{ connect_ms: 200, read_ms: 1000 }}\n");
+    let out = diff_configs(&a, &b).expect("diffs");
+    assert_eq!(out.trim(), "~ upstream echo", "exactly one delta: {out}");
+}
+
+/// #125: same-name content changes are reported for routes and
+/// consumers too, not just upstreams.
+#[test]
+fn diff_reports_same_name_route_and_consumer_content_changes() {
+    let route_b = VALID.replace("value: /api\n", "value: /api/v2\n");
+    let out = diff_configs(VALID, &route_b).expect("diffs");
+    assert!(out.contains("~ route r1"), "out: {out}");
+    assert!(!out.contains("+ route"), "out: {out}");
+    assert!(!out.contains("- route"), "out: {out}");
+
+    let consumer = |key: &str| {
+        format!("{VALID}consumers:\n  - name: acme\n    credentials:\n      - {{ type: api_key, key: {key} }}\n")
+    };
+    let out = diff_configs(&consumer("k1"), &consumer("k2")).expect("diffs");
+    assert!(out.contains("~ consumer acme"), "out: {out}");
+    assert!(!out.contains("+ consumer"), "out: {out}");
+    assert!(!out.contains("- consumer"), "out: {out}");
+}
+
+/// Normalization makes source key order irrelevant: the same config
+/// with mapping keys written in a different order produces identical
+/// per-entity hashes and reports no differences (the hash is over the
+/// normalized serialization, not the raw text).
+#[test]
+fn diff_ignores_source_key_order() {
+    let reordered = VALID.replace(
+        "- { address: 127.0.0.1, port: 1 }",
+        "- { port: 1, address: 127.0.0.1 }",
+    );
+    let out = diff_configs(VALID, &reordered).expect("diffs");
     assert!(
         out.contains("no route/upstream/consumer differences"),
-        "same-name content change is invisible to diff (pinned): {out}"
+        "key order must not matter: {out}"
+    );
+}
+
+/// #125 secrets discipline: when a same-name consumer's CREDENTIAL
+/// changes, the report is the name only — neither the old nor the new
+/// credential VALUE (nor any fragment of them) may appear in the diff
+/// output.
+#[test]
+fn diff_changed_consumer_report_keeps_credential_values_out() {
+    let consumer = |key: &str| {
+        format!(
+            "{VALID}consumers:\n  - name: acme\n    credentials:\n      - {{ type: api_key, key: {key} }}\n"
+        )
+    };
+    let a = consumer("sk-live-9f1c2d3b4a");
+    let b = consumer("sk-live-0e5f6a7b8c");
+    let out = diff_configs(&a, &b).expect("diffs");
+    assert_eq!(out.trim(), "~ consumer acme", "name-only report: {out}");
+    assert!(
+        !out.contains("sk-live"),
+        "credential values must never print: {out}"
+    );
+}
+
+/// #125: the diff SUBCOMMAND's exit-code contract — 0 whenever both
+/// sides compile, including a changed-ONLY diff (`~` lines with no
+/// adds/removes — the same exit code any other differences get today),
+/// and 1 when a side is invalid. Deltas print on stdout.
+#[test]
+fn binary_diff_changed_only_keeps_differences_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    std::fs::write(&a, VALID).unwrap();
+    // The only delta is the same-name endpoint change: `~ upstream echo`.
+    std::fs::write(&b, VALID.replace("port: 1 }", "port: 2 }")).unwrap();
+    let out = run_cli(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a changed-only diff is still a differences result (exit 0): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("~ upstream echo"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("no route/upstream/consumer differences"),
+        "a change must count as a difference: {stdout}"
+    );
+
+    // Identical sides: also 0, carrying the no-differences line.
+    let out = run_cli(&["diff", a.to_str().unwrap(), a.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no route/upstream/consumer differences"));
+
+    // An invalid side remains the only diff failure mode: 1.
+    let bad = dir.path().join("bad.yaml");
+    std::fs::write(&bad, "listeners: 42\n").unwrap();
+    let out = run_cli(&["diff", a.to_str().unwrap(), bad.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

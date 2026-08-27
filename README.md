@@ -1525,9 +1525,12 @@ shared host.
   collections omitted. Round-trip guarantee: the output parses back to
   the same typed value. Prints nothing on success; exit 1 on failure.
 - `dwara-cli diff <a> <b>` — compile both configs and print
-  route/upstream/consumer deltas as `+ kind name` / `- kind name`
-  lines (or "no route/upstream/consumer differences"). Exit 1 if
-  either side is invalid.
+  route/upstream/consumer deltas as `+ kind name` (added) /
+  `- kind name` (removed) / `~ kind name` (same name, different
+  content, e.g. changed endpoints or timeouts — compared by per-entity
+  hash of the normalized serialization, so source key order never
+  shows up as a change) lines (or "no route/upstream/consumer
+  differences"). Exit 1 if either side is invalid.
 - `dwara-cli lint <file>` — advisory rules BEYOND validation: findings
   about config that compiles and routes traffic but likely does not do
   what the author meant. Rules: `prefix-duplicate` (two prefix routes

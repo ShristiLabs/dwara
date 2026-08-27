@@ -196,6 +196,12 @@ the project follows semantic versioning once 1.0 is reached.
   contradicting the documented "absent: any audience accepted". The
   audience is now validated ONLY when configured: a provider without
   `audience` accepts tokens carrying any (or no) `aud` claim (#124).
+- `dwara-cli diff` compared only entity name sets, so a route, upstream,
+  or consumer kept under the same name but with changed content
+  (endpoints, timeouts, ...) was reported as "no route/upstream/consumer
+  differences". Same-name entities are now compared by per-entity
+  content hash of the normalized serialization (source key order never
+  surfaces as a change) and reported as `~ kind name` lines (#125).
 
 ### Changed
 

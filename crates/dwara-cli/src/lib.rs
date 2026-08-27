@@ -20,12 +20,12 @@
 //! (public for reuse and testing; the `dwara-loadgen` binary is a thin
 //! wrapper over it).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod loadgen;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
-use dwara_core::snapshot::{compile, validate};
+use dwara_core::snapshot::{compile, entity_content_hash, validate};
 
 /// Result of validating a config document end to end.
 pub enum ValidateOutcome {
@@ -70,8 +70,13 @@ pub fn format_config_text(text: &str) -> Result<String, String> {
 }
 
 /// Compile both documents and report route/upstream/consumer deltas as
-/// plain text (`+ kind name` / `- kind name`). Returns Err when either
-/// side is invalid (a diff against a broken config is meaningless).
+/// plain text: `+ kind name` (added), `- kind name` (removed), and
+/// `~ kind name` (present in both sides under the same name but with
+/// different content — changed endpoints, timeouts, credentials, ...
+/// detected by comparing per-entity content hashes of the normalized
+/// serialization, so source key order never shows up as a change).
+/// Returns Err when either side is invalid (a diff against a broken
+/// config is meaningless).
 pub fn diff_configs(a_text: &str, b_text: &str) -> Result<String, String> {
     let parse = |t| parse_gateway(t).map_err(|e| format!("parse failed: {e}"));
     let a = parse(a_text)?;
@@ -84,52 +89,83 @@ pub fn diff_configs(a_text: &str, b_text: &str) -> Result<String, String> {
             return Err(m.join("\n"));
         }
     }
+    // Name -> per-entity content hash, per kind. Validation has run, so
+    // names are unique within each kind and keying is safe.
     let mut out = String::new();
     let mut deltas = 0usize;
-    for (label, a_names, b_names) in [
+    for (label, ha, hb) in [
         (
             "route",
-            a.routes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-            b.routes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            hash_by_name(
+                a.routes
+                    .iter()
+                    .map(|r| (r.name.as_str(), entity_content_hash(r))),
+            )?,
+            hash_by_name(
+                b.routes
+                    .iter()
+                    .map(|r| (r.name.as_str(), entity_content_hash(r))),
+            )?,
         ),
         (
             "upstream",
-            a.upstreams
-                .iter()
-                .map(|u| u.name.as_str())
-                .collect::<Vec<_>>(),
-            b.upstreams
-                .iter()
-                .map(|u| u.name.as_str())
-                .collect::<Vec<_>>(),
+            hash_by_name(
+                a.upstreams
+                    .iter()
+                    .map(|u| (u.name.as_str(), entity_content_hash(u))),
+            )?,
+            hash_by_name(
+                b.upstreams
+                    .iter()
+                    .map(|u| (u.name.as_str(), entity_content_hash(u))),
+            )?,
         ),
         (
             "consumer",
-            a.consumers
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            b.consumers
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
+            hash_by_name(
+                a.consumers
+                    .iter()
+                    .map(|c| (c.name.as_str(), entity_content_hash(c))),
+            )?,
+            hash_by_name(
+                b.consumers
+                    .iter()
+                    .map(|c| (c.name.as_str(), entity_content_hash(c))),
+            )?,
         ),
     ] {
-        let sa: BTreeSet<&str> = a_names.into_iter().collect();
-        let sb: BTreeSet<&str> = b_names.into_iter().collect();
-        for added in sb.difference(&sa) {
+        let names_a: BTreeSet<&str> = ha.keys().copied().collect();
+        let names_b: BTreeSet<&str> = hb.keys().copied().collect();
+        for added in names_b.difference(&names_a) {
             out.push_str(&format!("+ {label} {added}\n"));
             deltas += 1;
         }
-        for removed in sa.difference(&sb) {
+        for removed in names_a.difference(&names_b) {
             out.push_str(&format!("- {label} {removed}\n"));
             deltas += 1;
+        }
+        // Same name on both sides: report it only when the content
+        // differs (the defect this fixes — name-set comparison alone
+        // silently passed same-name changes).
+        for changed in names_a.intersection(&names_b) {
+            if ha[changed] != hb[changed] {
+                out.push_str(&format!("~ {label} {changed}\n"));
+                deltas += 1;
+            }
         }
     }
     if deltas == 0 {
         out.push_str("no route/upstream/consumer differences\n");
     }
     Ok(out)
+}
+
+/// Collect one entity kind's `(name, content hash)` pairs into a map,
+/// propagating any serialization failure.
+fn hash_by_name<'a>(
+    pairs: impl Iterator<Item = (&'a str, Result<u64, String>)>,
+) -> Result<BTreeMap<&'a str, u64>, String> {
+    pairs.map(|(name, hash)| hash.map(|h| (name, h))).collect()
 }
 
 /// One advisory lint finding: `kind/name: message`.

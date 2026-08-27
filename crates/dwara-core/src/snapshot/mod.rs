@@ -29,7 +29,9 @@
 //! Content hash: a fast non-cryptographic `DefaultHasher` (SipHash-1-3) over
 //! the normalized YAML serialization of the gateway. Its purpose is change
 //! detection / generation identity, NOT cryptographic integrity; it is not
-//! suitable for adversarial settings.
+//! suitable for adversarial settings. The same hashing step backs a public
+//! per-entity variant ([`entity_content_hash`]) so tooling can compare
+//! single entities the way the gateway compares whole generations.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -1735,6 +1737,30 @@ pub struct SnapshotInfo {
     pub route_count: usize,
 }
 
+/// The single hashing step behind both the whole-gateway content hash
+/// in [`compile`] and the per-entity [`entity_content_hash`]: a
+/// `DefaultHasher` (SipHash-1-3) over a normalized YAML serialization.
+fn normalized_hash(yaml: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    yaml.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Per-entity content hash: the entity's normalized YAML serialization
+/// (stable field order, defaulted-empty fields omitted — the same
+/// normalization `gateway_to_yaml` applies to a whole [`Gateway`])
+/// through the same `DefaultHasher` as the snapshot content hash. Two
+/// entities of one kind hash equal exactly when their normalized
+/// serializations are equal, so source key order and omitted defaults
+/// do not affect the result. Same caveats as
+/// [`SnapshotInfo::content_hash`]: a per-process change-detection
+/// token, not stable across Rust versions, not a content digest.
+pub fn entity_content_hash<T: serde::Serialize>(entity: &T) -> Result<u64, String> {
+    let yaml =
+        serde_yaml_ng::to_string(entity).map_err(|e| format!("normalization failed: {e}"))?;
+    Ok(normalized_hash(&yaml))
+}
+
 /// Pure compile: validated [`Gateway`] -> [`Compiled`]. Fails with
 /// [`CompileError::Validation`] on semantic issues, or with
 /// [`CompileError::InvalidRegex`] / [`CompileError::RouteConflict`] when
@@ -1795,8 +1821,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
 
     let yaml = gateway_to_yaml(gateway)
         .map_err(|e| CompileError::Internal(format!("normalization failed: {e}")))?;
-    let mut hasher = DefaultHasher::new();
-    yaml.hash(&mut hasher);
+    let content_hash = normalized_hash(&yaml);
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -1807,7 +1832,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             regex_indices,
             rewrite_regexes,
         }),
-        content_hash: hasher.finish(),
+        content_hash,
     })
 }
 
