@@ -16,6 +16,11 @@ rust-version = "1.94"
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+# #126: direct dependency for the otlp feature's std-only exporter HTTP
+# client (http::Request/Response types behind the opentelemetry-http
+# HttpClient trait); already in the tree via hyper, so this only makes it
+# a direct one. MIT OR Apache-2.0.
+http = "1"
 hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "server", "server-graceful", "http1", "http2", "server-auto"] }
 http-body-util = "0.1"
 bytes = "1"
@@ -101,6 +106,19 @@ jsonwebtoken = "9"
 # renders JSON logs with env filtering; prometheus with default features
 # OFF keeps the protobuf exporter out of the tree (text format only).
 tracing = "0.1"
+# OTLP trace export (#126, default-off `otlp` feature on dwara-bin): the
+# whole stack is feature-gated because it weighs on the musl release
+# binary against the DW-026 25MB budget. opentelemetry-otlp carries ONLY
+# http/protobuf (http-proto; no tonic/grpc transport, no reqwest client —
+# dwara-bin ships a std-only exporter HTTP client, see its src/otlp.rs).
+# tracing-opentelemetry is the era-appropriate span bridge:
+# opentelemetry-appender-tracing has been logs-only since 0.28. All
+# Apache-2.0 except tracing-opentelemetry (MIT).
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-http = { version = "0.32", default-features = false }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "trace"] }
+tracing-opentelemetry = "0.33"
 serial_test = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 prometheus = { version = "0.14", default-features = false }

@@ -161,6 +161,13 @@ the project follows semantic versioning once 1.0 is reached.
   so group-based authorization (`allowed_groups`/`denied_groups`) now
   applies to store-managed consumers exactly as to config consumers —
   previously they could never satisfy a group rule.
+- OTLP trace export behind a default-off `otlp` cargo feature (#126):
+  built with the feature and `DWARA_OTLP_ENDPOINT` set (an `http://`
+  collector base endpoint; `/v1/traces` is appended), the gateway
+  exports its existing request root/phase spans over OTLP http/protobuf
+  to any collector receiver, flushed bounded by the shutdown drain
+  budget; the default build is unchanged (the variable stays
+  reserved-but-inert).
 
 ### Fixed
 

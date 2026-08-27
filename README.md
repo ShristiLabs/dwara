@@ -59,8 +59,11 @@ Environment variables (all optional):
 - `DWARA_LOG`: log filter in `RUST_LOG` syntax, default `dwara=info`.
 - `DWARA_ACCESS_LOG_SAMPLE`: fraction of non-error access-log lines
   emitted, 0.0-1.0, default 1.0. See "Observability".
-- `DWARA_OTLP_ENDPOINT`: reserved for future OTLP trace export;
-  currently inert (see "Observability").
+- `DWARA_OTLP_ENDPOINT`: base OTLP collector endpoint, `http://` only
+  (e.g. `http://collector:4318`; `/v1/traces` is appended) for trace
+  export. Requires building the gateway with the default-off `otlp`
+  cargo feature; in the default build this variable is reserved but
+  inert (see "Observability").
 - `DWARA_ADMIN_DEV`: `"1"` serves the admin API as plaintext on the
   configured admin bind, which must be loopback — DEV ONLY, see
   "Admin API". Default unset = mTLS only.
@@ -1636,12 +1639,28 @@ Every gateway-generated non-success body — including reserved
 leaks upstream internals (classification strings only), and
 `request_id` ties the response to the trace and access log.
 
-### OTLP (deferred)
+### OTLP (feature-gated)
 
-`DWARA_OTLP_ENDPOINT` is reserved but inert: the OTLP exporter was
-deliberately not linked in v1 (dependency weight against the binary
-size budget). The span structure it would export ships today; export
-itself is deferred to the first feature that needs a collector.
+Trace export over OTLP lives behind the default-off `otlp` cargo
+feature (dependency weight against the binary size budget — the reason
+it was deferred in v1). In the default build `DWARA_OTLP_ENDPOINT` is
+reserved but inert. Build the gateway with the feature:
+
+```sh
+cargo build -p dwara-bin --features otlp
+```
+
+Set `DWARA_OTLP_ENDPOINT` to a collector base endpoint (e.g.
+`http://collector:4318`; `/v1/traces` is appended, a full
+`.../v1/traces` URL is accepted as-is) and the gateway exports the
+request span tree documented above — root `request` span and phase
+spans, unchanged — over OTLP http/protobuf, so any collector with an
+OTLP http/protobuf receiver works (Jaeger, otelcol, SigNoz, ...). The
+built-in exporter speaks plain `http://` only: an `https://` endpoint
+fails fast at startup with one ERROR log and the gateway serves
+without trace export; the feature enabled with the endpoint unset is a
+no-op (one INFO line). Spans are batched and flushed (bounded by the
+graceful-drain budget) on the SIGTERM/SIGINT path.
 
 ## State store
 
@@ -1755,7 +1774,9 @@ pair, client and server side, plus kernel headroom:
 Benchmarks never run on pull requests. The `bench` workflow
 (`.github/workflows/bench.yml`) is scheduled weekly (Mondays, 03:17 UTC)
 and manually dispatchable: the micro job runs the criterion gate against
-the checked-in baseline; the macro job runs load profiles (errors must
+the checked-in baseline and compile-checks the default-off `otlp` cargo
+feature (its only CI coverage — the feature is never built per-push);
+the macro job runs load profiles (errors must
 be 0) and a best-effort 100k-connection test on the standard runner. A
 24h soak job exists in the same workflow but is manual-dispatch only —
 trigger it from the Actions tab when a soak is wanted (e.g. ahead of a

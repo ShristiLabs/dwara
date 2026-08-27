@@ -21,9 +21,12 @@
 //! transport, tonic/protonic codegen) against a musl <25MB binary-size
 //! budget (DW-026) and a compute-conscious CI. The span STRUCTURE ships
 //! now and is proven by an in-process span-capture test (one trace shows
-//! all phases); exporting over OTLP is deferred to the feature that
-//! first needs a collector. `DWARA_OTLP_ENDPOINT` is therefore RESERVED
-//! but inert today.
+//! all phases). Since #126 the exporter exists behind the default-off
+//! `otlp` cargo FEATURE on dwara-bin (the env var `DWARA_OTLP_ENDPOINT`
+//! is a binary-level knob and the tracing subscriber the exporter must
+//! hook lives in the bin; this module stays dependency-light by design).
+//! Default build: `DWARA_OTLP_ENDPOINT` remains RESERVED but inert;
+//! feature build: the spans defined here export over http/protobuf.
 //!
 //! ## Access logs
 //!

@@ -61,6 +61,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
+      # #126: compile check for the default-off otlp feature (OTLP trace
+      # export on dwara-bin). Deliberately NOT in ci.yml: the opentelemetry
+      # dep tree adds real compile time per push, and the feature is not
+      # part of the shipped default build — a weekly (and dispatch) check
+      # here catches feature rot at the cadence the maintainer chose.
+      - name: Feature compile check (otlp)
+        run: cargo check -p dwara-bin --features otlp
+
       - name: Run micro benchmarks (criterion, bencher format)
         run: |
           cargo bench --workspace --bench micro -- --output-format bencher | tee bench-output.txt

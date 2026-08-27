@@ -23,7 +23,7 @@ implemented.
 | Path | Contents |
 |---|---|
 | `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
-| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh) |
+| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (feature-gated OTLP trace export) |
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
 | `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
 | `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |
@@ -121,13 +121,15 @@ Rules for new code:
   expressed through the public API — each carries a comment saying why
   it stays (e.g. raw-SQL introspection of the store's connection).
   Current residuals: `state/store.rs`,
-  `dataplane/{balance,upstream,proxy}.rs`, and `dwara-bin`'s
-  `listeners.rs` (panic supervisor). New suites must be
+  `dataplane/{balance,upstream,proxy}.rs`, `dwara-bin`'s
+  `listeners.rs` (panic supervisor), and `dwara-bin`'s `otlp.rs`
+  (private-helper white-box tests; justification comment in source).
+  New suites must be
   deterministic under load: bounded polls, unique ports, generous
   margins; see the Test map below.
 - **Feature flags** are declared in the owning crate's `Cargo.toml`
-  with a comment stating why they exist (see `loom`). No default-on
-  features beyond the standard set.
+  with a comment stating why they exist (see `loom` on dwara-core,
+  `otlp` on dwara-bin). No default-on features beyond the standard set.
 
 ## Development environment
 
@@ -157,6 +159,7 @@ if invalid). Main environment variables:
 | `DWARA_CREDENTIAL_PEPPER` | unset | per-deployment secret peppering stored credential hashes (#124); unset = legacy-only mode |
 | `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin (dev only) |
 | `DWARA_LOG` / `DWARA_ACCESS_LOG_SAMPLE` | `dwara=info` / `1.0` | log filter / access-line sampling |
+| `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export; live only in an `otlp`-feature build (`http://` endpoint), reserved-but-inert otherwise |
 | `DWARA_HTTP1_*`, `DWARA_H2_*`, `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | protocol hardening knobs |
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful drain bound |
 
@@ -176,6 +179,7 @@ cargo run -q -p dwara-cli --bin dwara-cli -- schema   # config reference (diff v
 ```
 
 Extras when touching those areas: `cargo test -p dwara-core --features loom --test loom`,
+`cargo test -p dwara-bin --features otlp --test otlp_export`,
 `cargo bench --workspace --bench micro`, `actionlint .github/workflows/<file>`,
 `scripts/bench-macro.sh` (macro rig), `cargo fuzz run <target>` (from `fuzz/`).
 
@@ -256,7 +260,7 @@ implementations without touching call sites — extend, do not break them.
 | Resilience | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | State | `store` |
 | Auth | `authn`, `authz` |
-| Ops | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence` |
+| Ops | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert` |
 | Tooling | `cli` (+ `loadgen_e2e`), `swap_stress`, `loom` (feature-gated) |
 
 ## Notable implementation facts

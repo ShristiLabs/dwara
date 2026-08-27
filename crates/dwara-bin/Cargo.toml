@@ -21,6 +21,36 @@ tracing-subscriber = { workspace = true }
 # #124: zeroizes the credential-pepper copy captured by the state-store
 # seed closure after hashing (same crate dwara-core already zeroizes with).
 zeroize = { workspace = true }
+# #126 (feature `otlp`, default OFF): OTLP trace export of the DW-021
+# span tree. Optional so none of it links into the default build; the
+# wiring lives in src/otlp.rs. async-trait/http/bytes serve the std-only
+# exporter HTTP client (opentelemetry-http's HttpClient impl).
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-http = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+
+[features]
+# #126: OTLP trace export (http/protobuf) of the existing root/phase
+# spans when DWARA_OTLP_ENDPOINT is set. Default-off: the opentelemetry
+# stack measured +414,256 bytes (~405 KiB) on the local release build
+# (musl static linking may differ) against the DW-026 25MB size budget —
+# the default build keeps DWARA_OTLP_ENDPOINT reserved-but-inert
+# (dwara-core::observability documents the decision).
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-http",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:async-trait",
+    "dep:http",
+    "dep:bytes",
+]
 
 [dev-dependencies]
 rcgen = { workspace = true }

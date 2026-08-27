@@ -33,11 +33,17 @@
 //! - `DWARA_ACCESS_LOG_SAMPLE` (DW-021): fraction of non-error access
 //!   lines emitted, 0.0-1.0, default 1.0; 5xx responses are always
 //!   logged (see dwara-core's observability docs).
-//! - `DWARA_OTLP_ENDPOINT` (DW-021): RESERVED but inert in v1 — the
-//!   opentelemetry exporter was deliberately not linked (dep weight vs
-//!   the DW-026 musl size budget); the span structure it would export
-//!   ships today and is verified in-process by dwara-core's span-capture
-//!   test. See dwara-core::observability for the full decision.
+//! - `DWARA_OTLP_ENDPOINT` (DW-021, #126): base OTLP collector endpoint
+//!   (e.g. `http://collector:4318`; `/v1/traces` is appended). LIVE only
+//!   when the binary is built with the default-off `otlp` cargo feature —
+//!   the opentelemetry stack is real megabytes against the DW-026 musl
+//!   size budget, so the default build keeps this variable reserved but
+//!   INERT (spans still exist; only the wire exporter is absent —
+//!   dwara-core::observability documents the decision, the bin's `otlp`
+//!   module the wiring). With the feature enabled and the variable set,
+//!   the root/phase spans export over http/protobuf and are flushed
+//!   (bounded) on the SIGTERM/SIGINT drain path; feature enabled with
+//!   the variable unset = one INFO line and no exporter.
 //! - `DWARA_ADMIN_DEV` (DW-022): "1" serves the admin API as PLAINTEXT
 //!   on 127.0.0.1 — DEV ONLY, refuses to start for a non-loopback
 //!   admin bind, and must never be set in production (mTLS is the
@@ -72,9 +78,17 @@
 //! passthrough splices are NOT drained (documented limitation: no drain
 //! signaling through a raw TLS pipe; they run until the process exits);
 //! whatever remains at the deadline is force-closed by process exit.
+//! With the `otlp` feature, the exporter flush is the LAST bounded step
+//! before exit (see the DWARA_OTLP_ENDPOINT bullet).
 
 mod listeners;
 mod reload;
+
+// #126: OTLP trace export lives behind the default-off `otlp` cargo
+// feature (musl size budget; see the module docs). Feature OFF = the
+// module does not exist and DWARA_OTLP_ENDPOINT stays inert.
+#[cfg(feature = "otlp")]
+mod otlp;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -94,6 +108,8 @@ use listeners::{bind_listener, run_listener_supervised, ListenerMode};
 use reload::{refresh_tls_states, reload, spawn_file_watcher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
@@ -118,13 +134,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Observability init (DW-021): JSON on STDOUT, filtered by DWARA_LOG
     // (RUST_LOG syntax; default dwara=info). Installed FIRST so startup
     // logs flow through the same pipeline as request logs.
+    //
+    // #126: with the `otlp` feature, DWARA_OTLP_ENDPOINT additionally
+    // bridges the span tree into an OTLP exporter — the provider must be
+    // built BEFORE the subscriber (the bridge is a subscriber layer), so
+    // the status line is logged after init, not here. The composition is
+    // registry + EnvFilter + JSON fmt (identical to the fmt()-builder
+    // form) so the OTLP layer can join the chain when compiled in;
+    // feature OFF compiles the exact same subscriber as before.
+    #[cfg(feature = "otlp")]
+    let otlp = otlp::Otlp::from_env();
     let filter =
         EnvFilter::new(std::env::var("DWARA_LOG").unwrap_or_else(|_| "dwara=info".to_string()));
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .with_target(true)
-        .init();
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().json().with_target(true));
+    #[cfg(feature = "otlp")]
+    let subscriber = subscriber.with(otlp.layer());
+    subscriber.init();
+    #[cfg(feature = "otlp")]
+    otlp.log_status();
     tls::install_aws_lc_rs_provider();
     let config_path = PathBuf::from(
         std::env::var("DWARA_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
@@ -551,6 +580,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         tracing::info!("drained, exiting");
     }
+
+    // #126: OTLP flush on the shutdown path — the exporter drains its
+    // batch and posts the remaining spans, bounded by whatever is left
+    // of the drain budget (the SDK caps itself at 5s). Feature OFF or
+    // endpoint unset = nothing here.
+    #[cfg(feature = "otlp")]
+    otlp.shutdown(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .await;
+
     std::process::exit(0);
 }
 
