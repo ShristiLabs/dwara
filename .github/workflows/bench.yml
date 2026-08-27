@@ -14,20 +14,28 @@
 #            baseline.json is the DEV-MACHINE reference (see its meta.note);
 #            while it is the one in place, the gate SKIPS comparison with a
 #            clear notice and fails open. BOOTSTRAP: immediately after this
-#            workflow merges, dispatch the `baseline-refresh` job ONCE — it
-#            re-runs the benches on the CI runner and commits a CI-captured
-#            baseline (meta.machine = ubuntu-latest), after which the
-#            weekly gate compares like-for-like.
-#   baseline-refresh — manual (workflow_dispatch) ONLY. Runs the micro
-#            benches ON THE CI RUNNER and COMMITS the refreshed baseline
-#            back to this branch (job-level permissions: contents: write;
-#            uses the repo's standard GITHUB_TOKEN — no extra secrets).
+#            workflow merges, dispatch the baseline refresh ONCE
+#            (`gh workflow run bench.yml --ref main -f
+#            job=baseline-refresh`) — it re-runs the benches on the CI
+#            runner and commits a CI-captured baseline (meta.machine =
+#            ubuntu-latest), after which the weekly gate compares
+#            like-for-like.
+#   baseline-refresh — manual (workflow_dispatch, `-f job=baseline-refresh`)
+#            ONLY. Runs the micro benches ON THE CI RUNNER and COMMITS the
+#            refreshed baseline back to this branch (job-level permissions:
+#            contents: write; uses the repo's standard GITHUB_TOKEN — no
+#            extra secrets).
 #   macro  — Linux end-to-end load rig (gateway + echo upstream +
 #            dwara-loadgen) at low/med/high concurrency, asserting errors=0,
 #            plus the 100k-connection test with a raised fd limit.
-#   soak   — 24h soak. DEFINED but DISABLED: it is workflow_dispatch-only
-#            (no cron below) so a 24h runner is never burned by default.
-#            Trigger manually from the Actions tab when a soak is wanted.
+#   soak   — 24h soak. DEFINED but DISABLED: it runs only when explicitly
+#            dispatched with `-f job=soak`, so a 24h runner is never burned
+#            by the weekly schedule or by a routine manual dispatch.
+#
+# Dispatch job selection (#127): the `job` input routes a manual run —
+# empty/`gate` runs the weekly gate (micro+macro), `baseline-refresh` and
+# `soak` run ONLY those jobs. Selecting via input (not per-job buttons) is
+# forced by GitHub: a dispatch always evaluates every job's `if:`.
 
 name: bench
 
@@ -39,6 +47,16 @@ on:
     # Weekly, Monday 03:17 UTC (off the :00 mark to shed load).
     - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run: gate (default; micro+macro), baseline-refresh, or soak"
+        required: false
+        default: "gate"
+        type: choice
+        options:
+          - gate
+          - baseline-refresh
+          - soak
 
 concurrency:
   group: bench-${{ github.ref }}
@@ -50,6 +68,11 @@ env:
 jobs:
   micro:
     name: micro benchmarks + regression gate
+    # Weekly schedule or a gate dispatch. NOT on the baseline-refresh
+    # dispatch (the refresh job re-runs the benches itself; a parallel
+    # micro would just fail-open against the dev baseline the refresh is
+    # about to replace) and not on soak dispatches.
+    if: github.event_name == 'schedule' || inputs.job == 'gate'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -70,7 +93,11 @@ jobs:
         run: cargo check -p dwara-bin --features otlp
 
       - name: Run micro benchmarks (criterion, bencher format)
+        # pipefail (#127): GitHub's default run shell is bash WITHOUT
+        # pipefail, so a failing `cargo bench` previously hid behind
+        # tee's exit 0 and the gate compared a truncated bench file.
         run: |
+          set -o pipefail
           cargo bench --workspace --bench micro -- --output-format bencher | tee bench-output.txt
 
       - name: Regression gate vs baseline (fail on >25% regression)
@@ -90,12 +117,14 @@ jobs:
 
   baseline-refresh:
     name: refresh micro baseline on the CI runner (dispatch only)
-    # Manual ONLY (workflow_dispatch): re-captures benches/baseline.json on
-    # the same runner class the weekly `micro` gate uses, and commits the
-    # result back to the ref it was dispatched on. This is the bootstrap
-    # step after this workflow first merges (the checked-in baseline is a
-    # dev-machine reference; cross-machine ns/iter comparison is invalid).
-    if: github.event_name == 'workflow_dispatch'
+    # Manual ONLY, selected by input (#127 bootstrap): re-captures
+    # benches/baseline.json on the same runner class the weekly `micro`
+    # gate uses, and commits the result back to the ref it was dispatched
+    # on. This is the bootstrap step after this workflow first merges
+    # (the checked-in baseline is a dev-machine reference; cross-machine
+    # ns/iter comparison is invalid). Dispatch once after merge:
+    #   gh workflow run bench.yml --ref main -f job=baseline-refresh
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'baseline-refresh'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -110,7 +139,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
       - name: Run micro benchmarks and write CI-captured baseline
+        # pipefail (#127): a failing `cargo bench` must fail the pipeline,
+        # not hide behind the writer script's exit 0 (which would commit a
+        # baseline parsed from truncated output — the script does reject
+        # empty input, but pipefail fails the step at the source).
         run: |
+          set -o pipefail
           cargo bench --workspace --bench micro -- --output-format bencher \
             | scripts/bench-baseline.py --write crates/dwara-core/benches/baseline.json \
                 --force --machine ubuntu-latest
@@ -129,6 +163,10 @@ jobs:
 
   macro:
     name: macro load rig (gateway end-to-end)
+    # Same trigger surface as `micro` minus the refresh leg: weekly
+    # schedule or an explicit gate dispatch. Never on soak dispatches
+    # (that runner budget belongs to the soak).
+    if: github.event_name == 'schedule' || inputs.job == 'gate'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -150,6 +188,13 @@ jobs:
         # (continue-on-error) — treat a red X here as "needs a larger
         # runner or a dedicated host", not a code regression. On a
         # dedicated Linux host: ulimit -n 1048576 before running.
+        #
+        # MAINTAINER DECISION (#127): this STAYS best-effort on the
+        # standard runner — the continue-on-error is deliberate, not a
+        # pending fix. Upgrading to a guaranteed 100k runner is a
+        # cost/infra decision that has been explicitly declined for the
+        # weekly cadence; dedicated-host verification remains available
+        # via scripts/bench-macro.sh (see its header) when needed.
         continue-on-error: true
         run: |
           ulimit -n 1048576 || ulimit -n "$(ulimit -Hn)"
@@ -158,11 +203,14 @@ jobs:
 
   soak:
     name: 24h soak (manual only — disabled by default)
-    # DELIBERATELY NOT SCHEDULED. A 24h soak burns a runner for a day;
-    # it exists to be triggered manually (Actions tab -> bench -> Run
-    # workflow -> soak) when wanted, e.g. ahead of a release. The
-    # schedule section above intentionally lists only the weekly bench.
-    if: github.event_name == 'workflow_dispatch'
+    # DELIBERATELY NOT SCHEDULED and not on routine dispatches (#127): a
+    # 24h soak burns a runner for a day, so it runs ONLY when the
+    # dispatch input explicitly selects it:
+    #   gh workflow run bench.yml --ref main -f job=soak
+    # (or Actions tab -> bench -> Run workflow -> job: soak), e.g. ahead
+    # of a release. Before the `job` input existed, ANY manual dispatch
+    # of this workflow also started the soak as a side effect.
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'soak'
     runs-on: ubuntu-latest
     timeout-minutes: 1500
     steps:

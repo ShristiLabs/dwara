@@ -5,6 +5,12 @@ name: release-artifacts
 # binaries for amd64+arm64 (the arm64 leg via QEMU emulation), enforces
 # the <25 MB size bar, uploads checksummed dwara-<ver>-<target>.tar.gz
 # tarballs, and pushes multi-arch scratch and distroless images to GHCR.
+# The images are built FROM the size-bar-verified artifacts of the
+# musl-binaries job (#127): the images job downloads them, re-verifies
+# the sha256 checksums, and COPYs the binaries into the release
+# Dockerfiles (Dockerfile.release-{scratch,distroless}) — nothing is
+# compiled twice, and the published images are byte-for-byte the
+# published tarball binaries.
 
 permissions:
   contents: read
@@ -36,10 +42,11 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
 
       # QEMU lets the arm64 leg run the aarch64 rust:1.94-alpine image
-      # (docker run --platform linux/arm64) on the x86_64 runner; same
-      # setup the images job below relies on. The emulated build is
-      # several times slower than native cross-compilation, which is
-      # acceptable here only because this workflow runs on version tags.
+      # (docker run --platform linux/arm64) on the x86_64 runner. The
+      # emulated build is several times slower than native
+      # cross-compilation, which is acceptable here only because this
+      # workflow runs on version tags. (The images job no longer needs
+      # QEMU since #127: it only COPYs prebuilt static binaries.)
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # pinned: v3 @ c7c53464
 
       - name: Build in rust:1.94-alpine (musl, static)
@@ -85,13 +92,36 @@ jobs:
           path: dist/*
 
   images:
-    name: images (multi-arch)
+    name: images (multi-arch, from verified musl artifacts)
+    # #127: reuse the binaries the musl-binaries job already built,
+    # size-barred, checksummed, and uploaded — no second compile of
+    # either arch. The release Dockerfiles have no RUN step (static
+    # binaries are only COPYed), so no QEMU setup is needed here even
+    # for the arm64 platform leg.
     runs-on: ubuntu-latest
     needs: musl-binaries
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # pinned: v3 @ c7c53464
+      - name: Download size-bar-verified musl artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pinned: v4 @ d3f86a10
+        with:
+          # Both matrix legs (dwara-linux-musl-amd64 / -arm64) uploaded
+          # tarball + .sha256; merged into one directory, no collisions
+          # (filenames carry the target triple).
+          path: dist
+          pattern: dwara-linux-musl-*
+          merge-multiple: true
+
+      - name: Verify checksums and stage per-arch binaries
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+          cd ..
+          # Layout the release Dockerfiles COPY from (staged/<arch>/dwara).
+          mkdir -p staged/amd64 staged/arm64
+          tar -xzf dist/dwara-*-x86_64-unknown-linux-musl.tar.gz -C staged/amd64
+          tar -xzf dist/dwara-*-aarch64-unknown-linux-musl.tar.gz -C staged/arm64
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # pinned: v3 @ 8d2750c6
 
@@ -106,7 +136,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # pinned: v6 @ 10e90e36
         with:
           context: .
-          file: ./Dockerfile.scratch
+          file: ./Dockerfile.release-scratch
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -117,7 +147,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # pinned: v6 @ 10e90e36
         with:
           context: .
-          file: ./Dockerfile.distroless
+          file: ./Dockerfile.release-distroless
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

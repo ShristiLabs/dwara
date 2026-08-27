@@ -316,7 +316,11 @@ implementations without touching call sites — extend, do not break them.
   supply-chain (cargo-deny + SBOM) on pushes/PRs to main, path-filtered,
   concurrency-cancelled.
 - `bench.yml` / `fuzz.yml`: scheduled weekly + manual dispatch only —
-  never on PRs.
+  never on PRs. `bench.yml` dispatches take a `job` input (`gate`
+  default, `baseline-refresh` to (re)capture the CI micro-bench
+  baseline: `gh workflow run bench.yml --ref main -f
+  job=baseline-refresh`, and `soak`); `fuzz.yml` builds on a dated
+  nightly pin (bump procedure in the workflow).
 - `release-artifacts.yml`: tag-only (`v*`), musl binaries with a 25 MB bar
   and GHCR multi-arch images.
 - Every action ref across `.github/workflows/` is pinned to a full commit

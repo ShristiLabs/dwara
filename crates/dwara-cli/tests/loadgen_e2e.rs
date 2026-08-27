@@ -125,6 +125,41 @@ fn paced_run_applies_rate_both_ways() {
     );
 }
 
+/// The paced rate is GLOBAL across all connections (#127 multi-worker
+/// pin): four connections sharing one paced run at --rate 20 --duration 2
+/// must TOGETHER stay inside rate*duration plus at most a slice of burst
+/// margin. A per-connection (per-worker) pacer would issue ~4x the
+/// schedule; a starved pool would fall well below half of it. Exercises
+/// the real dispenser task and the real epoch-grid starve-sleeps of the
+/// actual paced path, concurrently.
+#[test]
+fn paced_rate_applies_globally_across_connections() {
+    let port = free_port();
+    let (code, out) = run_loadgen(
+        &[
+            "--url",
+            &format!("http://127.0.0.1:{port}/"),
+            "--echo",
+            &port.to_string(),
+            "--connections",
+            "4",
+            "--duration",
+            "2",
+            "--rate",
+            "20",
+        ],
+        Duration::from_secs(15),
+    );
+    assert_eq!(code, Some(0), "no request failures expected: {out}");
+    let (requests, errors) = parse_counts(&out);
+    assert_eq!(errors, 0);
+    assert!(
+        (15..=47).contains(&requests),
+        "4 connections at rate 20 for 2s must total the GLOBAL schedule \
+         (20*2 + slice/burst margin), got {requests}"
+    );
+}
+
 /// RESULT line contract: exact field names and order, values parseable,
 /// success percentiles monotone, err_p99_ns present even at 0.
 #[test]

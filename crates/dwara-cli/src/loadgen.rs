@@ -161,6 +161,76 @@ pub struct Totals {
     pub errors: u64,
 }
 
+/// Pacing slice: the dispenser wakes and tops up every 50 ms, and a
+/// starved worker sleeps to the NEXT slice boundary. One constant (and
+/// the single epoch in [`Pacer`]) is what keeps the two sides of pacing
+/// on the same grid.
+pub const PACE_SLICE: Duration = Duration::from_millis(50);
+
+/// Shared pacing state: the permit balance plus the single time base
+/// both sides of pacing use (#127).
+///
+/// The dispenser task's interval is anchored to `epoch`, and every
+/// starved worker sleeps to the next `epoch + k*PACE_SLICE` boundary.
+/// Before this was shared, the starve-sleep re-anchored to its own
+/// `now + 50ms` on every wake, drifting against the dispenser's grid —
+/// a worker could land just before a dispensation and pay a second
+/// slice of wait for the same token.
+pub struct Pacer {
+    /// Permit balance. Workers CAS-decrement; the pacing task tops up
+    /// with [`pace_top_up`]. In unbounded mode (`--rate 0`) it is
+    /// pre-filled with a huge balance so workers never wait.
+    pub permits: std::sync::atomic::AtomicU64,
+    /// Pacing epoch; `None` in unbounded mode (workers never starve).
+    pub epoch: Option<Instant>,
+}
+
+impl Pacer {
+    /// Unbounded-mode pacer: a huge pre-filled balance, no epoch.
+    pub fn unbounded() -> Self {
+        Pacer {
+            permits: std::sync::atomic::AtomicU64::new(u64::MAX / 2),
+            epoch: None,
+        }
+    }
+}
+
+/// One dispenser tick's top-up decision (#127): how many permits to add,
+/// given the cumulative total the rate schedule owes (`owed`), the
+/// cumulative total already dispensed (`paid`), and the current
+/// unconsumed `balance`. The top-up target is
+/// `min(owed, consumed + per_slice)` with `consumed = paid - balance`:
+///
+/// - the owed-total keeps the exact requested schedule (rates below one
+///   token per slice remain expressible), and
+/// - the balance may never exceed one slice above what workers have
+///   actually CONSUMED, so a worker that stops consuming and later
+///   resumes cannot discharge the accumulated backlog as one burst — a
+///   burst would contaminate paced latency percentiles.
+///
+/// Concurrency: `balance` is read once per tick; a worker consuming
+/// concurrently only lowers the real balance, so the computed target is
+/// an upper bound with at most the intended one slice of slack —
+/// over-dispensing past the cap is impossible.
+///
+/// Pure arithmetic; unit-tested in `tests/loadgen_unit.rs`.
+pub fn pace_top_up(owed: u64, paid: u64, balance: u64, per_slice: u64) -> u64 {
+    let consumed = paid.saturating_sub(balance);
+    owed.min(consumed.saturating_add(per_slice))
+        .saturating_sub(paid)
+}
+
+/// Wait from `now` until the next pacing-slice boundary STRICTLY after
+/// `now`, where boundaries are `epoch + k * PACE_SLICE` (k = 1, 2, ...).
+/// Pure arithmetic over `Instant`s; unit-tested in
+/// `tests/loadgen_unit.rs`. `now` before `epoch` (never in practice)
+/// reads as phase 0 and waits one full slice.
+pub fn until_next_tick(now: Instant, epoch: Instant) -> Duration {
+    let slice = PACE_SLICE.as_millis() as u64;
+    let phase = now.saturating_duration_since(epoch).as_millis() as u64 % slice;
+    Duration::from_millis(if phase == 0 { slice } else { slice - phase })
+}
+
 /// Per-run state shared by all workers: request/error counters plus the
 /// success and error latency histograms (error latencies kept separate so
 /// failures never contaminate the success percentiles).
@@ -202,41 +272,48 @@ pub async fn run(args: Args) -> i32 {
     // they are reported as err_p99 on the RESULT line.
     let err_histogram = Arc::new(std::sync::Mutex::new(Histogram::default()));
     // Unbounded mode pre-fills a huge permit balance so workers never wait;
-    // paced mode starts at 0 and is dispensed by the pacing task below.
-    let permits = Arc::new(std::sync::atomic::AtomicU64::new(if args.rate > 0 {
-        0
+    // paced mode starts at 0, is dispensed by the pacing task below, and
+    // its epoch anchors BOTH the dispenser tick and the workers'
+    // starve-sleeps (see Pacer).
+    let pacer = Arc::new(if args.rate > 0 {
+        Pacer {
+            permits: std::sync::atomic::AtomicU64::new(0),
+            epoch: Some(Instant::now()),
+        }
     } else {
-        u64::MAX / 2
-    }));
+        Pacer::unbounded()
+    });
 
-    if args.rate > 0 {
-        // Pacing: dispense `rate` tokens per second in 50ms slices. The
-        // balance is CLAMPED to one slice of headroom after each
-        // dispensation: if the workers ever fall behind (GC pause, runner
-        // hiccup), unused tokens must not accumulate and later burst out —
-        // a burst would contaminate paced latency percentiles.
-        // Unbounded mode leaves a huge permit balance, so workers never
-        // wait on it.
-        let permits = permits.clone();
+    if let Some(epoch) = pacer.epoch {
+        // Pacing: dispense `rate` tokens per second in PACE_SLICE slices.
+        // Each tick tops the cumulative dispensed total up to
+        // `min(rate * elapsed + one slice, consumed + one slice)` via
+        // [pace_top_up]: the owed-total keeps the exact requested schedule
+        // (even below 20 rps, where per-slice dispensing cannot), while the
+        // consumed-relative cap bounds catch-up — unused tokens never
+        // accumulate behind an idle worker, so resumed workers cannot
+        // discharge a backlog as one burst (#127).
+        let pacer = pacer.clone();
         let per_slice = ((args.rate as f64 / 20.0).ceil() as u64).max(1);
         let rate = args.rate;
-        let pace_start = Instant::now();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(50));
-            // Cumulative tokens ever dispensed. Each tick tops the total up
-            // to `rate * elapsed + one slice of headroom`. Dispensing per
-            // slice with a balance clamp cannot express rates below 20/s (a
-            // slice always dispenses at least 1 token); an owed-total
-            // dispenser keeps the exact requested schedule while the
-            // headroom bound prevents burst accumulation if workers fall
-            // behind.
+            // interval_at anchors the grid to the shared epoch so the
+            // first tick fires immediately and later ticks land exactly on
+            // the boundaries starved workers sleep to.
+            let mut tick =
+                tokio::time::interval_at(tokio::time::Instant::from_std(epoch), PACE_SLICE);
+            // Cumulative tokens ever dispensed.
             let mut paid: u64 = 0;
             loop {
                 tick.tick().await;
-                let allowed = (rate as f64 * pace_start.elapsed().as_secs_f64()) as u64 + per_slice;
-                if paid < allowed {
-                    permits.fetch_add(allowed - paid, std::sync::atomic::Ordering::Relaxed);
-                    paid = allowed;
+                let owed = (rate as f64 * epoch.elapsed().as_secs_f64()) as u64 + per_slice;
+                let balance = pacer.permits.load(std::sync::atomic::Ordering::Relaxed);
+                let add = pace_top_up(owed, paid, balance, per_slice);
+                if add > 0 {
+                    pacer
+                        .permits
+                        .fetch_add(add, std::sync::atomic::Ordering::Relaxed);
+                    paid += add;
                 }
             }
         });
@@ -274,7 +351,7 @@ pub async fn run(args: Args) -> i32 {
             path.clone(),
             deadline,
             timeout,
-            permits.clone(),
+            pacer.clone(),
             shared.clone(),
         )));
     }
@@ -298,16 +375,17 @@ pub async fn run(args: Args) -> i32 {
 }
 
 /// One load-generation connection: owns a persistent hyper connection,
-/// acquires pacing permits, and records each request's outcome into
-/// `shared` until `deadline`. The first (warmup) request per connection
-/// is unrecorded, so percentiles measure pure RTT on warm connections.
+/// acquires pacing permits from `pacer`, and records each request's
+/// outcome into `shared` until `deadline`. The first (warmup) request per
+/// connection is unrecorded, so percentiles measure pure RTT on warm
+/// connections.
 pub async fn worker(
     scheme: String,
     authority: String,
     path: String,
     deadline: Instant,
     timeout: Duration,
-    permits: Arc<std::sync::atomic::AtomicU64>,
+    pacer: Arc<Pacer>,
     shared: Arc<SharedState>,
 ) {
     let mut conn: Option<(
@@ -324,9 +402,10 @@ pub async fn worker(
         // Acquire one rate permit (unbounded mode: the balance is huge, so
         // this is a single uncontended atomic).
         loop {
-            let b = permits.load(std::sync::atomic::Ordering::Relaxed);
+            let b = pacer.permits.load(std::sync::atomic::Ordering::Relaxed);
             if b > 0
-                && permits
+                && pacer
+                    .permits
                     .compare_exchange(
                         b,
                         b - 1,
@@ -340,12 +419,20 @@ pub async fn worker(
             if Instant::now() >= deadline {
                 return;
             }
-            // Starved of permits: sleep until the next 50ms pacing slice
-            // boundary rather than busy-yielding — a yield_now spin burns
-            // a full core per waiting worker and contaminates the paced
-            // latencies of everyone else.
-            let now = tokio::time::Instant::now();
-            tokio::time::sleep_until(now + Duration::from_millis(50)).await;
+            // Starved of permits: sleep to the NEXT dispenser boundary on
+            // the pacer's shared epoch grid rather than busy-yielding — a
+            // yield_now spin burns a full core per waiting worker and
+            // contaminates the paced latencies of everyone else. Sleeping
+            // to an unaligned now+50ms (the old behavior) drifts against
+            // the dispenser: it can wake just before a dispensation and
+            // pay a second slice of wait for the same token (#127). The
+            // `None` arm is unreachable in unbounded mode (the balance is
+            // pre-filled huge); the full-slice fallback just stays honest.
+            let wait = pacer
+                .epoch
+                .map(|epoch| until_next_tick(Instant::now(), epoch))
+                .unwrap_or(PACE_SLICE);
+            tokio::time::sleep(wait).await;
         }
 
         let start = Instant::now();

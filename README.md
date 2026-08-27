@@ -139,7 +139,11 @@ The release workflow (`.github/workflows/release-artifacts.yml`) runs
 ONLY on `v*` tag push — nothing builds on PRs or pushes to `main`. A
 tag cross-builds amd64 and arm64 musl binaries, enforces a 25 MB
 stripped-binary size bar per arch, and publishes multi-arch images to
-GHCR. There is no gnu build (see `packaging/README.md`).
+GHCR assembled from those verified binaries: the images job downloads
+the checksummed artifacts, re-verifies the sha256s, and COPYs them in,
+so a published image is byte-identical to the published tarball binary
+— nothing is compiled twice (#127). There is no gnu build (see
+`packaging/README.md`).
 
 ## Configuration
 
@@ -1738,6 +1742,11 @@ cargo bench --workspace --bench micro -- --output-format bencher \
   | scripts/bench-baseline.py --write crates/dwara-core/benches/baseline.json
 ```
 
+The checked-in baseline is a dev-machine reference; the CI gate fails
+open until a CI-captured baseline exists, so bootstrap it once after
+first merge with `gh workflow run bench.yml --ref main -f
+job=baseline-refresh` (re-run the same command to re-capture later).
+
 ### Macro load testing
 
 `scripts/bench-macro.sh [DURATION_SECS] [CONNS...]` builds the release
@@ -1757,6 +1766,9 @@ dwara-loadgen --url http://127.0.0.1:18080/ \
 
 `--rate 0` (default) is unbounded — each connection issues back-to-back
 requests; a positive value paces a global requests-per-second target.
+Pacing dispenses permits in 50 ms slices and caps catch-up at what
+workers have consumed plus one slice, so a rig that falls behind never
+discharges the accumulated backlog as one burst (#127).
 `--echo PORT` also serves a minimal echo upstream in the same process
 (`--echo-only` serves just the upstream; `--echo-body` sets the response
 size, default 128 bytes). Output includes a machine-parseable `RESULT:`
@@ -1777,10 +1789,12 @@ and manually dispatchable: the micro job runs the criterion gate against
 the checked-in baseline and compile-checks the default-off `otlp` cargo
 feature (its only CI coverage — the feature is never built per-push);
 the macro job runs load profiles (errors must
-be 0) and a best-effort 100k-connection test on the standard runner. A
-24h soak job exists in the same workflow but is manual-dispatch only —
-trigger it from the Actions tab when a soak is wanted (e.g. ahead of a
-release).
+be 0) and a best-effort 100k-connection test on the standard runner
+(deliberately best-effort, #127). A `job` dispatch input selects
+one-off runs: `gate` (default; micro+macro), `baseline-refresh`
+(bootstrap the CI-captured regression baseline), or `soak` (a 24h soak,
+e.g. ahead of a release — never started as a side effect of other
+dispatches).
 
 ## Fuzzing and concurrency testing
 

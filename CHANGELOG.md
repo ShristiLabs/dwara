@@ -209,6 +209,17 @@ the project follows semantic versioning once 1.0 is reached.
   differences". Same-name entities are now compared by per-entity
   content hash of the normalized serialization (source key order never
   surfaces as a change) and reported as `~ kind name` lines (#125).
+- Paced-mode starve-sleep in `dwara-loadgen` re-anchored to its own
+  clock: a starved worker slept `now + 50ms` and drifted off the
+  dispenser's tick grid, occasionally landing just before a
+  dispensation and paying a second slice of wait for the same permit.
+  Both sides of pacing now share one epoch — the dispenser's interval
+  and every starve-sleep land on the same 50 ms grid (#127).
+- The bench workflow piped `cargo bench` through `tee` (and the baseline
+  refresh through its writer script) without pipefail, so a failing
+  `cargo bench` hid behind the pipeline's exit 0 and the regression gate
+  compared (or the refresh committed) output truncated at the failure
+  point; both pipelines now fail at the source (#127).
 
 ### Changed
 
@@ -227,6 +238,23 @@ the project follows semantic versioning once 1.0 is reached.
   rcgen and jsonwebtoken), so the pin is supply-chain hygiene; the one
   behavioral delta is dropping rustls's `prefer-post-quantum` default,
   with interop unchanged.
+- Paced mode in `dwara-loadgen` caps catch-up (#127): the permit
+  dispenser's top-up is bounded by what workers have actually consumed
+  plus one 50 ms slice, so a worker (or the whole rig) that falls
+  behind can no longer discharge the accumulated permit backlog as one
+  burst — bursts contaminate paced latency percentiles. The sustained
+  schedule is unchanged.
+- Release images are assembled from the size-bar-verified musl
+  artifacts instead of recompiling both architectures (#127): the
+  release workflow's images job downloads the checksummed tarballs,
+  re-verifies the sha256s, and COPYs the binaries into
+  `Dockerfile.release-{scratch,distroless}`, so published images are
+  byte-for-byte the published tarball binaries (and the image build no
+  longer needs QEMU emulation).
+- The fuzz workflow builds on a dated nightly pin (`nightly-2026-08-25`,
+  bump procedure documented in `fuzz.yml`) instead of a floating
+  `nightly`, keeping the weekly fuzz matrix reproducible and immune to
+  unrelated nightly regressions (#127).
 
 ### Security
 

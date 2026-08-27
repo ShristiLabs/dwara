@@ -14,7 +14,7 @@
   },
   "meta": {
     "machine": "developer laptop, macOS arm64, 2026-08-24 (bench profile, unloaded)",
-    "note": "ns/iter, bencher format. DEV-MACHINE REFERENCE: captured on a macOS laptop, NOT on the CI runner. The CI gate (bench.yml micro job) skips cross-machine comparison and fails open while this baseline is in place; dispatch the baseline-refresh job (Actions tab -> bench -> baseline-refresh) once to capture an ubuntu-latest baseline. Refresh with scripts/bench-baseline.py --write FILE --force --machine LABEL.",
+    "note": "ns/iter, bencher format. DEV-MACHINE REFERENCE: captured on a macOS laptop, NOT on the CI runner. The CI gate (bench.yml micro job) skips cross-machine comparison and fails open while this baseline is in place; dispatch the baseline refresh once to capture an ubuntu-latest baseline (gh workflow run bench.yml --ref main -f job=baseline-refresh). Refresh with scripts/bench-baseline.py --write FILE --force --machine LABEL.",
     "tolerance": 0.25
   }
 }

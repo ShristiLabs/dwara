@@ -1,0 +1,26 @@
+# Dockerfile.release-scratch (#127): release-image variant that COPYs
+# the size-bar-verified static musl binary produced by the
+# musl-binaries job of .github/workflows/release-artifacts.yml instead
+# of recompiling from source, so the published image is byte-for-byte
+# the binary that passed the 25 MB bar and whose tarball + sha256 were
+# published alongside it. Local from-source builds keep using
+# Dockerfile.scratch; this file expects a workflow-staged context:
+#
+#   staged/amd64/dwara   (x86_64-unknown-linux-musl)
+#   staged/arm64/dwara   (aarch64-unknown-linux-musl)
+#
+# TARGETARCH is set per-platform by buildx and selects the staged
+# binary. The final stage has no RUN instruction — the binaries are
+# static and merely copied — so building the foreign-arch leg needs no
+# QEMU emulation. Runtime properties (scratch base, compiled-in webpki
+# roots, example config, entrypoint) mirror Dockerfile.scratch; see
+# that file for the trade-off notes.
+
+FROM scratch
+ARG TARGETARCH
+COPY staged/${TARGETARCH}/dwara /usr/local/bin/dwara
+# Example config for zero-config boots (DWARA_CONFIG can override; the
+# quickstart mounts its own). Read-only is the operator's mount choice.
+COPY crates/dwara-bin/dwara.yaml /etc/dwara/dwara.yaml
+ENV DWARA_CONFIG=/etc/dwara/dwara.yaml
+ENTRYPOINT ["/usr/local/bin/dwara"]

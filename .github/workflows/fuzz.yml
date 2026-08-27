@@ -36,6 +36,19 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # #127: nightly is pinned to a date, not floating. A floating `nightly`
+  # makes the weekly job hostage to whatever shipped the night before (a
+  # nightly regression fails the whole fuzz matrix without any code
+  # change) and makes fuzz behavior unreproducible. The pin below must
+  # stay in sync with itself everywhere via this single env var.
+  # 2026-08-25 = rustc 1.100.0-nightly (e7769602a, built 2026-08-24);
+  # verified locally that the fuzz crate and all six targets build on it.
+  # BUMP PROCEDURE: pick a recent nightly (e.g. the one on
+  # https://rust-lang.github.io/rustup-components-history/ marked green,
+  # or `rustup toolchain list` output if a local nightly exists), change
+  # the date here once, verify with `cargo +nightly-<date> fuzz build`
+  # locally (or one manual dispatch of this workflow), and commit.
+  NIGHTLY_TOOLCHAIN: nightly-2026-08-25
 
 jobs:
   fuzz:
@@ -57,14 +70,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
 
-      - name: Install nightly + cargo-fuzz
+      - name: Install pinned nightly + cargo-fuzz
         run: |
-          rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --locked
+          rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
+          cargo +"$NIGHTLY_TOOLCHAIN" install cargo-fuzz --locked
 
       - name: Fuzz ${{ matrix.target }} (bounded 120s)
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+          cargo +"$NIGHTLY_TOOLCHAIN" fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
             -max_total_time=120 -rss_limit_mb=2560 -print_final_stats=1
 
       - name: Upload crash artifacts

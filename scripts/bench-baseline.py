@@ -29,10 +29,10 @@ Machine matching: the gate accepts --expect-machine LABEL. When the
 baseline's meta.machine does not match LABEL, the comparison is SKIPPED
 (exit 0, fail-open) with a clear notice — comparing absolute ns/iter
 across machines is meaningless. The intended flow: dispatch the
-`baseline-refresh` job in .github/workflows/bench.yml once (it re-runs
-the benches on the CI runner and commits a CI-captured baseline with
-meta.machine set to the runner label), after which the weekly gate
-compares like-for-like.
+baseline refresh on the CI runner ONCE (gh workflow run bench.yml
+--ref main -f job=baseline-refresh; it re-runs the benches on the CI
+runner and commits a CI-captured baseline with meta.machine set to the
+runner label), after which the weekly gate compares like-for-like.
 """
 
 from __future__ import annotations
@@ -119,9 +119,9 @@ def main() -> int:
             print("bench-baseline: SKIP comparison (fail-open): baseline machine "
                   f"{machine!r} != this runner {args.expect_machine!r}.")
             print("bench-baseline: cross-machine ns/iter comparison is not meaningful. "
-                  "Dispatch the 'baseline-refresh' job (Actions tab -> bench -> "
-                  "baseline-refresh) once to capture a CI-runner baseline, then the "
-                  "weekly gate will compare like-for-like.")
+                  "Dispatch the baseline refresh once to capture a CI-runner baseline "
+                  "(gh workflow run bench.yml --ref main -f job=baseline-refresh), then "
+                  "the weekly gate will compare like-for-like.")
             return 0
 
     failures = []
