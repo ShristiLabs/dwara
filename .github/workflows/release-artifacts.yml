@@ -133,7 +133,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push scratch image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # pinned: v6 @ 10e90e36
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # pinned: v7.3.0 @ 10e90e37.3.0
         with:
           context: .
           file: ./Dockerfile.release-scratch
@@ -144,7 +144,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scratch-${{ github.ref_name }}
 
       - name: Build and push distroless image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # pinned: v6 @ 10e90e36
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # pinned: v7.3.0 @ 10e90e37.3.0
         with:
           context: .
           file: ./Dockerfile.release-distroless
