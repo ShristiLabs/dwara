@@ -28,3 +28,8 @@ docs-internal
 
 # cargo-cyclonedx output (per-crate SBOMs)
 *.cdx.json
+
+# docs-site (VitePress)
+docs-site/node_modules/
+docs-site/.vitepress/cache/
+docs-site/.vitepress/dist/

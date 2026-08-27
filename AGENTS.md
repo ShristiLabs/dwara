@@ -66,6 +66,8 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 | `grafana/` | Starter dashboard for the /metrics families |
 | `scripts/` | Macro bench rig + baseline gate + dependency-direction guard |
 | `config-reference.json` | Generated JSON Schema (repo root; see freshness gate) |
+| `docs/` | Contributor-facing developer documentation (internals, rationale, diagrams) — see Documentation below |
+| `docs-site/` | Published end-user (operator) documentation site, VitePress — see Documentation below |
 
 ## Code organization
 
@@ -333,7 +335,66 @@ you are about to change.
   SHA (with a `# pinned: <tag> @ <sha>` comment naming the source tag);
   Dependabot (`github-actions`, weekly, `.github/dependabot.yml`) keeps
   the pins fresh — reviewers should not accept unpinned third-party
-  actions.
+  actions. Dependabot also has an `npm` lane scoped to `docs-site/`
+  (separate from the Rust workspace's `deny.toml` gate).
+- `docs-site.yml`: builds and publishes `docs-site/` to GitHub Pages on
+  every push to `main` that touches `docs-site/**`.
+
+## Documentation
+
+Two documentation trees, for two different audiences — do not mix their
+content:
+
+| Tree | Audience | Content |
+|---|---|---|
+| `docs/` | dwara contributors (this repo's agents and humans) | In-depth internals: how a feature is implemented, the rationale behind non-obvious choices, mermaid diagrams of flows/state machines. Plain markdown, browsed on GitHub — not built or published separately. |
+| `docs-site/` | OSS and enterprise operators | Task-oriented guides (install, configure, deploy, operate) and high-level architecture diagrams — never internals or rationale. A VitePress site, versioned, published to GitHub Pages. |
+
+If a change adds or materially changes a feature covered in either
+tree, update the corresponding page(s) as part of the same change —
+don't let `docs/` or `docs-site/` drift from the code the way a stale
+comment would.
+
+### `docs/` (contributor docs)
+
+- Entry point: [`docs/README.md`](docs/README.md), which tracks what's
+  written vs. scaffolded (`docs/features/*.md` stubs marked
+  `> **Status: scaffold.**`).
+- When writing a page: state what the feature does, why it's built
+  that way (cite `DW-xxx`/`#nnn` markers and the module's `//!` doc
+  comment — most rationale already lives there), a mermaid diagram if
+  it clarifies a flow or state machine, and links to the owning source
+  files and test suites. Follow the pattern in the already-written
+  pages (`docs/architecture.md`, `docs/features/{tls,dataplane-proxy,
+  resilience,authn-authz}.md`).
+- No build step; verify by reading rendered markdown/mermaid on GitHub
+  (or any local markdown+mermaid previewer) and by re-checking cited
+  facts still match the source before merging.
+
+### `docs-site/` (published end-user site)
+
+- Local dev: `cd docs-site && npm install && npm run docs:dev`. Build
+  with `npm run docs:build` (must succeed with zero dead-link errors —
+  VitePress fails the build on a broken internal link by default).
+- Structure: `guide/` (task-oriented), `architecture/` (high-level
+  mermaid diagrams only, no internals), `reference/` (generated/
+  exhaustive material, e.g. links to `config-reference.json`). See
+  [`docs-site/README.md`](docs-site/README.md) for the full layout.
+- Links between pages must be relative (versioning plugin requirement)
+  — never `/guide/foo`, always `./foo` or `../guide/foo`.
+- **Versioning** (`vitepress-versioning-plugin`): the root content
+  always tracks `main` and is labeled `unstable`. Before tagging a
+  release, run `npm run docs:freeze -- <version>` (no leading `v`) from
+  `docs-site/` to snapshot the current root into `versions/<version>/`,
+  commit that snapshot, *then* cut the tag — the frozen snapshot must
+  land before the tag it documents. Never hand-edit files under
+  `versions/`; regenerate by re-running the freeze step against a
+  corrected root if a past snapshot needs fixing.
+- Publishing is automatic: `.github/workflows/docs-site.yml` builds and
+  deploys to GitHub Pages on every push to `main` touching
+  `docs-site/**`. There is no separate per-tag deploy — a frozen
+  version only appears on the published site once its snapshot is
+  committed to `main`.
 
 ## Quickstart sanity check
 

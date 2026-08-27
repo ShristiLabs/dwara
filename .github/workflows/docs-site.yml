@@ -1,0 +1,54 @@
+name: docs-site
+
+# Builds and publishes the end-user docs-site (VitePress) to GitHub
+# Pages. All versions (the "unstable" root plus every frozen
+# versions/<tag>/ snapshot committed by scripts/freeze-version.mjs)
+# are built from whatever is on `main` in one pass -- see
+# docs-site/README.md for the versioning/release process.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs-site.yml"
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # pinned: v7 @ 82076278
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: docs-site/package-lock.json
+      - run: npm ci
+      - run: npm run docs:build
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # pinned: v6 @ 45bfe019
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # pinned: v5 @ fc324d35
+        with:
+          path: docs-site/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # pinned: v5 @ cd2ce8fc

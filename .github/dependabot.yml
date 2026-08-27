@@ -13,3 +13,11 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+  # docs-site/ is a separate npm project (VitePress end-user docs site,
+  # published by .github/workflows/docs-site.yml); its deps are unrelated
+  # to the Rust workspace's deny.toml gate, so they get their own weekly
+  # dependabot lane.
+  - package-ecosystem: npm
+    directory: "/docs-site"
+    schedule:
+      interval: weekly
