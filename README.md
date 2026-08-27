@@ -1115,7 +1115,11 @@ bundle that is missing, unreadable, or not parseable as PEM holding at
 least one CERTIFICATE — so a bundle that goes bad after publish is
 rejected at reload and the old generation keeps authenticating. Only if
 a bundle breaks between validation and build (the microsecond race) is
-the provider disabled (ERROR logged) rather than failing every fetch.
+the provider disabled (ERROR logged) rather than failing every fetch;
+in that state a presented `Bearer` token fails closed (500
+`authentication_unavailable`) instead of proxying unverified — with no
+JWT provider configured at all, `Bearer` remains deliberate
+pass-through.
 Bundle paths are not file-watched; rotating one requires SIGHUP or a
 config change, as with upstream bundles.
 

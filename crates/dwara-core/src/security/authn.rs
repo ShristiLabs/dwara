@@ -971,6 +971,13 @@ const JWKS_FORCED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(5);
 pub struct CompositeAuthenticator {
     registry: CredentialRegistry,
     jwt: Vec<Arc<JwtVerifier>>,
+    /// Whether the config declares ANY jwt provider (#131):
+    /// distinguishes "no provider configured" (Bearer is not the
+    /// gateway's credential to interpret — deliberate pass-through)
+    /// from "providers configured but every verifier failed to build"
+    /// (the gateway promised to verify Bearer tokens and cannot —
+    /// fail closed with `Unavailable`).
+    jwt_configured: bool,
     /// issuer -> (consumer name, audiences) from consumers' jwt
     /// credentials: the claims-based consumer mapping for tokens whose
     /// provider has no explicit `consumer` binding.
@@ -1003,6 +1010,7 @@ impl CompositeAuthenticator {
         CompositeAuthenticator {
             registry: CredentialRegistry::Config(HashMap::new()),
             jwt: Vec::new(),
+            jwt_configured: false,
             jwt_consumer_index: HashMap::new(),
             consumer_groups_index: HashMap::new(),
             pepper: None,
@@ -1058,6 +1066,7 @@ impl CompositeAuthenticator {
         Arc::new(CompositeAuthenticator {
             registry,
             jwt,
+            jwt_configured: !gateway.jwt_providers.is_empty(),
             jwt_consumer_index,
             consumer_groups_index,
             pepper: pepper.cloned(),
@@ -1185,8 +1194,26 @@ impl CompositeAuthenticator {
 
     async fn authenticate_jwt(&self, token: &str) -> Result<Option<Identity>, AuthError> {
         if self.jwt.is_empty() {
-            // No provider configured: Bearer stays pass-through.
-            return Ok(None);
+            if !self.jwt_configured {
+                // No provider configured: Bearer stays pass-through —
+                // the header may be intended for the upstream (the
+                // documented optional-authn shape; `challenge()` offers
+                // no Bearer scheme in this state either).
+                return Ok(None);
+            }
+            // Providers are configured but every verifier failed to
+            // build (#131): the gateway promised to verify Bearer tokens
+            // and cannot. Failing closed with `Unavailable` (500-class
+            // authentication_unavailable) instead of proxying the token
+            // unverified with no consumer identity. Reachable only via
+            // the validate-vs-build race (#121 rejects broken bundles at
+            // validation); the residual must still fail loud, not
+            // silently.
+            return Err(AuthError::Unavailable(
+                "jwt providers are configured but disabled (verifier build failed); \
+                 failing closed instead of proxying Bearer tokens unverified"
+                    .to_string(),
+            ));
         }
         let header = jsonwebtoken::decode_header(token)
             .map_err(|_| AuthError::Invalid("token header is malformed"))?;
@@ -1388,7 +1415,11 @@ impl Authenticator for CompositeAuthenticator {
                 // No provider configured leaves `Ok(None)`: Bearer stays
                 // pass-through (not interpreted), so the certificate
                 // family may still authenticate the connection; any
-                // resolved identity or failure is the answer.
+                // resolved identity or failure is the answer. Providers
+                // configured but disabled (#131) instead answers
+                // `Err(Unavailable)` — the presented credential was the
+                // gateway's to verify and it cannot, so it never
+                // proxies unverified.
                 if let verified @ (Ok(Some(_)) | Err(_)) = self.authenticate_jwt(rest.trim()).await
                 {
                     return verified;

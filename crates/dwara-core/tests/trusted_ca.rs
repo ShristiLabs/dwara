@@ -757,12 +757,13 @@ async fn reload_rejects_a_bundle_that_became_garbage_and_old_generation_keeps_se
 /// keeps its OLD generation authenticating tokens, because the reload is
 /// rejected at validation. With the validation-time PEM parse, the
 /// disabled-provider state (JwksConnector::new fails -> the
-/// `jwt_provider_disabled` ERROR in CompositeAuthenticator::build ->
-/// authenticate_jwt answers Ok(None) -> Bearer tokens proxy UNVERIFIED,
-/// 200 with no identity) is unreachable from config; that pass-through
-/// code path remains in authn.rs only as a residual of the microsecond
-/// validate-to-build race — the reason the build keeps failing closed
-/// instead of trusting validation alone.
+/// `jwt_provider_disabled` ERROR in CompositeAuthenticator::build) is
+/// unreachable from config; it remains reachable only via the
+/// microsecond validate-to-build race, and since #131 that residual
+/// fails CLOSED — authenticate_jwt answers `Err(Unavailable)` (500-class
+/// authentication_unavailable), never the old unverified Bearer
+/// pass-through — the reason the build keeps failing closed instead of
+/// trusting validation alone.
 #[tokio::test]
 async fn jwks_reload_rejects_a_broken_bundle_and_old_generation_keeps_authenticating() {
     let ca = private_ca();

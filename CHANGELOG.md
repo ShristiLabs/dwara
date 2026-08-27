@@ -237,6 +237,16 @@ the project follows semantic versioning once 1.0 is reached.
   shared in `dwara-core`, respawns a panicked incarnation on the same
   bound socket up to 8 times, then gives up with an ERROR log while
   the gateway keeps serving (#130).
+- A JWT provider that failed to build left Bearer tokens passing
+  through UNVERIFIED (proxied 200 with no consumer identity; a
+  misleading 401 on auth_required routes) because the empty-verifier
+  branch treated "disabled" the same as "not configured". The two
+  states now split: with no provider configured Bearer stays
+  deliberate pass-through, but providers configured yet disabled fail
+  closed — a presented Bearer token answers 500
+  `authentication_unavailable` (reachable only via the
+  validate-vs-build race; #121 rejects broken bundles at validation)
+  (#131).
 
 ### Changed
 

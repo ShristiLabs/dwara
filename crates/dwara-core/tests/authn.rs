@@ -1079,13 +1079,17 @@ consumers:
     let dp = dataplane_from(&yaml);
     let tok = lab_token(&key, "key-1");
     let hdr = format!("Bearer {tok}");
-    let (status, _, _) = tokio::time::timeout(
+    let (status, _, body) = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         send_with(&dp, "/x", vec![("authorization", hdr.as_str())]),
     )
     .await
     .expect("must not hang");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        body.contains("authentication_unavailable"),
+        "the 500 carries the authentication_unavailable envelope code: {body}"
+    );
 }
 
 // ---- hash-format dispatch through the store path ---------------------------
@@ -2575,4 +2579,91 @@ async fn jwt_token_without_aud_claim_against_a_configured_audience_is_accepted()
         "a token without aud must pass a provider with a configured audience: {body}"
     );
     assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+}
+
+/// #131: a gateway whose jwt provider is configured but DISABLED (the
+/// verifier failed to build) must fail CLOSED on a presented Bearer
+/// token — the authentication_unavailable error class (500-class in the
+/// dataplane) — never proxy the token unverified with no consumer
+/// identity. The state is unreachable through compile_and_publish
+/// (snapshot validation rejects broken bundles, #121); it is the
+/// validate-vs-build race residual, so the test constructs it directly:
+/// a config that PARSES (parse never loads PEMs) handed straight to
+/// CompositeAuthenticator::build with a garbage bundle on disk. The
+/// no-provider pass-through (Bearer not interpreted when nothing is
+/// configured) is the documented deliberate behavior and is pinned by
+/// the bearer pass-through tests above.
+#[tokio::test]
+async fn disabled_jwt_provider_fails_closed_on_bearer_tokens() {
+    use dwara_core::authn::{AuthError, Authenticator, CompositeAuthenticator};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad_bundle = dir.path().join("broken.ca.pem");
+    std::fs::write(&bad_bundle, "not a pem file\n").expect("write broken bundle");
+    let yaml = format!(
+        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:9\n    \
+         algorithms: [ES256]\n    trusted_ca_file: {}\n\
+         routes:\n  - name: r\n    service: svc\n    match:\n      path: \
+         {{ type: regex, value: /.* }}\n    action: {{ type: proxy }}\n\
+         services:\n  - name: svc\n    upstream: pool\n\
+         upstreams:\n  - name: pool\n    endpoints:\n      - address: 127.0.0.1\n        port: 9\n\
+         consumers:\n  - name: acme\n    credentials:\n      - type: jwt\n        \
+         issuer: https://idp.example\n",
+        bad_bundle.display()
+    );
+    let gateway = parse_gateway(&yaml).expect("parses: bundle loading is validation, not parse");
+    let mut jwks_caches = std::collections::HashMap::new();
+    let authn = CompositeAuthenticator::build(&gateway, None, &mut jwks_caches, None, None);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        hyper::header::AUTHORIZATION,
+        "Bearer eyJhbGciOiJub25lIn0.e30.signature".parse().unwrap(),
+    );
+    let err = authn
+        .authenticate(&headers, None)
+        .await
+        .expect_err("a disabled provider must fail closed on a presented Bearer token");
+    match err {
+        AuthError::Unavailable(msg) => assert!(
+            msg.contains("disabled"),
+            "the unavailable error names the disabled provider: {msg}"
+        ),
+        other => panic!("expected Unavailable, got: {other:?}"),
+    }
+}
+
+/// #131 boundary: the fail-closed is keyed on the PRESENTED credential.
+/// A disabled provider must 500 only requests that actually carry a
+/// Bearer token; requests without an Authorization header still fall
+/// through the composite (anonymous pass-through) — a broken provider
+/// must not take every request on the gateway down with it.
+#[tokio::test]
+async fn disabled_jwt_provider_without_a_bearer_still_passes_through() {
+    use dwara_core::authn::{Authenticator, CompositeAuthenticator};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad_bundle = dir.path().join("broken.ca.pem");
+    std::fs::write(&bad_bundle, "not a pem file\n").expect("write broken bundle");
+    let yaml = format!(
+        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:9\n    \
+         algorithms: [ES256]\n    trusted_ca_file: {}\n\
+         routes:\n  - name: r\n    service: svc\n    match:\n      path: \
+         {{ type: regex, value: /.* }}\n    action: {{ type: proxy }}\n\
+         services:\n  - name: svc\n    upstream: pool\n\
+         upstreams:\n  - name: pool\n    endpoints:\n      - address: 127.0.0.1\n        port: 9\n\
+         consumers:\n  - name: acme\n    credentials:\n      - type: jwt\n        \
+         issuer: https://idp.example\n",
+        bad_bundle.display()
+    );
+    let gateway = parse_gateway(&yaml).expect("parses: bundle loading is validation, not parse");
+    let mut jwks_caches = std::collections::HashMap::new();
+    let authn = CompositeAuthenticator::build(&gateway, None, &mut jwks_caches, None, None);
+
+    let headers = HeaderMap::new();
+    let identity = authn
+        .authenticate(&headers, None)
+        .await
+        .expect("no presented credential must not fail");
+    assert!(identity.is_none(), "anonymous pass-through, not an error");
 }
