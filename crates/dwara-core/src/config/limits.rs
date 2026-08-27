@@ -25,3 +25,12 @@ pub const MAX_SLOW_START_MS: u64 = 600_000;
 
 /// Validation bound on `retries.attempts` (mirrored in `snapshot::validate`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 10;
+
+/// Runtime bound on the per-key GCRA state a rate-limiter window holds
+/// PER SHARD of its keyed store (see `extensions::rate_limiter`). Not a
+/// schema bound — no config value is checked against it — but a
+/// process-lifetime memory guarantee: an `[ip]`-selector limiter under
+/// key spray can hold at most `shards * this` keys per window per rule,
+/// after which idlest-first eviction takes over (a deliberately fixed
+/// constant rather than an ops knob; revisit if operators need to tune).
+pub const MAX_RATE_LIMITER_KEYS_PER_SHARD: usize = 4_096;

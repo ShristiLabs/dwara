@@ -27,12 +27,13 @@
 //!
 //! [`GcraRateLimiter`] implements the [`RateLimiter`] trait with the
 //! `governor` crate's GCRA cells over a sharded keyed state store
-//! (`dashmap` feature: one shard-parallel map per window, no global mutex;
-//! contrast [`InMemoryRateLimiter`]'s single `Mutex<HashMap>`, which is
-//! why it stayed a skeleton). A limiter may STACK several windows
-//! (e.g. 10 r/s AND 100 r/hour): each window is an independent GCRA cell
-//! per key and the decision is the AND of all windows — denied if ANY
-//! window denies, `retry_after` from the denying (binding) window.
+//! (`GcraShardStore`: fixed-count shard-locked maps per window, no
+//! global mutex; contrast [`InMemoryRateLimiter`]'s single
+//! `Mutex<HashMap>`, which is why it stayed a skeleton). A limiter may
+//! STACK several windows (e.g. 10 r/s AND 100 r/hour): each window is
+//! an independent GCRA cell per key and the decision is the AND of all
+//! windows — denied if ANY window denies, `retry_after` from the
+//! denying (binding) window.
 //!
 //! **Stacking consumption semantics (documented trade-off):** windows are
 //! evaluated shortest-first and evaluation STOPS at the first denial, so
@@ -54,14 +55,32 @@
 //! the stricter-not-looser stop-at-first-denial semantics above stay,
 //! per limiter, for WINDOWS stacked within one rule.
 //!
-//! **Known v1 limitation — no per-key eviction:** every distinct key a
-//! rule sees creates permanent GCRA state in that window's dashmap; the
-//! maps are only reset by a config reload (generation swap). With `[ip]`
-//! or `[ip, route]` selectors this is a memory-amplification vector: an
-//! attacker spraying requests from many source IPs (or spoofed keys, if
-//! the peer IP is not connection-derived) grows the state map without
-//! bound for the process lifetime. Key-state eviction / TTL is a
-//! recorded follow-up, not implemented in v1.
+//! **Per-key eviction (#122):** every window's keyed GCRA state lives in
+//! a `GcraShardStore` — [`GCRA_STORE_SHARDS`] independent lock-guarded
+//! maps replacing governor's unbounded `DashMapStateStore` (whose key
+//! set a reload can only reset wholesale). Each shard holds at most
+//! [`crate::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD`] keys, so a
+//! window's worst case is `GCRA_STORE_SHARDS` times that cap — an
+//! `[ip]`-selector limiter under key spray is memory-bounded for the
+//! process lifetime. The sweep runs INLINE, on the shard lock a
+//! reservation already holds (cascade-on-insert; no background task, no
+//! O(cap) work per request): when a shard reaches its cap it first
+//! drops IDLE cells — keys untouched for at least the window's
+//! full-refill time, whose GCRA state is indistinguishable from a fresh
+//! cell, so dropping them cannot change any decision — and if the shard
+//! is still crowded (every key fresh — sustained spray) it evicts the
+//! idlest half, ordered by `(last_touch_ms, key)`, down to half the cap
+//! so the O(cap) sweep amortizes to O(1) per insertion. Idle-first
+//! ordering means a key actively under enforcement (denied, hence
+//! freshly touched) is evicted only when the shard holds more than a
+//! cap-full of keys ALL touched within one full-refill window; losing a
+//! cell then merely resets that key's bucket (a fresh bucket can only
+//! be MORE permissive for that key, never stricter for anyone) — the
+//! documented fail-open trade under spray. `GcraRateLimiter::evictions`
+//! exposes the dropped-cell count as a monotonic counter in the
+//! balancer's fail-open-picks style; extensions may not import
+//! observability, so no metric family is wired here (a future gauge can
+//! scrape it from the dataplane).
 //!
 //! **Legacy field mapping:** a policy's old `rate_limit
 //! {requests, window_seconds}` compiles to one rule with selector
@@ -76,17 +95,35 @@
 //! can admit up to `burst + replenished` cells (documented, standard
 //! GCRA shape).
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::num::NonZeroU32;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+// DW-025 (#122): under the `loom` feature the shard mutexes and the
+// eviction counter swap for loom's model-checked equivalents so the
+// shard reservation path (lock -> read TAT -> decide -> write TAT) can
+// be exhaustively explored; builds are bit-identical otherwise.
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "loom")]
+use loom::sync::Mutex;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(feature = "loom"))]
+use std::sync::{Arc, Mutex};
+// Arc stays std even under loom (the health.rs precedent): it is a
+// container, not a synchronization primitive.
+#[cfg(feature = "loom")]
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use governor::clock::Clock as _;
-use governor::clock::DefaultClock;
-use governor::middleware::StateInformationMiddleware;
-use governor::state::keyed::DashMapStateStore;
-use governor::state::RateLimiter as GovernorLimiter;
+use governor::clock::{DefaultClock, QuantaInstant};
+use governor::middleware::{NoOpMiddleware, StateInformationMiddleware};
+use governor::nanos::Nanos;
+use governor::state::keyed::ShrinkableKeyedStateStore;
+use governor::state::{RateLimiter as GovernorLimiter, StateStore};
 use governor::Quota;
 
 use super::ExtensionsError;
@@ -204,20 +241,239 @@ impl RateLimiter for InMemoryRateLimiter {
     }
 }
 
+/// Number of independent shard locks in a `GcraShardStore`. Fixed (not
+/// CPU-count-derived) so the worst-case key bound per window
+/// (`GCRA_STORE_SHARDS * MAX_RATE_LIMITER_KEYS_PER_SHARD`) is the same
+/// number on every machine. Public for the eviction tests' bound
+/// assertions.
+pub const GCRA_STORE_SHARDS: usize = 16;
+
+/// Per-key GCRA cell: governor's theoretical arrival time in nanoseconds
+/// since the limiter was created (`0` = fresh/absent, mirroring
+/// governor's `NonZeroU64` encoding) plus the last-touch stamp the
+/// eviction sweep orders by. The stamp comes from the store's
+/// bookkeeping clock, NOT governor's GCRA clock.
+#[derive(Debug, Default, Clone, Copy)]
+struct GcraCell {
+    tat: u64,
+    last_touch_ms: u64,
+}
+
+/// One shard's keyed cells (a plain map; the shard mutex provides the
+/// atomicity governor's `measure_and_replace` contract requires).
+#[derive(Debug, Default)]
+struct ShardCells {
+    cells: HashMap<String, GcraCell>,
+}
+
+/// Clock for eviction bookkeeping only — governor keeps its own
+/// monotonic clock for the GCRA math (see `GcraRateLimiter::with_clock`).
+#[derive(Debug, Clone, Copy)]
+enum StoreClock {
+    /// Milliseconds elapsed since store creation (production default).
+    Monotonic(Instant),
+    /// Caller-supplied millisecond source (deterministic tests).
+    Injected(fn() -> u64),
+}
+
+impl StoreClock {
+    fn now_ms(&self) -> u64 {
+        match *self {
+            StoreClock::Monotonic(start) => start.elapsed().as_millis() as u64,
+            StoreClock::Injected(now_ms) => now_ms(),
+        }
+    }
+}
+
+/// Sharded keyed state store for one GCRA window (#122).
+///
+/// Implements governor's [`StateStore`] so the limiter keeps governor's
+/// GCRA decision math (`measure_and_replace` receives the closure and
+/// must atomically apply its new state — or leave the old state in place
+/// when it returns `Err`, i.e. on a denial). Unlike governor's
+/// `DashMapStateStore`, whose key set grows for the process lifetime,
+/// each shard is size-capped at
+/// [`crate::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD`] keys with
+/// an inline idle-first eviction sweep (see the module docs for the
+/// policy and its fail-open trade).
+struct GcraShardStore {
+    shards: Vec<Mutex<ShardCells>>,
+    hasher: RandomState,
+    clock: StoreClock,
+    /// A key untouched for at least this long is indistinguishable from
+    /// a fresh cell and may be dropped by the sweep's idle pass.
+    max_idle_ms: u64,
+    /// Dropped-cell count, shared with the owning window (monotonic;
+    /// scrape-ready in the fail-open-picks style).
+    evictions: Arc<AtomicU64>,
+}
+
+impl GcraShardStore {
+    fn new(max_idle_ms: u64, clock: StoreClock, evictions: Arc<AtomicU64>) -> Self {
+        Self {
+            shards: (0..GCRA_STORE_SHARDS)
+                .map(|_| Mutex::new(ShardCells::default()))
+                .collect(),
+            hasher: RandomState::new(),
+            clock,
+            max_idle_ms,
+            evictions,
+        }
+    }
+
+    fn shard_for(&self, key: &str) -> &Mutex<ShardCells> {
+        &self.shards[(self.hasher.hash_one(key) as usize) & (GCRA_STORE_SHARDS - 1)]
+    }
+
+    /// Inline cascade-on-insert sweep (see module docs): runs when the
+    /// shard REACHES its cap — before the requesting key's own insert,
+    /// so a shard never exceeds the cap, even transiently — first
+    /// dropping idle cells, then, if every key is fresh, the idlest half
+    /// by `(last_touch_ms, key)` order down to half the cap, which
+    /// amortizes the O(cap) scan to O(1) per insertion. Deterministic:
+    /// the victim order is a total order. Must be called with the shard
+    /// already locked, BEFORE the current key's cell is touched, so the
+    /// sweep orders by pre-request stamps: a cell dropped by the idle
+    /// pass is decision-identical to a fresh cell (its TAT lies in the
+    /// past), and the size pass's cap-full-of-fresh-keys trade is the
+    /// documented one.
+    fn sweep_if_crowded(&self, shard: &mut ShardCells, now_ms: u64) {
+        let cap = crate::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD;
+        if shard.cells.len() < cap {
+            return;
+        }
+        // Idle pass: cells untouched for at least one full refill are
+        // fresh-equivalent; dropping them is unobservable through
+        // decisions (the millisecond rounding keeps a cell at most ~1ms
+        // past its refill before it becomes droppable).
+        let before = shard.cells.len();
+        shard
+            .cells
+            .retain(|_, cell| now_ms.saturating_sub(cell.last_touch_ms) < self.max_idle_ms);
+        let mut dropped = (before - shard.cells.len()) as u64;
+        // Size pass: still at/over the cap — every remaining key is
+        // fresh. Evict the idlest half down to the low-water mark.
+        if shard.cells.len() >= cap {
+            let excess = shard.cells.len() - cap / 2;
+            let mut victims: Vec<(u64, String)> = shard
+                .cells
+                .iter()
+                .map(|(key, cell)| (cell.last_touch_ms, key.clone()))
+                .collect();
+            victims.sort_unstable();
+            for (_, key) in victims.into_iter().take(excess) {
+                shard.cells.remove(&key);
+            }
+            dropped += excess as u64;
+        }
+        if dropped > 0 {
+            self.evictions.fetch_add(dropped, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The reservation critical section: one shard lock covers the
+/// read-decide-write of the TAT, linearizing concurrent checks for the
+/// same key (and any keys sharing its shard).
+impl StateStore for GcraShardStore {
+    type Key = String;
+
+    fn measure_and_replace<T, F, E>(&self, key: &String, f: F) -> Result<T, E>
+    where
+        F: Fn(Option<Nanos>) -> Result<(T, Nanos), E>,
+    {
+        let now_ms = self.clock.now_ms();
+        let shard = self.shard_for(key);
+        let mut guard = shard.lock().expect("rate limiter shard poisoned");
+        self.sweep_if_crowded(&mut guard, now_ms);
+        if let Some(cell) = guard.cells.get_mut(key) {
+            // Fast path: measure the existing cell. A denial (`Err`)
+            // leaves the TAT untouched per governor's contract, but
+            // still counts as activity — a throttled key is an ACTIVE
+            // key and must not age out of the store ahead of idle ones.
+            cell.last_touch_ms = now_ms;
+            let prev = if cell.tat == 0 {
+                None
+            } else {
+                Some(Nanos::from(cell.tat))
+            };
+            match f(prev) {
+                Ok((outcome, new_tat)) => {
+                    cell.tat = new_tat.as_u64();
+                    Ok(outcome)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // Fresh cell: governor seeds the TAT from `t0` itself, so a
+            // first touch is always admitted (when the cost fits the
+            // bucket at all). A denial here stores nothing.
+            match f(None) {
+                Ok((outcome, new_tat)) => {
+                    guard.cells.insert(
+                        key.clone(),
+                        GcraCell {
+                            tat: new_tat.as_u64(),
+                            last_touch_ms: now_ms,
+                        },
+                    );
+                    Ok(outcome)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// Housekeeping seam (parity with governor's own stores): exposes the
+/// live key count the eviction bound is asserted against, plus
+/// TAT-based retention for callers that want a wider-than-idle drop.
+impl ShrinkableKeyedStateStore<String> for GcraShardStore {
+    fn retain_recent(&self, drop_below: Nanos) {
+        for shard in &self.shards {
+            let mut guard = shard.lock().expect("rate limiter shard poisoned");
+            guard.cells.retain(|_, cell| cell.tat > drop_below.as_u64());
+        }
+    }
+
+    fn shrink_to_fit(&self) {
+        for shard in &self.shards {
+            let mut guard = shard.lock().expect("rate limiter shard poisoned");
+            guard.cells.shrink_to_fit();
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .expect("rate limiter shard poisoned")
+                    .cells
+                    .len()
+            })
+            .sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// One stacked GCRA window (DW-017): `requests` per `window` with a
 /// `burst`-token bucket, backed by its own sharded keyed state.
 struct GcraWindow {
-    limiter: GovernorLimiter<
-        String,
-        DashMapStateStore<String>,
-        DefaultClock,
-        StateInformationMiddleware,
-    >,
+    limiter: GovernorLimiter<String, GcraShardStore, DefaultClock, StateInformationMiddleware>,
+    /// Dropped-cell counter shared with the window's store (the store is
+    /// owned by the governor limiter; this handle keeps it readable).
+    evictions: Arc<AtomicU64>,
     /// Bucket size (governor's max_burst) — the `X-RateLimit-Limit` this
     /// window reports when it is the binding constraint.
     burst: NonZeroU32,
     /// Full-bucket refill time (`burst_size_replenished_in`) — used when
-    /// a cost can never fit the bucket.
+    /// a cost can never fit the bucket, and as the store's idle
+    /// threshold.
     full_refill_ms: u64,
 }
 
@@ -251,9 +507,13 @@ pub struct GcraWindowSpec {
 /// for the stop-at-first-denial consumption semantics). Keys are opaque
 /// strings; the caller composes them (see [`RateLimitEngine`]).
 ///
-/// **Clock:** governor runs on its own quanta monotonic clock; there is
-/// deliberately no clock injection here. Tests use real time with tiny
-/// windows (sub-second) instead of a fake clock.
+/// **Clocks:** the GCRA math runs on governor's own quanta monotonic
+/// clock; there is deliberately no clock injection for it. The EVICTION
+/// bookkeeping (per-key last-touch stamps) has a separate, injectable
+/// millisecond clock: `new` uses elapsed monotonic time, tests use
+/// [`GcraRateLimiter::with_clock`] to advance deterministically. The two
+/// clocks only meet in the idle-eviction threshold (one full refill of
+/// the window's bucket), where both advance with wall time.
 pub struct GcraRateLimiter {
     /// Shortest window first (see module docs: consumption on a stacked
     /// denial falls on the fastest-replenishing buckets).
@@ -273,6 +533,22 @@ impl GcraRateLimiter {
     /// sorted shortest window first). Returns `None` for an empty spec
     /// list — a limiter with no windows cannot make decisions.
     pub fn new(specs: Vec<GcraWindowSpec>) -> Option<Self> {
+        Self::build(specs, StoreClock::Monotonic(Instant::now()))
+    }
+
+    /// New limiter using a caller-supplied millisecond clock for the
+    /// per-key eviction bookkeeping (NOT the GCRA decisions — see the
+    /// clocks note in the type docs).
+    ///
+    /// Intended for tests and other time-controlled setups; production
+    /// code should prefer [`GcraRateLimiter::new`]. `now_ms` must return
+    /// non-decreasing milliseconds and is called once per window per
+    /// `check` (cheap).
+    pub fn with_clock(specs: Vec<GcraWindowSpec>, now_ms: fn() -> u64) -> Option<Self> {
+        Self::build(specs, StoreClock::Injected(now_ms))
+    }
+
+    fn build(specs: Vec<GcraWindowSpec>, clock: StoreClock) -> Option<Self> {
         if specs.is_empty() {
             return None;
         }
@@ -289,15 +565,46 @@ impl GcraRateLimiter {
                 let quota = Quota::with_period(spec.window / spec.requests.get())
                     .unwrap_or_else(|| Quota::per_second(spec.requests))
                     .allow_burst(burst);
+                let full_refill_ms = quota.burst_size_replenished_in().as_millis() as u64;
+                let evictions = Arc::new(AtomicU64::new(0));
+                let store = GcraShardStore::new(full_refill_ms, clock, Arc::clone(&evictions));
+                // `new` leaves the middleware parameter uninferred; the
+                // raw limiter is NoOp until the snapshot middleware is
+                // layered on (the field's final type).
+                let raw: GovernorLimiter<
+                    String,
+                    GcraShardStore,
+                    DefaultClock,
+                    NoOpMiddleware<QuantaInstant>,
+                > = GovernorLimiter::new(quota, store, DefaultClock::default());
                 GcraWindow {
-                    limiter: GovernorLimiter::dashmap(quota)
-                        .with_middleware::<StateInformationMiddleware>(),
+                    limiter: raw.with_middleware::<StateInformationMiddleware>(),
+                    evictions,
                     burst,
-                    full_refill_ms: quota.burst_size_replenished_in().as_millis() as u64,
+                    full_refill_ms,
                 }
             })
             .collect();
         Some(Self { windows })
+    }
+
+    /// Live per-key cell count across all stacked windows (sum of the
+    /// shard maps; approximate under concurrent checks). Bounded by
+    /// `GCRA_STORE_SHARDS *
+    /// crate::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD` per
+    /// window — the bound the spray tests assert.
+    pub fn live_keys(&self) -> usize {
+        self.windows.iter().map(|w| w.limiter.len()).sum::<usize>()
+    }
+
+    /// Cells dropped by eviction sweeps across all stacked windows
+    /// (monotonic for the limiter's lifetime; a reload builds a fresh
+    /// limiter, so the counter resets with the generation).
+    pub fn evictions(&self) -> u64 {
+        self.windows
+            .iter()
+            .map(|w| w.evictions.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Check-and-reserve `cost` units for `key` across all stacked
@@ -514,6 +821,25 @@ impl RateLimitEngine {
     /// rate-limit policies skip per-request key building entirely).
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Live per-key cell count across every compiled rule's windows
+    /// (approximate under concurrent checks) — the spray-bounded figure
+    /// for tests and ops visibility. See [`GcraRateLimiter::live_keys`].
+    pub fn live_keys(&self) -> usize {
+        self.rules
+            .iter()
+            .map(|(_, rule)| rule.limiter.live_keys())
+            .sum()
+    }
+
+    /// Cells dropped by eviction sweeps across every compiled rule
+    /// (monotonic per config generation). See [`GcraRateLimiter::evictions`].
+    pub fn evictions(&self) -> u64 {
+        self.rules
+            .iter()
+            .map(|(_, rule)| rule.limiter.evictions())
+            .sum()
     }
 
     /// Resolve the applicable rules for one request and check them.

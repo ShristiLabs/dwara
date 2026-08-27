@@ -901,6 +901,14 @@ matched carry none.
 generation: every config reload rebuilds the engine and RESETS all
 buckets — a reload is a fresh budget for everyone.
 
+**Key-state bound.** Per-key buckets are size-capped per window (16
+shards of 4,096 keys — 65,536 at worst): keys idle past one full
+bucket refill are evicted first (dropping them changes no decision),
+and under a sustained spray of fresh keys a full shard evicts its
+idlest half, resetting those keys' buckets — a fresh budget for the
+evicted keys is the fail-open trade that keeps memory bounded for the
+process lifetime.
+
 **Legacy field.** A policy's older `rate_limit` field
 (`{requests, window_seconds}`) still applies and compiles to one rule
 with `selector: [route]`, a single window of `requests` per

@@ -58,8 +58,12 @@ rustls-pki-types = "1"
 zeroize = "1"
 rcgen = "0.13"
 # Property-based tests (DW-011 balancer coverage): Apache-2.0/MIT.
-# GCRA rate limiting (DW-017): MIT; dashmap feature gives sharded keyed state.
-governor = { version = "0.10", features = ["dashmap"] }
+# GCRA rate limiting (DW-017): MIT. Runs on governor's default features
+# (the GCRA math and the quanta clock); the keyed state store is our own
+# sharded, size-capped implementation (extensions/rate_limiter.rs,
+# #122) — governor's dashmap-backed store, though pulled in by its
+# defaults, is no longer used.
+governor = { version = "0.10" }
 proptest = "1"
 # SQLite state store (DW-018): rusqlite is MIT; the "bundled" feature
 # compiles the bundled SQLite (public domain, libsqlite3-sys is MIT) so no

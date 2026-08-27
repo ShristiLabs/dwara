@@ -144,6 +144,15 @@ the project follows semantic versioning once 1.0 is reached.
   loops are now respawned on the same bound socket up to 8 times per
   listener, after which the listener is given up on with an ERROR log
   while the process and other listeners keep serving.
+- Rate-limiter per-key GCRA state was never evicted, so rules keyed by
+  `ip` (or any high-cardinality selector) grew state for the process
+  lifetime under key spray. Each window's keyed state is now a
+  size-capped sharded store (16 shards of 4,096 keys — 65,536 per
+  window at worst): keys idle past one full bucket refill are dropped
+  first (indistinguishable from fresh state), and a shard full of
+  fresh keys evicts its idlest half, resetting those keys' buckets —
+  a fresh budget for the evicted keys, the fail-open trade for the
+  memory bound (#122).
 
 ### Changed
 

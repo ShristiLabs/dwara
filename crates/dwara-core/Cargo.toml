@@ -43,14 +43,15 @@ tracing = { workspace = true }
 prometheus = { workspace = true }
 # Concurrency model checker (DW-025, optional): MIT/Apache-2.0. Optional so
 # it never enters production builds; the `loom` feature gates the
-# primitive swap in health.rs/breaker.rs/retries.rs.
+# primitive swap in health.rs/breaker.rs/retries.rs and the rate
+# limiter's shard store (extensions/rate_limiter.rs, #122).
 loom = { version = "0.7", optional = true }
 
 [features]
-# DW-025: swaps the health/breaker/retry-budget synchronization primitives
-# for loom's model-checked equivalents. Never enabled in production builds
-# or the default test run; exercised by `cargo test --features loom` and
-# the fuzz.yml CI job.
+# DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
+# synchronization primitives for loom's model-checked equivalents. Never
+# enabled in production builds or the default test run; exercised by
+# `cargo test --features loom` and the fuzz.yml CI job.
 loom = ["dep:loom"]
 
 [dev-dependencies]

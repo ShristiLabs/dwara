@@ -2,8 +2,10 @@
 //!
 //! Run with `cargo test -p dwara-core --features loom --test loom`. The
 //! `loom` feature swaps the synchronization primitives in `health.rs`,
-//! `breaker.rs`, and `retries.rs` for loom's model-checked equivalents,
-//! letting loom enumerate every interleaving of the small scenarios here.
+//! `breaker.rs`, `retries.rs`, and the rate limiter's shard store
+//! (`extensions/rate_limiter.rs`, #122) for loom's model-checked
+//! equivalents, letting loom enumerate every interleaving of the small
+//! scenarios here.
 //!
 //! Scope note (honest limitation): `arc-swap` (1.9.x) exposes no loom
 //! feature, so the `ArcSwap`-based hot paths — `ConfigState` snapshot
@@ -11,8 +13,9 @@
 //! with loom here. Those paths are covered instead by the real-thread
 //! stress test in `tests/swap_stress.rs`. The scenarios below cover the
 //! primitives that are loom-representable: the EndpointHealth CAS
-//! transition machine, the breaker Mutex state machine, and the retry
-//! budget's check-and-record critical section.
+//! transition machine, the breaker Mutex state machine, the retry
+//! budget's check-and-record critical section, and the rate limiter's
+//! shard reservation (lock -> read TAT -> decide -> write TAT).
 //!
 //! Scenarios are deliberately tiny: loom's state space grows
 //! exponentially with operations, so each test exercises one invariant
@@ -21,6 +24,7 @@
 #![cfg(feature = "loom")]
 
 use dwara_core::breaker::{Breaker, BreakerParams};
+use dwara_core::extensions::rate_limiter::{GcraRateLimiter, GcraWindowSpec};
 use dwara_core::health::{EndpointHealth, HealthParams};
 use dwara_core::retries::RetryBudget;
 
@@ -153,6 +157,40 @@ fn retry_budget_reservation_invariant() {
             budget.retries() as u64 * 100 <= 25 * requests as u64,
             "retry budget invariant violated: {} retries vs {requests} requests",
             budget.retries()
+        );
+    });
+}
+
+/// Rate limiter shard reservation (#122): two threads race `check` on
+/// ONE key with a one-cell bucket. The shard store's critical section
+/// (lock -> read TAT -> decide -> write TAT) must linearize: exactly
+/// one check is admitted and the other is throttled, for every
+/// interleaving. The injected bookkeeping clock is fixed (loom models
+/// interleavings, not time) and the hour-long quota means governor's
+/// own real clock cannot replenish a cell within a model run, so the
+/// counts do not depend on how long exploration takes.
+#[test]
+fn rate_limiter_shard_reservation_allows_exactly_one() {
+    loom::model(|| {
+        let limiter = loom::sync::Arc::new(
+            GcraRateLimiter::with_clock(
+                vec![GcraWindowSpec {
+                    requests: std::num::NonZeroU32::new(1).unwrap(),
+                    window: std::time::Duration::from_secs(3_600),
+                    burst: None,
+                }],
+                || 0,
+            )
+            .unwrap(),
+        );
+        let a = loom::sync::Arc::clone(&limiter);
+        let t1 = loom::thread::spawn(move || a.check("k", 1).decision.allowed);
+        let b = loom::sync::Arc::clone(&limiter);
+        let t2 = loom::thread::spawn(move || b.check("k", 1).decision.allowed);
+        let allowed = usize::from(t1.join().unwrap()) + usize::from(t2.join().unwrap());
+        assert_eq!(
+            allowed, 1,
+            "a one-cell bucket must admit exactly one of two racing checks"
         );
     });
 }
