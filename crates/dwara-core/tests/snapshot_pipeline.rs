@@ -302,6 +302,31 @@ fn validation_rejects_endpoint_weight_zero() {
     assert_single_issue(&gw, "upstream", "pool", "endpoints[0].weight");
 }
 
+/// #128: duplicate-endpoint detection compares TRIMMED addresses, exactly
+/// like the other endpoint checks — " 127.0.0.1" and "127.0.0.1" are the
+/// same target and must be rejected instead of corrupting shared balancer
+/// state at runtime.
+#[test]
+fn validation_rejects_duplicate_endpoints_with_padded_addresses() {
+    let mut gw = base_gateway();
+    // Same address, one form padded with whitespace: a duplicate.
+    gw.upstreams[0].endpoints.push(Endpoint {
+        address: "  127.0.0.1  ".into(),
+        port: 9001,
+        weight: 1,
+    });
+    assert_single_issue(&gw, "upstream", "pool", "endpoints[1].address");
+
+    // Different port with the same padding is NOT a duplicate: no issue.
+    let mut gw = base_gateway();
+    gw.upstreams[0].endpoints.push(Endpoint {
+        address: "  127.0.0.1  ".into(),
+        port: 9002,
+        weight: 1,
+    });
+    assert!(validate(&gw).is_empty(), "{:?}", validate(&gw));
+}
+
 #[test]
 fn validation_rejects_empty_api_key_credential() {
     let mut gw = base_gateway();

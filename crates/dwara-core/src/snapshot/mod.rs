@@ -1050,15 +1050,19 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             }
             // Duplicate address:port corrupts shared balancer state (both
             // entries carry to the same live counter; guards would
-            // double-decrement). Reject at validation time.
-            if !seen_targets.insert((e.address.clone(), e.port)) {
+            // double-decrement). Reject at validation time. The target is
+            // compared TRIMMED, exactly like the empty-address check
+            // above: " 127.0.0.1" and "127.0.0.1" are the same endpoint
+            // (#128, DW-011 review).
+            if !seen_targets.insert((e.address.trim(), e.port)) {
                 issues.push(issue(
                     "upstream",
                     &u.name,
                     &format!("endpoints[{i}].address"),
                     format!(
                         "duplicate endpoint {}/{}: address:port must be unique within an upstream",
-                        e.address, e.port
+                        e.address.trim(),
+                        e.port
                     ),
                 ));
             }

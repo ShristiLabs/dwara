@@ -41,13 +41,12 @@ fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
 /// Config with a catch-all `respond` route; exercises the full listener ->
 /// dataplane -> route-action path without needing a backend.
 fn config_path(tag: &str) -> std::path::PathBuf {
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "dwara-dw009-hello-{}-{}-{tag}.yaml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-dw009-hello-{}-{n}-{tag}.yaml",
+        std::process::id()
     ));
     std::fs::write(
         &path,
@@ -92,22 +91,50 @@ fn start_server(tag: &str) -> (String, ServerGuard) {
     (addr, guard)
 }
 
-fn get_response(stream: &mut TcpStream) -> String {
-    stream
+/// One GET attempt on an established stream; a transport failure (a
+/// reset racing the exchange under parallel load — the #128 class)
+/// yields the empty string so the retry wrapper sees "nothing arrived".
+fn get_response_once(stream: &mut TcpStream) -> String {
+    if stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .expect("failed to write request");
+        .is_err()
+    {
+        return String::new();
+    }
     let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .expect("failed to read response");
+    let _ = stream.read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Connect + GET, retrying the WHOLE exchange while ZERO response bytes
+/// have arrived (#128 item-H class, the same tolerance as
+/// tls_listener::tls_get_retrying_reset: the kernel can turn the peer's
+/// FIN into an RST while unread data is queued, discarding the answer
+/// before any byte lands). Once a byte has arrived the result is final —
+/// no partial-data truncation is ever masked. Callers assert on response
+/// CONTENT, so an exhausted 10 s budget with zero bytes is a failure.
+fn get_response(addr: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let response = match TcpStream::connect(addr) {
+            Ok(mut stream) => get_response_once(&mut stream),
+            Err(_) => String::new(),
+        };
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
 fn listener_serves_configured_respond_route_body() {
     let (addr, _server) = start_server("single");
-    let mut stream = TcpStream::connect(&addr).expect("failed to connect");
-    let response = get_response(&mut stream);
+    let response = get_response(&addr);
 
     let status_line = response.lines().next().unwrap_or_default();
     assert!(
@@ -130,8 +157,7 @@ fn listener_serves_configured_respond_route_body() {
 fn listener_handles_multiple_connections() {
     let (addr, _server) = start_server("multi");
     for i in 0..3 {
-        let mut stream = TcpStream::connect(&addr).expect("failed to connect");
-        let response = get_response(&mut stream);
+        let response = get_response(&addr);
         assert!(
             response.ends_with("dwara"),
             "request {i}: unexpected body: {response}"
@@ -181,8 +207,7 @@ fn unmatched_path_is_served_404_by_the_dataplane() {
         Instant::now() + Duration::from_secs(10)
     ));
 
-    let mut stream = TcpStream::connect(&addr).expect("failed to connect");
-    let response = get_response(&mut stream);
+    let response = get_response(&addr);
     assert!(
         response.starts_with("HTTP/1.1 404"),
         "no-route path must be 404: {response}"
@@ -196,13 +221,12 @@ fn unmatched_path_is_served_404_by_the_dataplane() {
 
 /// Unique scratch path for one test invocation (the config_path pattern).
 fn scratch_path(tag: &str, suffix: &str) -> std::path::PathBuf {
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "dwara-124-pepper-{}-{}-{tag}{suffix}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-124-pepper-{}-{n}-{tag}{suffix}",
+        std::process::id()
     ))
 }
 
@@ -263,21 +287,45 @@ fn start_server_with_env(tag: &str, envs: &[(&str, &str)]) -> (String, ServerGua
     (addr, guard)
 }
 
-fn get_with_api_key(addr: &str, key: &str) -> String {
-    let mut stream = TcpStream::connect(addr).expect("failed to connect");
-    stream
+/// One GET attempt with an API key; transport failures yield the empty
+/// string for the retry wrapper (#128 class — see `get_response`).
+fn get_with_api_key_once(addr: &str, key: &str) -> String {
+    let Ok(mut stream) = TcpStream::connect(addr) else {
+        return String::new();
+    };
+    if stream
         .write_all(
             format!(
                 "GET / HTTP/1.1\r\nHost: localhost\r\nX-API-Key: {key}\r\nConnection: close\r\n\r\n"
             )
             .as_bytes(),
         )
-        .expect("failed to write request");
+        .is_err()
+    {
+        return String::new();
+    }
     let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .expect("failed to read response");
+    let _ = stream.read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Connect + keyed GET, retrying the WHOLE exchange while ZERO response
+/// bytes have arrived (#128 item-H class; see `get_response`). Callers
+/// assert on response CONTENT, so an exhausted 10 s budget with zero
+/// bytes is a failure.
+fn get_with_api_key(addr: &str, key: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let response = get_with_api_key_once(addr, key);
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]

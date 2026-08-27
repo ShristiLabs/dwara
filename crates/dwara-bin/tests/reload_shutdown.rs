@@ -30,14 +30,10 @@ fn free_port() -> u16 {
 }
 
 fn unique_temp_config(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "dwara-dw006-{}-{}-{tag}.yaml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("dwara-dw006-{}-{n}-{tag}.yaml", std::process::id()))
 }
 
 fn respond_config(body: &str) -> String {

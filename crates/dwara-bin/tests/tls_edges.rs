@@ -42,14 +42,13 @@ fn free_port() -> u16 {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dwara-dw007-edge-{}-{}-{tag}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // #128: a process-global counter instead of clock nanos — nanosecond
+    // stamps collide across parallel test threads (one test's cleanup
+    // then deletes a sibling's certs/config).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("dwara-dw007-edge-{}-{n}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -131,26 +130,58 @@ fn tls_connector(alpn: &[&str]) -> TlsConnector {
     Arc::new(config).into()
 }
 
-/// One HTTPS GET: returns (peer cert DER, response bytes). Fails the task
-/// on any handshake error.
-async fn tls_get_ok(addr: &str, sni: &str, connector: &TlsConnector) -> (Vec<u8>, Vec<u8>) {
-    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
+/// One HTTPS GET attempt: returns (peer cert DER, response bytes), or
+/// None when the exchange failed before it could yield anything (tcp
+/// connect, TLS handshake, or the request write — the #128 class: a
+/// reset racing the exchange under parallel load). A reset DURING the
+/// response read keeps the partial bytes, so truncation is never masked.
+async fn tls_get_attempt(
+    addr: &str,
+    sni: &str,
+    connector: &TlsConnector,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let tcp = TcpStream::connect(addr).await.ok()?;
     let name = rustls::pki_types::ServerName::try_from(sni.to_string())
         .expect("sni")
         .to_owned();
-    let mut tls = connector.connect(name, tcp).await.expect("tls handshake");
+    let mut tls = connector.connect(name, tcp).await.ok()?;
     let cert = tls
         .get_ref()
         .1
         .peer_certificates()
         .and_then(|c| c.first())
-        .map(|c| c.to_vec())
-        .expect("peer cert");
+        .map(|c| c.to_vec())?;
     let http = b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n";
-    tls.write_all(http).await.unwrap();
+    tls.write_all(http).await.ok()?;
     let mut resp = Vec::new();
     let _ = tls.read_to_end(&mut resp).await;
-    (cert, resp)
+    Some((cert, resp))
+}
+
+/// One HTTPS GET (cert DER + response bytes), retrying the WHOLE
+/// connect+handshake+request while ZERO response bytes have arrived
+/// (#128 item-H class, the same tolerance as tls_listener's
+/// tls_get_retrying_reset: under parallel suite load the kernel's
+/// FIN-to-RST replacement — or a reset racing the handshake/write — can
+/// discard the in-flight answer before any byte lands). Once a byte has
+/// arrived the result is final: no partial-data truncation is ever
+/// masked, and every caller's cert/body assertions stay byte-strict.
+/// All callers require a served response, so an exhausted 10 s budget
+/// with zero bytes is a failure, not a verdict.
+async fn tls_get_ok(addr: &str, sni: &str, connector: &TlsConnector) -> (Vec<u8>, Vec<u8>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((cert, resp)) = tls_get_attempt(addr, sni, connector).await {
+            if !resp.is_empty() {
+                return (cert, resp);
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn start_server(config_path: &std::path::Path) -> ServerGuard {
@@ -618,6 +649,13 @@ async fn passthrough_large_padded_clienthello_is_still_parsed_and_spliced() {
     assert!(hello.len() > 4000, "hello must actually be large");
     let mut tcp = TcpStream::connect(&addr).await.unwrap();
     tcp.write_all(&hello).await.unwrap();
+    // #128: half-close the write side. The passthrough peek never
+    // consumes bytes, so a gateway close while this payload is still
+    // queued arrives as RST instead of FIN (the #121 class) and can eat
+    // the spliced record the read below asserts. With the write side
+    // fully drained the gateway's close is a clean FIN and the strict
+    // read keeps its full strength.
+    let _ = tcp.shutdown().await;
 
     // The crafted hello uses a single modern cipher suite the minimal
     // backend accepts, so a successful parse + splice yields a TLS record
@@ -679,6 +717,10 @@ async fn passthrough_fragmented_clienthello_across_two_records_is_reassembled_an
     }
 
     tcp.write_all(&rec2).await.unwrap();
+    // #128: half-close so the gateway's eventual close is a FIN, not a
+    // close-with-unread-data RST racing the spliced record (see the
+    // large-hello test).
+    let _ = tcp.shutdown().await;
 
     // Splice proof (same shape as the large-hello test): the backend
     // answers with a TLS record — handshake (0x16) or alert (0x15) —
@@ -746,6 +788,12 @@ async fn passthrough_fragmented_hello_bytes_are_replayed_verbatim() {
     let mut tcp = TcpStream::connect(&addr).await.unwrap();
     tcp.write_all(&rec1).await.unwrap();
     tcp.write_all(&rec2).await.unwrap();
+    // #128: half-close after the hello so the gateway's close after the
+    // splice is a clean FIN — an RST here (close with the replayed
+    // payload still queued under load) could discard the b"OK" marker
+    // the read below must observe. The marker itself stays a strict,
+    // byte-exact assertion.
+    let _ = tcp.shutdown().await;
 
     let mut marker = [0u8; 2];
     tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut marker))

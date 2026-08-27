@@ -32,6 +32,10 @@
 //!   cap, each pinned just-under (served) and just-over (refused).
 //! - **h2c preface abuse**: the HTTP/2 preface followed by garbage closes
 //!   the connection instead of desyncing it.
+//! - **HTTP/2 limits** (#128): the DWARA_H2_* knobs are advertised in
+//!   SETTINGS, the concurrent-stream cap refuses the excess stream
+//!   (RST_STREAM/REFUSED_STREAM), and flow control gates an 8 KiB body
+//!   through a 1 KiB stream window (WINDOW_UPDATE-driven).
 //! - **Admin surface**: the dev-mode loopback admin listener applies the
 //!   same slowloris timeout and the same CL+TE rejection.
 
@@ -203,13 +207,13 @@ fn start_server_ex(
     } else {
         (String::new(), String::new())
     };
+    // #128: counter suffix — clock nanos collide across parallel threads,
+    // and two servers sharing one config path corrupt each other.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let config = std::env::temp_dir().join(format!(
-        "dwara-dw023-hardening-{}-{}-{tag}.yaml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-dw023-hardening-{}-{n}-{tag}.yaml",
+        std::process::id()
     ));
     std::fs::write(
         &config,
@@ -235,12 +239,8 @@ fn start_server_ex(
     )
     .unwrap();
     let stderr_log = std::env::temp_dir().join(format!(
-        "dwara-dw023-hardening-{}-{}-{tag}.stderr",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-dw023-hardening-{}-{n}-{tag}.stderr",
+        std::process::id()
     ));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
     cmd.env("DWARA_BIND", &addr)
@@ -274,7 +274,7 @@ fn start_server_ex(
 /// Send raw bytes, then read whatever the gateway sends back until EOF or
 /// the deadline. Err(Timeout) means the gateway neither closed nor
 /// answered within the bound.
-fn exchange(addr: &str, bytes: &[u8], deadline: Duration) -> Result<String, &'static str> {
+fn exchange_once(addr: &str, bytes: &[u8], deadline: Duration) -> Result<String, &'static str> {
     let mut stream = TcpStream::connect(addr).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_millis(100)))
@@ -306,6 +306,32 @@ fn exchange(addr: &str, bytes: &[u8], deadline: Duration) -> Result<String, &'st
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return Ok(String::from_utf8_lossy(&out).into_owned()),
         }
+    }
+}
+
+/// [`exchange_once`] with #128-class reset tolerance (the same shape as
+/// tls_listener::tls_get_retrying_reset): under parallel suite load the
+/// kernel can turn the peer's FIN into an RST while unread data is still
+/// queued, discarding the in-flight answer before a single byte lands —
+/// a zero-byte result is then a race artifact, not a verdict. Retry the
+/// WHOLE connect+request, but ONLY while ZERO response bytes have
+/// arrived: once any byte exists the result is final, so partial-data
+/// truncation can never be masked (every caller stays byte-strict).
+/// Bounded at 10 s with 50 ms backoff; on exhaustion the last (empty)
+/// result is handed to the caller's own assertion — callers whose
+/// legitimate outcome is a bare close keep accepting it.
+fn exchange(addr: &str, bytes: &[u8], deadline: Duration) -> Result<String, &'static str> {
+    let started = Instant::now();
+    loop {
+        let attempt = exchange_once(addr, bytes, deadline);
+        let zero_bytes = match &attempt {
+            Ok(response) => response.is_empty(),
+            Err(_) => true,
+        };
+        if !zero_bytes || started.elapsed() >= Duration::from_secs(10) {
+            return attempt;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1367,5 +1393,306 @@ fn admin_surface_rejects_cl_te_smuggling() {
     assert!(
         response.starts_with("HTTP/1.1 400") || response.is_empty(),
         "admin surface must reject CL+TE ambiguity, got: {response}"
+    );
+}
+
+// --- HTTP/2 limits (DW-023 gap; #128) -------------------------------------
+//
+// The DWARA_H2_* knobs configure hyper's h2 server builder (see
+// HttpHardening::apply); these tests pin the WIRE behavior of the real
+// binary: the advertised SETTINGS values, enforcement of the
+// concurrent-stream cap (the excess stream is refused with
+// RST_STREAM/REFUSED_STREAM), and window-gated flow (an 8 KiB body
+// through a 1 KiB stream window completes only via the server's
+// WINDOW_UPDATEs as it consumes the body). Malformed h2 framing is
+// already pinned by h2c_preface_followed_by_garbage_is_closed above and
+// tls_edges::h2c_malformed_preface_does_not_hang_the_listener.
+
+/// HPACK literal header field without indexing (0x00 prefix, no
+/// Huffman). Name/value lengths stay below 127, so no integer encoding
+/// is needed — the bytes are fixed and auditable.
+fn hpack_literal(name: &str, value: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(2 + name.len() + value.len());
+    b.push(0x00);
+    b.push(name.len() as u8);
+    b.extend_from_slice(name.as_bytes());
+    b.push(value.len() as u8);
+    b.extend_from_slice(value.as_bytes());
+    b
+}
+
+/// HEADERS payload for an incomplete POST: END_HEADERS only, no
+/// END_STREAM — the gateway holds the stream OPEN awaiting
+/// `content_length` body bytes the test never sends, so the stream
+/// consumes concurrency for as long as the test needs it open.
+fn hpack_open_post(path: &str, content_length: usize) -> Vec<u8> {
+    let mut b = hpack_literal(":method", "POST");
+    b.extend(hpack_literal(":scheme", "http"));
+    b.extend(hpack_literal(":authority", "h"));
+    b.extend(hpack_literal(":path", path));
+    b.extend(hpack_literal("content-length", &content_length.to_string()));
+    b
+}
+
+/// One h2 frame with explicit flags and stream id.
+fn h2_frame_stream(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(9 + payload.len());
+    f.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
+    f.push(kind);
+    f.push(flags);
+    f.extend_from_slice(&stream.to_be_bytes());
+    f.extend_from_slice(payload);
+    f
+}
+
+/// Read one complete h2 frame (9-byte header + payload) within
+/// `deadline`, polling past read timeouts. Returns
+/// (kind, flags, stream_id, payload) or None on close/timeout/malformed.
+fn read_h2_frame(stream: &mut TcpStream, deadline: Instant) -> Option<(u8, u8, u32, Vec<u8>)> {
+    let mut read_exact = |buf: &mut [u8]| -> Option<()> {
+        let mut got = 0;
+        while got < buf.len() {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match stream.read(&mut buf[got..]) {
+                Ok(0) => return None,
+                Ok(n) => got += n,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+        Some(())
+    };
+    let mut header = [0u8; 9];
+    read_exact(&mut header)?;
+    let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+    let mut payload = vec![0u8; len];
+    read_exact(&mut payload)?;
+    let stream_id = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & 0x7fff_ffff;
+    Some((header[3], header[4], stream_id, payload))
+}
+
+/// Connect, send the h2c prior-knowledge preface and an empty client
+/// SETTINGS frame — the shared handshake prefix of the raw-frame tests.
+fn h2_raw_connect(addr: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .expect("preface");
+    stream
+        .write_all(&h2_frame_stream(0x4, 0, 0, &[]))
+        .expect("client settings");
+    stream
+}
+
+/// The advertised knobs: SETTINGS_MAX_CONCURRENT_STREAMS and
+/// SETTINGS_INITIAL_WINDOW_SIZE carry the configured env values (the cap
+/// is "enforced and advertised" — this pins the advertised half).
+#[test]
+fn h2_settings_advertise_the_configured_limits() {
+    let (addr, _log, _server) = start_server(
+        "h2adv",
+        &[
+            ("DWARA_H2_MAX_CONCURRENT_STREAMS", "7"),
+            ("DWARA_H2_STREAM_WINDOW_KIB", "1"),
+        ],
+    );
+    let mut stream = h2_raw_connect(&addr);
+    let (kind, _flags, sid, payload) =
+        read_h2_frame(&mut stream, Instant::now() + Duration::from_secs(5))
+            .expect("server SETTINGS within 5s");
+    assert_eq!(kind, 0x4, "first server frame must be SETTINGS");
+    assert_eq!(sid, 0);
+    let mut max_streams = None;
+    let mut initial_window = None;
+    for pair in payload.chunks(6) {
+        if pair.len() < 6 {
+            break;
+        }
+        let id = u16::from_be_bytes([pair[0], pair[1]]);
+        let val = u32::from_be_bytes([pair[2], pair[3], pair[4], pair[5]]);
+        match id {
+            0x0003 => max_streams = Some(val),
+            0x0004 => initial_window = Some(val),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        max_streams,
+        Some(7),
+        "SETTINGS_MAX_CONCURRENT_STREAMS must be the knob value"
+    );
+    assert_eq!(
+        initial_window,
+        Some(1024),
+        "SETTINGS_INITIAL_WINDOW_SIZE must be 1 KiB (DWARA_H2_STREAM_WINDOW_KIB=1)"
+    );
+}
+
+/// Stream-cap enforcement: with the cap at 2, two held-open streams are
+/// legal concurrency; the THIRD stream must be refused with
+/// RST_STREAM/REFUSED_STREAM while the two in-cap streams stay
+/// untouched and nothing reaches the upstream.
+#[test]
+fn h2_excess_concurrent_stream_is_refused() {
+    let (addr, log, _server) = start_server("h2cap", &[("DWARA_H2_MAX_CONCURRENT_STREAMS", "2")]);
+    let mut stream = h2_raw_connect(&addr);
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    // Two streams held open by incomplete POST bodies.
+    for sid in [1u32, 3] {
+        stream
+            .write_all(&h2_frame_stream(
+                0x1,
+                0x4, // END_HEADERS (no END_STREAM: await the body)
+                sid,
+                &hpack_open_post("/h2cap", 64),
+            ))
+            .expect("in-cap headers");
+    }
+    // Acknowledge the server's SETTINGS like a compliant client.
+    loop {
+        let (kind, _f, _sid, _p) =
+            read_h2_frame(&mut stream, deadline).expect("server SETTINGS within 5s");
+        if kind == 0x4 {
+            stream
+                .write_all(&h2_frame_stream(0x4, 0x1, 0, &[]))
+                .expect("settings ack");
+            break;
+        }
+    }
+
+    // The excess stream: over the advertised cap of two.
+    stream
+        .write_all(&h2_frame_stream(
+            0x1,
+            0x4,
+            5,
+            &hpack_open_post("/h2cap", 64),
+        ))
+        .expect("excess headers");
+
+    // Bounded poll for the refusal; only the EXCESS stream may be reset.
+    let mut refusal: Option<u32> = None;
+    while refusal.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "excess stream was not refused within 5s"
+        );
+        let (kind, _f, sid, payload) = read_h2_frame(&mut stream, deadline)
+            .expect("frame after the excess stream (connection closed without a refusal?)");
+        if kind == 0x3 {
+            assert_eq!(
+                sid, 5,
+                "only the excess stream may be refused, saw RST_STREAM for {sid}"
+            );
+            refusal = Some(u32::from_be_bytes([
+                payload[0], payload[1], payload[2], payload[3],
+            ]));
+        }
+        // SETTINGS/ACK/WINDOW_UPDATE and friends: keep polling.
+    }
+    assert_eq!(
+        refusal.unwrap(),
+        7, // REFUSED_STREAM
+        "the excess stream must be refused with REFUSED_STREAM"
+    );
+    // The held-open bodies never completed: nothing reached the upstream.
+    assert_upstream_saw_nothing(&log);
+}
+
+/// Window enforcement (flow control): an 8 KiB POST body through a
+/// 1 KiB initial stream window (2 KiB connection window) can only
+/// complete if the server grants WINDOW_UPDATEs as it consumes bytes
+/// toward the upstream — the h2 client's capacity API blocks otherwise.
+/// Completing the exchange within the bound therefore proves the data
+/// flow was window-gated end to end (bounded bytes in flight), without
+/// asserting exact OS-level scheduling.
+#[tokio::test]
+async fn h2_window_updates_gate_flow_beyond_the_initial_window() {
+    let (addr, log, _server) = start_server(
+        "h2win",
+        &[
+            ("DWARA_H2_STREAM_WINDOW_KIB", "1"),
+            ("DWARA_H2_CONNECTION_WINDOW_KIB", "2"),
+        ],
+    );
+    let tcp = tokio::net::TcpStream::connect(&addr)
+        .await
+        .expect("connect");
+    let (mut client, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    const TOTAL: usize = 8 * 1024;
+    static BODY: [u8; TOTAL] = [0x57; TOTAL];
+    // hyper::Request IS http::Request (re-exported), the same type h2's
+    // API takes — no http dev-dependency needed. Likewise
+    // hyper::body::Bytes IS the bytes::Bytes h2's SendStream takes.
+    let request = hyper::Request::post("http://h/h2win")
+        .header("content-length", TOTAL.to_string())
+        .body(())
+        .expect("request");
+    let (response, mut send_body) = client.send_request(request, false).expect("send request");
+
+    // Send only what the server grants; every granted byte beyond the
+    // initial 1 KiB window arrived via a WINDOW_UPDATE.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut sent = 0usize;
+    while sent < TOTAL {
+        let remaining = &BODY[sent..];
+        send_body.reserve_capacity(remaining.len());
+        let granted = tokio::time::timeout_at(
+            deadline,
+            std::future::poll_fn(|cx| send_body.poll_capacity(cx)),
+        )
+        .await
+        .expect("capacity granted within 10s (windows never opened: flow stalled)")
+        .expect("stream still open")
+        .expect("nonzero capacity");
+        let n = granted.min(remaining.len());
+        send_body
+            .send_data(hyper::body::Bytes::from_static(&remaining[..n]), false)
+            .expect("send data");
+        sent += n;
+    }
+    send_body
+        .send_data(hyper::body::Bytes::new(), true)
+        .expect("end stream");
+
+    let response = tokio::time::timeout_at(deadline, response)
+        .await
+        .expect("response within 10s")
+        .expect("response future");
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "the window-gated upload must complete"
+    );
+    // Drain the tiny response body cleanly (release flow control).
+    let mut body = response.into_body();
+    while let Some(chunk) =
+        tokio::time::timeout_at(deadline, std::future::poll_fn(|cx| body.poll_data(cx)))
+            .await
+            .expect("response body within 10s")
+    {
+        let n = chunk.expect("body chunk").len();
+        let _ = body.flow_control().release_capacity(n);
+    }
+    let requests = log.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /h2win")),
+        "the full window-gated body reached the upstream: {requests:?}"
     );
 }

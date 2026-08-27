@@ -34,13 +34,12 @@ fn free_port() -> u16 {
 }
 
 fn unique_temp_dir(tag: &str) -> PathBuf {
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "dwara-dw006-edges-{}-{}-{tag}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-dw006-edges-{}-{n}-{tag}",
+        std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -154,13 +153,41 @@ fn one_shot_text(stream: &mut TcpStream) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// One GET; true iff HTTP 200 with the pre- or post-reload respond body.
-fn one_shot_request(stream: &mut TcpStream) -> bool {
-    let Some(text) = one_shot_text(stream) else {
-        return false;
-    };
+/// True iff the text is an HTTP 200 carrying the pre- or post-reload
+/// respond body.
+fn served_ok(text: &str) -> bool {
     (text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200"))
         && (text.ends_with("dwara") || text.ends_with("dwara-v2"))
+}
+
+/// One GET; true iff HTTP 200 with the pre- or post-reload respond body.
+fn one_shot_request(stream: &mut TcpStream) -> bool {
+    one_shot_text(stream).is_some_and(|text| served_ok(&text))
+}
+
+/// Connect + GET, retrying the WHOLE exchange while ZERO response bytes
+/// have arrived (#128 item-H class, the same tolerance as
+/// tls_listener::tls_get_retrying_reset: under parallel load the
+/// kernel's FIN-to-RST replacement can discard the in-flight answer
+/// before any byte lands). Once a byte has arrived the result is final —
+/// no partial-data truncation is ever masked. Callers assert on response
+/// CONTENT, so an exhausted 10 s budget with zero bytes is a failure.
+fn one_shot_retrying(addr: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let text = TcpStream::connect(addr)
+            .ok()
+            .and_then(|mut stream| one_shot_text(&mut stream))
+            .unwrap_or_default();
+        if !text.is_empty() {
+            return text;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// One keepalive GET (no `Connection: close`): read headers until the
@@ -250,9 +277,8 @@ fn config_deleted_while_running_keeps_serving_last_snapshot() {
     std::thread::sleep(Duration::from_millis(1500));
 
     // Running snapshot is kept: still serving.
-    let mut stream = TcpStream::connect(&addr).expect("connect after config deletion");
     assert!(
-        one_shot_request(&mut stream),
+        served_ok(&one_shot_retrying(&addr)),
         "server must keep serving after config deletion"
     );
 
@@ -296,9 +322,8 @@ fn config_replaced_via_atomic_rename_triggers_reload() {
     std::fs::rename(&tmp, &config).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
 
-    let mut stream = TcpStream::connect(&addr).expect("connect after rename");
     assert!(
-        one_shot_request(&mut stream),
+        served_ok(&one_shot_retrying(&addr)),
         "server must keep serving after atomic config replace"
     );
 
@@ -334,10 +359,9 @@ fn empty_config_reload_publishes_empty_generation_and_keeps_serving() {
     std::fs::write(&config, "").unwrap();
     std::thread::sleep(Duration::from_millis(1500));
 
-    let mut stream = TcpStream::connect(&addr).expect("connect after empty reload");
     // The empty gateway has no routes, so the dataplane answers a clean
     // 404 — still an HTTP response from the running generation.
-    let text = one_shot_text(&mut stream).expect("server must keep answering after empty reload");
+    let text = one_shot_retrying(&addr);
     assert!(
         text.starts_with("HTTP/1.1 404"),
         "empty generation serves 404 no-route: {text}"

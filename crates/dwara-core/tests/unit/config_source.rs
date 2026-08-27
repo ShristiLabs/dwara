@@ -19,14 +19,11 @@ const INVALID_UNKNOWN_FIELD_YAML: &str =
     include_str!("../../tests/fixtures/invalid_unknown_field.yaml");
 
 fn unique_temp_file(name: &str) -> std::path::PathBuf {
-    let unique = format!(
-        "dwara-dw004-{}-{}-{name}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    // #128: counter suffix — clock nanos collide across parallel threads
+    // (a sibling's remove_file then deletes this test's fixture).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unique = format!("dwara-dw004-{}-{n}-{name}", std::process::id());
     std::env::temp_dir().join(unique)
 }
 

@@ -99,8 +99,12 @@ struct LbEndpoint {
     /// state reads.
     inflight: Arc<AtomicU64>,
     /// Smooth-WRR running weight (the nginx algorithm's per-endpoint
-    /// accumulator). Carried across rebuilds for unchanged addresses.
-    current_weight: AtomicI64,
+    /// accumulator). Carried across rebuilds for unchanged addresses as a
+    /// SHARED cell (exactly like `inflight`): a pick in flight against
+    /// the old snapshot while a reload swaps in a new state mutates the
+    /// same accumulator the next generation reads, so no phase step is
+    /// lost (#128, DW-011 review).
+    current_weight: Arc<AtomicI64>,
     /// Passive health tracker (DW-012); present only when the upstream
     /// configures `health`. Carried across rebuilds for unchanged
     /// addresses, exactly like `inflight`: the live tracker survives the
@@ -117,13 +121,16 @@ impl LbEndpoint {
             weight: e.weight.max(1),
             entered: Instant::now(),
             inflight: Arc::new(AtomicU64::new(0)),
-            current_weight: AtomicI64::new(0),
+            current_weight: Arc::new(AtomicI64::new(0)),
             health: None,
         }
     }
 
     /// Same endpoint (address:port unchanged): keep live counters, WRR
-    /// phase, and slow-start clock; take the new configured weight.
+    /// phase, and slow-start clock; take the new configured weight. The
+    /// WRR phase carries as the LIVE shared cell, not a copied value, so
+    /// a pick racing the rebuild cannot strand a phase step in the old
+    /// state (#128).
     fn carried_from(old: &LbEndpoint, e: &Endpoint) -> Self {
         LbEndpoint {
             address: old.address.clone(),
@@ -131,7 +138,7 @@ impl LbEndpoint {
             weight: e.weight.max(1),
             entered: old.entered,
             inflight: Arc::clone(&old.inflight),
-            current_weight: AtomicI64::new(old.current_weight.load(Ordering::Relaxed)),
+            current_weight: Arc::clone(&old.current_weight),
             health: old.health.clone(),
         }
     }
@@ -779,5 +786,44 @@ mod tests {
         // configured weight from the first pick on.
         let off = build_state(&spec, LoadBalancer::RoundRobin, Duration::ZERO, None, None);
         assert_eq!(off.effective_weight(&off.endpoints[1]), 5);
+    }
+
+    // --- WRR phase across a rebuild (#128) ---------------------------------
+    //
+    // White-box (stays in src like the slow-start test): the lost-phase
+    // race is a pick mutating the OLD state snapshot's `current_weight`
+    // while a rebuild has already copied state into a new generation.
+    // `pick` loads and mutates within one call, so the interleave cannot
+    // be forced through the public API — pinning the shared cell needs
+    // private access to the pinned `Arc<LbState>` and `choose`.
+    #[test]
+    fn wrr_phase_cell_is_shared_across_rebuild() {
+        let spec = eps(&[("a", 1, 2), ("b", 2, 1)]);
+        let lb = UpstreamLb::new(&spec, LoadBalancer::RoundRobin, Duration::ZERO);
+        // A pick holds the OLD snapshot across the rebuild (the shape of
+        // `pick`/`pick_for_dispatch` running concurrently with a reload).
+        let old = lb.state.load_full();
+        lb.rebuild(&spec, LoadBalancer::RoundRobin, Duration::ZERO);
+        let new = lb.state.load_full();
+        for i in 0..new.endpoints.len() {
+            assert!(
+                Arc::ptr_eq(
+                    &old.endpoints[i].current_weight,
+                    &new.endpoints[i].current_weight
+                ),
+                "endpoint {i}: the WRR phase cell must be the SAME allocation \
+                 across a rebuild, not a copied value"
+            );
+        }
+        // The pick against the old snapshot mutates the shared cell: the
+        // new generation observes the phase step (before #128 the old
+        // snapshot's step was stranded and the copy went stale).
+        let idx = lb.choose(&old, None).unwrap();
+        assert_eq!(
+            new.endpoints[idx].current_weight.load(Ordering::Relaxed),
+            old.endpoints[idx].current_weight.load(Ordering::Relaxed),
+            "a pick in flight against the old snapshot must advance the \
+             phase the new generation reads"
+        );
     }
 }

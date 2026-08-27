@@ -25,14 +25,10 @@ fn free_port() -> u16 {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dwara-dw013-{}-{}-{tag}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dwara-dw013-{}-{n}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -83,17 +79,48 @@ fn wait_tcp(addr: &str, deadline: Instant) {
     panic!("dwara did not listen on {addr}");
 }
 
-fn http_get(addr: &str, path: &str) -> String {
-    let mut stream = TcpStream::connect(addr).expect("connect");
-    stream
+/// One GET attempt; a transport failure (connect, write, or a reset
+/// racing the read — the #128 class) yields the empty string so the
+/// retry wrapper can distinguish "nothing arrived" from a real answer.
+fn http_get_once(addr: &str, path: &str) -> String {
+    let Ok(mut stream) = TcpStream::connect(addr) else {
+        return String::new();
+    };
+    if stream
         .write_all(
             format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .as_bytes(),
         )
-        .unwrap();
+        .is_err()
+    {
+        return String::new();
+    }
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).unwrap();
+    let _ = stream.read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Connect + GET, retrying the WHOLE exchange while ZERO response bytes
+/// have arrived (#128 item-H class, the same tolerance as
+/// tls_listener::tls_get_retrying_reset): under parallel load the
+/// kernel's FIN-to-RST replacement can discard the in-flight answer
+/// before any byte lands. Once a byte has arrived the result is final —
+/// no partial-data truncation is ever masked. Every caller of this
+/// helper asserts on response CONTENT, so an exhausted 10 s budget with
+/// zero bytes is a failure, not a verdict.
+fn http_get(addr: &str, path: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let response = http_get_once(addr, path);
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -165,10 +192,13 @@ fn healthz_and_readyz_served_through_tls_terminated_listener() {
     std::fs::remove_file(&config).ok();
 }
 
-/// One HTTPS GET using a dedicated tokio runtime; the peer certificate is
-/// self-signed, so verification is disabled (tests only assert status and
-/// body, mirroring tls_listener.rs's NoVerify approach).
-fn tls_http_get(addr: &str, path: &str) -> String {
+/// One HTTPS GET attempt using a dedicated tokio runtime; the peer
+/// certificate is self-signed, so verification is disabled (tests only
+/// assert status and body, mirroring tls_listener.rs's NoVerify
+/// approach). Transport failures yield the empty string for the retry
+/// wrapper (#128 class: a reset racing the exchange discards the answer
+/// before any byte lands).
+fn tls_http_get_once(addr: &str, path: &str) -> String {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -227,20 +257,52 @@ fn tls_http_get(addr: &str, path: &str) -> String {
             .with_custom_certificate_verifier(std::sync::Arc::new(NoVerify))
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
-        let tcp = tokio::net::TcpStream::connect(addr).await.expect("tcp");
+        let tcp = match tokio::net::TcpStream::connect(addr).await {
+            Ok(tcp) => tcp,
+            Err(_) => return String::new(),
+        };
         let name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_string())
             .unwrap()
             .to_owned();
-        let mut tls = connector.connect(name, tcp).await.expect("tls");
+        let mut tls = match connector.connect(name, tcp).await {
+            Ok(tls) => tls,
+            Err(_) => return String::new(),
+        };
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        tls.write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .await
-        .unwrap();
+        if tls
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .is_err()
+        {
+            return String::new();
+        }
         let mut buf = Vec::new();
-        tls.read_to_end(&mut buf).await.unwrap();
+        let _ = tls.read_to_end(&mut buf).await;
         String::from_utf8_lossy(&buf).into_owned()
     })
+}
+
+/// Connect + HTTPS GET, retrying the WHOLE exchange while ZERO response
+/// bytes have arrived (#128 item-H class; the same tolerance as
+/// tls_listener's tls_get_retrying_reset: under parallel load the
+/// kernel's FIN-to-RST replacement can discard the in-flight answer
+/// before any byte lands). Once a byte has arrived the result is final —
+/// no partial-data truncation is ever masked. Callers assert on response
+/// CONTENT, so an exhausted 10 s budget with zero bytes is a failure.
+fn tls_http_get(addr: &str, path: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let response = tls_http_get_once(addr, path);
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

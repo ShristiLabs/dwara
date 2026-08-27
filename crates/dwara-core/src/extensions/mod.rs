@@ -58,3 +58,22 @@ impl std::fmt::Display for ExtensionsError {
 }
 
 impl std::error::Error for ExtensionsError {}
+
+impl From<std::io::Error> for ExtensionsError {
+    /// I/O failures map to the [`ExtensionsError::Io`] class, carrying the
+    /// OS error message. Call sites needing more context (e.g. the file
+    /// path) still hand-format — this conversion covers the common case
+    /// (#128, DW-004 review).
+    fn from(e: std::io::Error) -> Self {
+        ExtensionsError::Io(e.to_string())
+    }
+}
+
+impl From<crate::config::ConfigError> for ExtensionsError {
+    /// Config parse failures map to [`ExtensionsError::Invalid`],
+    /// preserving `ConfigError`'s path-precise Display ("config error at
+    /// {path}: {message}").
+    fn from(e: crate::config::ConfigError) -> Self {
+        ExtensionsError::Invalid(e.to_string())
+    }
+}

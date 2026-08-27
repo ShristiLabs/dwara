@@ -388,13 +388,12 @@ impl CapturedOutput {
 }
 
 fn respond_config(tag: &str) -> std::path::PathBuf {
+    // #128: counter suffix — clock nanos collide across parallel threads.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "dwara-126-otlp-{}-{}-{tag}.yaml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "dwara-126-otlp-{}-{n}-{tag}.yaml",
+        std::process::id()
     ));
     std::fs::write(
         &path,
@@ -448,7 +447,7 @@ fn spawn_gateway(tag: &str, extra_env: &[(&str, &str)]) -> (String, ServerGuard,
 fn wait_ready(addr: &str, deadline: Instant) -> bool {
     while Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(addr) {
-            if get(&mut s).starts_with("HTTP/1.1 200") {
+            if get_once(&mut s).starts_with("HTTP/1.1 200") {
                 return true;
             }
         }
@@ -457,15 +456,45 @@ fn wait_ready(addr: &str, deadline: Instant) -> bool {
     false
 }
 
-fn get(stream: &mut TcpStream) -> String {
-    stream
+/// One GET attempt on an established stream; a transport failure (a
+/// reset racing the exchange under parallel load — the #128 class)
+/// yields the empty string so the caller can tell "nothing arrived"
+/// from a real answer.
+fn get_once(stream: &mut TcpStream) -> String {
+    if stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .expect("failed to write request");
+        .is_err()
+    {
+        return String::new();
+    }
     let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .expect("failed to read response");
+    let _ = stream.read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Connect + GET, retrying the WHOLE exchange while ZERO response bytes
+/// have arrived (#128 item-H class, the same tolerance as
+/// tls_listener::tls_get_retrying_reset: under parallel load the
+/// kernel's FIN-to-RST replacement can discard the in-flight answer
+/// before any byte lands). Once a byte has arrived the result is final —
+/// no partial-data truncation is ever masked. Callers assert on response
+/// CONTENT, so an exhausted 10 s budget with zero bytes is a failure.
+fn get(addr: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let response = match TcpStream::connect(addr) {
+            Ok(mut stream) => get_once(&mut stream),
+            Err(_) => String::new(),
+        };
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn kill_signal(pid: u32, sig: &str) {
@@ -530,8 +559,7 @@ fn root_span_exports_to_otlp_sink_on_shutdown() {
     );
 
     // One proxied request through the real binary.
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    let response = get(&mut stream);
+    let response = get(&addr);
     assert!(
         response.starts_with("HTTP/1.1 200") && response.ends_with("dwara"),
         "gateway must serve normally with OTLP live: {response}"
@@ -594,8 +622,7 @@ fn root_span_exports_to_otlp_sink_on_shutdown() {
 fn feature_enabled_endpoint_unset_is_a_noop_with_info_line() {
     let (addr, mut guard, mut output) = spawn_gateway("unset", &[]);
 
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+    assert!(get(&addr).starts_with("HTTP/1.1 200"));
 
     kill_signal(guard.0.id(), "TERM");
     let status = wait_exit(&mut guard.0, Duration::from_secs(20));
@@ -619,8 +646,7 @@ fn https_endpoint_fails_fast_but_gateway_serves() {
         &[("DWARA_OTLP_ENDPOINT", "https://collector:4318")],
     );
 
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+    assert!(get(&addr).starts_with("HTTP/1.1 200"));
 
     kill_signal(guard.0.id(), "TERM");
     let status = wait_exit(&mut guard.0, Duration::from_secs(20));
@@ -654,8 +680,7 @@ fn multi_request_traces_export_with_parenting_on_immediate_sigterm() {
 
     const REQUESTS: usize = 3;
     for _ in 0..REQUESTS {
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-        let response = get(&mut stream);
+        let response = get(&addr);
         assert!(
             response.starts_with("HTTP/1.1 200"),
             "gateway must serve with OTLP live: {response}"
@@ -759,8 +784,7 @@ fn endpoint_path_resolution_trailing_slash_and_verbatim_full_path() {
                 &format!("http://127.0.0.1:{sink_port}/"),
             )],
         );
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-        assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+        assert!(get(&addr).starts_with("HTTP/1.1 200"));
         kill_signal(guard.0.id(), "TERM");
         let status = wait_exit(&mut guard.0, Duration::from_secs(20));
         assert!(status.success());
@@ -794,8 +818,7 @@ fn endpoint_path_resolution_trailing_slash_and_verbatim_full_path() {
                 &format!("http://127.0.0.1:{sink_port}/custom/v1/traces"),
             )],
         );
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-        assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+        assert!(get(&addr).starts_with("HTTP/1.1 200"));
         kill_signal(guard.0.id(), "TERM");
         let status = wait_exit(&mut guard.0, Duration::from_secs(20));
         assert!(status.success());
@@ -832,9 +855,8 @@ fn malformed_endpoints_fail_fast_but_gateway_serves() {
         let (addr, mut guard, mut output) =
             spawn_gateway("malformed", &[("DWARA_OTLP_ENDPOINT", endpoint)]);
 
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
         assert!(
-            get(&mut stream).starts_with("HTTP/1.1 200"),
+            get(&addr).starts_with("HTTP/1.1 200"),
             "gateway must serve with endpoint {endpoint:?}"
         );
 
@@ -869,8 +891,7 @@ fn collector_errors_during_serving_never_take_down_the_data_plane() {
 
     // One request seeds a span so the batch tick has something to
     // export; the failure is then guaranteed to happen mid-serving.
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+    assert!(get(&addr).starts_with("HTTP/1.1 200"));
 
     // Bounded poll for the sink OBSERVING the first (failing) export —
     // the batch processor's scheduled delay is 5s, so allow generous
@@ -894,8 +915,7 @@ fn collector_errors_during_serving_never_take_down_the_data_plane() {
 
     // The data plane is unaffected by the export failures.
     for _ in 0..3 {
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-        let response = get(&mut stream);
+        let response = get(&addr);
         assert!(
             response.starts_with("HTTP/1.1 200") && response.ends_with("dwara"),
             "serving must continue through collector errors: {response}"
@@ -935,8 +955,7 @@ fn absurd_chunked_size_is_an_export_error_not_a_batch_thread_panic() {
 
     // Seed spans; bounded poll for the sink OBSERVING the first (poisoned)
     // export — the batch tick is 5s, so generous headroom for load.
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    assert!(get(&mut stream).starts_with("HTTP/1.1 200"));
+    assert!(get(&addr).starts_with("HTTP/1.1 200"));
     assert!(
         wait_for_captures(&captured, 1, Instant::now() + Duration::from_secs(20)),
         "the exporter never attempted the poisoned export"
@@ -944,8 +963,7 @@ fn absurd_chunked_size_is_an_export_error_not_a_batch_thread_panic() {
 
     // The data plane is untouched by the malformed answer...
     for _ in 0..3 {
-        let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-        let response = get(&mut stream);
+        let response = get(&addr);
         assert!(
             response.starts_with("HTTP/1.1 200") && response.ends_with("dwara"),
             "serving must continue through a malformed collector answer: {response}"
@@ -985,8 +1003,7 @@ fn ipv6_literal_endpoint_exports_to_loopback_sink() {
         &[("DWARA_OTLP_ENDPOINT", &format!("http://[::1]:{sink_port}"))],
     );
 
-    let mut stream = TcpStream::connect(&addr).expect("connect to gateway");
-    let response = get(&mut stream);
+    let response = get(&addr);
     assert!(
         response.starts_with("HTTP/1.1 200"),
         "gateway must serve with an IPv6-literal OTLP endpoint: {response}"

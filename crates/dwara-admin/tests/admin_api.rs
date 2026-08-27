@@ -194,11 +194,20 @@ async fn request(
     tls.write_all(req.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
+    // #128 flake class: write_all completing does NOT mean the bytes are on
+    // the wire — tokio-rustls may keep the final TLS record (the 4 MiB
+    // body's tail) buffered, and poll_read never flushes pending writes, so
+    // the server would sit below the size cap forever. Flush before reading.
+    tls.flush().await.map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(5), tls.read_to_end(&mut buf))
-        .await
-        .map_err(|_| "read timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    // #128 flake class: 10s read bound is load tolerance for full-suite parallelism (4 MiB over loopback mTLS takes milliseconds); a genuine hang still trips the caller's outer deadline.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tls.read_to_end(&mut buf),
+    )
+    .await
+    .map_err(|_| "read timed out".to_string())?
+    .map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&buf).to_string();
     parse_response(&text).ok_or_else(|| "malformed response".to_string())
 }

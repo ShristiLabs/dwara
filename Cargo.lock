@@ -443,6 +443,7 @@ dependencies = [
  "bytes",
  "dwara-admin",
  "dwara-core",
+ "h2",
  "http",
  "http-body-util",
  "hyper",

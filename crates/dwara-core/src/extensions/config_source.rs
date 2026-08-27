@@ -54,8 +54,12 @@ impl FileConfigSource {
 #[async_trait]
 impl ConfigSource for FileConfigSource {
     async fn load(&self) -> Result<Gateway, ExtensionsError> {
+        // The io site keeps the file path (context the blanket
+        // From<std::io::Error> cannot provide); the config site uses the
+        // From<ConfigError> conversion (#128) — ConfigError's Display is
+        // already path-precise.
         let text = std::fs::read_to_string(&self.path)
             .map_err(|e| ExtensionsError::Io(format!("{}: {e}", self.path.display())))?;
-        parse_gateway(&text).map_err(|e| ExtensionsError::Invalid(e.to_string()))
+        parse_gateway(&text).map_err(ExtensionsError::from)
     }
 }

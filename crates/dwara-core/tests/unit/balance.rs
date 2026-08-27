@@ -240,6 +240,33 @@ fn rebuild_carries_wrr_phase_and_inflight_for_unchanged_addresses() {
     assert_eq!(lb.inflight(0), 0);
 }
 
+/// #128: a rebuild must not reset the WRR phase SEQUENCE. The pick
+/// sequence of a balancer that was rebuilt mid-period equals the
+/// uninterrupted sequence of a fresh one (the in-flight/shared-cell half
+/// of the fix is pinned white-box in src/dataplane/balance.rs).
+#[test]
+fn rebuild_does_not_reset_the_wrr_phase_sequence() {
+    let spec = eps(&[("a", 1, 3), ("b", 2, 2)]);
+    let baseline = UpstreamLb::new(&spec, LoadBalancer::RoundRobin, Duration::ZERO);
+    // One full period (weights 3+2 = 5 picks) without interruption.
+    let uninterrupted: Vec<usize> = (0..5).map(|_| baseline.pick(None).unwrap()).collect();
+
+    let reloaded = UpstreamLb::new(&spec, LoadBalancer::RoundRobin, Duration::ZERO);
+    let mut across_reload = Vec::with_capacity(5);
+    for _ in 0..2 {
+        across_reload.push(reloaded.pick(None).unwrap());
+    }
+    // Reload mid-period (same endpoint set, as a config-only reload does).
+    reloaded.rebuild(&spec, LoadBalancer::RoundRobin, Duration::ZERO);
+    while across_reload.len() < 5 {
+        across_reload.push(reloaded.pick(None).unwrap());
+    }
+    assert_eq!(
+        across_reload, uninterrupted,
+        "picks across a rebuild must continue the uninterrupted WRR sequence"
+    );
+}
+
 #[test]
 fn rebuild_with_new_weights_takes_effect_immediately() {
     let spec = eps(&[("a", 1, 2), ("b", 2, 1)]);

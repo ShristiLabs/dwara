@@ -220,6 +220,16 @@ the project follows semantic versioning once 1.0 is reached.
   `cargo bench` hid behind the pipeline's exit 0 and the regression gate
   compared (or the refresh committed) output truncated at the failure
   point; both pipelines now fail at the source (#127).
+- Smooth-WRR `current_weight` was copied at rebuild, so a pick in flight
+  against the old generation while a reload published a new one stranded
+  its phase step (a one-off distribution glitch). The accumulator is now
+  a shared cell carried across rebuilds exactly like the inflight
+  counters, so WRR phase continuity survives reloads (#128).
+- Duplicate-endpoint detection compared untrimmed address strings while
+  the neighboring endpoint checks trim, so ` 127.0.0.1` and `127.0.0.1`
+  passed validation as two endpoints against one shared balancer state
+  (the identical spelling was already rejected). The duplicate target is
+  now compared trimmed, like the empty-address check (#128).
 
 ### Changed
 
@@ -255,6 +265,12 @@ the project follows semantic versioning once 1.0 is reached.
   bump procedure documented in `fuzz.yml`) instead of a floating
   `nightly`, keeping the weekly fuzz matrix reproducible and immune to
   unrelated nightly regressions (#127).
+- `InMemoryCache` (the in-tree `CacheStore` impl) is bounded instead of
+  the previously documented-unbounded map: capacity 1024 entries by
+  default (`InMemoryCache::with_capacity` for another bound; the count
+  bounds entries, not bytes), evicting the least-recently-used entry
+  past it with `get`/`set` refreshing recency. It still sits behind the
+  trait seam, wired into no request path (#128).
 
 ### Security
 

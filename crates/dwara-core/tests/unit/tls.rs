@@ -463,24 +463,22 @@ fn write_test_cert(dir: &std::path::Path, cn: &str) -> (PathBuf, PathBuf) {
     (cpath, kpath)
 }
 
-fn temp_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dwara-tls-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// #128: a `tempfile::TempDir` per test. The previous helper named dirs
+/// `dwara-tls-{pid}-{nanos}` from the system clock, and the nanosecond
+/// stamps collide across parallel test threads (measured 31.5k/32k
+/// duplicates in a 16-thread sampler on one host) — one test's
+/// remove_dir_all then deleted a sibling's certificates. TempDir is
+/// collision-free by construction and cleans up on drop, so the manual
+/// remove_dir_all calls disappear with the helper change.
+fn temp_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("unique temp dir")
 }
 
 #[test]
 fn resolver_selects_by_sni_and_falls_back() {
     let dir = temp_dir();
-    let (fc, fk) = write_test_cert(&dir, "fallback.example.com");
-    let (ac, ak) = write_test_cert(&dir, "a.example.com");
+    let (fc, fk) = write_test_cert(dir.path(), "fallback.example.com");
+    let (ac, ak) = write_test_cert(dir.path(), "a.example.com");
     let tls = ListenerTls {
         client_ca_file: None,
         mode: TlsMode::Terminate,
@@ -498,14 +496,13 @@ fn resolver_selects_by_sni_and_falls_back() {
 
     // Hot reload keeps working and does not disturb the live config.
     term.reload(&tls).expect("reload");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn build_rejects_mismatched_cert_key_pair() {
     let dir = temp_dir();
-    let (ac, ak) = write_test_cert(&dir, "a.example.com");
-    let (_bc, bk) = write_test_cert(&dir, "b.example.com");
+    let (ac, ak) = write_test_cert(dir.path(), "a.example.com");
+    let (_bc, bk) = write_test_cert(dir.path(), "b.example.com");
     // Wrong key for the leaf certificate: rejected at build time.
     let tls = ListenerTls {
         client_ca_file: None,
@@ -558,7 +555,6 @@ fn build_rejects_mismatched_cert_key_pair() {
     ));
     // Reload of the good config still succeeds afterwards.
     term.reload(&good).expect("reload with matching pair");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -591,7 +587,8 @@ fn build_fails_on_missing_files() {
 #[test]
 fn build_fails_when_key_file_carries_no_private_key_material() {
     let dir = temp_dir();
-    let (cc, ck) = write_test_cert(&dir, "nokey.example.com");
+    let dir = dir.path();
+    let (cc, ck) = write_test_cert(dir, "nokey.example.com");
 
     // A key file that is a valid PEM of the WRONG kind (certificates
     // only): the private-key iterator finds nothing usable.
@@ -640,14 +637,13 @@ fn build_fails_when_key_file_carries_no_private_key_material() {
         ..tls
     };
     assert!(TlsTermination::build(&tls).is_ok());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn build_fails_on_corrupt_private_key_pem_without_leaking_material() {
     let dir = temp_dir();
-    let (cc, _ck) = write_test_cert(&dir, "corrupt.example.com");
+    let dir = dir.path();
+    let (cc, _ck) = write_test_cert(dir, "corrupt.example.com");
     // A recognized PRIVATE KEY section whose body is not base64: the
     // PEM decode fails. The marker string is what a leaking error path
     // would carry back out; it must appear in no reachable output.
@@ -681,8 +677,6 @@ fn build_fails_on_corrupt_private_key_pem_without_leaking_material() {
     // Sanity: the error is a decoding failure, not a silent success or
     // a panic out of the zeroized load path.
     assert!(matches!(err, TlsError::Io(_) | TlsError::Rustls(_)));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // --- trusted-CA bundle loading (#121: root_store_from_pem_file) ---------
@@ -702,6 +696,7 @@ fn bundle_ca(cn: &str) -> String {
 #[test]
 fn root_store_loads_every_certificate_in_a_multi_cert_bundle() {
     let dir = temp_dir();
+    let dir = dir.path();
     // Real bundles list several anchors with comment filler between the
     // blocks; every certificate must become a trust anchor, in any order.
     let bundle = dir.join("two-anchors.pem");
@@ -722,13 +717,12 @@ fn root_store_loads_every_certificate_in_a_multi_cert_bundle() {
     std::fs::write(&single, bundle_ca("unit-ca-single")).unwrap();
     let store = root_store_from_pem_file(single.to_str().unwrap()).expect("single loads");
     assert_eq!(store.len(), 1);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn root_store_rejects_unusable_bundle_files() {
-    let dir = temp_dir();
+    let owned = temp_dir();
+    let dir = owned.path();
 
     // Missing path: io error.
     assert!(matches!(
@@ -792,8 +786,6 @@ fn root_store_rejects_unusable_bundle_files() {
         root_store_from_pem_file(bogus.to_str().unwrap()),
         Err(TlsError::RootUnusable(_))
     ));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

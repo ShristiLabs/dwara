@@ -36,14 +36,12 @@ fn free_port() -> u16 {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dwara-dw007-{}-{}-{tag}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // #128: a process-global counter instead of clock nanos — nanosecond
+    // stamps collide across parallel test threads (one test's cleanup
+    // then deletes a sibling's certs/config).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dwara-dw007-{}-{n}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -680,26 +678,63 @@ fn client_cert_connector(cert_pem: &str, key_der: &[u8]) -> TlsConnector {
 }
 
 /// One plain GET over an established TLS stream; returns the response
-/// bytes (status line + headers + body).
+/// bytes (status line + headers + body). #128: a FAILED write means the
+/// connection died before anything was received (a reset racing the
+/// exchange under parallel load — the #121 class); the empty Vec tells
+/// [`tls_get_retrying_reset`] to retry rather than panicking here.
 async fn raw_get(tls: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) -> Vec<u8> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    tls.write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+    if tls
+        .write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
         .await
-        .unwrap();
+        .is_err()
+    {
+        return Vec::new();
+    }
     let mut resp = Vec::new();
     let _ = tls.read_to_end(&mut resp).await;
     resp
 }
 
+/// Connect + [`raw_get`] in one exchange, retrying under a bounded budget
+/// while NOTHING has been received. Under parallel load the gateway's
+/// close can reach the client as ECONNRESET instead of a clean FIN (the
+/// kernel replaces FIN with RST when the closing socket still has
+/// unread data queued, and CPU contention widens that race window), so
+/// the handshake or the request write fails before any response bytes
+/// exist. Retrying that specific shape does not weaken the callers'
+/// assertions: the asserted response must still arrive within the same
+/// bounded budget — a genuinely failing listener fails every attempt.
+async fn tls_get_retrying_reset(addr: &str, connector: &TlsConnector) -> Vec<u8> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let exchange = async {
+            let mut tls = connect_tls(addr, connector).await?;
+            let resp = raw_get(&mut tls).await;
+            Ok::<Vec<u8>, std::io::Error>(resp)
+        };
+        if let Ok(resp) = exchange.await {
+            if !resp.is_empty() {
+                return resp;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no response bytes within the 10s retry budget (repeated resets or a dead listener)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn connect_tls(
     addr: &str,
     connector: &TlsConnector,
-) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
-    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
+) -> std::io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+    let tcp = TcpStream::connect(addr).await?;
     let name = rustls::pki_types::ServerName::try_from("edge.example.com".to_string())
         .expect("sni")
         .to_owned();
-    connector.connect(name, tcp).await.expect("tls handshake")
+    connector.connect(name, tcp).await
 }
 
 #[tokio::test]
@@ -768,8 +803,7 @@ consumers:
     // WITH the CA-verified client certificate whose CN matches the
     // consumer's mtls credential: proxied (here: answered) with identity.
     let connector = client_cert_connector(&good_client.cert_pem, &good_client.key_der);
-    let mut tls = connect_tls(&addr, &connector).await;
-    let resp = raw_get(&mut tls).await;
+    let resp = tls_get_retrying_reset(&addr, &connector).await;
     let text = String::from_utf8_lossy(&resp);
     assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
     assert!(text.ends_with("hello-mtls"), "resp: {text}");
@@ -777,8 +811,7 @@ consumers:
     // WITHOUT a client certificate: the mTLS family has nothing to
     // match, the route requires auth -> 401 envelope.
     let plain = tls_connector("edge.example.com", &["http/1.1"]);
-    let mut tls = connect_tls(&addr, &plain).await;
-    let resp = raw_get(&mut tls).await;
+    let resp = tls_get_retrying_reset(&addr, &plain).await;
     let text = String::from_utf8_lossy(&resp);
     assert!(text.starts_with("HTTP/1.1 401"), "resp: {text}");
 
@@ -881,8 +914,7 @@ consumers:
     // No client certificate at all: handshake completes, request is
     // served anonymously (the route does not require auth).
     let plain = tls_connector("edge.example.com", &["http/1.1"]);
-    let mut tls = connect_tls(&addr, &plain).await;
-    let resp = raw_get(&mut tls).await;
+    let resp = tls_get_retrying_reset(&addr, &plain).await;
     let text = String::from_utf8_lossy(&resp);
     assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
     assert!(text.ends_with("hello-anon"), "resp: {text}");
