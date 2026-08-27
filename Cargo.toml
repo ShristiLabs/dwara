@@ -87,9 +87,12 @@ tempfile = "3"
 # per-lookup argon2 is slow, so config-seeded keys hash with sha256);
 # base64 decodes Basic credentials; jsonwebtoken verifies Bearer tokens
 # against JWKS keys (RS/ES/Ed; its ring backend is already in the tree
-# via rcgen).
+# via rcgen). hmac (#124) peppers the stored fast-path hashes with a
+# per-deployment secret (sha2 alone cannot HMAC); RustCrypto, MIT OR
+# Apache-2.0, only `digest` beneath it (already in the tree).
 subtle = "2"
 sha2 = "0.10"
+hmac = "0.12"
 argon2 = "0.5"
 base64 = "0.22"
 jsonwebtoken = "9"

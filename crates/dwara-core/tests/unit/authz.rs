@@ -28,6 +28,7 @@ fn identity(consumer: &str, claims: &[(&str, &str)]) -> Identity {
     Identity {
         consumer_name: consumer.to_string(),
         credential_kind: CredentialKind::Jwt,
+        groups: Vec::new(),
         claims: claims
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

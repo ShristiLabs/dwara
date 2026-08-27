@@ -366,6 +366,7 @@ fn sni_list_and_name_length_overruns_return_none() {
 
 fn passthrough_gateway() -> (Gateway, ListenerTls) {
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Passthrough,
         cert_file: None,
         key_file: None,
@@ -481,6 +482,7 @@ fn resolver_selects_by_sni_and_falls_back() {
     let (fc, fk) = write_test_cert(&dir, "fallback.example.com");
     let (ac, ak) = write_test_cert(&dir, "a.example.com");
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some(fc.display().to_string()),
         key_file: Some(fk.display().to_string()),
@@ -506,6 +508,7 @@ fn build_rejects_mismatched_cert_key_pair() {
     let (_bc, bk) = write_test_cert(&dir, "b.example.com");
     // Wrong key for the leaf certificate: rejected at build time.
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some(ac.display().to_string()),
         key_file: Some(bk.display().to_string()),
@@ -518,6 +521,7 @@ fn build_rejects_mismatched_cert_key_pair() {
     ));
     // Same mismatch inside a per-certificate entry is rejected too.
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         certificates: vec![TlsCertificate {
             server_names: vec!["a.example.com".into()],
@@ -534,6 +538,7 @@ fn build_rejects_mismatched_cert_key_pair() {
     // Matching pair: builds, and a reload with a torn pair is
     // rejected while the live config keeps serving.
     let good = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some(ac.display().to_string()),
         key_file: Some(ak.display().to_string()),
@@ -542,6 +547,7 @@ fn build_rejects_mismatched_cert_key_pair() {
     };
     let term = TlsTermination::build(&good).expect("matching pair builds");
     let torn = ListenerTls {
+        client_ca_file: None,
         cert_file: Some(ac.display().to_string()),
         key_file: Some(bk.display().to_string()),
         ..good.clone()
@@ -558,6 +564,7 @@ fn build_rejects_mismatched_cert_key_pair() {
 #[test]
 fn build_fails_on_missing_files() {
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some("/nonexistent/cert.pem".into()),
         key_file: Some("/nonexistent/key.pem".into()),
@@ -567,6 +574,7 @@ fn build_fails_on_missing_files() {
     assert!(matches!(TlsTermination::build(&tls), Err(TlsError::Io(_))));
     assert!(matches!(
         TlsTermination::build(&ListenerTls {
+            client_ca_file: None,
             mode: TlsMode::Terminate,
             cert_file: None,
             key_file: None,
@@ -590,6 +598,7 @@ fn build_fails_when_key_file_carries_no_private_key_material() {
     let cert_only = dir.join("cert-only.key.pem");
     std::fs::write(&cert_only, std::fs::read_to_string(&cc).unwrap()).unwrap();
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some(cc.display().to_string()),
         key_file: Some(cert_only.display().to_string()),
@@ -606,6 +615,7 @@ fn build_fails_when_key_file_carries_no_private_key_material() {
     let empty = dir.join("empty.key.pem");
     std::fs::write(&empty, b"").unwrap();
     let tls = ListenerTls {
+        client_ca_file: None,
         key_file: Some(empty.display().to_string()),
         ..tls
     };
@@ -625,6 +635,7 @@ fn build_fails_when_key_file_carries_no_private_key_material() {
     body.push_str(&std::fs::read_to_string(&ck).unwrap());
     std::fs::write(&mixed, body).unwrap();
     let tls = ListenerTls {
+        client_ca_file: None,
         key_file: Some(mixed.display().to_string()),
         ..tls
     };
@@ -648,6 +659,7 @@ fn build_fails_on_corrupt_private_key_pem_without_leaking_material() {
     )
     .unwrap();
     let tls = ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some(cc.display().to_string()),
         key_file: Some(corrupt.display().to_string()),

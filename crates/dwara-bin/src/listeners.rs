@@ -120,6 +120,7 @@ pub(crate) async fn run_listener(
                 peer,
                 std::sync::Arc::from(bound.name.as_str()),
                 Arc::clone(&hardening),
+                None,
             ),
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
@@ -182,7 +183,32 @@ pub(crate) async fn run_listener(
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
-                            serve_http_tls(watcher, dp, tls_stream, peer, listener, hardening);
+                            // #124 mTLS authn: when the listener carries a
+                            // client_ca_file, rustls has VERIFIED any
+                            // presented certificate against it (an
+                            // unverified one fails the handshake above).
+                            // Extract the verified leaf's match values
+                            // once per connection; the request service
+                            // inserts them into the extensions so the
+                            // authenticator's ambient mTLS family can map
+                            // the certificate to a consumer.
+                            let client_cert = tls_stream
+                                .get_ref()
+                                .1
+                                .peer_certificates()
+                                .and_then(|certs| certs.first())
+                                .map(|cert| {
+                                    Arc::new(dwara_core::authn::ClientCertificate::from_cert(cert))
+                                });
+                            serve_http_tls(
+                                watcher,
+                                dp,
+                                tls_stream,
+                                peer,
+                                listener,
+                                hardening,
+                                client_cert,
+                            );
                         }
                         Err(err) => tracing::warn!("tls handshake error: {err}"),
                     }
@@ -223,6 +249,7 @@ pub(crate) async fn run_listener(
                                 peer,
                                 std::sync::Arc::from(bound.name.as_str()),
                                 Arc::clone(&hardening),
+                                None,
                             ),
                             ListenerMode::Terminate(term) => {
                                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
@@ -233,9 +260,29 @@ pub(crate) async fn run_listener(
                                     std::sync::Arc::from(bound.name.as_str());
                                 tokio::spawn(async move {
                                     match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => serve_http_tls(
-                                            watcher, dp, tls_stream, peer, listener, hardening,
-                                        ),
+                                        Ok(tls_stream) => {
+                                            let client_cert = tls_stream
+                                                .get_ref()
+                                                .1
+                                                .peer_certificates()
+                                                .and_then(|certs| certs.first())
+                                                .map(|cert| {
+                                                    Arc::new(
+                                                        dwara_core::authn::ClientCertificate::from_cert(
+                                                            cert,
+                                                        ),
+                                                    )
+                                                });
+                                            serve_http_tls(
+                                                watcher,
+                                                dp,
+                                                tls_stream,
+                                                peer,
+                                                listener,
+                                                hardening,
+                                                client_cert,
+                                            )
+                                        }
                                         Err(err) => {
                                             tracing::warn!("tls handshake error: {err}")
                                         }
@@ -362,6 +409,10 @@ pub(crate) async fn run_listener_supervised(
 /// Serve one (possibly TLS-terminated) connection with the proxy dataplane.
 /// Upgrades are enabled on the inbound connection so WebSocket-style 101
 /// tunnels can be spliced (generic tunneling; see dwara-core's proxy docs).
+/// `client_cert` is the VERIFIED client certificate when the TLS layer
+/// requested one (#124); it rides the request extensions to the
+/// authenticator's ambient mTLS family.
+#[allow(clippy::too_many_arguments)] // fixed accept-loop plumbing, #124 added the client cert
 fn serve_http_tls<S>(
     watcher: hyper_util::server::graceful::Watcher,
     dp: Arc<DataPlane>,
@@ -369,6 +420,7 @@ fn serve_http_tls<S>(
     peer: SocketAddr,
     listener: std::sync::Arc<str>,
     hardening: Arc<HttpHardening>,
+    client_cert: Option<Arc<dwara_core::authn::ClientCertificate>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -393,11 +445,16 @@ fn serve_http_tls<S>(
                 let hardening = Arc::clone(&hardening);
                 let peer_ip = peer.ip();
                 let listener = Arc::clone(&listener);
+                let client_cert = client_cert.clone();
                 // The listener label rides the request extensions so
                 // the per-request metrics/logs can attribute traffic
-                // to the accepting listener (DW-021).
+                // to the accepting listener (DW-021); the verified
+                // client certificate rides the same way (#124).
                 req.extensions_mut()
                     .insert(dwara_core::observability::ListenerLabel(listener));
+                if let Some(cert) = client_cert {
+                    req.extensions_mut().insert(cert);
+                }
                 async move {
                     // Slow-body defense (DW-023): the inbound body is
                     // wrapped with the inactivity-gap timeout BEFORE

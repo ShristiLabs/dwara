@@ -52,6 +52,10 @@ Environment variables (all optional):
   SIGTERM/SIGINT, default 10.
 - `DWARA_STATE_DB`: path to a SQLite state store (default unset = no
   store). See "State store" under Operations.
+- `DWARA_CREDENTIAL_PEPPER`: per-deployment SECRET that peppers stored
+  credential hashes (`hmac-sha256:<hex>`), so a state-DB leak alone
+  cannot verify guesses. Default unset = legacy-only mode (legacy
+  `sha256:` entries keep verifying). Never logged. See "Authentication".
 - `DWARA_LOG`: log filter in `RUST_LOG` syntax, default `dwara=info`.
 - `DWARA_ACCESS_LOG_SAMPLE`: fraction of non-error access-log lines
   emitted, 0.0-1.0, default 1.0. See "Observability".
@@ -945,7 +949,7 @@ one policy; both apply. Use `rate_limits` for new configs.
 Request authentication (DW-019) runs after route resolution, before
 rate limiting and cap admission (the rate-limit `credential` selector
 and the shedding priority class both consume the identity). It accepts
-three credential families:
+four credential families:
 
 - **API key**: `X-API-Key: <key>`. Config declares these under
   `consumers[].credentials` (`type: api_key`, a `key` value).
@@ -956,9 +960,16 @@ three credential families:
   A resolved Basic identity is reported with the API-key kind.
 - **JWT Bearer**: `Authorization: Bearer <token>`, verified per
   `jwt_providers` config (below).
+- **mTLS client certificate**: on a terminate listener with
+  `client_ca_file` set, the connection's VERIFIED client certificate is
+  matched against consumers' `mtls` credentials (see "mTLS client
+  certificates" below).
 
 `X-API-Key` wins over `Authorization`; within `Authorization`, the
-`Basic`/`Bearer` scheme token decides. A gateway with NO consumers and
+`Basic`/`Bearer` scheme token decides. The client certificate is the
+ambient, connection-level family, consulted only when no header
+credential was presented (see "mTLS client certificates" below). A
+gateway with NO consumers and
 NO JWT providers has authentication disabled: the authenticator
 resolves anonymous for everything and `Authorization` is forwarded
 upstream untouched (pass-through mode). Once any credential is
@@ -999,13 +1010,34 @@ when credential records exist, plus `Bearer` when JWT providers do).
 
 **Hashing model.** The gateway never indexes or stores plaintext key
 material. The lookup selector is `hex(sha256(secret))` and the stored
-hash is `sha256:<hex(sha256(secret))>`, verified with a constant-time
-comparison. Config-declared API keys are hashed at startup (or at state
-store seed time); the plaintext value is then dropped. A credential
-whose stored hash is a PHC argon2id string (`$argon2id$...`, supplied
-through the state store) is verified with argon2id instead — opt-in per
-credential: an argon2 verify is memory-hard and far too slow for the
-per-request hot path, so config-declared keys are always sha256.
+hash is `sha256:<hex(sha256(secret))>` — or, when a credential pepper
+is configured (below), `hmac-sha256:<hex(HMAC-SHA256(pepper, secret))>`
+— verified with a constant-time comparison either way. Config-declared
+API keys are hashed at startup (or at state store seed time); the
+plaintext value is then dropped. A credential whose stored hash is a
+PHC argon2id string (`$argon2id$...`, supplied through the state store)
+is verified with argon2id instead — opt-in per credential: an argon2
+verify is memory-hard and far too slow for the per-request hot path, so
+config-declared keys always take the fast path (sha256, or the peppered
+HMAC when a pepper is configured).
+
+**Credential pepper.** Set `DWARA_CREDENTIAL_PEPPER` (a per-deployment
+secret, resolved at startup through the SecretSource extension seam)
+and every NEW stored credential hash takes the peppered
+`hmac-sha256:<hex>` format, so a state-DB leak alone cannot verify
+guesses: the search also needs the pepper, held outside the DB. The
+lookup selector stays `hex(sha256(secret))` in both modes — it must be
+computable from the presented material alone, and it leaks nothing
+about the secret. The transition is lazy and transparent: legacy
+`sha256:<hex>` entries keep verifying, and on successful verification
+the store row is re-hashed to the peppered format in place — no
+credential re-issue needed. Unset (the default) is legacy-only mode:
+legacy entries keep verifying, while peppered entries fail closed (401)
+with an ERROR log naming the condition; a set-but-unreadable value
+refuses startup. The pepper itself is never logged. Rotating the pepper
+invalidates existing peppered credentials until they are re-issued.
+Use at least 32 bytes of entropy; argon2id PHC credentials are
+pepper-independent (unchanged).
 
 **JWT providers.** Top-level `jwt_providers` lists trusted token
 issuers whose keys are fetched from a JWKS endpoint:
@@ -1022,8 +1054,10 @@ jwt_providers:
     consumer: acme             # optional explicit consumer binding
 ```
 
-Verification per provider: `iss`/`aud` (when configured), `exp` and
-`nbf` with `leeway_secs` skew, and the algorithm allowlist enforced
+Verification per provider: `iss` when configured; `aud` ONLY when
+configured — a provider with no `audience` accepts tokens that carry
+any (or no) `aud` claim; `exp` and `nbf` with `leeway_secs` skew; and
+the algorithm allowlist enforced
 before any signature work — `none` and HMAC (`HS*`) are never allowed
 (asymmetric verification only; the gateway holds no shared secrets with
 issuers). A token is verified against each provider whose allowlist
@@ -1055,6 +1089,47 @@ a bundle breaks between validation and build (the microsecond race) is
 the provider disabled (ERROR logged) rather than failing every fetch.
 Bundle paths are not file-watched; rotating one requires SIGHUP or a
 config change, as with upstream bundles.
+
+**mTLS client certificates.** A terminate listener can verify client
+certificates: set `client_ca_file` (a PEM CA bundle) in the listener's
+`tls` block. A presented certificate is verified against that bundle
+during the handshake — an UNVERIFIED certificate fails the handshake
+and never reaches authentication — while a connection without one is
+still accepted (the other credential families, or anonymous, apply). A
+verified certificate is mapped to a consumer via its `mtls` credential:
+either by subject CommonName (`subject`, case-sensitive exact match —
+survives certificate re-issue under the same CN) or by the
+certificate's SHA-256 fingerprint (lowercase hex over the DER,
+`fingerprint` — pins one exact certificate); exactly one of the two
+must be set. A verified certificate matching no credential is a
+presented-but-rejected credential: 401, exactly like an unknown API
+key. Header credentials (API key, Basic, Bearer) take precedence over
+the certificate — it is the ambient family, consulted only when no
+header credential was presented, and a pass-through `Bearer` (no JWT
+provider configured) falls through to it. TLS-level client auth has no
+`WWW-Authenticate` representation, so the certificate family never
+joins the challenge. `client_ca_file` is rejected in passthrough mode
+(the TLS layer is not terminated, so client certificates cannot be
+verified) and must exist and be readable at config compile time;
+cleartext listeners never see certificates.
+
+```yaml
+listeners:
+  - name: edge
+    address: 0.0.0.0
+    port: 443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/certs/edge.crt.pem
+      key_file: /etc/dwara/certs/edge.key.pem
+      client_ca_file: /etc/dwara/ca/client-ca.crt.pem
+consumers:
+  - name: service-a
+    credentials:
+      - type: mtls
+        subject: service-a.internal   # match by subject CN
+```
 
 **X-Consumer hygiene.** The gateway strips every client-supplied
 `X-Consumer-*` header from proxied requests (a client must never reach
@@ -1119,17 +1194,18 @@ absent block, never an empty one.
 
 **Consumers and groups.** `allowed_consumers`, when non-empty, is a
 closed set: the authenticated consumer must be listed. Groups come from
-the CONFIG consumer's `groups` field; consumers that exist only in the
-state store (`DWARA_STATE_DB` deployments with no config entry) have no
-groups and never satisfy an `allowed_groups` rule.
+the consumer's `groups` field — the config record for config consumers,
+the state store's `consumers.groups` for store-managed consumers
+(`DWARA_STATE_DB`, schema v3) — so group rules apply to both alike. A
+consumer with no groups never satisfies an `allowed_groups` rule.
 
 **Scopes and claims** apply to JWT identities. Every `required_scopes`
 entry must appear in the token's `scope` claim, which may be a
 space-separated string (`"read write"`, the OAuth convention) or a JSON
 array of strings (flattened to the same form). `required_claims` is
 exact string equality on the stringified claim value — a listed claim
-absent from the token fails. API-key and Basic identities carry no
-claims and never satisfy scope or claim rules.
+absent from the token fails. API-key, Basic, and mTLS identities carry
+no claims and never satisfy scope or claim rules.
 
 **IP ACL** matches against the EFFECTIVE client IP: when the direct
 connection peer is inside `trusted_proxies`, the `X-Forwarded-For`
@@ -1186,7 +1262,9 @@ client's server name; the single `cert_file`/`key_file` pair is the
 fallback for unmatched or absent SNI, and with no single pair the first
 `certificates` entry is the fallback. A single pair alone (no
 `certificates`) is the simplest form; a `certificates`-only config is
-also valid.
+also valid. An optional `client_ca_file` (a PEM CA bundle) requests and
+verifies client certificates — see "mTLS client certificates" under
+Authentication.
 
 ```yaml
 listeners:
@@ -1568,7 +1646,8 @@ Set `DWARA_STATE_DB=/path/to/db` to enable the SQLite state store
 (WAL mode). At startup the gateway opens (or creates) the database,
 applies any pending schema migrations automatically, and idempotently
 seeds consumers and credentials from the config — re-syncing creates
-nothing new; an existing consumer only has its priority updated.
+nothing new; an existing consumer only has its priority and groups
+updated.
 Consumers, credential records, and quota counters persist across
 restarts.
 
@@ -1584,13 +1663,18 @@ since schema-v1 content is fully re-derivable, recreate the file and
 let config seeding repopulate it.
 
 Credential hashing is real: seeded API-key rows carry the same hash
-the authenticator verifies (`sha256:<hex(sha256(key))>`, selector
-`hex(sha256(key))` — never the plaintext key). With `DWARA_STATE_DB`
+the authenticator verifies (`sha256:<hex(sha256(key))>`, or
+`hmac-sha256:<hex(HMAC-SHA256(pepper, key))>` when
+`DWARA_CREDENTIAL_PEPPER` is set; selector `hex(sha256(key))` in both
+modes — never the plaintext key). With `DWARA_STATE_DB`
 set, the dataplane authenticates against the store's hot-cached
 records; without it, config credentials are hashed in-memory at
 startup. JWT and mTLS config credentials are bindings, not secrets
-(tokens are verified cryptographically, client certificates by
-fingerprint), so their rows keep binding-marker hashes.
+(tokens are verified cryptographically, client certificates matched by
+subject CN or fingerprint), so their rows keep binding-marker hashes.
+Store-managed consumers carry their own groups (`consumers.groups`,
+schema v3) — group-based authorization applies to them exactly as to
+config consumers.
 
 The store keeps an in-memory hot cache: credential lookups by selector
 avoid disk after their first lookup (unknown selectors are cached as

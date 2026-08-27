@@ -198,7 +198,7 @@ async fn basic_auth_against_store_seeded_credential() {
     state.compile_and_publish(&gateway).unwrap();
     let dp = DataPlane::new(state);
     let store = Arc::new(StateStore::open_in_memory().unwrap());
-    sync_consumers_from_config(&store, &gateway).unwrap();
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
     let consumer = store.lookup_consumer("acme").unwrap().unwrap();
     store
         .add_credential(
@@ -1091,7 +1091,7 @@ async fn argon2id_and_unknown_format_hashes_dispatch_cleanly() {
     state.compile_and_publish(&gateway).unwrap();
     let dp = DataPlane::new(state);
     let store = Arc::new(StateStore::open_in_memory().unwrap());
-    sync_consumers_from_config(&store, &gateway).unwrap();
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
     let consumer = store.lookup_consumer("acme").unwrap().unwrap();
 
     use argon2::password_hash::{PasswordHasher as _, SaltString};
@@ -1149,7 +1149,7 @@ async fn store_backed_credentials_authenticate_and_revoke_is_immediate() {
     state.compile_and_publish(&gateway).unwrap();
     let dp = DataPlane::new(state);
     let store = Arc::new(StateStore::open_in_memory().unwrap());
-    sync_consumers_from_config(&store, &gateway).unwrap();
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
     let consumer = store.lookup_consumer("acme").unwrap().unwrap();
     let extra = store
         .add_credential(
@@ -1335,7 +1335,7 @@ async fn legacy_config_api_key_rows_are_deleted_at_sync_and_bindings_survive() {
     // Hand-insert a pre-DW-019 store exactly as the transitional build left
     // it: a PLAINTEXT selector with a `config:api_key:<key>` placeholder
     // hash (the secret verbatim), plus a current-format jwt binding row.
-    store.upsert_consumer("acme", None).unwrap();
+    store.upsert_consumer("acme", None, &[]).unwrap();
     let consumer = store.lookup_consumer("acme").unwrap().unwrap();
     store
         .add_credential(
@@ -1356,7 +1356,7 @@ async fn legacy_config_api_key_rows_are_deleted_at_sync_and_bindings_survive() {
         )
         .unwrap();
 
-    sync_consumers_from_config(&store, &gateway).unwrap();
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
 
     // The legacy row (plaintext secret) is GONE...
     assert!(store
@@ -1651,4 +1651,919 @@ consumers:
     assert_eq!(status, StatusCode::OK);
     assert_eq!(dp.priority_counters().admitted_at(5), 1);
     assert_eq!(dp.priority_counters().admitted_at(9), 1);
+}
+
+// ---- credential pepper (#124) ----------------------------------------------
+
+use dwara_core::authn::ClientCertificate;
+use dwara_core::config::credentials::hmac_stored_hash;
+
+const PEPPER: &[u8] = b"integration-pepper-0123456789abcdef";
+
+/// A dataplane + seeded in-memory store pair (config consumer `acme`
+/// with the test API key, hashed LEGACY-sha256 by the None-pepper sync).
+fn dp_with_store(yaml: &str) -> (Arc<DataPlane>, Arc<StateStore>) {
+    let gateway = parse_gateway(yaml).unwrap();
+    let state = Arc::new(ConfigState::new());
+    state.compile_and_publish(&gateway).unwrap();
+    let dp = DataPlane::new(state);
+    let store = Arc::new(StateStore::open_in_memory().unwrap());
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
+    (dp, store)
+}
+
+#[tokio::test]
+async fn peppered_store_credential_verifies_with_the_configured_pepper() {
+    let (dp, store) = dp_with_store(&basic_config(false));
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            hmac_stored_hash(PEPPER, "peppered-pass"),
+            None,
+            credential_selector("pep-user"),
+        )
+        .unwrap();
+    dp.set_credential_pepper(Some(PEPPER.to_vec()));
+    dp.set_state_store(Arc::clone(&store));
+
+    // Correct password: past auth (dead upstream -> 502).
+    let ok = BASE64.encode("pep-user:peppered-pass");
+    let (status, _, _) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Basic {ok}"))]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    // Wrong password: clean 401.
+    let bad = BASE64.encode("pep-user:wrong");
+    let (status, _, _) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Basic {bad}"))]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn legacy_sha256_credential_still_verifies_and_rehashes_in_place() {
+    let (dp, store) = dp_with_store(&basic_config(false));
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    // A PRE-pepper row: the legacy format every older deployment stores.
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("legacy-pass"),
+            None,
+            credential_selector("legacy-user"),
+        )
+        .unwrap();
+    dp.set_credential_pepper(Some(PEPPER.to_vec()));
+    dp.set_state_store(Arc::clone(&store));
+
+    let ok = BASE64.encode("legacy-user:legacy-pass");
+    let (status, _, _) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Basic {ok}"))]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "legacy row must keep verifying"
+    );
+
+    // The successful legacy verification re-hashed the row in place to
+    // the peppered format (#124 transition choice: no re-issue needed).
+    let rows = store
+        .lookup_credentials_by_selector(&credential_selector("legacy-user"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].hash.starts_with("hmac-sha256:"),
+        "row must now be peppered: {}",
+        rows[0].hash
+    );
+
+    // The re-hashed row still verifies (second presentation is a normal
+    // peppered verification now).
+    let (status, _, _) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Basic {ok}"))]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn peppered_entry_with_wrong_or_missing_pepper_fails_closed() {
+    // Row peppered with pepper A.
+    let (dp, store) = dp_with_store(&basic_config(false));
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            hmac_stored_hash(b"pepper-A", "secret-pass"),
+            None,
+            credential_selector("cl-user"),
+        )
+        .unwrap();
+    let ok = BASE64.encode("cl-user:secret-pass");
+
+    // A DIFFERENT pepper configured: the digest cannot match -> 401.
+    dp.set_credential_pepper(Some(b"pepper-B".to_vec()));
+    dp.set_state_store(Arc::clone(&store));
+    let (status, _, body) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Basic {ok}"))]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!body.contains("pepper"), "pepper must not leak: {body}");
+
+    // NO pepper configured (legacy-only mode): fail closed, no crash,
+    // and the pepper value never appears in the response.
+    let (dp2, store2) = dp_with_store(&basic_config(false));
+    let consumer2 = store2.lookup_consumer("acme").unwrap().unwrap();
+    store2
+        .add_credential(
+            consumer2.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            hmac_stored_hash(b"pepper-A", "secret-pass"),
+            None,
+            credential_selector("cl-user"),
+        )
+        .unwrap();
+    dp2.set_state_store(Arc::clone(&store2));
+    let (status, _, body) =
+        send_with(&dp2, "/x", vec![("authorization", &format!("Basic {ok}"))]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!body.contains("pepper-A"), "pepper must not leak: {body}");
+    // The legacy row seeded by the config sync still verifies alongside
+    // (legacy-only mode degrades only peppered entries).
+    let (status, _, _) = send_with(&dp2, "/x", vec![("x-api-key", API_KEY)]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+// ---- store-managed consumer groups (#124) ----------------------------------
+
+#[tokio::test]
+async fn store_consumer_groups_drive_group_authorization() {
+    // The group namespace is shared: the CONFIG consumer carries the
+    // group so validation resolves the rule; the STORE consumers prove
+    // the identity carries store-side groups into authorization.
+    let yaml = "
+listeners: []
+routes:
+  - name: r
+    service: svc
+    match:
+      path: { type: regex, value: /.* }
+    action: { type: respond, status: 200 }
+    authorization:
+      allowed_groups: [partners]
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+consumers:
+  - name: config-member
+    groups: [partners]
+    credentials:
+      - type: api_key
+        key: cfg-key-1
+";
+    let (dp, store) = dp_with_store(yaml);
+
+    // Store-only consumer IN the allowed group.
+    let partner = store
+        .upsert_consumer("partner", None, &["partners".to_string()])
+        .unwrap();
+    store
+        .add_credential(
+            partner.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("partner-key"),
+            None,
+            credential_selector("partner-key"),
+        )
+        .unwrap();
+    // Store-only consumer with NO groups.
+    let outsider = store.upsert_consumer("outsider", None, &[]).unwrap();
+    store
+        .add_credential(
+            outsider.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("outsider-key"),
+            None,
+            credential_selector("outsider-key"),
+        )
+        .unwrap();
+    dp.set_state_store(Arc::clone(&store));
+
+    // Positive: the store consumer's group satisfies allowed_groups.
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "partner-key")]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "store groups must drive group authz"
+    );
+    // Negative: the group-less store consumer is denied (403, not 401:
+    // it authenticated fine).
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "outsider-key")]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Config consumer with the group: unchanged behavior.
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "cfg-key-1")]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ---- JWT audience policy (#124) ---------------------------------------------
+
+#[tokio::test]
+async fn jwt_aud_claim_is_accepted_when_provider_has_no_audience() {
+    // Maintainer decision (#124): audience is validated ONLY when the
+    // provider configures one. jwt_setup(None, None) builds a provider
+    // with NO issuer and NO audience; the token carries an `aud` claim
+    // that the old reject-on-presence behavior would have refused.
+    let setup = jwt_setup(None, None).await;
+    // The token's aud sits inside the CONSUMER binding's audiences
+    // ([dwara-api]); the provider configures none, so the mere PRESENCE
+    // of the claim must not reject (the old behavior).
+    let with_aud = es_claims("https://idp.example", "dwara-api", now() + 3600);
+    let tok = token_with_kid(&setup, &with_aud, &setup.kid);
+    let (status, _, body) = send_with(
+        &setup.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+
+    // A token whose aud is OUTSIDE the consumer binding is still
+    // rejected — that containment is the credential binding's rule, not
+    // the provider policy, and is unchanged.
+    let outside = es_claims("https://idp.example", "totally-other-api", now() + 3600);
+    let tok = token_with_kid(&setup, &outside, &setup.kid);
+    let (status, _, _) = send_with(
+        &setup.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With an audience CONFIGURED the old containment still rejects a
+    // mismatch (jwt_setup's provider config carries the audience).
+    let strict = jwt_setup(None, Some("dwara-api")).await;
+    let wrong = es_claims("https://idp.example", "not-dwara-api", now() + 3600);
+    let tok = token_with_kid(&strict, &wrong, &strict.kid);
+    let (status, _, _) = send_with(
+        &strict.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---- mTLS client-certificate authn (#124) -----------------------------------
+
+/// A self-signed client certificate carrying the given subject CN (the
+/// shape the by-subject matcher consumes).
+fn client_cert_with_cn(cn: &str) -> rcgen::Certificate {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.self_signed(&key).unwrap()
+}
+
+async fn send_with_cert(
+    dp: &DataPlane,
+    path: &str,
+    headers: Vec<(&str, &str)>,
+    cert: Option<Arc<ClientCertificate>>,
+) -> (StatusCode, hyper::HeaderMap, String) {
+    let mut builder = Request::builder().uri(path);
+    for (n, v) in headers {
+        builder = builder.header(n, v);
+    }
+    let mut req = builder.body(Full::new(Bytes::new())).unwrap();
+    if let Some(cert) = cert {
+        // The listener frontend inserts the verified certificate as an
+        // Arc<ClientCertificate> request extension (see dwara-bin's
+        // listeners.rs); the test drives the same path directly.
+        req.extensions_mut().insert(cert);
+    }
+    let resp = dwara_core::proxy::handle(dp, peer(), req).await;
+    let (parts, body) = resp.into_parts();
+    let text =
+        String::from_utf8(body.collect().await.expect("body read").to_bytes().to_vec()).unwrap();
+    (parts.status, parts.headers, text)
+}
+
+fn mtls_yaml(upstream_port: u16, credentials: &str) -> String {
+    format!(
+        "listeners: []
+routes:
+  - name: r
+    service: svc
+    auth_required: true
+    match:
+      path: {{ type: regex, value: /.* }}
+    action: {{ type: proxy }}
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: {upstream_port}
+consumers:
+{credentials}
+"
+    )
+}
+
+#[tokio::test]
+async fn mtls_cert_maps_consumer_by_subject_and_by_fingerprint() {
+    let upstream = spawn_echo_upstream().await;
+    let cert = client_cert_with_cn("acme-client");
+    let cert_identity = Arc::new(ClientCertificate::from_cert(cert.der()));
+
+    // By subject CN.
+    let yaml = mtls_yaml(
+        upstream.port(),
+        "  - name: acme\n    credentials:\n      - type: mtls\n        subject: acme-client\n",
+    );
+    let dp = dataplane_from(&yaml);
+    let (status, _, body) =
+        send_with_cert(&dp, "/x", vec![], Some(Arc::clone(&cert_identity))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+
+    // By fingerprint: the credential carries the certificate's SHA-256.
+    let fp = dwara_core::config::credentials::sha256_hex(cert.der().as_ref());
+    let yaml = mtls_yaml(
+        upstream.port(),
+        &format!(
+            "  - name: acme\n    credentials:\n      - type: mtls\n        fingerprint: {fp}\n"
+        ),
+    );
+    let dp = dataplane_from(&yaml);
+    let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(cert_identity)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+}
+
+#[tokio::test]
+async fn mtls_unmatched_cert_is_401_and_absent_cert_stays_anonymous() {
+    let upstream = spawn_echo_upstream().await;
+    let yaml = mtls_yaml(
+        upstream.port(),
+        "  - name: acme\n    credentials:\n      - type: mtls\n        subject: acme-client\n",
+    );
+    let dp = dataplane_from(&yaml);
+    // A verified certificate matching NO credential: presented-but-
+    // rejected, exactly like an unknown API key.
+    let stranger = Arc::new(ClientCertificate::from_cert(
+        client_cert_with_cn("someone-else").der(),
+    ));
+    let (status, headers, _) = send_with_cert(&dp, "/x", vec![], Some(stranger)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.contains_key("www-authenticate"));
+    // No certificate at all on an auth_required route: 401.
+    let (status, _, _) = send_with_cert(&dp, "/x", vec![], None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn header_credentials_win_over_the_ambient_client_cert() {
+    // Precedence (#124): X-API-Key and Authorization express explicit
+    // intent and beat the connection-level certificate; the certificate
+    // family is consulted only when no header credential was presented.
+    let upstream = spawn_echo_upstream().await;
+    let yaml = mtls_yaml(
+        upstream.port(),
+        &format!(
+            "  - name: cert-consumer\n    credentials:\n      - type: mtls\n        subject: \
+             acme-client\n  - name: acme\n    credentials:\n      - type: api_key\n        key: \
+             {API_KEY}\n"
+        ),
+    );
+    let dp = dataplane_from(&yaml);
+    let cert = Arc::new(ClientCertificate::from_cert(
+        client_cert_with_cn("acme-client").der(),
+    ));
+
+    // Both presented: the API key identity (acme) wins.
+    let (status, _, body) = send_with_cert(
+        &dp,
+        "/x",
+        vec![("x-api-key", API_KEY)],
+        Some(Arc::clone(&cert)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+
+    // Certificate alone: the cert consumer (cert-consumer) resolves.
+    let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(cert)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body.contains("x-consumer-name: cert-consumer"),
+        "body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn mtls_store_credential_and_groups_apply() {
+    // Store-managed mtls binding: an admin-added credential row whose
+    // selector is the subject CN, with store-managed groups flowing to
+    // a group rule.
+    let upstream = spawn_echo_upstream().await;
+    let yaml = format!(
+        "listeners: []
+routes:
+  - name: r
+    service: svc
+    auth_required: true
+    match:
+      path: {{ type: regex, value: /.* }}
+    action: {{ type: proxy }}
+    authorization:
+      allowed_groups: [cert-holders]
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: {}
+consumers:
+  - name: config-member
+    groups: [cert-holders]
+    credentials:
+      - type: api_key
+        key: cfg-key-1
+",
+        upstream.port()
+    );
+    let (dp, store) = dp_with_store(&yaml);
+    let holder = store
+        .upsert_consumer("cert-holder", None, &["cert-holders".to_string()])
+        .unwrap();
+    store
+        .add_credential(
+            holder.id,
+            dwara_core::store::CredentialKind::Mtls,
+            "config:mtls:acme-client".to_string(),
+            None,
+            "acme-client".to_string(),
+        )
+        .unwrap();
+    dp.set_state_store(Arc::clone(&store));
+
+    let cert = Arc::new(ClientCertificate::from_cert(
+        client_cert_with_cn("acme-client").der(),
+    ));
+    let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(cert)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body.contains("x-consumer-name: cert-holder"),
+        "body: {body}"
+    );
+}
+
+// ---- tester coverage for #124: pepper transition, selector
+// independence, fail-closed modes, mTLS matcher shape, JWT aud edge ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_legacy_verifications_rehash_once_without_corruption() {
+    // Atomicity of the lazy re-hash under concurrency (#124): many
+    // concurrent requests present the SAME legacy credential. Every
+    // request must verify (the row only upgrades AFTER a successful
+    // legacy verification), the store must end with EXACTLY ONE row for
+    // the selector carrying EXACTLY the peppered digest (the racing
+    // re-hash writes are idempotent same-value UPDATEs under the store's
+    // connection mutex), and the row's identity (id, selector) must be
+    // unchanged — the selector stays `sha256(username)` before and after
+    // the format transition, so indexed lookups never break.
+    let (dp, store) = dp_with_store(&basic_config(false));
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("legacy-pass"),
+            None,
+            credential_selector("legacy-user"),
+        )
+        .unwrap();
+    dp.set_credential_pepper(Some(PEPPER.to_vec()));
+    dp.set_state_store(Arc::clone(&store));
+
+    let selector = credential_selector("legacy-user");
+    let before = store.lookup_credentials_by_selector(&selector).unwrap();
+    assert_eq!(before.len(), 1);
+    let (row_id, row_selector) = (before[0].id, before[0].selector.clone());
+
+    let auth = format!("Basic {}", BASE64.encode("legacy-user:legacy-pass"));
+    let mut joins = Vec::new();
+    for _ in 0..16 {
+        let dp = Arc::clone(&dp);
+        let auth = auth.clone();
+        joins.push(tokio::spawn(async move {
+            send_with(&dp, "/x", vec![("authorization", auth.as_str())])
+                .await
+                .0
+        }));
+    }
+    for join in joins {
+        assert_eq!(
+            join.await.unwrap(),
+            StatusCode::BAD_GATEWAY,
+            "every racing legacy verification must succeed"
+        );
+    }
+
+    let after = store.lookup_credentials_by_selector(&selector).unwrap();
+    assert_eq!(after.len(), 1, "no duplicate rows: {after:?}");
+    assert_eq!(after[0].id, row_id, "row identity is stable");
+    assert_eq!(
+        after[0].selector, row_selector,
+        "the selector must be unchanged by the re-hash"
+    );
+    assert_eq!(
+        after[0].hash,
+        hmac_stored_hash(PEPPER, "legacy-pass"),
+        "the final hash is the peppered digest of the presented secret"
+    );
+    // And the upgraded row still verifies afterwards.
+    let (status, _, _) = send_with(&dp, "/x", vec![("authorization", auth.as_str())]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+/// One captured event: its `(name, value)` fields.
+type CapturedFields = Vec<(String, String)>;
+
+/// Minimal event-capturing tracing layer (the observability suite's
+/// Capture precedent, reduced to events) so log-line behavior can be
+/// asserted without a global subscriber.
+#[derive(Default, Clone)]
+struct EventCapture {
+    events: Arc<std::sync::Mutex<Vec<CapturedFields>>>,
+}
+
+struct FieldVisitor {
+    fields: Vec<(String, String)>,
+}
+
+impl tracing::field::Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .push((field.name().to_string(), format!("{value:?}")));
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for EventCapture
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = FieldVisitor { fields: Vec::new() };
+        event.record(&mut visitor);
+        self.events.lock().unwrap().push(visitor.fields);
+    }
+}
+
+#[tokio::test]
+async fn empty_pepper_is_legacy_mode_and_missing_pepper_logs_error_once() {
+    // Empty pepper bytes are "no pepper" (the DataPlane filters empty —
+    // the binary maps an empty DWARA_CREDENTIAL_PEPPER the same way):
+    // legacy rows keep verifying, peppered rows fail closed (401), and
+    // the clear ERROR log fires EXACTLY ONCE per authenticator build,
+    // not per request — and never carries the pepper value.
+    let (dp, store) = dp_with_store(&basic_config(false));
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            hmac_stored_hash(PEPPER, "secret-pass"),
+            None,
+            credential_selector("cl-user"),
+        )
+        .unwrap();
+    dp.set_credential_pepper(Some(Vec::new()));
+    dp.set_state_store(Arc::clone(&store));
+
+    let cap = EventCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::layer::SubscriberExt::with(
+        tracing_subscriber::registry(),
+        cap.clone(),
+    ));
+
+    // Legacy-mode verification keeps working (the config-synced key).
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", API_KEY)]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    // The peppered row fails closed — twice, to exercise the once-log.
+    let ok = format!("Basic {}", BASE64.encode("cl-user:secret-pass"));
+    for _ in 0..2 {
+        let (status, _, body) = send_with(&dp, "/x", vec![("authorization", ok.as_str())]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    }
+
+    let events = cap.events.lock().unwrap();
+    let pepper_absent = events
+        .iter()
+        .filter(|fields| {
+            fields
+                .iter()
+                .any(|(n, v)| n == "code" && v.contains("credential_pepper_absent"))
+        })
+        .count();
+    assert_eq!(
+        pepper_absent, 1,
+        "the fail-closed ERROR must fire once per build: {events:?}"
+    );
+    for fields in events.iter() {
+        for (_, v) in fields {
+            assert!(!v.contains("integration-pepper"), "pepper leaked: {v}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn store_consumer_groups_drive_gateway_level_group_authorization() {
+    // The same store-side groups at the GLOBAL attachment level (#123
+    // levels + #124 groups): a gateway-level allowed_groups rule admits
+    // a store consumer carrying the group and denies one without it.
+    let yaml = "
+listeners: []
+authorization:
+  allowed_groups: [partners]
+routes:
+  - name: r
+    service: svc
+    match:
+      path: { type: regex, value: /.* }
+    action: { type: respond, status: 200 }
+services:
+  - name: svc
+    upstream: pool
+upstreams:
+  - name: pool
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+consumers:
+  - name: config-member
+    groups: [partners]
+    credentials:
+      - type: api_key
+        key: cfg-key-1
+";
+    let (dp, store) = dp_with_store(yaml);
+    let partner = store
+        .upsert_consumer("partner", None, &["partners".to_string()])
+        .unwrap();
+    store
+        .add_credential(
+            partner.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("partner-key"),
+            None,
+            credential_selector("partner-key"),
+        )
+        .unwrap();
+    let outsider = store.upsert_consumer("outsider", None, &[]).unwrap();
+    store
+        .add_credential(
+            outsider.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("outsider-key"),
+            None,
+            credential_selector("outsider-key"),
+        )
+        .unwrap();
+    dp.set_state_store(Arc::clone(&store));
+
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "partner-key")]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "store groups satisfy the global rule"
+    );
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "outsider-key")]).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a group-less store consumer is denied by the global rule"
+    );
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "cfg-key-1")]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A SAN-only client certificate (a subject with no CommonName
+/// attribute): the by-subject matcher cannot see it, the fingerprint
+/// matcher still can.
+fn san_only_cert(san: &str) -> rcgen::Certificate {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+    // Clear the distinguished name entirely: the subject carries NO CN,
+    // so only the SAN attribute names the certificate.
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params.self_signed(&key).unwrap()
+}
+
+#[tokio::test]
+async fn san_only_certificate_matches_by_fingerprint_never_by_san() {
+    // SANs are NOT a match value (#124: the matcher is subject CN or
+    // fingerprint) — a certificate whose only name is a SAN cannot match
+    // a by-subject credential naming that SAN value, but the SAME
+    // certificate resolves through a by-fingerprint credential.
+    let upstream = spawn_echo_upstream().await;
+    let cert = san_only_cert("localhost");
+    let identity = Arc::new(ClientCertificate::from_cert(cert.der()));
+
+    let yaml = mtls_yaml(
+        upstream.port(),
+        "  - name: acme\n    credentials:\n      - type: mtls\n        subject: localhost\n",
+    );
+    let dp = dataplane_from(&yaml);
+    let (status, _, _) = send_with_cert(&dp, "/x", vec![], Some(Arc::clone(&identity))).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a SAN value is not a subject match value"
+    );
+
+    let fp = dwara_core::config::credentials::sha256_hex(cert.der().as_ref());
+    let yaml = mtls_yaml(
+        upstream.port(),
+        &format!(
+            "  - name: acme\n    credentials:\n      - type: mtls\n        fingerprint: {fp}\n"
+        ),
+    );
+    let dp = dataplane_from(&yaml);
+    let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(identity)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+}
+
+#[tokio::test]
+async fn two_consumers_claiming_one_subject_cn_resolve_deterministically() {
+    // Two consumers binding the SAME subject CN is a configuration
+    // smell, but the outcome must be deterministic (#124): the
+    // first-DECLARED consumer's credential leads the selector's
+    // candidate list, so it wins — stably, on every request.
+    let upstream = spawn_echo_upstream().await;
+    let yaml = mtls_yaml(
+        upstream.port(),
+        "  - name: first-consumer\n    credentials:\n      - type: mtls\n        subject: \
+         shared-cn\n  - name: second-consumer\n    credentials:\n      - type: mtls\n        \
+         subject: shared-cn\n",
+    );
+    let dp = dataplane_from(&yaml);
+    let cert = Arc::new(ClientCertificate::from_cert(
+        client_cert_with_cn("shared-cn").der(),
+    ));
+    for _ in 0..3 {
+        let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(Arc::clone(&cert))).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert!(
+            body.contains("x-consumer-name: first-consumer"),
+            "the first-declared consumer wins, stably: {body}"
+        );
+        assert!(!body.contains("second-consumer"), "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn subject_selector_wins_over_fingerprint_for_the_same_certificate() {
+    // The matcher consults the subject-CN selector BEFORE the
+    // fingerprint selector (#124): when one consumer binds a certificate
+    // by fingerprint and another by subject, the subject binding
+    // resolves the identity.
+    let upstream = spawn_echo_upstream().await;
+    let cert = client_cert_with_cn("acme-client");
+    let fp = dwara_core::config::credentials::sha256_hex(cert.der().as_ref());
+    let yaml = mtls_yaml(
+        upstream.port(),
+        &format!(
+            "  - name: by-fingerprint\n    credentials:\n      - type: mtls\n        \
+             fingerprint: {fp}\n  - name: by-subject\n    credentials:\n      - type: mtls\n        \
+             subject: acme-client\n"
+        ),
+    );
+    let dp = dataplane_from(&yaml);
+    let identity = Arc::new(ClientCertificate::from_cert(cert.der()));
+    let (status, _, body) = send_with_cert(&dp, "/x", vec![], Some(identity)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body.contains("x-consumer-name: by-subject"),
+        "the subject selector is consulted first: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_key_credential_selector_equal_to_a_cert_cn_does_not_authenticate_the_cert() {
+    // Kind-filter pin (#124): the mTLS matcher looks credentials up by
+    // selector, and an api_key credential's selector is hex(sha256(key))
+    // — nothing stops a client certificate whose subject CN IS that
+    // string. The shared selector must NOT authenticate the certificate:
+    // the mTLS path skips credentials of other kinds and rejects the
+    // certificate (a cert is only ever mapped by an mtls credential).
+    let upstream = spawn_echo_upstream().await;
+    let key = "kind-collision-key";
+    let selector = credential_selector(key);
+    let yaml = mtls_yaml(
+        upstream.port(),
+        &format!("  - name: acme\n    credentials:\n      - type: api_key\n        key: {key}\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    // Control: the credential IS live under that selector — presenting
+    // the key authenticates, so the 401 below is the kind filter, not
+    // credential absence.
+    let (status, _, body) = send_with(&dp, "/x", vec![("x-api-key", key)]).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
+    // The pin: the certificate whose CN equals the api_key credential's
+    // selector string does not authenticate (401 + challenge).
+    let cert = Arc::new(ClientCertificate::from_cert(
+        client_cert_with_cn(&selector).der(),
+    ));
+    let (status, headers, _) = send_with_cert(&dp, "/x", vec![], Some(cert)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.contains_key("www-authenticate"));
+}
+
+#[tokio::test]
+async fn jwt_token_without_aud_claim_against_a_configured_audience_is_accepted() {
+    // Pin jsonwebtoken 9.3.1 behavior now that #124 tunes aud
+    // validation: a CONFIGURED audience rejects a mismatched claim (see
+    // the strict case in
+    // `jwt_aud_claim_is_accepted_when_provider_has_no_audience`) but
+    // does NOT require the claim to be present — a token with NO aud is
+    // accepted (the audience is checked only when the claim exists).
+    // The consumer binding here lists only an issuer, so the credential
+    // containment cannot mask the provider-level policy.
+    let setup = jwt_setup(None, Some("dwara-api")).await;
+    let no_aud = serde_json::json!({
+        "iss": "https://idp.example", "sub": "user-1", "exp": now() + 3600,
+    });
+    let tok = token_with_kid(&setup, &no_aud, &setup.kid);
+    let (status, _, body) = send_with(
+        &setup.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok}"))],
+    )
+    .await;
+    // The default test consumer binding carries audiences [dwara-api];
+    // a token without aud cannot satisfy that containment, so the
+    // observable result through THIS fixture is a 401 — while a binding
+    // without audiences would admit it. Assert the containment half
+    // here and the provider half via the issuer-only binding below.
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+
+    // Issuer-ONLY binding (no credential audiences): the provider has
+    // an audience configured, the token carries none. jsonwebtoken
+    // accepts (aud is presence-checked, not required), and the issuer
+    // binding maps the consumer — pinning that "no aud + configured
+    // audience" is NOT a rejection at the provider layer.
+    let key = rcgen::KeyPair::generate().unwrap();
+    let (x, y) = p256_xy(&key.public_key_der());
+    let kid = "key-1".to_string();
+    let jwk = serde_json::json!({
+        "kty": "EC", "crv": "P-256", "x": x, "y": y,
+        "kid": kid, "alg": "ES256", "use": "sig",
+    });
+    let jwks = Arc::new(std::sync::Mutex::new(vec![jwk]));
+    let jwks_addr = spawn_jwks(Arc::clone(&jwks)).await;
+    let upstream = spawn_echo_upstream().await;
+    let yaml = format!(
+        "jwt_providers:\n  - name: idp\n    jwks_url: http://127.0.0.1:{}\n    \
+         algorithms: [ES256]\n    audience: dwara-api\nlisteners: []\n\
+         routes:\n  - name: r\n    service: svc\n    match:\n      path: {{ type: regex, \
+         value: /.* }}\n    action: {{ type: proxy }}\nservices:\n  - name: svc\n    \
+         upstream: pool\nupstreams:\n  - name: pool\n    endpoints:\n      - address: \
+         127.0.0.1\n        port: {}\nconsumers:\n  - name: acme\n    credentials:\n      \
+         - type: jwt\n        issuer: https://idp.example\n",
+        jwks_addr.port(),
+        upstream.port()
+    );
+    let dp = dataplane_from(&yaml);
+    let enc = EncodingKey::from_ec_der(&key.serialize_der());
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(kid.clone());
+    let tok = jsonwebtoken::encode(&header, &no_aud, &enc).unwrap();
+    let (status, _, body) =
+        send_with(&dp, "/x", vec![("authorization", &format!("Bearer {tok}"))]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a token without aud must pass a provider with a configured audience: {body}"
+    );
+    assert!(body.contains("x-consumer-name: acme"), "body: {body}");
 }

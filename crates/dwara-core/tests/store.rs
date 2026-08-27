@@ -36,7 +36,7 @@ fn state_survives_drop_and_reopen_of_the_same_file() {
     let path = dir.path().join("state.db");
     let (consumer_id, cred_id) = {
         let store = StateStore::open(&path).unwrap();
-        let c = store.upsert_consumer("acme", Some(7)).unwrap();
+        let c = store.upsert_consumer("acme", Some(7), &[]).unwrap();
         add_key(&store, c.id, "key-1", "h1");
         store.incr_quota(c.id, "rpm", 1000, 4, None).unwrap();
         (
@@ -52,6 +52,7 @@ fn state_survives_drop_and_reopen_of_the_same_file() {
             id: consumer_id,
             name: "acme".into(),
             priority: Some(7),
+            groups: vec![],
             created_at: reopened.list_consumers().unwrap()[0].created_at,
         }]
     );
@@ -78,7 +79,7 @@ fn state_survives_drop_and_reopen_of_the_same_file() {
 #[test]
 fn incr_exactly_to_limit_is_allowed_and_beyond_is_refused_atomically() {
     let store = StateStore::open_in_memory().unwrap();
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     // Exactly to the limit: allowed, used == limit.
     assert_eq!(store.incr_quota(c.id, "rpm", 1, 5, Some(5)).unwrap(), 5);
     assert_eq!(store.get_quota(c.id, "rpm", 1).unwrap(), 5);
@@ -104,7 +105,7 @@ fn incr_exactly_to_limit_is_allowed_and_beyond_is_refused_atomically() {
 #[test]
 fn concurrent_increments_never_exceed_the_limit() {
     let store = Arc::new(StateStore::open_in_memory().unwrap());
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     const THREADS: usize = 8;
     const LIMIT: u64 = 5;
     let barrier = Arc::new(Barrier::new(THREADS));
@@ -135,7 +136,7 @@ fn concurrent_increments_never_exceed_the_limit() {
 #[test]
 fn window_rollover_starts_an_independent_counter_at_zero() {
     let store = StateStore::open_in_memory().unwrap();
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     store.incr_quota(c.id, "rpm", 1000, 7, Some(10)).unwrap();
     // New window: independent counter, starts at zero, own limit.
     assert_eq!(store.incr_quota(c.id, "rpm", 2000, 3, Some(10)).unwrap(), 3);
@@ -156,7 +157,7 @@ fn window_rollover_starts_an_independent_counter_at_zero() {
 #[test]
 fn negative_cache_is_invalidated_by_add_and_repopulated_by_revoke() {
     let store = StateStore::open_in_memory().unwrap();
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     // Miss: negative result cached, one disk read.
     assert!(store
         .lookup_credential("key-1")
@@ -212,8 +213,8 @@ fn negative_cache_is_invalidated_by_add_and_repopulated_by_revoke() {
 #[test]
 fn two_active_credentials_on_one_selector_and_revoking_one_keeps_the_other() {
     let store = StateStore::open_in_memory().unwrap();
-    let acme = store.upsert_consumer("acme", None).unwrap();
-    let other = store.upsert_consumer("other", None).unwrap();
+    let acme = store.upsert_consumer("acme", None, &[]).unwrap();
+    let other = store.upsert_consumer("other", None, &[]).unwrap();
     let old = add_key(&store, acme.id, "shared-sel", "old-hash");
     let new = add_key(&store, other.id, "shared-sel", "new-hash");
 
@@ -245,8 +246,8 @@ fn seeding_twice_creates_single_consumer_and_credential_rows() {
     let config =
         config_yaml("  - name: acme\n    credentials:\n      - type: api_key\n        key: k1\n");
     let store = StateStore::open_in_memory().unwrap();
-    sync_consumers_from_config(&store, &config).unwrap();
-    sync_consumers_from_config(&store, &config).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap();
     assert_eq!(store.list_consumers().unwrap().len(), 1);
     assert_eq!(
         store
@@ -270,8 +271,8 @@ fn removed_config_consumers_persist_in_the_store_upsert_only_sync() {
     let reduced =
         config_yaml("  - name: acme\n    credentials:\n      - type: api_key\n        key: k1\n");
     let store = StateStore::open_in_memory().unwrap();
-    sync_consumers_from_config(&store, &full).unwrap();
-    sync_consumers_from_config(&store, &reduced).unwrap();
+    sync_consumers_from_config(&store, &full, None).unwrap();
+    sync_consumers_from_config(&store, &reduced, None).unwrap();
     let names: Vec<String> = store
         .list_consumers()
         .unwrap()
@@ -298,13 +299,13 @@ fn seed_resync_after_revoke_reinserts_the_config_credential() {
     let config =
         config_yaml("  - name: acme\n    credentials:\n      - type: api_key\n        key: k1\n");
     let store = StateStore::open_in_memory().unwrap();
-    sync_consumers_from_config(&store, &config).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap();
     let cred_id = store
         .lookup_credentials_by_selector(&dwara_core::config::credentials::credential_selector("k1"))
         .unwrap()[0]
         .id;
     assert!(store.revoke_credential(cred_id).unwrap());
-    sync_consumers_from_config(&store, &config).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap();
     let active = store
         .lookup_credentials_by_selector(&dwara_core::config::credentials::credential_selector("k1"))
         .unwrap();
@@ -352,7 +353,7 @@ fn add_credential_for_unknown_consumer_is_the_typed_unknown_consumer_error() {
 #[test]
 fn disk_reads_counter_increments_on_each_cold_miss() {
     let store = StateStore::open_in_memory().unwrap();
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     add_key(&store, c.id, "k1", "h");
     let before = store.disk_reads();
     store.lookup_credential("k1").unwrap();
@@ -375,7 +376,7 @@ fn five_hundred_selectors_warmed_serve_five_thousand_lookups_with_zero_disk() {
     const LOOKUPS: u64 = 5000;
     let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state.db")).unwrap();
-    let c = store.upsert_consumer("acme", None).unwrap();
+    let c = store.upsert_consumer("acme", None, &[]).unwrap();
     for i in 0..SELECTORS {
         add_key(&store, c.id, &format!("key-{i}"), &format!("h{i}"));
     }

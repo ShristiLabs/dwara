@@ -318,7 +318,7 @@
           }
         },
         "groups": {
-          "description": "Consumer group memberships (DW-020): group names this consumer\nbelongs to, consulted by authorization `allowed_groups` /\n`denied_groups` rules. Empty (the default) = no groups. Group\nnames are free-form strings; validation checks that authorization\nrules referencing groups resolve against at least one consumer's\nmembership.",
+          "description": "Consumer group memberships (DW-020): group names this consumer\nbelongs to, consulted by authorization `allowed_groups` /\n`denied_groups` rules. Empty (the default) = no groups. Group\nnames are free-form strings; validation checks that authorization\nrules referencing groups resolve against at least one consumer's\nmembership. Store-managed consumers carry their own groups in the\nstate store (#124) — the group NAMESPACE is shared, but\nconfig-time validation can only see config consumers, so a rule\nreferencing a group that exists solely on store consumers is\nflagged (grant at least one config consumer the same group name,\nor accept the issue is a false positive for store-only groups).",
           "type": "array",
           "items": {
             "type": "string"
@@ -350,7 +350,7 @@
       ]
     },
     "Credential": {
-      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS fingerprint.",
+      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS client-certificate match.",
       "oneOf": [
         {
           "type": "object",
@@ -397,8 +397,18 @@
           "type": "object",
           "properties": {
             "fingerprint": {
-              "description": "SHA-256 fingerprint of the client certificate.",
-              "type": "string"
+              "description": "SHA-256 fingerprint (lowercase hex of the DER) of the client\ncertificate. Optional when `subject` is set (#124); a\nfingerprint match binds the credential to ONE exact\ncertificate (a re-issued cert needs a new credential).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subject": {
+              "description": "Subject CommonName of the client certificate (#124): the\ncredential matches any verified client certificate whose\nsubject CN is exactly this string (case-sensitive). Binding\nby subject survives certificate re-issue under the same CN;\nthe certificate must still chain to a listener's\n`client_ca_file` (or be otherwise verified) at the TLS layer\n— the matcher only maps an ALREADY-VERIFIED certificate to a\nconsumer. Exactly one of `subject` / `fingerprint` must be\nset (validation rejects both-empty and both-set).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "type": "string",
@@ -407,8 +417,7 @@
           },
           "additionalProperties": false,
           "required": [
-            "type",
-            "fingerprint"
+            "type"
           ]
         }
       ]
@@ -495,7 +504,7 @@
           }
         },
         "audience": {
-          "description": "Required audience (`aud` claim). Absent: any audience accepted.",
+          "description": "Required audience (`aud` claim). Audience is validated ONLY when\nthis is configured (#124, maintainer decision): a provider\nwithout an `audience` ACCEPTS tokens that carry any (or no) `aud`\nclaim — `aud` is not interpreted unless the provider names one.\nAll other validations (exp, nbf, iss when configured, the\nalgorithm allowlist) are identical either way.",
           "type": [
             "string",
             "null"
@@ -629,6 +638,13 @@
           "items": {
             "$ref": "#/$defs/TlsCertificate"
           }
+        },
+        "client_ca_file": {
+          "description": "PEM file of CA certificates that CLIENT certificates must chain\nto (#124, termination mode only). When set, the listener\nREQUESTS a client certificate and verifies any presented one\nagainst this bundle; a connection without a certificate is still\naccepted (other credential families apply) — the verified\ncertificate is matched against consumers' `mtls` credentials to\nresolve an identity, and an UNVERIFIED certificate fails the\nhandshake (mTLS authn never sees it). Rejected in passthrough\nmode (the TLS layer is not terminated, so client certificates\ncannot be verified). The file must exist and be readable at\nconfig compile time; validation names this field otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "key_file": {
           "description": "Path to the PEM private key (termination mode only).",

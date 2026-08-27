@@ -341,7 +341,8 @@ fn validation_rejects_empty_mtls_fingerprint() {
         priority: None,
         groups: vec![],
         credentials: vec![Credential::Mtls {
-            fingerprint: String::new(),
+            fingerprint: Some(String::new()),
+            subject: None,
         }],
         policies: vec![],
         authorization: None,
@@ -812,6 +813,7 @@ fn validation_rejects_https_listener_without_tls_block() {
 #[test]
 fn validation_rejects_terminate_without_cert_file() {
     let gw = https_gateway(Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: None,
         key_file: Some("/etc/certs/key.pem".into()),
@@ -824,6 +826,7 @@ fn validation_rejects_terminate_without_cert_file() {
 #[test]
 fn validation_rejects_terminate_without_key_file() {
     let gw = https_gateway(Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: None,
@@ -836,6 +839,7 @@ fn validation_rejects_terminate_without_key_file() {
 #[test]
 fn validation_accepts_terminate_with_cert_and_key() {
     let gw = https_gateway(Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),
@@ -941,6 +945,7 @@ fn validation_rejects_readable_but_unparseable_trusted_ca_file() {
 #[test]
 fn validation_accepts_passthrough_without_cert_or_key() {
     let gw = https_gateway(Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Passthrough,
         cert_file: None,
         key_file: None,
@@ -953,6 +958,7 @@ fn validation_accepts_passthrough_without_cert_or_key() {
 #[test]
 fn validation_rejects_passthrough_with_cert_and_key() {
     let gw = https_gateway(Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Passthrough,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),
@@ -966,6 +972,7 @@ fn validation_rejects_passthrough_with_cert_and_key() {
 fn validation_rejects_http_listener_with_tls_block() {
     let mut gw = base_gateway();
     gw.listeners[0].tls = Some(ListenerTls {
+        client_ca_file: None,
         mode: TlsMode::Terminate,
         cert_file: Some("/etc/certs/cert.pem".into()),
         key_file: Some("/etc/certs/key.pem".into()),

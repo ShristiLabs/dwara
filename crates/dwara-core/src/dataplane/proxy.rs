@@ -199,6 +199,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument as _;
+use zeroize::Zeroizing;
 
 use crate::config::net::peer_is_trusted;
 use crate::config::{
@@ -330,12 +331,22 @@ pub struct DataPlane {
     rate_limits: ArcSwap<RateLimitEngine>,
     /// Authenticator (DW-019), rebuilt on every generation swap from the
     /// new config (and the optional state store, set once at startup via
-    /// [`DataPlane::set_state_store`]).
+    /// [`DataPlane::set_state_store`], and the credential pepper set via
+    /// [`DataPlane::set_credential_pepper`], #124).
     authn: ArcSwap<CompositeAuthenticator>,
     /// The DWARA_STATE_DB store when deployed; None = config-only
     /// credentials. Set once before serving; the authenticator rebuild
     /// reads it.
     state_store: std::sync::RwLock<Option<Arc<StateStore>>>,
+    /// The per-deployment credential pepper (#124): raw bytes resolved
+    /// ABOVE dwara-core's security domain — dwara-bin resolves the secret
+    /// through the `SecretSource` extension seam and hands the bytes
+    /// down, because `security` must not import `extensions`
+    /// (`check_deps.py`). Arc-held so the authenticator rebuild shares
+    /// the SAME Zeroizing buffer (no plain copy; the bytes zeroize when
+    /// the last holder drops). SECRET: never logged, never in Debug.
+    /// None = legacy-only mode (peppered stored hashes fail closed).
+    credential_pepper: std::sync::RwLock<Option<Arc<Zeroizing<Vec<u8>>>>>,
     /// JWKS caches keyed by provider URL, carried ACROSS generation swaps
     /// so key rotation state survives reloads (DW-019).
     jwks_caches: std::sync::Mutex<HashMap<String, Arc<JwksCacheEntry>>>,
@@ -417,6 +428,7 @@ impl DataPlane {
             rate_limits: ArcSwap::from_pointee(rate_limits),
             authn: ArcSwap::from_pointee(CompositeAuthenticator::disabled()),
             state_store: std::sync::RwLock::new(None),
+            credential_pepper: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             obs: Arc::new(Observability::from_env()),
             state,
@@ -445,6 +457,34 @@ impl DataPlane {
             .clone()
     }
 
+    /// Attach the per-deployment credential pepper (#124). The bytes are
+    /// resolved by the CALLER (dwara-bin, through the SecretSource
+    /// extension seam — the security domain never touches extensions)
+    /// and threaded down here; an empty slice is treated as "no pepper"
+    /// (legacy-only mode). Call once, before serving traffic; rebuilds
+    /// the authenticator against it immediately.
+    pub fn set_credential_pepper(&self, pepper: Option<Vec<u8>>) {
+        let pepper = pepper
+            .filter(|p| !p.is_empty())
+            .map(|p| Arc::new(Zeroizing::new(p)));
+        *self
+            .credential_pepper
+            .write()
+            .expect("credential pepper lock poisoned") = pepper;
+        self.rebuild_authn();
+    }
+
+    /// The credential pepper for the authenticator rebuild: a clone of
+    /// the Arc-held Zeroizing buffer (an Arc bump, NO byte copy; the
+    /// authenticator keeps it alive until its next rebuild and the bytes
+    /// zeroize when the last holder drops). Never logged.
+    fn pepper_bytes(&self) -> Option<Arc<Zeroizing<Vec<u8>>>> {
+        self.credential_pepper
+            .read()
+            .expect("credential pepper lock poisoned")
+            .clone()
+    }
+
     /// Rebuild the authenticator from the CURRENT snapshot and the
     /// attached state store (if any), reusing JWKS caches by URL.
     fn rebuild_authn(&self) {
@@ -453,10 +493,16 @@ impl DataPlane {
             .read()
             .expect("state store lock poisoned")
             .clone();
+        let pepper = self.pepper_bytes();
         let snapshot = self.state.snapshot();
         let mut caches = self.jwks_caches.lock().expect("jwks cache lock poisoned");
-        let authn =
-            CompositeAuthenticator::build(snapshot.gateway(), store, &mut caches, Some(&self.obs));
+        let authn = CompositeAuthenticator::build(
+            snapshot.gateway(),
+            store,
+            &mut caches,
+            Some(&self.obs),
+            pepper.as_ref(),
+        );
         self.authn.store(authn);
     }
 
@@ -773,11 +819,19 @@ where
     // `auth_required`. Gateway-side failures (JWKS endpoint down) answer
     // 500 — the gateway cannot vouch for the caller either way.
     let authn = dp.authn.load_full();
+    // The ambient mTLS family (#124): the accepting TLS listener (when
+    // it carries a client_ca_file) inserts the VERIFIED client
+    // certificate into the request extensions; absent on cleartext
+    // listeners and connections that presented none.
+    let client_cert = req
+        .extensions()
+        .get::<Arc<crate::security::authn::ClientCertificate>>()
+        .cloned();
     // The authn phase span (DW-021): instrumented onto the authenticate
     // future so the span covers exactly the phase (no guard is held
     // across a poll boundary).
     let identity = match authn
-        .authenticate(req.headers())
+        .authenticate(req.headers(), client_cert.as_deref())
         .instrument(tracing::info_span!("authn"))
         .await
     {
@@ -861,7 +915,14 @@ where
             );
             let authz_ctx = crate::security::authz::AuthzContext {
                 identity: identity.as_ref(),
-                consumer_groups: consumer_cfg.map(|c| c.groups.as_slice()).unwrap_or(&[]),
+                // Groups ride the identity (#124): config consumers from
+                // the config record, store-managed consumers from the
+                // store — one source for both, so group rules apply
+                // uniformly.
+                consumer_groups: identity
+                    .as_ref()
+                    .map(|id| id.groups.as_slice())
+                    .unwrap_or(&[]),
                 peer_ip: peer,
                 effective_ip,
             };

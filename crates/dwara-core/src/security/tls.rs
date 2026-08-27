@@ -246,8 +246,92 @@ fn der_elem(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         i += n;
         l
     };
-    let content = buf.get(i..i + len)?;
-    Some((tag, content, &buf[i + len..]))
+    // An 8-byte length field can encode a value near usize::MAX, which
+    // would overflow the `i + len` addition: bound the element end
+    // BEFORE slicing (checked add + length filter, then the slice is
+    // always in range).
+    let end = len.checked_add(i).filter(|end| *end <= buf.len())?;
+    Some((tag, &buf[i..end], &buf[end..]))
+}
+
+/// Walk the TBS of a leaf certificate to the SUBJECT RDNSequence content
+/// (the bytes INSIDE the subject SEQUENCE header — unlike
+/// [`spki_of_leaf`], which keeps its header because that is the SPKI
+/// encoding the key comparison needs). None on any structural
+/// shortcoming.
+fn subject_of_leaf<'a>(cert: &'a CertificateDer<'a>) -> Option<&'a [u8]> {
+    let (tag, cert_content, _) = der_elem(cert.as_ref())?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, tbs, _) = der_elem(cert_content)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs;
+    // Optional [0] EXPLICIT version comes before the serial INTEGER.
+    if let Some((tag, _, tail)) = der_elem(rest) {
+        if tag & 0xc0 == 0x80 {
+            rest = tail;
+        }
+    }
+    // serialNumber, signature, issuer, validity — then subject (the 5th
+    // element after the optional version).
+    for _ in 0..4 {
+        let (_, _, tail) = der_elem(rest)?;
+        rest = tail;
+    }
+    let (tag, subject_content, _) = der_elem(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    Some(subject_content)
+}
+
+/// Extract the subject CommonName of a leaf certificate (#124): the
+/// value of the FIRST CN attribute (OID 2.5.4.3) in the subject RDN
+/// sequence, decoded from UTF8String / PrintableString / IA5String (the
+/// string types CNs carry in practice). The decode is STRICT UTF-8:
+/// invalid CN bytes yield `None` rather than being lossy-folded to
+/// U+FFFD, which could collide two distinct malformed names into one
+/// selector. `None` also when the subject carries no CN at all — either
+/// way such a certificate can only match a by-fingerprint mTLS
+/// credential (the caller falls back to the fingerprint selector).
+/// Hand-rolled DER walk (no X.509 parser dependency), same substrate as
+/// the private SPKI extractor in this module. THE CERTIFICATE IS
+/// ALREADY VERIFIED at the TLS layer when this runs; extraction only
+/// reads the match value.
+pub fn subject_cn_of_leaf(cert: &CertificateDer<'_>) -> Option<String> {
+    let subject = subject_of_leaf(cert)?;
+    // RDNSequence: SEQUENCE OF (SET OF (SEQUENCE { OID, value })).
+    let mut rdns = subject;
+    while let Some((set_tag, set_content, tail)) = der_elem(rdns) {
+        if set_tag != 0x31 {
+            // Not a SET: malformed or a trailing oddity — stop.
+            return None;
+        }
+        let mut attrs = set_content;
+        while let Some((seq_tag, attr, attr_tail)) = der_elem(attrs) {
+            if seq_tag == 0x30 {
+                // AttributeTypeAndValue: OID then value.
+                if let Some((oid_tag, oid, after_oid)) = der_elem(attr) {
+                    if oid_tag == 0x06 && oid == [0x55, 0x04, 0x03] {
+                        if let Some((val_tag, val, _)) = der_elem(after_oid) {
+                            if matches!(val_tag, 0x0c | 0x13 | 0x16) {
+                                // Strict UTF-8 (PrintableString and
+                                // IA5String are ASCII subsets): reject
+                                // rather than fold.
+                                return Some(std::str::from_utf8(val).ok()?.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            attrs = attr_tail;
+        }
+        rdns = tail;
+    }
+    None
 }
 
 /// Extract the DER-encoded SubjectPublicKeyInfo of a leaf certificate by
@@ -393,9 +477,31 @@ impl TlsTermination {
 
     fn server_config(tls: &ListenerTls) -> Result<ServerConfig, TlsError> {
         let resolver = SniCertResolver::build(tls)?;
-        let mut config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(resolver));
+        // #124 client-certificate authn: with a `client_ca_file` the
+        // listener REQUESTS a client certificate and verifies any
+        // presented one against the bundle (the admin mTLS verifier
+        // pattern), but — unlike the admin listener — does NOT require
+        // one: `allow_unauthenticated` keeps the listener open to API-key
+        // / Basic / JWT / anonymous traffic, and authn matches the
+        // VERIFIED certificate against consumers' `mtls` credentials. An
+        // UNVERIFIED certificate fails the handshake here and never
+        // reaches the authenticator (mTLS authn only ever sees
+        // certificates rustls has already chained to the configured CA).
+        let mut config = match &tls.client_ca_file {
+            Some(client_ca) => {
+                let roots = root_store_from_pem_file(client_ca)?;
+                let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .allow_unauthenticated()
+                    .build()
+                    .map_err(|e| TlsError::ClientAuth(format!("building client verifier: {e}")))?;
+                ServerConfig::builder()
+                    .with_client_cert_verifier(verifier)
+                    .with_cert_resolver(Arc::new(resolver))
+            }
+            None => ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(resolver)),
+        };
         // ALPN advertises both; the client's choice decides HTTP/1.1 vs
         // HTTP/2 (hyper-util's auto builder handles whichever arrives).
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

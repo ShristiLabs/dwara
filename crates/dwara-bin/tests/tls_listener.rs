@@ -620,3 +620,270 @@ upstreams:
     assert_ne!(cert1, cert2);
     assert!(String::from_utf8_lossy(&resp).ends_with("dwara"));
 }
+
+// ---------------------------------------------------------------------------
+// #124: mTLS client-certificate authn on a terminate listener
+// ---------------------------------------------------------------------------
+
+/// A self-signed client CA plus a leaf certificate it signed carrying
+/// the given subject CommonName (the by-subject matcher's input).
+struct ClientCert {
+    cert_pem: String,
+    key_der: Vec<u8>,
+}
+
+fn client_ca_and_leaf(ca_cn: &str, leaf_cn: &str) -> (rcgen::Certificate, ClientCert) {
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, ca_cn);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf_params = rcgen::CertificateParams::default();
+    leaf_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, leaf_cn);
+    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+    (
+        ca,
+        ClientCert {
+            cert_pem: leaf.pem(),
+            key_der: leaf_key.serialize_der(),
+        },
+    )
+}
+
+/// Connector presenting a client certificate (server trust bypassed as
+/// everywhere in this suite: only client-cert AUTHENTICATION is under
+/// test, not the server chain).
+fn client_cert_connector(cert_pem: &str, key_der: &[u8]) -> TlsConnector {
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let cert = <rustls::pki_types::CertificateDer<'_> as rustls::pki_types::pem::PemObject>::pem_slice_iter(cert_pem.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        key_der.to_vec(),
+    ));
+    let mut config = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .expect("versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_client_auth_cert(vec![cert], key)
+        .expect("client cert");
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config).into()
+}
+
+/// One plain GET over an established TLS stream; returns the response
+/// bytes (status line + headers + body).
+async fn raw_get(tls: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp = Vec::new();
+    let _ = tls.read_to_end(&mut resp).await;
+    resp
+}
+
+async fn connect_tls(
+    addr: &str,
+    connector: &TlsConnector,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("edge.example.com".to_string())
+        .expect("sni")
+        .to_owned();
+    connector.connect(name, tcp).await.expect("tls handshake")
+}
+
+#[tokio::test]
+async fn mtls_client_certificate_authenticates_on_terminate_listener() {
+    let dir = temp_dir("mtls");
+    let server = write_cert(&dir, "edge.example.com");
+    let (client_ca, good_client) = client_ca_and_leaf("dwara-test-client-ca", "mtls-acme");
+    // A second CA whose leaf is NOT trusted by the listener.
+    let (_stranger_ca, stranger_client) = client_ca_and_leaf("other-ca", "mtls-acme");
+    let ca_path = dir.join("client-ca.pem");
+    std::fs::write(&ca_path, client_ca.pem()).unwrap();
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: mtls-edge
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: {}
+      key_file: {}
+      client_ca_file: {}
+routes:
+  - name: catch
+    service: local
+    auth_required: true
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: hello-mtls
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+consumers:
+  - name: acme
+    credentials:
+      - type: mtls
+        subject: mtls-acme
+",
+            server.cert.display(),
+            server.key.display(),
+            ca_path.display()
+        ),
+    )
+    .unwrap();
+
+    let _server = start_server(&config);
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // WITH the CA-verified client certificate whose CN matches the
+    // consumer's mtls credential: proxied (here: answered) with identity.
+    let connector = client_cert_connector(&good_client.cert_pem, &good_client.key_der);
+    let mut tls = connect_tls(&addr, &connector).await;
+    let resp = raw_get(&mut tls).await;
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
+    assert!(text.ends_with("hello-mtls"), "resp: {text}");
+
+    // WITHOUT a client certificate: the mTLS family has nothing to
+    // match, the route requires auth -> 401 envelope.
+    let plain = tls_connector("edge.example.com", &["http/1.1"]);
+    let mut tls = connect_tls(&addr, &plain).await;
+    let resp = raw_get(&mut tls).await;
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.starts_with("HTTP/1.1 401"), "resp: {text}");
+
+    // A certificate from an UNTRUSTED CA is rejected at the TLS layer;
+    // authn never sees it. In TLS 1.3 the client-side handshake can
+    // COMPLETE before the server's bad_certificate alert arrives, so the
+    // rejection may surface on the first read instead of connect — either
+    // way, NO HTTP response is ever served.
+    let bad = client_cert_connector(&stranger_client.cert_pem, &stranger_client.key_der);
+    let tcp = TcpStream::connect(&addr).await.unwrap();
+    let name = rustls::pki_types::ServerName::try_from("edge.example.com".to_string())
+        .unwrap()
+        .to_owned();
+    let served = match bad.connect(name, tcp).await {
+        Err(_) => None, // TLS 1.2 shape: the handshake itself fails.
+        Ok(mut tls) => {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let _ = tls
+                .write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+                .await;
+            let mut resp = Vec::new();
+            let _ = tls.read_to_end(&mut resp).await;
+            Some(resp)
+        }
+    };
+    assert!(
+        served
+            .as_ref()
+            .is_none_or(|resp| !String::from_utf8_lossy(resp).starts_with("HTTP/1.1")),
+        "untrusted client cert must never serve a response"
+    );
+}
+
+#[tokio::test]
+async fn client_ca_listener_serves_anonymous_traffic_when_auth_not_required() {
+    // allow_unauthenticated semantics (#124): a terminate listener with
+    // a client_ca_file still accepts connections that present NO client
+    // certificate — the bundle only adds an optional verification
+    // family, it never turns the listener into require-mTLS. On a route
+    // that does not require auth, a certificate-less client is served
+    // like on any plain terminate listener.
+    let dir = temp_dir("mtls-anon");
+    let server = write_cert(&dir, "edge.example.com");
+    let (client_ca, _client) = client_ca_and_leaf("dwara-test-client-ca", "mtls-acme");
+    let ca_path = dir.join("client-ca.pem");
+    std::fs::write(&ca_path, client_ca.pem()).unwrap();
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: mtls-edge
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: {}
+      key_file: {}
+      client_ca_file: {}
+routes:
+  - name: catch
+    service: local
+    match:
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: respond
+      status: 200
+      body: hello-anon
+services:
+  - name: local
+    upstream: local-up
+upstreams:
+  - name: local-up
+    endpoints:
+      - address: 127.0.0.1
+        port: 9
+consumers:
+  - name: acme
+    credentials:
+      - type: mtls
+        subject: mtls-acme
+",
+            server.cert.display(),
+            server.key.display(),
+            ca_path.display()
+        ),
+    )
+    .unwrap();
+
+    let _server = start_server(&config);
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // No client certificate at all: handshake completes, request is
+    // served anonymously (the route does not require auth).
+    let plain = tls_connector("edge.example.com", &["http/1.1"]);
+    let mut tls = connect_tls(&addr, &plain).await;
+    let resp = raw_get(&mut tls).await;
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
+    assert!(text.ends_with("hello-anon"), "resp: {text}");
+}

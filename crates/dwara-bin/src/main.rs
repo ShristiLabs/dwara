@@ -43,6 +43,15 @@
 //!   admin bind, and must never be set in production (mTLS is the
 //!   admin surface's only authentication). Default: unset = mTLS-only.
 //!   See the `dwara-admin` crate docs for the endpoint set.
+//! - `DWARA_CREDENTIAL_PEPPER` (#124): per-deployment SECRET that peppers
+//!   every NEW stored API-key/Basic hash (`hmac-sha256:<hex>`), so a
+//!   state-DB leak alone cannot verify guesses. Resolved at startup
+//!   through the SecretSource extension seam (EnvSecretSource for the
+//!   OSS edition; a managed backend may be swapped in separately).
+//!   Unset = legacy-only mode (legacy `sha256:` entries keep verifying;
+//!   peppered entries fail closed with one ERROR log). An EMPTY value is
+//!   treated as unset. A SET-but-unreadable value refuses startup. The
+//!   value is never logged.
 //! - Protocol hardening (DW-023, feature analysis 4.20): every serving
 //!   surface (data-plane listeners AND the admin listener) applies the
 //!   knob set documented in dwara-core's `hardening` module — HTTP/1
@@ -74,6 +83,7 @@ use std::time::Duration;
 
 use dwara_core::config::{Listener, ListenerProtocol};
 use dwara_core::extensions::config_source::{ConfigSource, FileConfigSource};
+use dwara_core::extensions::secrets::{EnvSecretSource, SecretSource};
 use dwara_core::hardening::HttpHardening;
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
@@ -85,6 +95,7 @@ use reload::{refresh_tls_states, reload, spawn_file_watcher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_CONFIG_PATH: &str = "dwara.yaml";
@@ -147,6 +158,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // Credential pepper (#124): resolved through the SecretSource
+    // extension seam BEFORE the state store is seeded (the pepper
+    // selects the stored-hash format for config-seeded keys) and handed
+    // to the dataplane, which threads the raw bytes down to the security
+    // domain (security must not import extensions — check_deps.py). The
+    // value is SECRET: it is never logged and never rendered.
+    const PEPPER_SECRET_NAME: &str = "DWARA_CREDENTIAL_PEPPER";
+    let credential_pepper: Option<Vec<u8>> = match EnvSecretSource.resolve(PEPPER_SECRET_NAME).await
+    {
+        Ok(Some(secret)) => {
+            let value = secret.expose();
+            if value.is_empty() {
+                tracing::warn!(
+                    code = "credential_pepper_empty",
+                    "{PEPPER_SECRET_NAME} is set but empty; running in legacy-only mode \
+                     (legacy sha256 stored hashes keep verifying, peppered entries fail closed)"
+                );
+                None
+            } else {
+                Some(value.as_bytes().to_vec())
+            }
+        }
+        Ok(None) => None,
+        // Set-but-unreadable (e.g. non-Unicode bytes): refuse startup.
+        // Silently degrading to legacy-only mode would quietly break
+        // verification of every peppered credential after a restart.
+        // The error text names the variable, never the value.
+        Err(err) => {
+            tracing::error!(
+                code = "credential_pepper_unreadable",
+                "secret {PEPPER_SECRET_NAME} could not be read: {err}; refusing to start"
+            );
+            std::process::exit(1);
+        }
+    };
+    if credential_pepper.is_some() {
+        tracing::info!(
+            code = "credential_pepper_active",
+            "credential pepper configured; new credential writes use the peppered \
+             hmac-sha256 stored-hash format"
+        );
+    }
+
     // Optional SQLite state store (DW-018): opened and seeded from the
     // config when DWARA_STATE_DB is set. Held alive for the process
     // lifetime and handed to the dataplane's authenticator (DW-019):
@@ -157,9 +211,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let store = match tokio::task::spawn_blocking({
                 let path = path.clone();
                 let gateway = gateway.clone();
+                // The seed closure needs its own copy while `main` keeps
+                // the original for the dataplane: hold the copy in a
+                // Zeroizing buffer so it is zeroized as soon as the seed
+                // finishes hashing (no plain copy outlives the work).
+                let pepper = credential_pepper.clone().map(Zeroizing::new);
                 move || {
                     StateStore::open(std::path::Path::new(&path)).and_then(|s| {
-                        sync_consumers_from_config(&s, &gateway)?;
+                        sync_consumers_from_config(
+                            &s,
+                            &gateway,
+                            pepper.as_deref().map(|p| p.as_slice()),
+                        )?;
                         Ok(s)
                     })
                 }
@@ -311,7 +374,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // DW-019: with a state store configured, the authenticator consults
     // the store's hot-cached credential records (config consumers are
     // still its seed source; the store adds admin-managed credentials
-    // and Basic-auth records).
+    // and Basic-auth records). #124: the credential pepper is attached
+    // the same way — bytes resolved above, threaded down to the
+    // authenticator.
+    dp.set_credential_pepper(credential_pepper);
     if let Some(store) = &state_store {
         dp.set_state_store(Arc::clone(store));
     }

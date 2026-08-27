@@ -18,6 +18,9 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# #124: zeroizes the credential-pepper copy captured by the state-store
+# seed closure after hashing (same crate dwara-core already zeroizes with).
+zeroize = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }

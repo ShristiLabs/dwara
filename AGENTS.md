@@ -12,7 +12,8 @@ pinned toolchain (`rust-toolchain.toml`, Rust 1.94.0). Public GitHub repo:
 TLS (multi-SNI terminate + SNI passthrough, h2/h2c), routing and rewrites,
 load balancing, passive/active health, retries and timeouts, circuit
 breaking, load shedding, rate limiting, authn (API key / Basic / JWT via
-JWKS), authz + IP ACL, SQLite state + migrations, observability, mTLS admin
+JWKS / mTLS client-cert), authz + IP ACL, SQLite state + migrations,
+observability, mTLS admin
 API, CLI, protocol hardening, fuzzing/benchmarks, and packaging. Later
 milestones (management plane, extensions, AI/LLM features) are not yet
 implemented.
@@ -153,6 +154,7 @@ if invalid). Main environment variables:
 | `DWARA_CONFIG` | `./dwara.yaml` | config file path (watched for changes) |
 | `DWARA_BIND` | `127.0.0.1:8080` | override for a single cleartext listener |
 | `DWARA_STATE_DB` | unset | enable the SQLite state store |
+| `DWARA_CREDENTIAL_PEPPER` | unset | per-deployment secret peppering stored credential hashes (#124); unset = legacy-only mode |
 | `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin (dev only) |
 | `DWARA_LOG` / `DWARA_ACCESS_LOG_SAMPLE` | `dwara=info` / `1.0` | log filter / access-line sampling |
 | `DWARA_HTTP1_*`, `DWARA_H2_*`, `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | protocol hardening knobs |
@@ -269,9 +271,13 @@ implementations without touching call sites — extend, do not break them.
 - The state store (opt-in via `DWARA_STATE_DB`) auto-migrates on open and
   writes a `.bak-*` backup before migrating; schema changes go through
   `migrations.rs` (forward-only).
-- API keys are stored as `sha256:<hex>` with sha256 selectors
-  (constant-time compare); store-managed Basic credentials should use
-  argon2id PHC hashes.
+- API keys are stored as `sha256:<hex>` (legacy) or, when
+  `DWARA_CREDENTIAL_PEPPER` is set, `hmac-sha256:<hex>` (#124), with
+  sha256 selectors and constant-time compare in both modes. Legacy
+  rows re-hash to the peppered format in place on successful
+  verification; peppered rows fail closed without a pepper (401 + one
+  ERROR log). Store-managed Basic credentials should use argon2id PHC
+  hashes (pepper-independent).
 - arc-swap has no loom support; swap paths are covered by real-thread
   stress tests in `tests/swap_stress.rs`.
 - Listener accept tasks are panic-supervised (`listeners.rs`): a

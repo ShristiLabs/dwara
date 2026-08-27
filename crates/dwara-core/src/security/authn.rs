@@ -1,25 +1,30 @@
-//! Request authentication (DW-019, feature analysis section 4.6).
+//! Request authentication (DW-019, feature analysis section 4.6; pepper
+//! and mTLS hardening per #124).
 //!
-//! Three credential families behind one [`Authenticator`] trait:
+//! Four credential families behind one [`Authenticator`] trait:
 //!
 //! - **API keys**: `X-API-Key: <key>`. The lookup SELECTOR is
 //!   `hex(sha256(key))` — never the plaintext key — and the stored hash is
-//!   `sha256:<hex(sha256(key))>`, verified with a constant-time comparison
-//!   (`subtle`). Optional memory-hard verification: a credential whose
-//!   stored hash is a PHC string (`$argon2id$...`, admin-supplied through
-//!   the state store) is verified with argon2id. Trade-off (documented
-//!   choice): sha256+ct-compare is the pragmatic gateway standard — an
+//!   `hmac-sha256:<hex(HMAC-SHA256(pepper, key))>` when the deployment
+//!   configures a credential pepper (#124) or legacy
+//!   `sha256:<hex(sha256(key))>` otherwise, verified with a
+//!   constant-time comparison (`subtle`) in either case. Optional
+//!   memory-hard verification: a credential whose stored hash is a PHC
+//!   string (`$argon2id$...`, admin-supplied through the state store) is
+//!   verified with argon2id. Trade-off (documented choice):
+//!   sha256/HMAC+ct-compare is the pragmatic gateway standard — an
 //!   argon2 verify is memory-hard and tens of milliseconds, far too slow
-//!   for a per-request hot path, so config-declared keys are always hashed
-//!   with sha256 at seed time and argon2id is opt-in per credential.
+//!   for a per-request hot path, so config-declared keys are always
+//!   fast-path hashed at seed time and argon2id is opt-in per credential.
 //! - **Basic**: `Authorization: Basic base64(user:pass)`. The username is
 //!   the selector (`hex(sha256(user))`, the same selector space as API
 //!   keys) and the password is verified against the stored hash through
-//!   the SAME hashing path as API keys. Basic credentials therefore live
-//!   in the state store (config declares API keys, not username/password
-//!   pairs); the resolved identity is reported with kind `api_key`.
-//!   REQUIREMENT: store-managed Basic credentials must store argon2id PHC
-//!   strings (`$argon2id$...`) — a human-chosen password hashed with plain
+//!   the SAME hashing path as API keys (peppered when a pepper is
+//!   configured). Basic credentials therefore live in the state store
+//!   (config declares API keys, not username/password pairs); the
+//!   resolved identity is reported with kind `api_key`. REQUIREMENT:
+//!   store-managed Basic credentials must store argon2id PHC strings
+//!   (`$argon2id$...`) — a human-chosen password hashed with plain
 //!   unsalted sha256 is offline-dictionary bait (see the hardening notes
 //!   below). Note also that usernames remain enumerable: the selector is
 //!   a deterministic hash of the username with no secret input, so an
@@ -37,15 +42,36 @@
 //!   appearing mid-flight triggers a re-fetch and the token then verifies
 //!   — no restart, no failure). Refresh-triggered (unknown-kid) fetches
 //!   are throttled to one per `min(5s, refresh_secs)` — forged random-kid
-//!   tokens cannot drive a JWKS fetch storm. `iss`/`aud`/`exp`/`nbf` are
-//!   validated with `leeway_secs` skew tolerance; the algorithm allowlist
-//!   (default RS256/ES256) is enforced BEFORE any signature work (`none`
-//!   and `HS*` are asymmetric-confusion bait and never allowed).
+//!   tokens cannot drive a JWKS fetch storm. `iss`/`exp`/`nbf` are
+//!   validated with `leeway_secs` skew tolerance, and `aud` is validated
+//!   ONLY when the provider configures an audience (#124, maintainer
+//!   decision): a provider without `audience` accepts tokens that carry
+//!   any (or no) `aud` claim; the algorithm allowlist (default
+//!   RS256/ES256) is enforced BEFORE any signature work (`none` and
+//!   `HS*` are asymmetric-confusion bait and never allowed).
+//! - **mTLS** (#124): the client certificate of the connection itself.
+//!   On a TERMINATE listener with `client_ca_file` set, the TLS layer
+//!   verifies any presented certificate against that bundle (rustls;
+//!   an unverified certificate fails the handshake and never reaches
+//!   authn) and the listener forwards the verified certificate here as a
+//!   [`ClientCertificate`]. The credential record maps it to a consumer:
+//!   an `mtls` credential's SELECTOR is its match value — the subject
+//!   CommonName when the credential is configured `by subject`, or the
+//!   certificate's SHA-256 fingerprint when `by fingerprint` — and a
+//!   presented certificate matches when its subject CN or fingerprint
+//!   equals that selector. Passthrough listeners never speak HTTP, and
+//!   cleartext listeners have no certificates, so the family is inert
+//!   there by construction.
 //!
-//! Accepted formats (composite dispatch on request shape):
-//! `X-API-Key` wins over `Authorization`; within `Authorization`, `Basic`
-//! and `Bearer` are distinguished by the scheme token. A gateway with NO
-//! consumers and NO JWT providers has authentication disabled: the
+//! Accepted formats (composite dispatch on request shape): `X-API-Key`
+//! wins over `Authorization`; within `Authorization`, `Basic` and
+//! `Bearer` are distinguished by the scheme token; the client
+//! certificate is the AMBIENT family — consulted only when NO header
+//! credential was presented (a header expresses explicit intent and
+//! wins; the certificate is connection-level context). A `Bearer` header
+//! with no JWT provider stays pass-through (not interpreted), so such a
+//! request still falls through to the certificate family. A gateway with
+//! NO consumers and NO JWT providers has authentication disabled: the
 //! authenticator resolves `Anonymous` for everything and `Authorization`
 //! is forwarded upstream untouched (pass-through mode). Once ANY
 //! credential is configured, the gateway INTERPRETS `Authorization` —
@@ -56,7 +82,12 @@
 //! Identity-to-consumer mapping: API keys and Basic map via the credential
 //! record; JWTs map via the provider's `consumer` binding, or by matching
 //! a consumer's `jwt` credential `issuer` (with audience containment when
-//! the credential lists audiences) against the token's `iss`.
+//! the credential lists audiences) against the token's `iss`; client
+//! certificates map via the `mtls` credential match value. Every resolved
+//! identity carries the consumer's GROUPS (config consumers from the
+//! config record, store-managed consumers from the store's
+//! `consumers.groups`, #124) so group-based authorization applies
+//! uniformly.
 //!
 //! Consumer-identity headers (spoof prevention): the proxy strips every
 //! client-supplied `X-Consumer-*` header and injects a trusted
@@ -65,26 +96,35 @@
 //!
 //! # Hardening notes (residual risks and the road to closing them)
 //!
-//! The stored-hash fast path is UNSALTED sha256, and the selector is
-//! unsalted sha256 of the presented material. That is deliberate for
-//! machine-generated config keys (constant-time, index-friendly, and a
-//! search over the stored hashes is not a dictionary attack when the key
-//! is 256 bits of entropy), but it leaves a residual offline-dictionary
-//! risk for WEAK secrets: an attacker who exfiltrates the store can
-//! brute-force low-entropy keys or passwords against the unsalted
-//! selectors/hashes at sha256 speed, offline, and confirm username
-//! guesses via the deterministic Basic selector. Mitigations in place:
-//! the DB file is mode 0600, hashes/selectors are redacted from `Debug`,
-//! and store-managed credentials may use argon2id PHC strings (REQUIRED
-//! for Basic passwords). Before the store becomes the credential source
-//! of truth for human-chosen secrets (a future `SecretSource` seam), the
-//! stored hashes should be peppered/HMAC'd with a key held outside the
-//! DB — an HMAC transform is still fast-path friendly and turns a DB
-//! leak into a search that also needs the pepper.
+//! The stored-hash fast path is UNSALTED sha256 when no pepper is
+//! configured, and the selector is always unsalted sha256 of the
+//! presented material. That is deliberate for machine-generated config
+//! keys (constant-time, index-friendly, and a search over the stored
+//! hashes is not a dictionary attack when the key is 256 bits of
+//! entropy), but it leaves a residual offline-dictionary risk for WEAK
+//! secrets: an attacker who exfiltrates the store can brute-force
+//! low-entropy keys or passwords against the unsalted selectors/hashes
+//! at sha256 speed, offline, and confirm username guesses via the
+//! deterministic Basic selector. Mitigations in place: the DB file is
+//! mode 0600, hashes/selectors are redacted from `Debug`, store-managed
+//! credentials may use argon2id PHC strings (REQUIRED for Basic
+//! passwords), and — #124 — a per-deployment PEPPER turns every NEW
+//! stored hash into `hmac-sha256:<hex>` so a DB leak alone cannot verify
+//! guesses (the search also needs the pepper, held outside the DB).
+//! The pepper is resolved through the `SecretSource` extension seam
+//! ABOVE this domain (the binary resolves it and threads raw bytes
+//! down; `security` must not import `extensions`), is never logged,
+//! never appears in `Debug` output, and never appears in error text.
+//! Transition semantics: legacy `sha256:<hex>` entries keep verifying;
+//! on SUCCESSFUL legacy verification with a pepper configured, the
+//! store row is re-hashed to the peppered format in place (no
+//! credential re-issue needed); `hmac-sha256:` entries with NO pepper
+//! configured fail closed (legacy-only mode) with a clear log line.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -98,10 +138,14 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
+use rustls::pki_types::CertificateDer;
 use subtle::ConstantTimeEq;
 use tower_service::Service;
+use zeroize::Zeroizing;
 
-use crate::config::credentials::{credential_selector, sha256_hex, sha256_stored_hash};
+use crate::config::credentials::{
+    credential_selector, hmac_stored_hash, sha256_hex, sha256_stored_hash,
+};
 use crate::config::{Credential, Gateway, JwtProvider as JwtProviderConfig};
 use crate::observability::Observability;
 use crate::state::store::{CredentialKind, CredentialRecord, StateStore};
@@ -124,11 +168,53 @@ const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Identity {
     pub consumer_name: String,
     pub credential_kind: CredentialKind,
+    /// Group memberships of the authenticated consumer (#124): from the
+    /// CONFIG consumer record when the consumer is config-declared, from
+    /// the state store's `consumers.groups` for store-managed consumers.
+    /// Consumed by group-based authorization (`allowed_groups` /
+    /// `denied_groups` at any attachment level).
+    pub groups: Vec<String>,
     /// JWT only: a subset of the token's claims (string- and
     /// number-valued top-level claims, plus arrays of strings flattened
     /// to their space-separated form — the OAuth `scope` convention,
     /// DW-020 — capped at 32 entries). Never contains the raw token.
     pub claims: BTreeMap<String, String>,
+}
+
+/// The VERIFIED client certificate of a connection, as the authenticator
+/// consumes it (#124). Built by the TLS frontend from the certificate
+/// rustls already verified against the listener's `client_ca_file`; the
+/// match VALUES (subject CN, fingerprint) double as credential selectors,
+/// so `Debug` redacts them (the selector-redaction precedent).
+#[derive(Clone)]
+pub struct ClientCertificate {
+    /// Subject CommonName of the verified leaf certificate (first CN in
+    /// the subject RDN sequence; `None` when the subject carries no
+    /// decodable CN — such a certificate can only match a
+    /// by-fingerprint credential).
+    pub(crate) subject_cn: Option<String>,
+    /// Lowercase hex of SHA-256 over the certificate DER.
+    pub(crate) fingerprint: String,
+}
+
+impl ClientCertificate {
+    /// Extract the match values of a verified leaf certificate. Never
+    /// fails: an undecodable subject yields `subject_cn: None` and the
+    /// credential lookup falls back to the fingerprint selector alone.
+    pub fn from_cert(cert: &CertificateDer<'_>) -> Self {
+        ClientCertificate {
+            subject_cn: crate::security::tls::subject_cn_of_leaf(cert),
+            fingerprint: sha256_hex(cert.as_ref()),
+        }
+    }
+}
+
+impl std::fmt::Debug for ClientCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Match values are credential selectors: redacted (an accidental
+        // Debug print must not leak lookup keys).
+        write!(f, "ClientCertificate([match values redacted])")
+    }
 }
 
 /// Authentication failure. `Invalid` is a caller-side problem (401);
@@ -152,13 +238,22 @@ impl std::error::Error for AuthError {}
 
 /// One pluggable authenticator (dyn-compatible seam). `Ok(None)` is
 /// Anonymous; `Err(AuthError::Invalid(..))` means a credential was
-/// PRESENTED and rejected.
+/// PRESENTED and rejected. `client_cert` is the VERIFIED client
+/// certificate of the connection when the accepting TLS listener
+/// requested one (#124; see [`ClientCertificate`]) — absent on cleartext
+/// listeners and connections that presented none.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<Option<Identity>, AuthError>;
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        client_cert: Option<&ClientCertificate>,
+    ) -> Result<Option<Identity>, AuthError>;
 
     /// The `WWW-Authenticate` challenge value for 401 responses, built
-    /// from the schemes this authenticator actually interprets.
+    /// from the schemes this authenticator actually interprets. Client
+    /// certificates are deliberately NOT challenged here: TLS-level
+    /// client-auth has no WWW-Authenticate representation.
     fn challenge(&self) -> String;
 }
 
@@ -168,14 +263,40 @@ pub trait Authenticator: Send + Sync {
 // the credential schema contract shared with the state store); this
 // module re-imports them and owns the VERIFICATION path below.
 
+/// The per-deployment credential pepper as this module consumes it: raw
+/// bytes handed down from ABOVE the security domain (the binary resolves
+/// it through the `SecretSource` extension seam; `security` must not
+/// import `extensions`). SECRET material: never logged, never in
+/// `Debug`, never in error text.
+type Pepper = [u8];
+
 /// Verify a presented secret against a stored hash, in constant time for
-/// the sha256 path (`subtle::ConstantTimeEq` over the encoded digests —
+/// the fast paths (`subtle::ConstantTimeEq` over the encoded digests —
 /// comparing hex strings byte-wise is length-equal and timing-uniform).
-/// Supported formats: `sha256:<hex>` and PHC argon2id strings
-/// (`$argon2id$...`). Unknown formats verify false (never accept).
+/// Supported formats: `hmac-sha256:<hex>` (#124; verified ONLY when a
+/// `pepper` is configured — a missing pepper fails closed for peppered
+/// entries), legacy `sha256:<hex>` (always verified, pepper or not: the
+/// transition keeps old rows valid), and PHC argon2id strings
+/// (`$argon2id$...`, pepper-independent). Unknown formats verify false
+/// (never accept).
 ///
 /// Public for testing the stored-hash verification contract.
-pub fn verify_secret(stored_hash: &str, presented: &str) -> bool {
+pub fn verify_secret(stored_hash: &str, presented: &str, pepper: Option<&Pepper>) -> bool {
+    if let Some(hexdigest) = stored_hash.strip_prefix("hmac-sha256:") {
+        // Peppered entries fail closed without a pepper (legacy-only
+        // mode): the gateway cannot verify what it lacks the key for.
+        let Some(pepper) = pepper else {
+            return false;
+        };
+        if hexdigest.len() != 64 || !hexdigest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+        // Same total length as `stored_hash` (12 + 64 bytes), so the
+        // full-encoding comparison below is length-matched and
+        // timing-uniform like the sha256 path.
+        let computed = hmac_stored_hash(pepper, presented);
+        return computed.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    }
     if let Some(hexdigest) = stored_hash.strip_prefix("sha256:") {
         if hexdigest.len() != 64 || !hexdigest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return false;
@@ -198,11 +319,35 @@ pub fn verify_secret(stored_hash: &str, presented: &str) -> bool {
 // --- credential registry ---------------------------------------------------
 
 /// One verifiable credential as the authenticator sees it.
-#[derive(Debug, Clone)]
+///
+/// Manual `Debug`: `hash` and `selector` are credential material (the
+/// selector is the lookup key — for `mtls` rows the match value itself —
+/// and the hash embeds a binding marker or a peppered digest), so both
+/// are redacted, matching the store's `CredentialRecord` precedent.
+#[derive(Clone)]
 pub struct KnownCredential {
     pub consumer_name: String,
     pub kind: CredentialKind,
     pub hash: String,
+    /// Store row id when the credential came from the state store (used
+    /// by the #124 pepper transition to re-hash a legacy-verified row in
+    /// place); `None` for config-seeded credentials.
+    pub id: Option<i64>,
+    /// The selector this credential was found under (the credential's
+    /// lookup key — its own match value for `mtls` bindings).
+    pub selector: String,
+}
+
+impl std::fmt::Debug for KnownCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KnownCredential")
+            .field("consumer_name", &self.consumer_name)
+            .field("kind", &self.kind)
+            .field("hash", &"[redacted]")
+            .field("id", &self.id)
+            .field("selector", &"[redacted]")
+            .finish()
+    }
 }
 
 impl From<&CredentialRecord> for KnownCredential {
@@ -211,6 +356,8 @@ impl From<&CredentialRecord> for KnownCredential {
             consumer_name: r.consumer_name.clone(),
             kind: r.kind,
             hash: r.hash.clone(),
+            id: Some(r.id),
+            selector: r.selector.clone(),
         }
     }
 }
@@ -218,7 +365,7 @@ impl From<&CredentialRecord> for KnownCredential {
 /// Where credential records come from: the state store (hot-cached; the
 /// `DWARA_STATE_DB` deployment) or config consumers hashed in-memory at
 /// startup. Both paths unify behind one lookup API (a private
-/// selector-keyed search shared by the API-key and Basic paths).
+/// selector-keyed search shared by the API-key, Basic, and mTLS paths).
 pub enum CredentialRegistry {
     Store(Arc<StateStore>),
     Config(HashMap<String, Arc<Vec<KnownCredential>>>),
@@ -227,30 +374,61 @@ pub enum CredentialRegistry {
 impl CredentialRegistry {
     /// Build the config-only registry: every consumer's API-key credential
     /// is hashed at startup (the config value is then dropped; the
-    /// registry holds only selectors and hashes).
-    pub fn from_config(gateway: &Gateway) -> Self {
+    /// registry holds only selectors and hashes) — with the PEPPERED
+    /// format when a pepper is configured (#124), the legacy sha256
+    /// format otherwise. `mtls` credentials are indexed by their match
+    /// value (subject CN or fingerprint). JWT credentials are bindings
+    /// consumed via the composite's issuer index, not this map.
+    pub fn from_config(gateway: &Gateway, pepper: Option<&Pepper>) -> Self {
         let mut map: HashMap<String, Arc<Vec<KnownCredential>>> = HashMap::new();
         for consumer in &gateway.consumers {
             for credential in &consumer.credentials {
-                if let Credential::ApiKey { key } = credential {
-                    if key.is_empty() {
-                        continue;
+                let (kind, selector, hash) = match credential {
+                    Credential::ApiKey { key } => {
+                        if key.is_empty() {
+                            continue;
+                        }
+                        let hash = match pepper {
+                            Some(pepper) => hmac_stored_hash(pepper, key),
+                            None => sha256_stored_hash(key),
+                        };
+                        (CredentialKind::ApiKey, credential_selector(key), hash)
                     }
-                    let selector = credential_selector(key);
-                    let entry = Arc::make_mut(map.entry(selector).or_default());
-                    entry.push(KnownCredential {
-                        consumer_name: consumer.name.clone(),
-                        kind: CredentialKind::ApiKey,
-                        hash: sha256_stored_hash(key),
-                    });
-                }
+                    Credential::Mtls {
+                        subject,
+                        fingerprint,
+                    } => {
+                        let match_value = subject
+                            .clone()
+                            .or_else(|| fingerprint.clone())
+                            .unwrap_or_default();
+                        if match_value.is_empty() {
+                            continue;
+                        }
+                        (
+                            CredentialKind::Mtls,
+                            match_value.clone(),
+                            format!("config:mtls:{match_value}"),
+                        )
+                    }
+                    // JWT credentials resolve through jwt_consumer_index.
+                    Credential::Jwt { .. } => continue,
+                };
+                let entry = Arc::make_mut(map.entry(selector.clone()).or_default());
+                entry.push(KnownCredential {
+                    consumer_name: consumer.name.clone(),
+                    kind,
+                    hash,
+                    id: None,
+                    selector,
+                });
             }
         }
         CredentialRegistry::Config(map)
     }
 
     /// Look up the active credentials for a selector (hash of the
-    /// presented material — never plaintext).
+    /// presented material — never plaintext — or an mTLS match value).
     async fn lookup(&self, selector: &str) -> Result<Vec<KnownCredential>, AuthError> {
         match self {
             CredentialRegistry::Store(store) => {
@@ -787,8 +965,9 @@ pub fn parse_algorithms(names: &[String]) -> Option<Vec<Algorithm>> {
 const JWKS_FORCED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The gateway's single authenticator: dispatches on the request's
-/// credential shape (X-API-Key / Basic / Bearer) and consults the
-/// credential registry plus the configured JWT providers.
+/// credential shape (X-API-Key / Basic / Bearer / verified client
+/// certificate) and consults the credential registry plus the configured
+/// JWT providers.
 pub struct CompositeAuthenticator {
     registry: CredentialRegistry,
     jwt: Vec<Arc<JwtVerifier>>,
@@ -796,6 +975,21 @@ pub struct CompositeAuthenticator {
     /// credentials: the claims-based consumer mapping for tokens whose
     /// provider has no explicit `consumer` binding.
     jwt_consumer_index: HashMap<String, (String, Vec<String>)>,
+    /// consumer name -> groups from the CONFIG consumers (#124): the
+    /// fast lookup for identity group resolution; store-managed
+    /// consumers fall through to a (cached) store lookup.
+    consumer_groups_index: HashMap<String, Vec<String>>,
+    /// The per-deployment credential pepper (#124): raw bytes resolved
+    /// ABOVE this domain through the SecretSource seam, held Arc-shared
+    /// with the dataplane's Zeroizing holder so the buffer is zeroized
+    /// when the LAST holder drops and no plain copy exists on the way
+    /// down. SECRET: never logged, never in Debug, never in error text.
+    /// `None` = legacy-only mode (peppered entries fail closed).
+    pepper: Option<Arc<Zeroizing<Vec<u8>>>>,
+    /// Guards the one-shot "peppered credential failed closed without a
+    /// pepper" warning (#124): the clear log line fires once per
+    /// authenticator build, not per request.
+    pepper_missing_logged: AtomicBool,
     /// Whether ANY credential family is active; when false the composite
     /// is a no-op (pass-through mode).
     enabled: bool,
@@ -810,22 +1004,31 @@ impl CompositeAuthenticator {
             registry: CredentialRegistry::Config(HashMap::new()),
             jwt: Vec::new(),
             jwt_consumer_index: HashMap::new(),
+            consumer_groups_index: HashMap::new(),
+            pepper: None,
+            pepper_missing_logged: AtomicBool::new(false),
             enabled: false,
         }
     }
     /// Build from one config generation. `store` is the DWARA_STATE_DB
     /// store when deployed; without it credentials come from config,
     /// hashed in-memory. `jwks_caches` carries JWKS cache entries ACROSS
-    /// rebuilds (keyed by URL) so reloads keep rotation state.
+    /// rebuilds (keyed by URL) so reloads keep rotation state. `pepper`
+    /// (#124) is the per-deployment credential pepper — an Arc CLONE of
+    /// the dataplane's Zeroizing holder (no byte copy; the bytes zeroize
+    /// when the last holder drops), resolved by the CALLER through the
+    /// SecretSource extension seam (this domain must not import
+    /// extensions) — or `None` for legacy-only mode.
     pub fn build(
         gateway: &Gateway,
         store: Option<Arc<StateStore>>,
         jwks_caches: &mut HashMap<String, Arc<JwksCacheEntry>>,
         obs: Option<&Observability>,
+        pepper: Option<&Arc<Zeroizing<Vec<u8>>>>,
     ) -> Arc<Self> {
         let registry = match store {
             Some(store) => CredentialRegistry::Store(store),
-            None => CredentialRegistry::from_config(gateway),
+            None => CredentialRegistry::from_config(gateway, pepper.map(|p| p.as_slice())),
         };
         let mut jwt = Vec::new();
         for cfg in &gateway.jwt_providers {
@@ -841,7 +1044,9 @@ impl CompositeAuthenticator {
             }
         }
         let mut jwt_consumer_index = HashMap::new();
+        let mut consumer_groups_index = HashMap::new();
         for consumer in &gateway.consumers {
+            consumer_groups_index.insert(consumer.name.clone(), consumer.groups.clone());
             for credential in &consumer.credentials {
                 if let Credential::Jwt { issuer, audiences } = credential {
                     jwt_consumer_index
@@ -854,8 +1059,42 @@ impl CompositeAuthenticator {
             registry,
             jwt,
             jwt_consumer_index,
+            consumer_groups_index,
+            pepper: pepper.cloned(),
+            pepper_missing_logged: AtomicBool::new(false),
             enabled,
         })
+    }
+
+    /// Resolve the group memberships of a consumer by name (#124):
+    /// config consumers from the config-built index, store-managed
+    /// consumers through a (hot-cached) store lookup. Unknown name = no
+    /// groups (group rules then deny, which fails closed).
+    fn consumer_groups_of(&self, consumer_name: &str) -> Vec<String> {
+        if let Some(groups) = self.consumer_groups_index.get(consumer_name) {
+            return groups.clone();
+        }
+        if let CredentialRegistry::Store(store) = &self.registry {
+            if let Ok(Some(record)) = store.lookup_consumer(consumer_name) {
+                return record.groups.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    /// A peppered stored hash failed closed because no pepper is
+    /// configured. The clear log line fires ONCE per authenticator build
+    /// (the condition cannot change without a rebuild), never per
+    /// request; the message names no credential material.
+    fn log_pepper_missing_once(&self) {
+        if !self.pepper_missing_logged.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                code = "credential_pepper_absent",
+                "a peppered (hmac-sha256) stored credential failed verification because no \
+                 credential pepper is configured; peppered credentials cannot verify in \
+                 legacy-only mode (legacy sha256 entries keep working)"
+            );
+        }
     }
 
     async fn authenticate_api_key_or_basic(
@@ -863,20 +1102,85 @@ impl CompositeAuthenticator {
         selector: &str,
         presented_secret: &str,
     ) -> Result<Option<Identity>, AuthError> {
+        let pepper = self.pepper.as_deref().map(|z| z.as_slice());
         let candidates = self.registry.lookup(selector).await?;
         for cred in &candidates {
             if cred.kind != CredentialKind::ApiKey {
                 continue;
             }
-            if verify_secret(&cred.hash, presented_secret) {
+            if cred.hash.starts_with("hmac-sha256:") && pepper.is_none() {
+                self.log_pepper_missing_once();
+            }
+            if verify_secret(&cred.hash, presented_secret, pepper) {
+                // #124 pepper transition: a SUCCESSFUL legacy (sha256)
+                // verification with a pepper configured upgrades the store
+                // row to the peppered format in place, so the transition
+                // completes lazily without credential re-issue. Config-
+                // seeded credentials (no row id) have no legacy residue by
+                // construction. A re-hash failure never fails the request
+                // (verification already succeeded) — it logs and leaves
+                // the legacy row to retry on the next presentation.
+                if let (Some(id), Some(pepper)) = (cred.id, pepper) {
+                    if cred.hash.starts_with("sha256:") {
+                        let peppered = hmac_stored_hash(pepper, presented_secret);
+                        if let CredentialRegistry::Store(store) = &self.registry {
+                            if let Err(e) = store.rehash_credential(id, selector, &peppered) {
+                                tracing::warn!(
+                                    code = "credential_rehash_failed",
+                                    "legacy credential re-hash to the peppered format failed: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+                let consumer_name = cred.consumer_name.clone();
+                let groups = self.consumer_groups_of(&consumer_name);
                 return Ok(Some(Identity {
-                    consumer_name: cred.consumer_name.clone(),
+                    consumer_name,
                     credential_kind: CredentialKind::ApiKey,
+                    groups,
                     claims: BTreeMap::new(),
                 }));
             }
         }
         Err(AuthError::Invalid("unknown api key or basic credentials"))
+    }
+
+    /// mTLS family (#124): map a VERIFIED client certificate to a
+    /// consumer. The lookup consults BOTH selectors the certificate
+    /// offers (subject CN when present, fingerprint always); an `mtls`
+    /// credential found under either selector is a match because the
+    /// credential's selector IS its match value. A verified certificate
+    /// that matches no credential is a PRESENTED-but-rejected credential
+    /// (401), exactly like an unknown API key.
+    async fn authenticate_client_cert(
+        &self,
+        cert: &ClientCertificate,
+    ) -> Result<Option<Identity>, AuthError> {
+        let mut selectors: Vec<&str> = Vec::with_capacity(2);
+        if let Some(cn) = cert.subject_cn.as_deref() {
+            selectors.push(cn);
+        }
+        selectors.push(cert.fingerprint.as_str());
+        for selector in selectors {
+            let candidates = self.registry.lookup(selector).await?;
+            for cred in &candidates {
+                if cred.kind != CredentialKind::Mtls {
+                    continue;
+                }
+                let consumer_name = cred.consumer_name.clone();
+                let groups = self.consumer_groups_of(&consumer_name);
+                return Ok(Some(Identity {
+                    consumer_name,
+                    credential_kind: CredentialKind::Mtls,
+                    groups,
+                    claims: BTreeMap::new(),
+                }));
+            }
+        }
+        Err(AuthError::Invalid(
+            "client certificate matches no credential",
+        ))
     }
 
     async fn authenticate_jwt(&self, token: &str) -> Result<Option<Identity>, AuthError> {
@@ -936,8 +1240,17 @@ impl CompositeAuthenticator {
         if let Some(iss) = &verifier.cfg.issuer {
             validation.iss = Some(std::iter::once(iss.clone()).collect());
         }
-        if let Some(aud) = &verifier.cfg.audience {
-            validation.aud = Some(std::iter::once(aud.clone()).collect());
+        // #124 (maintainer decision): audience is validated ONLY when the
+        // provider configures one. jsonwebtoken validates `aud` whenever
+        // the token CARRIES the claim and the Validation expects it — so
+        // with no configured audience we switch aud validation off
+        // entirely (a token with any, or no, `aud` is accepted) instead of
+        // jsonwebtoken's reject-on-presence. Every other validation (exp,
+        // nbf, iss when configured, the algorithm allowlist above) is
+        // identical either way.
+        match &verifier.cfg.audience {
+            Some(aud) => validation.aud = Some(std::iter::once(aud.clone()).collect()),
+            None => validation.validate_aud = false,
         }
         validation.validate_exp = true;
         validation.validate_nbf = true;
@@ -975,6 +1288,7 @@ impl CompositeAuthenticator {
                 name.clone()
             }
         };
+        let groups = self.consumer_groups_of(&consumer_name);
         let mut identity_claims = BTreeMap::new();
         if let Some(map) = claims.as_object() {
             for (k, v) in map {
@@ -1014,6 +1328,7 @@ impl CompositeAuthenticator {
         Ok(Identity {
             consumer_name,
             credential_kind: CredentialKind::Jwt,
+            groups,
             claims: identity_claims,
         })
     }
@@ -1021,10 +1336,22 @@ impl CompositeAuthenticator {
 
 #[async_trait]
 impl Authenticator for CompositeAuthenticator {
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<Option<Identity>, AuthError> {
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        client_cert: Option<&ClientCertificate>,
+    ) -> Result<Option<Identity>, AuthError> {
         if !self.enabled {
             return Ok(None);
         }
+        // Family precedence (documented): header-presented credentials
+        // express explicit intent and win — X-API-Key over anything in
+        // `Authorization`, `Basic` over `Bearer` by scheme token — and
+        // the VERIFIED client certificate is the ambient,
+        // connection-level family consulted only when no header
+        // credential was presented. A Bearer header with no configured
+        // provider is NOT interpreted (pass-through), so it falls
+        // through to the certificate family rather than masking it.
         if let Some(key) = headers.get(&X_API_KEY).and_then(|v| v.to_str().ok()) {
             if key.is_empty() {
                 return Err(AuthError::Invalid("empty api key"));
@@ -1058,8 +1385,19 @@ impl Authenticator for CompositeAuthenticator {
                 if rest.trim().is_empty() {
                     return Err(AuthError::Invalid("empty bearer token"));
                 }
-                return self.authenticate_jwt(rest.trim()).await;
+                // No provider configured leaves `Ok(None)`: Bearer stays
+                // pass-through (not interpreted), so the certificate
+                // family may still authenticate the connection; any
+                // resolved identity or failure is the answer.
+                if let verified @ (Ok(Some(_)) | Err(_)) = self.authenticate_jwt(rest.trim()).await
+                {
+                    return verified;
+                }
             }
+        }
+        // Ambient family: the verified client certificate (#124).
+        if let Some(cert) = client_cert {
+            return self.authenticate_client_cert(cert).await;
         }
         Ok(None)
     }

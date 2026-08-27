@@ -196,7 +196,12 @@ pub struct JwtProvider {
     /// Required token issuer (`iss` claim). Absent: any issuer accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
-    /// Required audience (`aud` claim). Absent: any audience accepted.
+    /// Required audience (`aud` claim). Audience is validated ONLY when
+    /// this is configured (#124, maintainer decision): a provider
+    /// without an `audience` ACCEPTS tokens that carry any (or no) `aud`
+    /// claim — `aud` is not interpreted unless the provider names one.
+    /// All other validations (exp, nbf, iss when configured, the
+    /// algorithm allowlist) are identical either way.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
     /// Allowed signature algorithms (default `["RS256", "ES256"]`).
@@ -312,6 +317,19 @@ pub struct ListenerTls {
     /// bytes. Rejected in terminate mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sni_routes: Vec<SniRoute>,
+    /// PEM file of CA certificates that CLIENT certificates must chain
+    /// to (#124, termination mode only). When set, the listener
+    /// REQUESTS a client certificate and verifies any presented one
+    /// against this bundle; a connection without a certificate is still
+    /// accepted (other credential families apply) — the verified
+    /// certificate is matched against consumers' `mtls` credentials to
+    /// resolve an identity, and an UNVERIFIED certificate fails the
+    /// handshake (mTLS authn never sees it). Rejected in passthrough
+    /// mode (the TLS layer is not terminated, so client certificates
+    /// cannot be verified). The file must exist and be readable at
+    /// config compile time; validation names this field otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ca_file: Option<String>,
 }
 
 /// One SNI-scoped certificate pair for TLS termination.
@@ -1176,7 +1194,12 @@ pub struct Consumer {
     /// `denied_groups` rules. Empty (the default) = no groups. Group
     /// names are free-form strings; validation checks that authorization
     /// rules referencing groups resolve against at least one consumer's
-    /// membership.
+    /// membership. Store-managed consumers carry their own groups in the
+    /// state store (#124) — the group NAMESPACE is shared, but
+    /// config-time validation can only see config consumers, so a rule
+    /// referencing a group that exists solely on store consumers is
+    /// flagged (grant at least one config consumer the same group name,
+    /// or accept the issue is a false positive for store-only groups).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
     /// Consumer-level authorization rules (#123): the MOST specific link
@@ -1191,7 +1214,7 @@ pub struct Consumer {
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience
-/// binding, or mTLS fingerprint.
+/// binding, or mTLS client-certificate match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
@@ -1205,8 +1228,23 @@ pub enum Credential {
         audiences: Vec<String>,
     },
     Mtls {
-        /// SHA-256 fingerprint of the client certificate.
-        fingerprint: String,
+        /// SHA-256 fingerprint (lowercase hex of the DER) of the client
+        /// certificate. Optional when `subject` is set (#124); a
+        /// fingerprint match binds the credential to ONE exact
+        /// certificate (a re-issued cert needs a new credential).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+        /// Subject CommonName of the client certificate (#124): the
+        /// credential matches any verified client certificate whose
+        /// subject CN is exactly this string (case-sensitive). Binding
+        /// by subject survives certificate re-issue under the same CN;
+        /// the certificate must still chain to a listener's
+        /// `client_ca_file` (or be otherwise verified) at the TLS layer
+        /// — the matcher only maps an ALREADY-VERIFIED certificate to a
+        /// consumer. Exactly one of `subject` / `fingerprint` must be
+        /// set (validation rejects both-empty and both-set).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
     },
 }
 

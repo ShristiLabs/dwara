@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -92,12 +92,24 @@ const MIGRATION_001_BASELINE: &str = "
 const MIGRATION_002_QUOTA_WINDOW_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_quota_counters_window ON quota_counters (window_start);";
 
+/// Migration 003 (#124): `consumers.groups` — a JSON array of group-name
+/// strings (`TEXT NOT NULL DEFAULT '[]'`), giving STORE-managed consumers
+/// the same group memberships config consumers declare, so group-based
+/// authorization (`allowed_groups` / `denied_groups` at any attachment
+/// level) applies to them. JSON (not a separator-joined string) because
+/// group names are free-form and may contain any separator; additive
+/// (existing rows default to `'[]'` = no groups, exactly the pre-003
+/// behavior where store consumers had none).
+const MIGRATION_003_CONSUMER_GROUPS: &str =
+    "ALTER TABLE consumers ADD COLUMN groups TEXT NOT NULL DEFAULT '[]';";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_001_BASELINE),
         M::up(MIGRATION_002_QUOTA_WINDOW_INDEX),
+        M::up(MIGRATION_003_CONSUMER_GROUPS),
     ])
 }
 

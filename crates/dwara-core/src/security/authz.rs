@@ -90,9 +90,10 @@ pub enum Decision {
 /// request.
 pub struct AuthzContext<'a> {
     pub identity: Option<&'a Identity>,
-    /// Group memberships of the authenticated consumer (from the CONFIG
-    /// consumer record; store-only consumers have none — documented
-    /// limitation).
+    /// Group memberships of the authenticated consumer, carried on the
+    /// identity (#124): config consumers resolve from the config record,
+    /// store-managed consumers from the store's `consumers.groups` —
+    /// group rules apply to both alike.
     pub consumer_groups: &'a [String],
     pub peer_ip: IpAddr,
     /// The XFF-resolved client IP when the peer is a trusted proxy,
@@ -223,7 +224,8 @@ pub fn evaluate_one(authz: &Authz, ctx: &AuthzContext<'_>) -> Option<Decision> {
             reason: "consumer is not in the allowed set",
         });
     }
-    // Group rules (config consumers only carry groups).
+    // Group rules (identity-carried groups: config and store-managed
+    // consumers alike, #124).
     if authz
         .denied_groups
         .iter()

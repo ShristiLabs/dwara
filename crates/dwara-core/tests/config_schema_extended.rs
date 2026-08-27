@@ -141,7 +141,8 @@ fn all_credential_variants_parse() {
     assert_eq!(
         creds[3],
         Credential::Mtls {
-            fingerprint: "sha256:ab".into()
+            fingerprint: Some("sha256:ab".into()),
+            subject: None
         }
     );
 }
@@ -487,6 +488,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             port: 65535,
             protocol: ListenerProtocol::Https,
             tls: Some(ListenerTls {
+                client_ca_file: None,
                 mode: TlsMode::Passthrough,
                 cert_file: None,
                 key_file: None,
@@ -544,7 +546,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         consumers: vec![Consumer {
             name: "c".into(),
             credentials: vec![Credential::Mtls {
-                fingerprint: "f".into(),
+                fingerprint: Some("f".into()),
+                subject: None,
             }],
             groups: vec![],
             policies: vec![],

@@ -34,6 +34,7 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
 fn terminate_tls() -> ListenerTls {
     ListenerTls {
         mode: TlsMode::Terminate,
+        client_ca_file: None,
         cert_file: Some("/certs/edge.crt.pem".into()),
         key_file: Some("/certs/edge.key.pem".into()),
         certificates: vec![],
@@ -44,6 +45,7 @@ fn terminate_tls() -> ListenerTls {
 fn passthrough_tls(routes: Vec<SniRoute>) -> ListenerTls {
     ListenerTls {
         mode: TlsMode::Passthrough,
+        client_ca_file: None,
         cert_file: None,
         key_file: None,
         certificates: vec![],
@@ -209,6 +211,7 @@ fn validation_accepts_terminate_with_certificates_and_no_single_pair() {
 fn validation_rejects_terminate_with_neither_single_pair_nor_certificates() {
     let tls = ListenerTls {
         mode: TlsMode::Terminate,
+        client_ca_file: None,
         cert_file: None,
         key_file: None,
         certificates: vec![],
@@ -264,4 +267,110 @@ fn validation_rejects_sni_route_referencing_unknown_upstream() {
 fn validation_accepts_passthrough_route_to_known_upstream() {
     let tls = passthrough_tls(vec![sni_route(&["a.example.com"], "pool")]);
     assert_no_issues(&base_gateway(https_listener("edge", 8443, tls)));
+}
+
+// ---------------------------------------------------------------------------
+// client_ca_file (#124): terminate-only client-certificate verification
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validation_rejects_client_ca_file_in_passthrough_mode() {
+    let mut tls = passthrough_tls(vec![sni_route(&["a.example.com"], "pool")]);
+    tls.client_ca_file = Some("/certs/client-ca.pem".into());
+    assert_single_issue(
+        &base_gateway(https_listener("edge", 8443, tls)),
+        "listener",
+        "edge",
+        "tls.client_ca_file",
+    );
+}
+
+#[test]
+fn validation_rejects_missing_client_ca_bundle() {
+    let mut tls = terminate_tls();
+    tls.client_ca_file = Some("/no/such/client-ca.pem".into());
+    assert_single_issue(
+        &base_gateway(https_listener("edge", 8443, tls)),
+        "listener",
+        "edge",
+        "tls.client_ca_file",
+    );
+}
+
+#[test]
+fn validation_accepts_real_client_ca_bundle_in_terminate_mode() {
+    // A REAL PEM bundle (a self-signed rcgen CA) passes the compile-time
+    // check exactly like trusted_ca_file (#121) does.
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "dwara-test-client-ca");
+    let ca = params.self_signed(&key).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client-ca.pem");
+    std::fs::write(&path, ca.pem()).unwrap();
+    let mut tls = terminate_tls();
+    tls.client_ca_file = Some(path.display().to_string());
+    assert_no_issues(&base_gateway(https_listener("edge", 8443, tls)));
+}
+
+#[test]
+fn validation_rejects_mtls_credential_with_neither_subject_nor_fingerprint() {
+    // #124: an mtls credential matches by subject CN or by fingerprint —
+    // carrying neither can never match anything, so it is rejected.
+    let mut gw = base_gateway(https_listener("edge", 8443, terminate_tls()));
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        credentials: vec![dwara_core::config::Credential::Mtls {
+            subject: None,
+            fingerprint: None,
+        }],
+        ..base_consumer_rest()
+    });
+    assert_single_issue(&gw, "consumer", "c", "credentials[0]");
+}
+
+#[test]
+fn validation_accepts_subject_only_mtls_credential() {
+    let mut gw = base_gateway(https_listener("edge", 8443, terminate_tls()));
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        credentials: vec![dwara_core::config::Credential::Mtls {
+            subject: Some("acme-client".into()),
+            fingerprint: None,
+        }],
+        ..base_consumer_rest()
+    });
+    assert_no_issues(&gw);
+}
+
+#[test]
+fn validation_rejects_mtls_credential_with_both_subject_and_fingerprint() {
+    // #124: "exactly one of subject / fingerprint" — both-set would
+    // leave the fingerprint silently inert (only the subject is ever
+    // matched), so it is rejected like both-empty.
+    let mut gw = base_gateway(https_listener("edge", 8443, terminate_tls()));
+    gw.consumers.push(dwara_core::config::Consumer {
+        name: "c".into(),
+        credentials: vec![dwara_core::config::Credential::Mtls {
+            subject: Some("acme-client".into()),
+            fingerprint: Some("sha256:9f2a7c1e...".into()),
+        }],
+        ..base_consumer_rest()
+    });
+    assert_single_issue(&gw, "consumer", "c", "credentials[0]");
+}
+
+/// The Consumer field spread for the credential-shape tests above.
+fn base_consumer_rest() -> dwara_core::config::Consumer {
+    dwara_core::config::Consumer {
+        name: String::new(),
+        credentials: vec![],
+        policies: vec![],
+        priority: None,
+        groups: vec![],
+        authorization: None,
+    }
 }

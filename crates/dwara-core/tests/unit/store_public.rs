@@ -13,14 +13,14 @@ use dwara_core::state::store::*;
 
 fn seeded_store() -> StateStore {
     let store = StateStore::open_in_memory().unwrap();
-    store.upsert_consumer("acme", Some(7)).unwrap();
+    store.upsert_consumer("acme", Some(7), &[]).unwrap();
     store
 }
 
 #[test]
 fn consumer_roundtrip_in_memory_and_on_disk() {
     let store = StateStore::open_in_memory().unwrap();
-    let a = store.upsert_consumer("acme", Some(7)).unwrap();
+    let a = store.upsert_consumer("acme", Some(7), &[]).unwrap();
     assert_eq!(a.name, "acme");
     assert_eq!(a.priority, Some(7));
     let listed = store.list_consumers().unwrap();
@@ -28,7 +28,7 @@ fn consumer_roundtrip_in_memory_and_on_disk() {
 
     let dir = tempfile::tempdir().unwrap();
     let disk = StateStore::open(&dir.path().join("state.db")).unwrap();
-    let b = disk.upsert_consumer("acme", None).unwrap();
+    let b = disk.upsert_consumer("acme", None, &[]).unwrap();
     assert_eq!(b.name, "acme");
     // Reopen the same file: the row persisted, schema not recreated.
     let disk2 = StateStore::open(&dir.path().join("state.db")).unwrap();
@@ -38,8 +38,8 @@ fn consumer_roundtrip_in_memory_and_on_disk() {
 #[test]
 fn consumer_name_is_unique_via_upsert() {
     let store = StateStore::open_in_memory().unwrap();
-    store.upsert_consumer("acme", None).unwrap();
-    store.upsert_consumer("acme", Some(9)).unwrap();
+    store.upsert_consumer("acme", None, &[]).unwrap();
+    store.upsert_consumer("acme", Some(9), &[]).unwrap();
     let listed = store.list_consumers().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].priority, Some(9));
@@ -250,8 +250,8 @@ fn seeding_from_config_is_idempotent_and_hashed() {
     )
     .unwrap();
     let store = StateStore::open_in_memory().unwrap();
-    sync_consumers_from_config(&store, &config).unwrap();
-    sync_consumers_from_config(&store, &config).unwrap(); // re-sync: no dupes
+    sync_consumers_from_config(&store, &config, None).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap(); // re-sync: no dupes
     let listed = store.list_consumers().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].priority, Some(3));
@@ -298,7 +298,7 @@ fn sync_deletes_legacy_config_placeholder_api_key_rows() {
     let store = StateStore::open_in_memory().unwrap();
     // Seed exactly as the pre-DW-019 build did: plaintext selector and
     // placeholder hash (api key), plus a legacy jwt binding row.
-    store.upsert_consumer("acme", None).unwrap();
+    store.upsert_consumer("acme", None, &[]).unwrap();
     let consumer = store.lookup_consumer("acme").unwrap().unwrap();
     store
         .add_credential(
@@ -331,7 +331,7 @@ fn sync_deletes_legacy_config_placeholder_api_key_rows() {
         .unwrap();
     store.revoke_credential(revoked.id).unwrap();
 
-    sync_consumers_from_config(&store, &config).unwrap();
+    sync_consumers_from_config(&store, &config, None).unwrap();
 
     // The plaintext legacy api_key rows are gone...
     assert!(store
@@ -388,9 +388,9 @@ fn upsert_preserves_created_across_cache_and_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
     let store = StateStore::open(&path).unwrap();
-    let a = store.upsert_consumer("acme", Some(1)).unwrap();
+    let a = store.upsert_consumer("acme", Some(1), &[]).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let b = store.upsert_consumer("acme", Some(2)).unwrap();
+    let b = store.upsert_consumer("acme", Some(2), &[]).unwrap();
     // Returned record keeps the original creation time.
     assert_eq!(a.created_at, b.created_at);
     assert_eq!(b.priority, Some(2));

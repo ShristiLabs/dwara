@@ -139,6 +139,28 @@ the project follows semantic versioning once 1.0 is reached.
   specific occurrence binds the 429 headers), and
   `RateLimitEngine::check` widened from three to five policy lists —
   listener and global added (public surface).
+- Credential pepper (#124): `DWARA_CREDENTIAL_PEPPER` (a per-deployment
+  secret resolved through the SecretSource seam, never logged) moves
+  every NEW stored credential hash to `hmac-sha256:<hex>` (HMAC-SHA256
+  keyed by the pepper), so a state-DB leak alone cannot verify guesses.
+  Legacy `sha256:<hex>` entries keep verifying; without a pepper the
+  gateway runs legacy-only and peppered entries fail closed with an
+  ERROR log (a set-but-unreadable value refuses startup).
+- mTLS client-certificate authentication (#124): a terminate listener
+  with `tls.client_ca_file` (a PEM CA bundle; rejected in passthrough
+  mode) verifies presented client certificates during the handshake
+  (unverified = handshake failure) and maps the verified certificate to
+  a consumer via its `mtls` credential — by subject CommonName or
+  SHA-256 fingerprint (exactly one must be set). A verified certificate
+  matching no credential is a 401; header credentials (API key, Basic,
+  Bearer) take precedence over the ambient certificate; a connection
+  without one is still accepted.
+- Store-managed consumer groups (#124): SQLite schema v3 adds
+  `consumers.groups` (a JSON array; existing rows default to none) via
+  the automatic forward-only migration with the pre-migration backup,
+  so group-based authorization (`allowed_groups`/`denied_groups`) now
+  applies to store-managed consumers exactly as to config consumers —
+  previously they could never satisfy a group rule.
 
 ### Fixed
 
@@ -169,9 +191,18 @@ the project follows semantic versioning once 1.0 is reached.
   fresh keys evicts its idlest half, resetting those keys' buckets —
   a fresh budget for the evicted keys, the fail-open trade for the
   memory bound (#122).
+- A JWT provider without a configured `audience` rejected tokens that
+  carry an `aud` claim (jsonwebtoken validates `aud` whenever present),
+  contradicting the documented "absent: any audience accepted". The
+  audience is now validated ONLY when configured: a provider without
+  `audience` accepts tokens carrying any (or no) `aud` claim (#124).
 
 ### Changed
 
+- Legacy `sha256:<hex>` stored credentials are transparently re-hashed
+  to the peppered `hmac-sha256:<hex>` format in place on successful
+  verification when a pepper is configured — the transition completes
+  lazily, without credential re-issue (#124).
 - `PATCH /config` no longer double-bumps the generation: the file
   watcher's reload of identical content is a no-op.
 - Gateway-generated responses use a uniform JSON error envelope

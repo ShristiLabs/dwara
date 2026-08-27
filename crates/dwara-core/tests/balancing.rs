@@ -449,6 +449,7 @@ async fn passthrough_sni_resolution_alternates_endpoints_via_registry() {
 
     let tls = ListenerTls {
         mode: TlsMode::Passthrough,
+        client_ca_file: None,
         cert_file: None,
         key_file: None,
         certificates: vec![],

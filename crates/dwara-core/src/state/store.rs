@@ -40,9 +40,15 @@
 //!
 //! The store NEVER sees plaintext secrets: credential values arrive
 //! pre-hashed with a lookup `selector` (a hash for API keys/Basic since
-//! DW-019, or a JWT kid/issuer / certificate fingerprint for bindings).
-//! Hashing is the authenticator's job (DW-019); config-seeded keys are
-//! hashed at seed time (see [`sync_consumers_from_config`]).
+//! DW-019, a JWT kid/issuer, or an mTLS subject/fingerprint match value
+//! for bindings). Hashing is the authenticator's job (DW-019); the
+//! stored API-key/Basic hash format is owned by
+//! [`config::credentials`](crate::config::credentials) — peppered
+//! `hmac-sha256:<hex>` when the deployment configures a pepper (#124,
+//! resolved above this layer), legacy `sha256:<hex>` otherwise, and
+//! legacy rows upgrade in place on successful verification (see
+//! [`StateStore::rehash_credential`]). Config-seeded keys are hashed at
+//! seed time (see [`sync_consumers_from_config`]).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -95,6 +101,12 @@ pub struct ConsumerRecord {
     pub id: i64,
     pub name: String,
     pub priority: Option<u8>,
+    /// Group memberships (#124), the store-side twin of the config
+    /// consumer's `groups` field: group-based authorization applies to
+    /// store-managed consumers exactly as to config ones. The group
+    /// NAMESPACE is shared; config-time validation only sees config
+    /// consumers (see `Consumer::groups` docs).
+    pub groups: Vec<String>,
     /// Unix epoch seconds.
     pub created_at: i64,
 }
@@ -337,10 +349,16 @@ impl StateStore {
     }
 
     /// Insert or update a consumer by name; returns the resulting record.
-    /// Updating preserves the row id and creation time; only `priority`
-    /// changes. The consumer cache entry is refreshed.
-    pub fn upsert_consumer(&self, name: &str, priority: Option<u8>) -> Result<ConsumerRecord> {
+    /// Updating preserves the row id and creation time; `priority` and
+    /// `groups` change (#124). The consumer cache entry is refreshed.
+    pub fn upsert_consumer(
+        &self,
+        name: &str,
+        priority: Option<u8>,
+        groups: &[String],
+    ) -> Result<ConsumerRecord> {
         let now = now_secs();
+        let groups_json = encode_groups(groups);
         let conn = self.conn.lock().expect("store connection poisoned");
         let tx = conn.unchecked_transaction()?;
         let existing: Option<i64> = tx
@@ -353,15 +371,16 @@ impl StateStore {
         let id = match existing {
             Some(id) => {
                 tx.execute(
-                    "UPDATE consumers SET priority = ?2 WHERE id = ?1",
-                    params![id, priority],
+                    "UPDATE consumers SET priority = ?2, groups = ?3 WHERE id = ?1",
+                    params![id, priority, groups_json],
                 )?;
                 id
             }
             None => {
                 tx.execute(
-                    "INSERT INTO consumers (name, priority, created_at) VALUES (?1, ?2, ?3)",
-                    params![name, priority, now],
+                    "INSERT INTO consumers (name, priority, groups, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![name, priority, groups_json, now],
                 )?;
                 tx.last_insert_rowid()
             }
@@ -371,7 +390,7 @@ impl StateStore {
         // the DB keeps the ORIGINAL created_at, and the returned/cached
         // record must match disk exactly.
         let record = conn.query_row(
-            "SELECT id, name, priority, created_at FROM consumers WHERE id = ?1",
+            "SELECT id, name, priority, groups, created_at FROM consumers WHERE id = ?1",
             params![id],
             row_to_consumer,
         )?;
@@ -387,8 +406,9 @@ impl StateStore {
     /// List all consumers (disk read; cold path).
     pub fn list_consumers(&self) -> Result<Vec<ConsumerRecord>> {
         let conn = self.conn.lock().expect("store connection poisoned");
-        let mut stmt =
-            conn.prepare("SELECT id, name, priority, created_at FROM consumers ORDER BY name")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, priority, groups, created_at FROM consumers ORDER BY name",
+        )?;
         let rows = stmt.query_map([], row_to_consumer)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
@@ -466,6 +486,28 @@ impl StateStore {
         Ok(true)
     }
 
+    /// Replace a credential's stored hash in place (#124 pepper
+    /// transition): used by the authenticator after a SUCCESSFUL legacy
+    /// (`sha256:`) verification when a pepper is configured, upgrading
+    /// the row to `hmac-sha256:<hex>` so the transition completes lazily
+    /// — no credential re-issue, and the next lookup of the same
+    /// selector serves the peppered hash. The UPDATE is guarded by BOTH
+    /// the row id and the selector the credential was looked up under,
+    /// so a row rebound to a different selector between the lookup and
+    /// this write is left alone instead of being re-hashed. The
+    /// selector's cache entry is invalidated; nothing else about the row
+    /// (kind, revocation, timestamps) changes.
+    pub fn rehash_credential(&self, credential_id: i64, selector: &str, hash: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "UPDATE credentials SET hash = ?3 WHERE id = ?1 AND selector = ?2",
+            params![credential_id, selector, hash],
+        )?;
+        drop(conn);
+        self.invalidate(selector);
+        Ok(())
+    }
+
     /// Disk lookup: all ACTIVE credentials for a selector (revoked rows
     /// are ignored). Cold path; feeds the cache.
     pub fn lookup_credentials_by_selector(&self, selector: &str) -> Result<Vec<CredentialRecord>> {
@@ -527,22 +569,15 @@ impl StateStore {
         }
         self.disk_reads.fetch_add(1, Ordering::Relaxed);
         let conn = self.conn.lock().expect("store connection poisoned");
-        let row: Option<(i64, String, Option<u8>, i64)> = conn
+        let row = conn
             .query_row(
-                "SELECT id, name, priority, created_at FROM consumers WHERE name = ?1",
+                "SELECT id, name, priority, groups, created_at FROM consumers WHERE name = ?1",
                 params![name],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                row_to_consumer,
             )
             .optional()?;
         drop(conn);
-        let record = row.map(|(id, name, priority, created_at)| {
-            Arc::new(ConsumerRecord {
-                id,
-                name,
-                priority,
-                created_at,
-            })
-        });
+        let record = row.map(Arc::new);
         if let Some(record) = &record {
             self.cache
                 .consumers
@@ -778,12 +813,39 @@ fn now_secs() -> i64 {
 }
 
 fn row_to_consumer(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConsumerRecord> {
+    let groups_raw: Option<String> = r.get(3)?;
     Ok(ConsumerRecord {
         id: r.get(0)?,
         name: r.get(1)?,
         priority: r.get(2)?,
-        created_at: r.get(3)?,
+        groups: decode_groups(groups_raw.as_deref()),
+        created_at: r.get(4)?,
     })
+}
+
+/// Encode consumer groups as the `consumers.groups` JSON array (#124).
+/// `Vec<String>` serialization cannot fail; the fallback keeps the
+/// signature infallible and the column always valid JSON.
+fn encode_groups(groups: &[String]) -> String {
+    serde_json::to_string(groups).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Decode the `consumers.groups` JSON array (#124). A malformed value
+/// (a hand-edited database) degrades to NO groups — fail-closed for
+/// group-based authorization (an `allowed_groups` rule then denies) —
+/// with a server-side warning; group names inside a valid-but-odd JSON
+/// array are used verbatim.
+fn decode_groups(raw: Option<&str>) -> Vec<String> {
+    match raw {
+        None => Vec::new(),
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| {
+            tracing::warn!(
+                code = "consumer_groups_unparseable",
+                "consumers.groups is not a JSON array of strings; treating as no groups"
+            );
+            Vec::new()
+        }),
+    }
 }
 
 fn row_to_credential(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord> {
@@ -808,31 +870,40 @@ fn row_to_credential(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord
 }
 
 /// Bootstrap the store from the gateway config (DW-018 seeding, hashing
-/// per DW-019).
+/// per DW-019, peppered per #124).
 ///
-/// Creates/updates every consumer found in the config and inserts a
-/// credential row for each config credential that is not already present
-/// (matched by consumer + selector, so re-syncing is idempotent).
+/// Creates/updates every consumer found in the config (including its
+/// `groups`, #124) and inserts a credential row for each config
+/// credential that is not already present (matched by consumer +
+/// selector, so re-syncing is idempotent).
 ///
-/// Hashing (DW-019): config API keys are hashed at seed time — the
-/// selector is `hex(sha256(key))` (never the plaintext key; this closes
-/// the DW-018 finding that seeded selectors were raw config values) and
-/// the stored hash is `sha256:<hex(sha256(key))>`, the format the
-/// authenticator's constant-time verifier expects. JWT and mTLS config
+/// Hashing: config API keys are hashed at seed time — the selector is
+/// `hex(sha256(key))` (never the plaintext key; this closes the DW-018
+/// finding that seeded selectors were raw config values) and the stored
+/// hash is `hmac-sha256:<hex>` when a `pepper` is configured (#124;
+/// resolved by the CALLER through the SecretSource seam — this store
+/// never touches the extension) or legacy `sha256:<hex>` otherwise.
+/// Rows seeded by a pre-pepper sync keep verifying (legacy format) and
+/// upgrade lazily on successful verification. JWT and mTLS config
 /// credentials are BINDINGS, not secrets (tokens are verified
-/// cryptographically; client certificates by fingerprint), so their rows
-/// keep a binding-marker hash and the issuer/fingerprint selector.
+/// cryptographically; client certificates by subject/fingerprint), so
+/// their rows keep a binding-marker hash and the issuer / match-value
+/// selector.
 ///
 /// Legacy cleanup: rows seeded by the pre-DW-019 build (plaintext api-key
 /// selector + `config:api_key:` placeholder hash) are deleted on every
 /// sync — see
 /// [`StateStore::delete_legacy_config_placeholder_credentials`].
-pub fn sync_consumers_from_config(store: &StateStore, gateway: &Gateway) -> Result<()> {
+pub fn sync_consumers_from_config(
+    store: &StateStore,
+    gateway: &Gateway,
+    pepper: Option<&[u8]>,
+) -> Result<()> {
     store.delete_legacy_config_placeholder_credentials()?;
     for consumer in &gateway.consumers {
-        let record = store.upsert_consumer(&consumer.name, consumer.priority)?;
+        let record = store.upsert_consumer(&consumer.name, consumer.priority, &consumer.groups)?;
         for credential in &consumer.credentials {
-            let (kind, selector, hash) = credential_parts(credential);
+            let (kind, selector, hash) = credential_parts(credential, pepper);
             let existing = store.lookup_credentials_by_selector(&selector)?;
             if existing
                 .iter()
@@ -846,23 +917,44 @@ pub fn sync_consumers_from_config(store: &StateStore, gateway: &Gateway) -> Resu
     Ok(())
 }
 
-fn credential_parts(credential: &Credential) -> (CredentialKind, String, String) {
+fn credential_parts(
+    credential: &Credential,
+    pepper: Option<&[u8]>,
+) -> (CredentialKind, String, String) {
     match credential {
-        Credential::ApiKey { key } => (
-            CredentialKind::ApiKey,
-            crate::config::credentials::credential_selector(key),
-            crate::config::credentials::sha256_stored_hash(key),
-        ),
+        Credential::ApiKey { key } => {
+            let selector = crate::config::credentials::credential_selector(key);
+            let hash = match pepper {
+                Some(pepper) => crate::config::credentials::hmac_stored_hash(pepper, key),
+                None => crate::config::credentials::sha256_stored_hash(key),
+            };
+            (CredentialKind::ApiKey, selector, hash)
+        }
         Credential::Jwt { issuer, .. } => (
             CredentialKind::Jwt,
             issuer.clone(),
             format!("config:jwt:{issuer}"),
         ),
-        Credential::Mtls { fingerprint } => (
-            CredentialKind::Mtls,
-            fingerprint.clone(),
-            format!("config:mtls:{fingerprint}"),
-        ),
+        // The mTLS selector is the credential's MATCH VALUE (#124): the
+        // subject CN when `subject` is set, else the certificate
+        // fingerprint. The authenticator looks up a presented certificate
+        // by BOTH its subject CN and its fingerprint, so either shape
+        // resolves. An unvalidated both-empty config yields an empty
+        // selector that no presented certificate can ever match.
+        Credential::Mtls {
+            subject,
+            fingerprint,
+        } => {
+            let match_value = subject
+                .clone()
+                .or_else(|| fingerprint.clone())
+                .unwrap_or_default();
+            (
+                CredentialKind::Mtls,
+                match_value.clone(),
+                format!("config:mtls:{match_value}"),
+            )
+        }
     }
 }
 
@@ -871,7 +963,7 @@ mod tests {
     use super::*;
     fn seeded_store() -> StateStore {
         let store = StateStore::open_in_memory().unwrap();
-        store.upsert_consumer("acme", Some(7)).unwrap();
+        store.upsert_consumer("acme", Some(7), &[]).unwrap();
         store
     }
     #[test]
@@ -972,6 +1064,8 @@ mod tests {
         assert_eq!(consumers[0].name, "acme");
         assert_eq!(consumers[0].priority, Some(5));
         assert_eq!(consumers[0].created_at, 1000);
+        // The 003 groups column defaults to no groups for v1 rows.
+        assert_eq!(consumers[0].groups, Vec::<String>::new());
         // active credential,
         let active = store.lookup_credentials_by_selector("key-1").unwrap();
         assert_eq!(active.len(), 1);
@@ -993,25 +1087,140 @@ mod tests {
             assert_eq!(n, 1);
         }
         // The store remains writable post-migration (idempotent upsert).
-        store.upsert_consumer("acme", Some(6)).unwrap();
+        store
+            .upsert_consumer("acme", Some(6), &["partners".to_string()])
+            .unwrap();
         assert_eq!(store.list_consumers().unwrap()[0].priority, Some(6));
+        assert_eq!(
+            store.list_consumers().unwrap()[0].groups,
+            vec!["partners".to_string()]
+        );
+    }
+    /// Build a database exactly as the v2 build left it (#124 fixture):
+    /// the v1 DDL plus migration 002's quota index, rows present, and
+    /// `PRAGMA user_version = 2` — a database that has NEVER seen the
+    /// `groups` column, so opening it must apply ONLY migration 003.
+    fn build_v2_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE consumers (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL UNIQUE,
+                 priority INTEGER,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE TABLE credentials (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 consumer_id INTEGER NOT NULL REFERENCES consumers(id),
+                 kind TEXT NOT NULL CHECK (kind IN ('api_key', 'jwt', 'mtls')),
+                 hash TEXT NOT NULL,
+                 salt TEXT,
+                 selector TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 revoked_at INTEGER
+             );
+             CREATE INDEX idx_credentials_selector ON credentials (selector);
+             CREATE TABLE quota_counters (
+                 consumer_id INTEGER NOT NULL REFERENCES consumers(id),
+                 counter_key TEXT NOT NULL,
+                 window_start INTEGER NOT NULL,
+                 used INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (consumer_id, counter_key, window_start)
+             );
+             CREATE INDEX idx_quota_counters_window ON quota_counters (window_start);
+             INSERT INTO consumers (name, priority, created_at) VALUES ('globex', 3, 2000);
+             INSERT INTO credentials
+                 (consumer_id, kind, hash, salt, selector, created_at, revoked_at)
+             VALUES (1, 'api_key', 'h1', NULL, 'key-1', 2001, NULL);
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn v2_db_migrates_to_latest_adding_groups_in_place() {
+        // Migration fidelity from the V2 schema state (#124): only 003
+        // is pending, and it must add `groups` with the no-groups
+        // default while leaving every existing row byte-identical.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        build_v2_db(&path);
+
+        let store = StateStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        // Every v2 row survives untouched...
+        let consumers = store.list_consumers().unwrap();
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].name, "globex");
+        assert_eq!(consumers[0].priority, Some(3));
+        assert_eq!(consumers[0].created_at, 2000);
+        // ...and the new column reads as the default no-groups value.
+        assert_eq!(consumers[0].groups, Vec::<String>::new());
+        let active = store.lookup_credentials_by_selector("key-1").unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].hash, "h1");
+        // The migrated store accepts group writes (idempotent upsert).
+        store
+            .upsert_consumer("globex", None, &["partners".to_string()])
+            .unwrap();
+        assert_eq!(
+            store.lookup_consumer("globex").unwrap().unwrap().groups,
+            vec!["partners".to_string()]
+        );
+    }
+    #[test]
+    fn malformed_groups_json_degrades_to_no_groups() {
+        // A hand-edited `consumers.groups` value that is not a JSON array
+        // of strings must DEGRADE to no groups (#124: fail-closed for
+        // group authorization — an allowed_groups rule then denies —
+        // never error the lookup, never invent groups). Fresh store
+        // handles per value so the hot consumer cache cannot mask the
+        // disk decode path a restarted deployment would take.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let store = StateStore::open(&path).unwrap();
+            store
+                .upsert_consumer("acme", None, &["partners".to_string()])
+                .unwrap();
+        }
+        for bad in ["not-json", "null", "\"partners\"", "[1,2]", "{\"a\":1}"] {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("UPDATE consumers SET groups = ?1", params![bad])
+                .unwrap();
+            drop(conn);
+            let store = StateStore::open(&path).unwrap();
+            assert_eq!(
+                store.list_consumers().unwrap()[0].groups,
+                Vec::<String>::new(),
+                "malformed groups {bad:?} must read back as no groups"
+            );
+            assert_eq!(
+                store.lookup_consumer("acme").unwrap().unwrap().groups,
+                Vec::<String>::new(),
+                "malformed groups {bad:?} must read back as no groups"
+            );
+        }
     }
     // ---- tester coverage for DW-115 (chain, backup integrity, deep
     // fidelity, rapid reopen, foreign version-0 databases, pragmas) ----
 
     /// Dump every row of `table` as formatted text, row order pinned by
     /// rowid, so pre/post/backup databases can be compared column for
-    /// column ("byte-identical" at the value level).
-    fn dump_table(conn: &Connection, table: &str) -> Vec<Vec<String>> {
+    /// column ("byte-identical" at the value level). `cols` restricts the
+    /// projection: migration tests compare the columns the OLDER schema
+    /// also had (#124: `consumers.groups` exists only at HEAD).
+    fn dump_table(conn: &Connection, table: &str, cols: &str) -> Vec<Vec<String>> {
         let mut stmt = conn
-            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .prepare(&format!("SELECT {cols} FROM {table} ORDER BY rowid"))
             .unwrap();
-        let cols = stmt.column_count();
+        let n = stmt.column_count();
         let mut rows = stmt.query([]).unwrap();
         let mut out = Vec::new();
         while let Some(row) = rows.next().unwrap() {
-            let mut cells = Vec::with_capacity(cols);
-            for i in 0..cols {
+            let mut cells = Vec::with_capacity(n);
+            for i in 0..n {
                 let cell = match row.get_ref(i).unwrap() {
                     rusqlite::types::ValueRef::Null => "NULL".to_string(),
                     rusqlite::types::ValueRef::Integer(v) => v.to_string(),
@@ -1108,9 +1317,9 @@ mod tests {
         let before = {
             let conn = Connection::open(&path).unwrap();
             (
-                dump_table(&conn, "consumers"),
-                dump_table(&conn, "credentials"),
-                dump_table(&conn, "quota_counters"),
+                dump_table(&conn, "consumers", "id, name, priority, created_at"),
+                dump_table(&conn, "credentials", "*"),
+                dump_table(&conn, "quota_counters", "*"),
             )
         };
 
@@ -1118,9 +1327,16 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         {
             let conn = store.conn.lock().expect("store connection poisoned");
-            assert_eq!(dump_table(&conn, "consumers"), before.0);
-            assert_eq!(dump_table(&conn, "credentials"), before.1);
-            assert_eq!(dump_table(&conn, "quota_counters"), before.2);
+            assert_eq!(
+                dump_table(&conn, "consumers", "id, name, priority, created_at"),
+                before.0
+            );
+            assert_eq!(dump_table(&conn, "credentials", "*"), before.1);
+            assert_eq!(dump_table(&conn, "quota_counters", "*"), before.2);
+            // 003 added `consumers.groups` with the no-groups default:
+            // every migrated v1 row reads back empty groups.
+            let groups = dump_table(&conn, "consumers", "groups");
+            assert_eq!(groups, vec![vec!["'[]'".to_string()]; 2]);
         }
 
         // Both consumers present with their exact fields.
@@ -1190,7 +1406,7 @@ mod tests {
 
         // Two handles alive at once: write through the second...
         let c = StateStore::open(&path).unwrap();
-        c.upsert_consumer("globex", Some(9)).unwrap();
+        c.upsert_consumer("globex", Some(9), &[]).unwrap();
         c.add_credential(1, CredentialKind::ApiKey, "hx".into(), None, "key-x".into())
             .unwrap();
         // ...read committed state through the first.
@@ -1246,7 +1462,7 @@ mod tests {
             .unwrap();
         assert_eq!(label, "keep-me");
         // Our schema is fully usable next to it.
-        store.upsert_consumer("acme", None).unwrap();
+        store.upsert_consumer("acme", None, &[]).unwrap();
         assert_eq!(store.list_consumers().unwrap().len(), 1);
         // version 0 -> no backup (nothing recognized to back up).
         assert!(

@@ -189,3 +189,140 @@ fn unmatched_path_is_served_404_by_the_dataplane() {
     );
     std::fs::remove_file(&config).ok();
 }
+
+// ---------------------------------------------------------------------------
+// #124: DWARA_CREDENTIAL_PEPPER through the real binary
+// ---------------------------------------------------------------------------
+
+/// Unique scratch path for one test invocation (the config_path pattern).
+fn scratch_path(tag: &str, suffix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "dwara-124-pepper-{}-{}-{tag}{suffix}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// Config with one API-key consumer: presenting the key must pass auth
+/// (then hit the respond action), a wrong key must 401 even on a route
+/// that does not require it.
+fn pepper_config(tag: &str) -> std::path::PathBuf {
+    let path = scratch_path(tag, ".yaml");
+    std::fs::write(
+        &path,
+        "routes:\n\
+         - name: catch\n\
+         \x20 service: local\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: regex\n\
+         \x20     value: /.*\n\
+         \x20 action:\n\
+         \x20   type: respond\n\
+         \x20   status: 200\n\
+         \x20   body: dwara\n\
+         services:\n\
+         - name: local\n\
+         \x20 upstream: local-up\n\
+         upstreams:\n\
+         - name: local-up\n\
+         \x20 endpoints:\n\
+         \x20   - address: 127.0.0.1\n\
+         \x20     port: 9\n\
+         consumers:\n\
+         - name: acme\n\
+         \x20 credentials:\n\
+         \x20   - type: api_key\n\
+         \x20     key: pepper-key-1\n",
+    )
+    .unwrap();
+    path
+}
+
+fn start_server_with_env(tag: &str, envs: &[(&str, &str)]) -> (String, ServerGuard) {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let config = pepper_config(tag);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    command
+        .env("DWARA_BIND", &addr)
+        .env("DWARA_CONFIG", &config)
+        .env_remove("DWARA_CREDENTIAL_PEPPER")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    let guard = ServerGuard(command.spawn().expect("failed to spawn dwara binary"));
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr} within 10s"
+    );
+    (addr, guard)
+}
+
+fn get_with_api_key(addr: &str, key: &str) -> String {
+    let mut stream = TcpStream::connect(addr).expect("failed to connect");
+    stream
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: localhost\r\nX-API-Key: {key}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("failed to write request");
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .expect("failed to read response");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[test]
+fn pepper_env_round_trips_through_the_real_binary() {
+    // DWARA_CREDENTIAL_PEPPER set: the store seeds the config key with
+    // the PEPPERED hash (EnvSecretSource -> sync) and the authenticator
+    // verifies it with the same pepper — the full binary path.
+    let db = scratch_path("set", ".state.db");
+    let (addr, _server) = start_server_with_env(
+        "set",
+        &[
+            ("DWARA_STATE_DB", db.to_str().unwrap()),
+            ("DWARA_CREDENTIAL_PEPPER", "binary-test-pepper-A"),
+        ],
+    );
+    let ok = get_with_api_key(&addr, "pepper-key-1");
+    assert!(ok.starts_with("HTTP/1.1 200"), "correct key: {ok}");
+    let bad = get_with_api_key(&addr, "wrong-key");
+    assert!(bad.starts_with("HTTP/1.1 401"), "wrong key: {bad}");
+
+    // Empty value = unset (legacy-only mode, warned at startup): the
+    // binary must start and the config key must still verify (seeded
+    // legacy-sha256 by the empty-pepper sync).
+    let db_empty = scratch_path("empty", ".state.db");
+    let (addr, _server) = start_server_with_env(
+        "empty",
+        &[
+            ("DWARA_STATE_DB", db_empty.to_str().unwrap()),
+            ("DWARA_CREDENTIAL_PEPPER", ""),
+        ],
+    );
+    let ok = get_with_api_key(&addr, "pepper-key-1");
+    assert!(
+        ok.starts_with("HTTP/1.1 200"),
+        "empty pepper must behave as legacy mode: {ok}"
+    );
+
+    // Restart the PEPPERED database WITHOUT the pepper: the persisted
+    // hmac-sha256 row fails closed (401 with the CORRECT key) — a
+    // pepper lost at restart cannot silently weaken verification.
+    let (addr, _server) =
+        start_server_with_env("lost", &[("DWARA_STATE_DB", db.to_str().unwrap())]);
+    let closed = get_with_api_key(&addr, "pepper-key-1");
+    assert!(
+        closed.starts_with("HTTP/1.1 401"),
+        "peppered row without pepper must fail closed: {closed}"
+    );
+}

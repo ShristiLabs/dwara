@@ -140,15 +140,21 @@ fn issue(entity: &str, name: &str, field: &str, message: impl Into<String>) -> V
 /// while anchor USABILITY (a parseable certificate the root store
 /// rejects) stays enforced where the rustls root store lives, at
 /// registry build.
-fn check_trusted_ca_file(entity: &str, name: &str, path: &str, issues: &mut Vec<ValidationIssue>) {
+fn check_trusted_ca_file(
+    entity: &str,
+    name: &str,
+    field: &str,
+    path: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
     use rustls_pki_types::pem::PemObject;
 
     if let Err(e) = std::fs::File::open(path) {
         issues.push(issue(
             entity,
             name,
-            "trusted_ca_file",
-            format!("trusted_ca_file '{path}' is not a readable file: {e}"),
+            field,
+            format!("{field} '{path}' is not a readable file: {e}"),
         ));
         return;
     }
@@ -165,18 +171,18 @@ fn check_trusted_ca_file(entity: &str, name: &str, path: &str, issues: &mut Vec<
         Ok(_) => issues.push(issue(
             entity,
             name,
-            "trusted_ca_file",
+            field,
             format!(
-                "trusted_ca_file '{path}' holds no usable CA certificates \
+                "{field} '{path}' holds no usable CA certificates \
                  (the PEM bundle must list at least one CERTIFICATE)"
             ),
         )),
         Err(e) => issues.push(issue(
             entity,
             name,
-            "trusted_ca_file",
+            field,
             format!(
-                "trusted_ca_file '{path}' could not be parsed as a PEM \
+                "{field} '{path}' could not be parsed as a PEM \
                  certificate bundle: {e}"
             ),
         )),
@@ -439,7 +445,13 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     .scheme_str()
                     .is_some_and(|s| s.eq_ignore_ascii_case("https"))
                 {
-                    check_trusted_ca_file("jwt_provider", &p.name, ca, &mut issues);
+                    check_trusted_ca_file(
+                        "jwt_provider",
+                        &p.name,
+                        "trusted_ca_file",
+                        ca,
+                        &mut issues,
+                    );
                 } else {
                     issues.push(issue(
                         "jwt_provider",
@@ -544,6 +556,22 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 "sni_routes only apply to tls mode passthrough",
                             ));
                         }
+                        // #124: a client-CA bundle turns the terminate
+                        // listener into one that verifies client
+                        // certificates (optional at the TLS layer, matched
+                        // against mtls credentials at authn). The same
+                        // compile-time PEM check as trusted_ca_file: a
+                        // broken bundle would otherwise surface as a
+                        // listener-build failure at startup.
+                        if let Some(ca) = &t.client_ca_file {
+                            check_trusted_ca_file(
+                                "listener",
+                                &l.name,
+                                "tls.client_ca_file",
+                                ca,
+                                &mut issues,
+                            );
+                        }
                         let mut seen_names = std::collections::BTreeSet::new();
                         for (i, c) in t.certificates.iter().enumerate() {
                             if c.server_names.is_empty() {
@@ -604,6 +632,15 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 &l.name,
                                 "tls.certificates",
                                 "tls mode passthrough does not terminate TLS; certificates do not apply",
+                            ));
+                        }
+                        if t.client_ca_file.is_some() {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "tls.client_ca_file",
+                                "tls mode passthrough does not terminate TLS; client certificates \
+                                 cannot be verified (use mode terminate)",
                             ));
                         }
                         let mut seen_names = std::collections::BTreeSet::new();
@@ -979,7 +1016,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
             );
             if tls {
-                check_trusted_ca_file("upstream", &u.name, ca, &mut issues);
+                check_trusted_ca_file("upstream", &u.name, "trusted_ca_file", ca, &mut issues);
             } else {
                 issues.push(issue(
                     "upstream",
@@ -1297,8 +1334,31 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             let problem = match cred {
                 Credential::ApiKey { key } if key.is_empty() => Some("api key is empty"),
                 Credential::Jwt { issuer, .. } if issuer.is_empty() => Some("jwt issuer is empty"),
-                Credential::Mtls { fingerprint } if fingerprint.is_empty() => {
-                    Some("mtls fingerprint is empty")
+                // #124: an mtls credential matches a verified client
+                // certificate by subject CN or by fingerprint — exactly
+                // one of the two must carry a non-empty value. Both-set
+                // is rejected because only the subject would ever be
+                // matched (the fingerprint would sit inert).
+                Credential::Mtls {
+                    subject,
+                    fingerprint,
+                } => {
+                    let s = subject.as_deref().unwrap_or("");
+                    let f = fingerprint.as_deref().unwrap_or("");
+                    if s.is_empty() && f.is_empty() {
+                        Some("mtls credential must set subject or fingerprint (both are empty)")
+                    } else if subject.is_some() && s.is_empty() {
+                        Some("mtls subject is empty")
+                    } else if fingerprint.is_some() && f.is_empty() {
+                        Some("mtls fingerprint is empty")
+                    } else if subject.is_some() && fingerprint.is_some() {
+                        Some(
+                            "mtls credential must set subject or fingerprint, not both \
+                             (both are set; only the subject would be matched)",
+                        )
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
