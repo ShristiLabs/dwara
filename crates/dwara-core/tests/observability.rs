@@ -209,7 +209,7 @@ async fn body_text(resp: hyper::Response<dwara_core::proxy::ProxyBody>) -> Strin
 }
 
 async fn envelope_of(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     path: &str,
 ) -> (StatusCode, serde_json::Value, hyper::HeaderMap, String) {
     let resp = dwara_core::proxy::handle(dp, peer(), req(path)).await;

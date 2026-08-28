@@ -61,7 +61,7 @@ fn req_labeled(listener: &str, path: &str) -> Request<Full<Bytes>> {
 }
 
 async fn send(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     peer: IpAddr,
     path: &str,
 ) -> hyper::Response<dwara_core::proxy::ProxyBody> {
@@ -831,7 +831,7 @@ upstreams:
 // ---- #123: every attachment level applies; unrouted traffic is limited ----
 
 async fn send_request(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     peer: IpAddr,
     request: Request<Full<Bytes>>,
 ) -> hyper::Response<dwara_core::proxy::ProxyBody> {
@@ -1135,7 +1135,7 @@ upstreams:
     let dp = dataplane_from(yaml);
     // The consumer link only exists once authn identifies the consumer:
     // every request presents acme's API key.
-    async fn as_acme(dp: &DataPlane) -> hyper::Response<dwara_core::proxy::ProxyBody> {
+    async fn as_acme(dp: &Arc<DataPlane>) -> hyper::Response<dwara_core::proxy::ProxyBody> {
         let req = Request::builder()
             .uri("/r")
             .header("x-api-key", "acme-key")

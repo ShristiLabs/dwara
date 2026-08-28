@@ -15,6 +15,7 @@ mod health;
 mod migrations;
 mod observability;
 mod rate_limiter;
+mod response_cache;
 mod retries;
 mod secrets;
 mod snapshot;

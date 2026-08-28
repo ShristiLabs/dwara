@@ -226,7 +226,7 @@ fn config_debug_output_never_carries_inline_keys() {
 
 /// One request through the dataplane with an X-API-Key header; 401 means
 /// the key did not authenticate, anything else means it did.
-async fn api_key_status(dp: &DataPlane, key: &str) -> hyper::StatusCode {
+async fn api_key_status(dp: &Arc<DataPlane>, key: &str) -> hyper::StatusCode {
     let req = Request::builder()
         .uri("/x")
         .header("x-api-key", key)

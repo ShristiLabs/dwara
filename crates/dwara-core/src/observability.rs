@@ -325,6 +325,24 @@ pub struct Observability {
     /// docs for the gauge-not-counter rationale).
     events_dropped: IntGauge,
     events_emitted: IntGauge,
+    /// DW-037: response-cache lookup outcomes — a CLOSED label set
+    /// (`hit`, `stale`, `miss`, `bypass`), one increment per request on
+    /// a cache-configured route, decided at lookup.
+    cache_lookups_total: IntCounterVec,
+    /// DW-037: response-cache store outcomes — CLOSED set (`stored`,
+    /// `vetoed`, `over_cap`, `error`), one increment per cacheable
+    /// fetch that reached the store stage.
+    cache_stores_total: IntCounterVec,
+    /// DW-037: responses served from a stored body after the upstream
+    /// answered a conditional revalidation with 304 (the "unchanged"
+    /// path; plain counter — no label space to close).
+    cache_revalidated_total: IntCounter,
+    /// DW-037: purge operations — CLOSED set (`route`, `all`).
+    cache_purges_total: IntCounterVec,
+    /// DW-037: approximate live cache entries (scrape-time snapshot
+    /// walk of the store's `entry_count`, the same gauge model as the
+    /// rate-limiter live-keys gauge).
+    cache_entries: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -492,6 +510,50 @@ impl Observability {
              (DW-044).",
         )
         .expect("valid metric definition");
+        let cache_lookups_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_cache_lookups_total",
+                "Response-cache lookups by outcome (DW-037), one per request on a \
+                 cache-configured route. outcome: hit (fresh entry served), stale \
+                 (expired entry served inside the stale-while-revalidate window), \
+                 miss (no usable entry; the request went upstream), bypass (the \
+                 request shape is not cacheable).",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        let cache_stores_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_cache_stores_total",
+                "Response-cache store attempts by outcome (DW-037). outcome: \
+                 stored, vetoed (a response-side rule forbade storage), over_cap \
+                 (body larger than the route's max_body_bytes; passed through \
+                 unbuffered), error (the backing store failed).",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        let cache_revalidated_total = IntCounter::new(
+            "dwara_cache_revalidated_total",
+            "Responses served from the stored body after the upstream confirmed \
+             the validator with 304 (DW-037).",
+        )
+        .expect("valid metric definition");
+        let cache_purges_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_cache_purges_total",
+                "Cache purge operations by scope (DW-037): route (one named \
+                 route) or all.",
+            ),
+            &["scope"],
+        )
+        .expect("valid metric definition");
+        let cache_entries = IntGauge::new(
+            "dwara_cache_entries",
+            "Approximate live response-cache entries (DW-037); scrape-time \
+             snapshot of the backing store's entry count.",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -513,6 +575,11 @@ impl Observability {
             Box::new(webhook_events_total.clone()),
             Box::new(events_dropped.clone()),
             Box::new(events_emitted.clone()),
+            Box::new(cache_lookups_total.clone()),
+            Box::new(cache_stores_total.clone()),
+            Box::new(cache_revalidated_total.clone()),
+            Box::new(cache_purges_total.clone()),
+            Box::new(cache_entries.clone()),
         ] {
             registry
                 .register(m)
@@ -538,6 +605,11 @@ impl Observability {
             webhook_events_total,
             events_dropped,
             events_emitted,
+            cache_lookups_total,
+            cache_stores_total,
+            cache_revalidated_total,
+            cache_purges_total,
+            cache_entries,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -647,6 +719,39 @@ impl Observability {
     /// authenticator; incremented on every JWKS fetch attempt).
     pub fn jwks_refresh_counter(&self, provider: &str) -> IntCounter {
         self.jwks_refresh_total.with_label_values(&[provider])
+    }
+
+    /// Count one response-cache lookup outcome (DW-037). `outcome` is
+    /// one of the closed set `hit` / `stale` / `miss` / `bypass` (see
+    /// `dataplane::response_cache` for the decision table).
+    pub fn record_cache_lookup(&self, outcome: &str) {
+        self.cache_lookups_total.with_label_values(&[outcome]).inc();
+    }
+
+    /// Count one response-cache store outcome (DW-037). `outcome` is
+    /// one of the closed set `stored` / `vetoed` / `over_cap` /
+    /// `error`.
+    pub fn record_cache_store(&self, outcome: &str) {
+        self.cache_stores_total.with_label_values(&[outcome]).inc();
+    }
+
+    /// Count one 304-confirmed revalidation served from the stored body
+    /// (DW-037).
+    pub fn record_cache_revalidated(&self) {
+        self.cache_revalidated_total.inc();
+    }
+
+    /// Count one cache purge (DW-037). `scope` is `route` or `all`.
+    pub fn record_cache_purge(&self, scope: &str) {
+        self.cache_purges_total.with_label_values(&[scope]).inc();
+    }
+
+    /// Set the approximate live-entries gauge (DW-037) — a scrape-time
+    /// snapshot walk of the backing store (the same gauge model as the
+    /// rate-limiter live-keys gauge: state lives outside observability,
+    /// the dataplane walks it at scrape time).
+    pub fn set_cache_entries(&self, entries: i64) {
+        self.cache_entries.set(entries);
     }
 
     pub fn active_requests(&self) -> &IntGauge {

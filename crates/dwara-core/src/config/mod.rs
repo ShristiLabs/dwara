@@ -24,8 +24,10 @@
 //! [`versioning`] the HTTP-date and media-type grammar of the API
 //! versioning aids (DW-048), and [`transforms`] the JSON-pointer
 //! grammar and shapes of the request/response transforms and
-//! security-header injection (DW-028).
+//! security-header injection (DW-028). [`cache`] carries the
+//! route-scoped response-caching grammar (DW-037).
 
+pub mod cache;
 pub mod credentials;
 pub mod limits;
 pub mod net;
@@ -35,6 +37,7 @@ pub mod versioning;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use cache::RouteCache;
 use transforms::{Masking, SecurityHeaders, Transforms};
 
 /// Error produced when a configuration document fails to parse.
@@ -711,6 +714,20 @@ pub struct Route {
     /// answers 502, never a passthrough. See [`Masking`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masking: Option<Masking>,
+    /// Route-scoped response caching (DW-037, feature analysis
+    /// 5-Protocol): opts the route's cacheable GET traffic into the
+    /// local response cache behind the `CacheStore` extension seam.
+    /// Absent (the default): responses are never cached or buffered.
+    /// The cache key folds in the route, the consumer, the inbound
+    /// path + query, and the effective vary set — masked (DW-029) and
+    /// consumer-group-specific variants never cross consumers. Stored
+    /// bodies are the POST-masking/transform bytes (replay consistency
+    /// under route-scoped policies), stored identity (never compressed;
+    /// compression re-negotiates per request), and the decoration tail
+    /// (compression onward) re-runs on every replay. See
+    /// [`RouteCache`] and `dataplane::response_cache`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<RouteCache>,
 }
 
 /// Route maintenance mode (DW-041): a per-route availability state that

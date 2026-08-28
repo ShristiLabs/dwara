@@ -1248,3 +1248,125 @@ async fn patch_swapping_a_placeholder_for_a_reference_republishes_cleanly() {
         "a reference-only config echoes with neither placeholder nor secret: {after}"
     );
 }
+
+// --- POST /cache/purge (DW-037) ----------------------------------------------
+
+/// Purge one named route: 200, names the route and its new epoch, and
+/// the epoch is observable on the dataplane. The whole call is an O(1)
+/// generation advance — the <100 ms bar holds by construction, and the
+/// test also bounds it in wall time (loopback mTLS included) so a
+/// future regression to store enumeration fails loudly.
+#[tokio::test]
+async fn cache_purge_names_route_and_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+    let started = std::time::Instant::now();
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: 15\r\nConnection: close\r\n\r\n{\"route\": \"r1\"}",
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(status, 200, "body: {body}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "purge took {elapsed:?} (the <100ms DW-037 bar)"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["route"], "r1", "the response names what was purged");
+    let epoch = doc["epoch"].as_u64().unwrap();
+    assert!(epoch >= 1, "the epoch advanced (got {epoch})");
+    assert_eq!(
+        server.dp.response_cache().epoch("r1"),
+        epoch,
+        "the dataplane observed the same epoch"
+    );
+}
+
+/// Purge-all invalidates every CURRENT route and lists them.
+#[tokio::test]
+async fn cache_purge_all_names_every_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: 13\r\nConnection: close\r\n\r\n{\"all\": true}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "body: {body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["all"], true);
+    assert_eq!(doc["routes"], serde_json::json!(["r1"]));
+    assert_eq!(doc["routes_invalidated"], 1);
+    assert_eq!(server.dp.response_cache().epoch("r1"), 1);
+}
+
+/// The error shapes: unknown route is 404 naming it; a body that is
+/// neither shape is 400; the wrong method on a known path is 405.
+#[tokio::test]
+async fn cache_purge_error_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-length: 24\r\nConnection: close\r\n\r\n{\"route\": \"nonexistent\"}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 404, "body: {body}");
+    assert!(body.contains("cache_purge_unknown_route"));
+
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-length: 4\r\nConnection: close\r\n\r\n{}{}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("cache_purge_invalid"));
+
+    let (status, _, _) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "GET /cache/purge HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 405);
+
+    // /stats carries the cache block (DW-037).
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        "GET /stats HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\"cache\""),
+        "stats carries the cache block: {body}"
+    );
+}

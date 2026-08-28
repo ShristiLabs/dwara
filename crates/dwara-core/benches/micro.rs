@@ -46,6 +46,7 @@ fn bench_gateway() -> Gateway {
             routes.push(Route {
                 name: format!("route-{i}-{j}"),
                 service: format!("service-{i}"),
+                cache: None,
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,

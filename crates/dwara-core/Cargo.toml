@@ -44,6 +44,8 @@ jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 prometheus = { workspace = true }
+# Local response cache backend (DW-037): see the workspace comment.
+moka = { workspace = true }
 # Response compression codecs (DW-027): see the workspace comment.
 flate2 = { workspace = true }
 brotli = { workspace = true }

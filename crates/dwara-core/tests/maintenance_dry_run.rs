@@ -63,7 +63,7 @@ fn dp_from(yaml: &str) -> Arc<DataPlane> {
 
 /// Republish `yaml` against the running state and refresh the dataplane
 /// — the exact mechanism the binary's reload path drives.
-fn republish(state: &ConfigState, dp: &DataPlane, yaml: &str) {
+fn republish(state: &ConfigState, dp: &Arc<DataPlane>, yaml: &str) {
     let gateway = parse_gateway(yaml).expect("test config parses");
     state
         .compile_and_publish(&gateway)
@@ -87,7 +87,7 @@ fn req_with(path: &str, headers: &[(&str, &str)]) -> Request<Full<Bytes>> {
 }
 
 async fn envelope(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     request: Request<Full<Bytes>>,
 ) -> (StatusCode, serde_json::Value, HeaderMap) {
     let resp = dwara_core::proxy::handle(dp, peer(), request).await;
@@ -101,7 +101,7 @@ async fn envelope(
 /// `envelope` for responses whose body need not be JSON (e.g. a
 /// compressed control response).
 async fn status_and_headers(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     request: Request<Full<Bytes>>,
 ) -> (StatusCode, HeaderMap) {
     let resp = dwara_core::proxy::handle(dp, peer(), request).await;
@@ -121,7 +121,7 @@ fn error_message(json: &serde_json::Value) -> &str {
 
 /// Read one `dwara_policy_dry_run_total{phase,route}` series from the
 /// rendered /metrics text (0 when the series does not exist yet).
-fn dry_run_total(dp: &DataPlane, phase: &str, route: &str) -> u64 {
+fn dry_run_total(dp: &Arc<DataPlane>, phase: &str, route: &str) -> u64 {
     let text = dp.observability().render();
     let want = format!("dwara_policy_dry_run_total{{phase=\"{phase}\",route=\"{route}\"}}");
     for line in text.lines() {

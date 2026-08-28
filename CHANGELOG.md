@@ -9,6 +9,17 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Route-scoped response caching (DW-037): a local cache behind the
+  `CacheStore` extension seam (moka-backed, byte-weighed, per-entry
+  TTL) with per-consumer keys folding the effective vary set
+  (configured + `Accept`/`Origin` policy folds), TTL freshness,
+  stale-while-revalidate with bounded single-flight background
+  revalidation, ETag/If-None-Match 304 semantics, `x-cache` hit/stale/
+  miss/bypass/revalidated stamps, closed-label metrics, an O(1)
+  epoch-based purge endpoint on the admin API (<100 ms at any store
+  size), and automatic invalidation on any config change to a route.
+  Stored bodies are the post-masking/post-transform identity bytes;
+  the decoration tail re-runs on every replay.
 - Cargo workspace scaffold: `dwara-core`, `dwara-bin`, `dwara-admin`,
   `dwara-cli`; pinned toolchain; strict fmt/clippy gates; runnable
   hello-listener (DW-001).

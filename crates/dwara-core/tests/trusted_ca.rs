@@ -219,7 +219,7 @@ fn launch_with_state(yaml: &str) -> (Arc<DataPlane>, ActiveProbes, Arc<ConfigSta
 /// fine — `compile_and_publish` always advances the generation), rebuild
 /// the (snapshot, registry) pair, and respawn the probe loops against the
 /// new registry. Mirrors `dwara_bin::reload` exactly.
-fn force_reload(dp: &DataPlane, probes: &mut ActiveProbes, state: &ConfigState, yaml: &str) {
+fn force_reload(dp: &Arc<DataPlane>, probes: &mut ActiveProbes, state: &ConfigState, yaml: &str) {
     let gateway = parse_gateway(yaml).expect("reload config parses");
     state
         .compile_and_publish(&gateway)
@@ -232,7 +232,7 @@ fn peer() -> std::net::IpAddr {
     "127.0.0.1".parse().unwrap()
 }
 
-async fn send(dp: &DataPlane, path: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
+async fn send(dp: &Arc<DataPlane>, path: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
     let mut builder = Request::builder().uri(path);
     for (n, v) in headers.iter().copied() {
         builder = builder.header(n, v);
@@ -246,7 +246,7 @@ async fn send(dp: &DataPlane, path: &str, headers: &[(&str, &str)]) -> (StatusCo
 
 /// Poll the upstream's sole endpoint tracker until it reports `want`
 /// (bounded; no sleep-sync — the probes themselves are the event source).
-async fn wait_endpoint_available(dp: &DataPlane, want: bool, deadline: Duration) -> bool {
+async fn wait_endpoint_available(dp: &Arc<DataPlane>, want: bool, deadline: Duration) -> bool {
     let handle = dp.registry().get("pool").expect("handle");
     let lb = handle.lb();
     let start = Instant::now();

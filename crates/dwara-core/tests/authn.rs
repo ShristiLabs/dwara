@@ -63,7 +63,7 @@ fn peer() -> IpAddr {
 }
 
 async fn send_with(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     path: &str,
     headers: Vec<(&str, &str)>,
 ) -> (StatusCode, HeaderMap, String) {
@@ -1946,7 +1946,7 @@ fn client_cert_with_cn(cn: &str) -> rcgen::Certificate {
 }
 
 async fn send_with_cert(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     path: &str,
     headers: Vec<(&str, &str)>,
     cert: Option<Arc<ClientCertificate>>,

@@ -72,6 +72,10 @@ export default withMermaid(
                   link: "/guide/masking",
                 },
                 {
+                  text: "Response caching",
+                  link: "/guide/caching",
+                },
+                {
                   text: "API versioning",
                   link: "/guide/api-versioning",
                 },

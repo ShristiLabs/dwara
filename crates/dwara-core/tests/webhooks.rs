@@ -94,7 +94,7 @@ async fn wait_for_hooks(captured: &Arc<Mutex<Vec<Hook>>>, n: usize) -> Vec<Hook>
 
 /// Bounded poll until the rendered metrics contain the
 /// `dwara_webhook_events_total` series for `kind`/`outcome`.
-async fn wait_for_outcome(dp: &DataPlane, kind: &str, outcome: &str) {
+async fn wait_for_outcome(dp: &Arc<DataPlane>, kind: &str, outcome: &str) {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         refresh_event_gauges(dp.events(), dp.observability());

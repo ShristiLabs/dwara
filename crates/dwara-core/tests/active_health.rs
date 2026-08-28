@@ -134,7 +134,7 @@ fn launch(gw: &Gateway) -> (Arc<DataPlane>, ActiveProbes) {
 
 /// Tracker of endpoint `idx`'s current availability, polled until `want`
 /// or the deadline. Returns the elapsed time at the observed state.
-async fn wait_available(dp: &DataPlane, idx: usize, want: bool, deadline: Duration) -> bool {
+async fn wait_available(dp: &Arc<DataPlane>, idx: usize, want: bool, deadline: Duration) -> bool {
     let handle = dp.registry().get("pool").expect("handle");
     let lb = handle.lb();
     let start = Instant::now();
@@ -444,6 +444,7 @@ async fn reserved_paths_shadow_configured_routes() {
             routes: vec![
                 Route {
                     name: "steal-liveness".into(),
+                    cache: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {
@@ -477,6 +478,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 },
                 Route {
                     name: "catch".into(),
+                    cache: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {

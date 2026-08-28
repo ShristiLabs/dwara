@@ -40,6 +40,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
   per-consumer-group redaction of response JSON fields (the inverted
   DW-028 gates: encoded/non-JSON/over-cap/pointer-miss all 502), the
   union-only group rule, and the audit trail (DW-029).
+- [Response caching](./features/caching.md) — the local cache behind
+  the `CacheStore` seam: per-consumer keys with Vary folding, TTL +
+  stale-while-revalidate + ETag revalidation, epoch invalidation
+  (purge/config-change), and the zero-buffering bounds (DW-037).
 - [Maintenance mode and policy dry-run](./features/maintenance-dry-run.md)
   — the per-route 503 + Retry-After availability short-circuit and
   the per-attachment monitor flags on every rejecting policy phase,

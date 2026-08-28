@@ -500,6 +500,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         }],
         routes: vec![Route {
             name: "r".into(),
+            cache: None,
             service: "s".into(),
             r#match: RouteMatch {
                 path: PathMatch {

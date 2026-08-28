@@ -1023,6 +1023,124 @@ fn validate_security_headers(
     }
 }
 
+/// Validate one `cache` block (DW-037): bounded ttl/stale window/body
+/// cap, and a vary list whose entries are real header names, dedupli-
+/// cated, and not one of the names the variance model forbids (the
+/// grammar lives in `config::cache`, the same validate/compile split
+/// as every other route block).
+fn validate_route_cache(
+    name: &str,
+    cache: &crate::config::cache::RouteCache,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    use crate::config::cache::{
+        forbidden_vary_reason, MAX_CACHE_MAX_BODY_BYTES, MAX_CACHE_STALE_SECS, MAX_CACHE_TTL_SECS,
+        MAX_CACHE_VARY_HEADERS,
+    };
+    if cache.ttl_secs == 0 {
+        issues.push(issue(
+            "route",
+            name,
+            "cache.ttl_secs",
+            "ttl_secs must be >= 1 (a zero lifetime would expire every entry immediately; \
+             omit the cache block to disable caching)",
+        ));
+    } else if cache.ttl_secs > MAX_CACHE_TTL_SECS {
+        issues.push(issue(
+            "route",
+            name,
+            "cache.ttl_secs",
+            format!(
+                "ttl_secs must be <= {MAX_CACHE_TTL_SECS} (24 h; longer freshness belongs to a \
+                 CDN in front of the gateway)"
+            ),
+        ));
+    }
+    if let Some(swr) = cache.stale_while_revalidate_secs {
+        if swr > MAX_CACHE_STALE_SECS {
+            issues.push(issue(
+                "route",
+                name,
+                "cache.stale_while_revalidate_secs",
+                format!(
+                    "stale_while_revalidate_secs must be <= {MAX_CACHE_STALE_SECS} (24 h, \
+                     symmetric with the ttl bound)"
+                ),
+            ));
+        }
+    }
+    if cache.max_body_bytes == 0 {
+        issues.push(issue(
+            "route",
+            name,
+            "cache.max_body_bytes",
+            "max_body_bytes must be >= 1 (0 would store nothing; omit the cache block to \
+             disable caching)",
+        ));
+    } else if cache.max_body_bytes > MAX_CACHE_MAX_BODY_BYTES {
+        issues.push(issue(
+            "route",
+            name,
+            "cache.max_body_bytes",
+            format!(
+                "max_body_bytes must be <= {MAX_CACHE_MAX_BODY_BYTES} (16 MiB; larger bodies \
+                 stream through unstored)"
+            ),
+        ));
+    }
+    if cache.vary.len() > MAX_CACHE_VARY_HEADERS {
+        issues.push(issue(
+            "route",
+            name,
+            "cache.vary",
+            format!(
+                "at most {MAX_CACHE_VARY_HEADERS} vary headers per route (each multiplies the \
+                 entry key space)"
+            ),
+        ));
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for (i, raw) in cache.vary.iter().enumerate() {
+        let trimmed = raw.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        let field = format!("cache.vary[{i}]");
+        if lowered.is_empty()
+            || lowered != trimmed
+            || lowered.starts_with('-')
+            || lowered.ends_with('-')
+            || !lowered
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'-' || b.is_ascii_digit())
+        {
+            issues.push(issue(
+                "route",
+                name,
+                &field,
+                format!("'{raw}' is not a header name (use the trimmed lowercase form)"),
+            ));
+            continue;
+        }
+        if let Some(reason) = forbidden_vary_reason(&lowered) {
+            issues.push(issue(
+                "route",
+                name,
+                &field,
+                format!("'{lowered}' cannot vary: {reason}"),
+            ));
+            continue;
+        }
+        if seen.contains(&lowered) {
+            issues.push(issue(
+                "route",
+                name,
+                &field,
+                format!("duplicate vary header '{lowered}' (deduplicate the list)"),
+            ));
+        }
+        seen.push(lowered);
+    }
+}
+
 /// Validate one `masking` block (DW-029): a positive cap, at least one
 /// pointer somewhere (a masking policy that masks nothing is an
 /// authoring mistake), pointers that parse and are not the root, and
@@ -1925,6 +2043,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         if let Some(masking) = &r.masking {
             validate_masking(&r.name, masking, &consumer_groups, &mut issues);
         }
+        // Response caching (DW-037).
+        if let Some(cache) = &r.cache {
+            validate_route_cache(&r.name, cache, &mut issues);
+        }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
         // bare type/subtype can never match and is an authoring error.
@@ -2802,6 +2924,10 @@ pub struct RouteTable {
     /// here; the per-request union with the consumer's groups is
     /// resolved at apply time (group membership is per-request state).
     masking: Vec<Option<crate::config::transforms::CompiledMasking>>,
+    /// Precompiled response-cache policies per route index (DW-037),
+    /// mirroring `routes[idx].cache` with the policy-derived vary folds
+    /// (`match.accept` -> `Accept`, `cors` -> `Origin`) resolved once.
+    caches: Vec<Option<std::sync::Arc<crate::config::cache::CompiledRouteCache>>>,
 }
 
 impl RouteTable {
@@ -2819,6 +2945,7 @@ impl RouteTable {
             request_body_ops: Vec::new(),
             response_body_ops: Vec::new(),
             masking: Vec::new(),
+            caches: Vec::new(),
         }
     }
 
@@ -2918,6 +3045,17 @@ impl RouteTable {
     /// `gateway().routes[idx].masking`).
     pub fn masking(&self, idx: usize) -> Option<&crate::config::transforms::CompiledMasking> {
         self.masking.get(idx).and_then(|m| m.as_ref())
+    }
+
+    /// The precompiled response-cache policy for route `idx` (`None`:
+    /// the route's responses are never cached — exactly mirroring
+    /// `gateway().routes[idx].cache`, with the policy-derived vary
+    /// folds already resolved).
+    pub fn cache(
+        &self,
+        idx: usize,
+    ) -> Option<&std::sync::Arc<crate::config::cache::CompiledRouteCache>> {
+        self.caches.get(idx).and_then(|c| c.as_ref())
     }
 }
 
@@ -3192,6 +3330,22 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 .map(crate::config::transforms::CompiledMasking::compile)
         })
         .collect();
+    // DW-037: compiled cache policies, including the policy-derived
+    // vary folds (`match.accept` -> Accept, `cors` -> Origin) resolved
+    // once here so the request path never re-derives the vary set.
+    let caches = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.cache.as_ref().map(|c| {
+                std::sync::Arc::new(crate::config::cache::CompiledRouteCache::compile(
+                    c,
+                    r.r#match.accept.is_some(),
+                    r.cors.is_some(),
+                ))
+            })
+        })
+        .collect();
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -3208,6 +3362,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             request_body_ops,
             response_body_ops,
             masking,
+            caches,
         }),
         content_hash,
     })

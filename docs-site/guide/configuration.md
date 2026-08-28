@@ -150,7 +150,8 @@ route/gateway-level blocks; see
 [Maintenance and dry-run](./maintenance),
 [CORS, compression, and request limits](./edge-policies),
 [Transforms and security headers](./transforms),
-[Response field masking](./masking), and
+[Response field masking](./masking),
+[Response caching](./caching), and
 [API versioning](./api-versioning).
 
 ## Authentication and authorization

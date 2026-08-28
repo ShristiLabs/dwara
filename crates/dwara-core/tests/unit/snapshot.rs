@@ -21,6 +21,7 @@ fn good_gateway() -> Gateway {
         routes: vec![
             Route {
                 name: "users-get".into(),
+                cache: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -50,6 +51,7 @@ fn good_gateway() -> Gateway {
             },
             Route {
                 name: "static".into(),
+                cache: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -79,6 +81,7 @@ fn good_gateway() -> Gateway {
             },
             Route {
                 name: "legacy".into(),
+                cache: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {

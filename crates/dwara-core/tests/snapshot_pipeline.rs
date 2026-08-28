@@ -34,6 +34,7 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
 fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
     Route {
         name: name.into(),
+        cache: None,
         service: "svc".into(),
         r#match: RouteMatch {
             path: PathMatch {

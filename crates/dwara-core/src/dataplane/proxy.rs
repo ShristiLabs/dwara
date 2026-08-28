@@ -237,8 +237,8 @@ use http_body_util::Full;
 use hyper::body::Body as _;
 use hyper::body::Bytes;
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONNECTION, COOKIE, HOST, LOCATION,
-    ORIGIN, UPGRADE,
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONNECTION, COOKIE, HOST, IF_NONE_MATCH,
+    LOCATION, ORIGIN, UPGRADE,
 };
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
@@ -267,9 +267,11 @@ use crate::state::store::StateStore;
 /// Body type of every proxied/gateway-generated response: a small
 /// fully-buffered gateway message (`Full`), the untouched streaming
 /// upstream body ([`UpstreamBody`]: the pooled stream wrapped with the
-/// DW-014 write-timeout / mid-body health-report knobs), or a route-
+/// DW-014 write-timeout / mid-body health-report knobs), a route-
 /// compressed stream ([`crate::dataplane::compression::CompressedBody`], DW-027 — the codec wrapper
-/// around either of the other two).
+/// around either of the other two), or an over-cap cache passthrough
+/// ([`crate::dataplane::response_cache::PassthroughBody`], DW-037 —
+/// the buffered prefix followed by the untouched remainder).
 pub enum ProxyBody {
     /// Small fully-buffered gateway message (envelope, respond action,
     /// metrics/health payloads).
@@ -278,6 +280,11 @@ pub enum ProxyBody {
     Upstream(UpstreamBody),
     /// Route-compressed response body (DW-027).
     Compressed(Box<crate::dataplane::compression::CompressedBody>),
+    /// Cache over-cap passthrough (DW-037): a body that began
+    /// buffering for the response cache, crossed the route's
+    /// `max_body_bytes` cap mid-stream, and continues streaming the
+    /// original bytes exactly as if no cache existed.
+    Passthrough(crate::dataplane::response_cache::PassthroughBody),
 }
 
 /// Error of a [`ProxyBody`]: upstream stream failure or a compression
@@ -316,6 +323,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Full(b) => Pin::new(b).poll_frame(cx).map_err(|e| match e {}),
             ProxyBody::Upstream(b) => Pin::new(b).poll_frame(cx).map_err(ProxyBodyError::Upstream),
             ProxyBody::Compressed(b) => Pin::new(b.as_mut()).poll_frame(cx),
+            ProxyBody::Passthrough(b) => Pin::new(b).poll_frame(cx),
         }
     }
 
@@ -324,6 +332,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Full(b) => b.is_end_stream(),
             ProxyBody::Upstream(b) => b.is_end_stream(),
             ProxyBody::Compressed(b) => b.is_end_stream(),
+            ProxyBody::Passthrough(b) => b.is_end_stream(),
         }
     }
 
@@ -332,6 +341,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Full(b) => b.size_hint(),
             ProxyBody::Upstream(b) => b.size_hint(),
             ProxyBody::Compressed(b) => b.size_hint(),
+            ProxyBody::Passthrough(b) => b.size_hint(),
         }
     }
 }
@@ -409,8 +419,8 @@ pub fn resolve_priority(consumer: Option<&Consumer>, route: &Route) -> u8 {
 /// One configuration generation coupled with the upstream pools built from
 /// it. Requests resolve routes AND upstreams from the same pair, so a
 /// reload can never mix a new route table with old pools.
-struct Generation {
-    snapshot: Arc<Snapshot>,
+pub(super) struct Generation {
+    pub(super) snapshot: Arc<Snapshot>,
     registry: Arc<UpstreamRegistry>,
 }
 
@@ -491,6 +501,13 @@ pub struct DataPlane {
     #[allow(dead_code)]
     webhook_targets_anchor:
         tokio::sync::watch::Receiver<Arc<Vec<crate::events::webhook::WebhookTarget>>>,
+    /// The local response cache (DW-037): the store backend, route
+    /// epochs, and the revalidation guard. RUNTIME STATE on the
+    /// dataplane (like the priority counters), deliberately NOT part of
+    /// a generation — it survives reloads; config changes reach it
+    /// through epoch bumps computed at `refresh` (see
+    /// `response_cache::ResponseCache::note_generation`).
+    response_cache: Arc<crate::dataplane::response_cache::ResponseCache>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -588,6 +605,7 @@ impl DataPlane {
             events,
             webhook_targets: target_tx,
             webhook_targets_anchor: target_anchor,
+            response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -682,15 +700,21 @@ impl DataPlane {
     pub fn refresh(&self) {
         let snapshot = self.state.snapshot();
         let generation = snapshot.generation();
+        let previous = self.current();
         let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous_and_events(
             &snapshot,
-            &self.current().registry,
+            &previous.registry,
             Some(&self.events.emitter()),
         ));
         self.global_cap
             .store(Arc::new(global_cap_of(snapshot.gateway())));
         self.rate_limits
             .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
+        // DW-037: cache epochs advance for every route whose definition
+        // changed between generations (stored bytes were shaped by the
+        // old masking/transform/policy); unchanged routes stay warm.
+        self.response_cache
+            .note_generation(Some(previous.snapshot.as_ref()), &snapshot);
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
         self.obs.set_config_generation(generation);
@@ -706,7 +730,10 @@ impl DataPlane {
         self.rebuild_authn();
     }
 
-    fn current(&self) -> Arc<Generation> {
+    /// The current (snapshot, registry) generation pair. pub(super):
+    /// the response cache's background revalidation (DW-037) resolves
+    /// routes through the same generation the dataplane serves.
+    pub(super) fn current(&self) -> Arc<Generation> {
         self.current.load_full()
     }
 
@@ -726,6 +753,14 @@ impl DataPlane {
     /// events emit onto it; `spawn_webhook_deliverer` drains it.
     pub fn events(&self) -> &Arc<crate::events::EventBus> {
         &self.events
+    }
+
+    /// The local response cache (DW-037): lookup/store stages run from
+    /// `handle`, the admin purge endpoint and the metrics gauge walk
+    /// read from here. Shared as an `Arc` because stale-while-revalidate
+    /// spawns background revalidations that outlive the request.
+    pub fn response_cache(&self) -> &Arc<crate::dataplane::response_cache::ResponseCache> {
+        &self.response_cache
     }
 
     /// A fresh receiver of the CURRENT webhook target set (DW-044);
@@ -821,6 +856,10 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
             let rate_limits = dp.rate_limits.load_full();
             refresh_rate_limiter_gauges(&rate_limits, obs);
             crate::events::refresh_event_gauges(&dp.events, obs);
+            // DW-037: the cache entries gauge is a scrape-time snapshot
+            // of the backing store's approximate count (the same walk
+            // model as the rate-limiter gauges above).
+            obs.set_cache_entries(dp.response_cache().live_entries());
             Response::builder()
                 .status(StatusCode::OK)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -954,6 +993,9 @@ fn unrouted_response(
 /// Handle one request against the current generation. Never panics; every
 /// failure path is a classified response. Generic over the request body so
 /// tests and alternative frontends can drive it with any streaming body.
+/// Takes the dataplane as an `Arc` reference: the response cache's
+/// stale-while-revalidate path (DW-037) spawns background revalidations
+/// that need the dataplane to outlive the request.
 ///
 /// Observability wrapper (DW-021): resolves the request ID (valid inbound
 /// `X-Request-Id` respected, else generated), opens the root `request`
@@ -962,7 +1004,7 @@ fn unrouted_response(
 /// emits the (sampled) access-log line. Reserved paths (`/healthz`,
 /// `/readyz`, `/metrics`) count under the "unrouted" route label like
 /// 404s (they are not routes).
-pub async fn handle<B>(dp: &DataPlane, peer: IpAddr, req: Request<B>) -> Response<ProxyBody>
+pub async fn handle<B>(dp: &Arc<DataPlane>, peer: IpAddr, req: Request<B>) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -1006,7 +1048,7 @@ where
 }
 
 async fn handle_inner<B>(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     peer: IpAddr,
     mut req: Request<B>,
     rid: &str,
@@ -1566,143 +1608,223 @@ where
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let mut resp = match &route.action {
-        RouteAction::Proxy { .. } => {
-            // Streaming body limit (DW-027): the counting wrapper (a
-            // thin passthrough when the route sets no cap; the
-            // declared-length half was rejected above) guards requests
-            // of unknown length for the whole proxy path.
-            //
-            // Signed-body digest enforcement (DW-036): an
-            // HMAC-authenticated request carries the digest its
-            // signature bound — the digesting wrapper folds every
-            // streamed frame into a SHA-256 (nothing buffered) and
-            // aborts the upstream send when the final hash disagrees.
-            // It sits INSIDE the route's limit wrapper, so an over-cap
-            // body is still rejected 413 first; every other request
-            // (no signed digest) streams through unchanged.
-            let signed_digest = identity.as_ref().and_then(|id| id.body_digest);
-            // Eager verdict for a signed body declaring EXACTLY zero
-            // bytes: hyper's h1 encoder never polls it (see
-            // DigestingBody's docs), so a digest mismatch there has
-            // no mid-stream abort to surface through — refuse with
-            // the family's 401 before the request is forwarded at
-            // all. A correct empty digest forwards normally; unsigned
-            // requests are unaffected.
-            let (parts, body) = req.into_parts();
-            let digesting = crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
-            if digesting.eager_digest_mismatch() {
-                tracing::warn!(
-                    code = "signature_body_mismatch",
-                    request_id = %rid,
-                    "signed empty request body did not match its digest; refused before forward"
-                );
-                unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
-            } else {
-                let req = Request::from_parts(
-                    parts,
-                    crate::dataplane::hardening::LimitedBody::new(
-                        digesting,
-                        // A dry-run limits block (DW-041) leaves the
-                        // streaming guard unarmed: the cap is monitor
-                        // mode, so a body that would have been aborted
-                        // mid-stream flows through.
-                        route
-                            .limits
-                            .as_ref()
-                            .filter(|l| !l.dry_run)
-                            .and_then(|l| l.max_body_bytes),
-                    ),
-                );
-                proxy_request(
-                    &gen,
-                    peer,
-                    req,
-                    route,
-                    idx,
-                    &params,
-                    &mut global_permit,
-                    identity.as_ref(),
-                    rid,
-                    rec,
-                    &dp.obs,
-                )
-                .await
+    // Response cache lookup (DW-037): PROXY-action routes with a cache
+    // block only, AFTER authn/authz/rate limiting/admission (a replay
+    // is still client traffic — it consumed a token and a slot, and no
+    // policy is bypassed by a hit) and BEFORE the breaker/endpoint pick
+    // (a hit contacts no upstream). A Serve short-circuits the action,
+    // masking, and transforms — the stored bytes ARE the post-mask,
+    // post-transform bytes for this exact consumer — and the response
+    // re-enters the pipeline at the store-stage/tail below, so the
+    // decoration tail (compression onward) still runs on every replay.
+    let mut cache_flow: Option<crate::dataplane::response_cache::CacheFlow> = None;
+    let replayed: Option<Response<ProxyBody>> = if let (RouteAction::Proxy { .. }, Some(policy)) =
+        (&route.action, gen.snapshot.route_table().cache(idx))
+    {
+        use crate::dataplane::response_cache::LookupOutcome;
+        match dp
+            .response_cache()
+            .lookup(
+                dp,
+                policy,
+                route,
+                identity.as_ref(),
+                peer,
+                req.uri().path(),
+                req.uri().query(),
+                req.headers(),
+                req.method(),
+                req.body().size_hint().exact(),
+                &dp.obs,
+            )
+            .await
+        {
+            LookupOutcome::Serve(resp) => Some(*resp),
+            LookupOutcome::Bypass => {
+                cache_flow = Some(crate::dataplane::response_cache::CacheFlow::Bypass);
+                None
+            }
+            LookupOutcome::Miss(flow) => {
+                // Conditional revalidation (DW-037): when the lookup
+                // kept an expired entry with a validator and the
+                // client sent none of its own, the forwarded fetch
+                // carries the stored validator — an upstream 304
+                // refreshes the entry without re-sending the body
+                // (the store stage converts it back to a 200).
+                if flow.injected_inm {
+                    if let Some(etag) = flow.stored_etag() {
+                        if let Ok(v) = HeaderValue::from_str(&etag) {
+                            req.headers_mut().insert(&IF_NONE_MATCH, v);
+                        }
+                    }
+                }
+                cache_flow = Some(crate::dataplane::response_cache::CacheFlow::Miss(flow));
+                None
             }
         }
-        RouteAction::Redirect {
-            scheme,
-            host,
-            path: redirect_path,
-            status,
-        } => redirect(
-            &req,
-            scheme.as_deref(),
-            host.as_deref(),
-            redirect_path.as_deref(),
-            *status,
-            rid,
-        ),
-        RouteAction::Respond {
-            status,
-            body,
-            headers,
-        } => respond(*status, body.as_deref(), headers),
+    } else {
+        None
     };
 
-    // Response field masking (DW-029), the decoration tail's FIRST
-    // stage and the security floor of the response path: the effective
-    // pointer set (route floor + the consumer's groups, the union
-    // rule) is replaced with the fixed sentinel BEFORE anything else
-    // can read the body — once masked, the original bytes exist
-    // nowhere in the gateway, so no later stage (operator transforms,
-    // the DW-027 compression codec) can resurrect them; the gateway's
-    // own compression runs later and never trips the encoding gate.
-    // Every gate here FAILS CLOSED (502): masking guards the UPSTREAM's
-    // output, so it applies to PROXY action responses only —
-    // gateway-authored bodies (redirect, respond) carry no upstream
-    // data, and bodiless statuses carry nothing at all.
-    if matches!(&route.action, RouteAction::Proxy { .. }) {
-        if let Some(masking) = gen.snapshot.route_table().masking(idx) {
-            resp = crate::dataplane::transforms::mask_response_body(
-                resp,
-                masking,
-                identity
-                    .as_ref()
-                    .map(|id| id.groups.as_slice())
-                    .unwrap_or(&[]),
-                &route.name,
-                identity.as_ref().map(|id| id.consumer_name.as_str()),
+    let mut resp = if let Some(resp) = replayed {
+        resp
+    } else {
+        let mut resp = match &route.action {
+            RouteAction::Proxy { .. } => {
+                // Streaming body limit (DW-027): the counting wrapper (a
+                // thin passthrough when the route sets no cap; the
+                // declared-length half was rejected above) guards requests
+                // of unknown length for the whole proxy path.
+                //
+                // Signed-body digest enforcement (DW-036): an
+                // HMAC-authenticated request carries the digest its
+                // signature bound — the digesting wrapper folds every
+                // streamed frame into a SHA-256 (nothing buffered) and
+                // aborts the upstream send when the final hash disagrees.
+                // It sits INSIDE the route's limit wrapper, so an over-cap
+                // body is still rejected 413 first; every other request
+                // (no signed digest) streams through unchanged.
+                let signed_digest = identity.as_ref().and_then(|id| id.body_digest);
+                // Eager verdict for a signed body declaring EXACTLY zero
+                // bytes: hyper's h1 encoder never polls it (see
+                // DigestingBody's docs), so a digest mismatch there has
+                // no mid-stream abort to surface through — refuse with
+                // the family's 401 before the request is forwarded at
+                // all. A correct empty digest forwards normally; unsigned
+                // requests are unaffected.
+                let (parts, body) = req.into_parts();
+                let digesting =
+                    crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
+                if digesting.eager_digest_mismatch() {
+                    tracing::warn!(
+                        code = "signature_body_mismatch",
+                        request_id = %rid,
+                        "signed empty request body did not match its digest; refused before forward"
+                    );
+                    unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
+                } else {
+                    let req = Request::from_parts(
+                        parts,
+                        crate::dataplane::hardening::LimitedBody::new(
+                            digesting,
+                            // A dry-run limits block (DW-041) leaves the
+                            // streaming guard unarmed: the cap is monitor
+                            // mode, so a body that would have been aborted
+                            // mid-stream flows through.
+                            route
+                                .limits
+                                .as_ref()
+                                .filter(|l| !l.dry_run)
+                                .and_then(|l| l.max_body_bytes),
+                        ),
+                    );
+                    proxy_request(
+                        &gen,
+                        peer,
+                        req,
+                        route,
+                        idx,
+                        &params,
+                        &mut global_permit,
+                        identity.as_ref(),
+                        rid,
+                        rec,
+                        &dp.obs,
+                    )
+                    .await
+                }
+            }
+            RouteAction::Redirect {
+                scheme,
+                host,
+                path: redirect_path,
+                status,
+            } => redirect(
+                &req,
+                scheme.as_deref(),
+                host.as_deref(),
+                redirect_path.as_deref(),
+                *status,
                 rid,
-            )
-            .await;
+            ),
+            RouteAction::Respond {
+                status,
+                body,
+                headers,
+            } => respond(*status, body.as_deref(), headers),
+        };
+
+        // Response field masking (DW-029), the decoration tail's FIRST
+        // stage and the security floor of the response path: the effective
+        // pointer set (route floor + the consumer's groups, the union
+        // rule) is replaced with the fixed sentinel BEFORE anything else
+        // can read the body — once masked, the original bytes exist
+        // nowhere in the gateway, so no later stage (operator transforms,
+        // the DW-027 compression codec) can resurrect them; the gateway's
+        // own compression runs later and never trips the encoding gate.
+        // Every gate here FAILS CLOSED (502): masking guards the UPSTREAM's
+        // output, so it applies to PROXY action responses only —
+        // gateway-authored bodies (redirect, respond) carry no upstream
+        // data, and bodiless statuses carry nothing at all.
+        if matches!(&route.action, RouteAction::Proxy { .. }) {
+            if let Some(masking) = gen.snapshot.route_table().masking(idx) {
+                resp = crate::dataplane::transforms::mask_response_body(
+                    resp,
+                    masking,
+                    identity
+                        .as_ref()
+                        .map(|id| id.groups.as_slice())
+                        .unwrap_or(&[]),
+                    &route.name,
+                    identity.as_ref().map(|id| id.consumer_name.as_str()),
+                    rid,
+                )
+                .await;
+            }
         }
-    }
 
-    // Response body transforms (DW-028), the tail's stage after
-    // masking: buffers only when the route configured a JSON body
-    // transform AND the response declares a JSON body within the cap —
-    // every other response (SSE, streamed downloads, other content
-    // types, already-encoded) passes untouched, the streaming
-    // guarantee. Before compression so the codec encodes the
-    // TRANSFORMED bytes and the eligibility check below sees the
-    // final Content-Type (header ops may have rewritten it).
-    if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
-        resp = crate::dataplane::transforms::transform_response_body(resp, compiled, rid).await;
-    }
+        // Response body transforms (DW-028), the tail's stage after
+        // masking: buffers only when the route configured a JSON body
+        // transform AND the response declares a JSON body within the cap —
+        // every other response (SSE, streamed downloads, other content
+        // types, already-encoded) passes untouched, the streaming
+        // guarantee. Before compression so the codec encodes the
+        // TRANSFORMED bytes and the eligibility check below sees the
+        // final Content-Type (header ops may have rewritten it).
+        if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
+            resp = crate::dataplane::transforms::transform_response_body(resp, compiled, rid).await;
+        }
 
-    // Response header transforms (DW-028): the operator's final shape
-    // of the upstream's headers, before the gateway's own policy
-    // stamps (compression's Vary/Content-Encoding, versioning, CORS,
-    // security headers, rate headers — each owns headers validation
-    // keeps the ops out of, so no stage here can be undone by an op).
-    if let Some(ops) = route
-        .transforms
-        .as_ref()
-        .and_then(|t| t.response.as_ref())
-        .and_then(|resp_t| resp_t.headers.as_ref())
-    {
-        crate::dataplane::transforms::apply_header_ops(resp.headers_mut(), ops);
+        // Response header transforms (DW-028): the operator's final shape
+        // of the upstream's headers, before the gateway's own policy
+        // stamps (compression's Vary/Content-Encoding, versioning, CORS,
+        // security headers, rate headers — each owns headers validation
+        // keeps the ops out of, so no stage here can be undone by an op).
+        if let Some(ops) = route
+            .transforms
+            .as_ref()
+            .and_then(|t| t.response.as_ref())
+            .and_then(|resp_t| resp_t.headers.as_ref())
+        {
+            crate::dataplane::transforms::apply_header_ops(resp.headers_mut(), ops);
+        }
+
+        resp
+    };
+
+    // Cache store stage (DW-037): the tail's LAST hands on the bytes
+    // before the gateway's own decoration. Stores happen only on the
+    // miss/bypass flows created above; the stage stamps `x-cache`
+    // (hit/stale were stamped at replay), applies the 304-reuse and
+    // storable-rule arms, and buffers — size-capped, this opted-in
+    // path only — the post-masking/post-transform identity bytes into
+    // the CacheStore. Compression and everything after re-run below
+    // for fresh AND replayed responses alike.
+    if let Some(flow) = cache_flow {
+        resp = dp
+            .response_cache()
+            .store_stage(flow, resp, rid, &dp.obs)
+            .await;
     }
 
     // Response compression (DW-027): route-scoped, negotiated against
@@ -2167,8 +2289,10 @@ fn resolve_ref<'a>(
 // Eleven parameters is the price of keeping every input explicit on the
 // per-request proxy path (no per-request allocation of a context struct);
 // DW-021's request id, access record, and metrics are the newest.
+// pub(super): the response cache's background revalidation (DW-037)
+// drives the same forward path with a synthetic conditional GET.
 #[allow(clippy::too_many_arguments)]
-async fn proxy_request<B>(
+pub(super) async fn proxy_request<B>(
     gen: &Generation,
     peer: IpAddr,
     mut req: Request<B>,

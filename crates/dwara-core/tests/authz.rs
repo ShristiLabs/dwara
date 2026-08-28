@@ -86,7 +86,7 @@ fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
 }
 
 async fn send_from(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     peer: IpAddr,
     headers: Vec<(&str, &str)>,
 ) -> (StatusCode, HeaderMap, String) {
@@ -102,7 +102,7 @@ async fn send_from(
     (parts.status, parts.headers, text)
 }
 
-async fn send(dp: &DataPlane, headers: Vec<(&str, &str)>) -> (StatusCode, HeaderMap, String) {
+async fn send(dp: &Arc<DataPlane>, headers: Vec<(&str, &str)>) -> (StatusCode, HeaderMap, String) {
     send_from(dp, ip(10, 0, 0, 1), headers).await
 }
 
@@ -896,7 +896,7 @@ listeners:
 }
 
 async fn send_labeled(
-    dp: &DataPlane,
+    dp: &Arc<DataPlane>,
     listener: Option<&str>,
     headers: Vec<(&str, &str)>,
 ) -> (StatusCode, HeaderMap, String) {

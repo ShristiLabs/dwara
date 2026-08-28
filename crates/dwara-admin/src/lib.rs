@@ -33,7 +33,12 @@
 //!   per-upstream per-endpoint health labels.
 //! - `GET /stats` — cheap live state only: state-store schema version
 //!   (when a store is attached), per-upstream breaker states, the
-//!   active-requests gauge, and the config generation.
+//!   active-requests gauge, the config generation, and the response
+//!   cache's live-entry estimate and purge count (DW-037).
+//! - `POST /cache/purge` — response-cache invalidation (DW-037): body
+//!   `{"route": "<name>"}` or `{"all": true}`; the response names what
+//!   was invalidated. Purge is an O(1) cache-epoch advance, never a
+//!   store enumeration — sub-100 ms at any store size by construction.
 //!
 //! AUTHENTICATION IS THE TLS LAYER (decision 6): the admin listener
 //! REQUIRES a client certificate chaining to the configured CA; there is
@@ -90,6 +95,10 @@ type AdminBody = Full<Bytes>;
 /// before collection), so an oversized body is rejected while it is
 /// still arriving and is never fully buffered in memory.
 const MAX_PATCH_BODY: usize = 4 * 1024 * 1024;
+
+/// Hard cap on a purge body (DW-037): `{"route": "<name>"}` or
+/// `{"all": true}` — a few hundred bytes of JSON at most.
+const MAX_PURGE_BODY: usize = 4096;
 
 /// Everything the admin handlers need: the published-config state, the
 /// dataplane (for refresh/health/stats), the config file path (for
@@ -295,7 +304,83 @@ fn stats_body(ctx: &AdminContext) -> serde_json::Value {
         "breakers": breakers,
         "active_requests": ctx.dp.observability().active_requests().get(),
         "config_generation": snapshot.generation(),
+        "cache": {
+            "entries": ctx.dp.response_cache().live_entries(),
+            "purges": ctx.dp.response_cache().purge_count(),
+        },
     })
+}
+
+/// POST /cache/purge (DW-037): invalidate cached responses. Body is
+/// `{"route": "<name>"}` (one route; 404 when the name is not in the
+/// CURRENT config) or `{"all": true}` (every current route). Purge is
+/// an O(1) cache-epoch advance — the response names exactly what was
+/// invalidated and the epoch it now sits at; the store is never
+/// enumerated, which is why the operation stays well under the 100 ms
+/// bar at any store size.
+async fn purge_cache(ctx: &AdminContext, body: Bytes, request_id: &str) -> Response<AdminBody> {
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            return envelope(
+                400,
+                "cache_purge_invalid",
+                &format!("body is not valid JSON: {err}"),
+                request_id,
+            )
+        }
+    };
+    let snapshot = ctx.state.snapshot();
+    if parsed.get("all").and_then(|v| v.as_bool()) == Some(true) {
+        let names: Vec<String> = snapshot
+            .gateway()
+            .routes
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        let bumped = ctx.dp.response_cache().purge_all(names.iter().cloned());
+        ctx.dp.observability().record_cache_purge("all");
+        tracing::info!(
+            code = "cache_purged",
+            scope = "all",
+            routes = bumped,
+            "cache purged for every current route (epoch advance)"
+        );
+        return json_response(
+            200,
+            serde_json::json!({
+                "all": true,
+                "routes": names,
+                "routes_invalidated": bumped,
+            }),
+        );
+    }
+    let Some(route) = parsed.get("route").and_then(|v| v.as_str()) else {
+        return envelope(
+            400,
+            "cache_purge_invalid",
+            "body must be {\"route\": \"<name>\"} or {\"all\": true}",
+            request_id,
+        );
+    };
+    if !snapshot.gateway().routes.iter().any(|r| r.name == route) {
+        return envelope(
+            404,
+            "cache_purge_unknown_route",
+            &format!("no route named '{route}' in the current config"),
+            request_id,
+        );
+    }
+    let epoch = ctx.dp.response_cache().bump_route(route);
+    ctx.dp.observability().record_cache_purge("route");
+    tracing::info!(
+        code = "cache_purged",
+        scope = "route",
+        route = route,
+        epoch = epoch,
+        "cache purged for route (epoch advance)"
+    );
+    json_response(200, serde_json::json!({ "route": route, "epoch": epoch }))
 }
 
 /// Validate + compile a candidate gateway as a dry run; Err carries a
@@ -462,8 +547,29 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         }
         ("GET", "/health") => json_response(200, health_body(&ctx)),
         ("GET", "/stats") => json_response(200, stats_body(&ctx)),
+        // POST /cache/purge (DW-037): O(1) epoch-advance invalidation;
+        // see `purge_cache` for the body shape and the response that
+        // names what was purged.
+        ("POST", "/cache/purge") => {
+            let limited = Limited::new(req.into_body(), MAX_PURGE_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "cache_purge_too_large",
+                            &format!("purge body exceeds {} bytes", MAX_PURGE_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            purge_cache(&ctx, body, &request_id).await
+        }
         // A known resource path with the wrong method.
-        (_, "/config" | "/health" | "/stats") => envelope(
+        (_, "/config" | "/health" | "/stats" | "/cache/purge") => envelope(
             405,
             "method_not_allowed",
             &format!("{method} not allowed here"),

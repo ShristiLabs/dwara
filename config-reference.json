@@ -1641,6 +1641,17 @@
             }
           ]
         },
+        "cache": {
+          "description": "Route-scoped response caching (DW-037, feature analysis\n5-Protocol): opts the route's cacheable GET traffic into the\nlocal response cache behind the `CacheStore` extension seam.\nAbsent (the default): responses are never cached or buffered.\nThe cache key folds in the route, the consumer, the inbound\npath + query, and the effective vary set — masked (DW-029) and\nconsumer-group-specific variants never cross consumers. Stored\nbodies are the POST-masking/transform bytes (replay consistency\nunder route-scoped policies), stored identity (never compressed;\ncompression re-negotiates per request), and the decoration tail\n(compression onward) re-runs on every replay. See\n[`RouteCache`] and `dataplane::response_cache`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteCache"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "compression": {
           "description": "Route-scoped response compression (DW-027, feature analysis 4.13):\nnegotiates gzip/brotli/zstd against the request's `Accept-Encoding`\nand compresses the response body per policy. Streaming-safe: the\nbody is compressed chunk-by-chunk with a per-chunk flush, never\nbuffered whole. Disabled (absent) by default — the dataplane\nforwards bytes untouched.",
           "anyOf": [
@@ -1863,6 +1874,44 @@
             "status"
           ]
         }
+      ]
+    },
+    "RouteCache": {
+      "description": "Route-scoped response caching policy (DW-037). Absent (the\ndefault): the route's responses are never cached, buffered, or\nstamped with cache headers — bytes flow exactly as before. Presence\nopts the route's GET traffic into the local response cache behind\nthe `CacheStore` extension seam (extensions domain).\n\nSemantics (frozen; enforcement lives in `dataplane::response_cache`):\n\n- Only PROXY-action routes cache. The key folds in the route name,\n  the consumer, the inbound path + query, and the effective vary\n  set's request header values — two consumers (or two vary\n  dimensions) never share an entry.\n- Freshness is the configured `ttl_secs`, full stop: upstream\n  freshness directives other than the storage vetoes\n  (`no-store`/`private`/`no-cache`) are deliberately ignored — the\n  OPERATOR, not the origin, owns how long the gateway holds an\n  entry. Within `stale_while_revalidate_secs` after expiry the\n  entry is served stale while a single background revalidation\n  refreshes it; past that window the next request revalidates\n  synchronously (conditional on the stored validator).\n- `ETag` round-trips: a stored entry's ETag backs client\n  `If-None-Match` 304s from the cache and upstream revalidation\n  (`If-None-Match` on the forwarded fetch; a 304 refreshes the\n  entry without re-sending the body).",
+      "type": "object",
+      "properties": {
+        "max_body_bytes": {
+          "description": "Per-entry body cap in bytes: responses at or under the cap are\nbuffered and stored; larger responses pass through unstored and\nunbuffered (the zero-buffering principle — the cap is the\nbuffering opt-in's hard edge). Absent: 1 MiB. Validation bounds\nthe range [1, 16 MiB].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stale_while_revalidate_secs": {
+          "description": "How long past expiry the entry may be served stale while a\nbackground revalidation runs (DW-037\nstale-while-revalidate). Absent/0: no stale serving — an expired\nentry revalidates synchronously. Validation bounds the value to\n24 hours.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ttl_secs": {
+          "description": "Freshness lifetime, in seconds. Required: a cache entry without\na lifetime is an unbounded staleness bug, so there is no\ndefault. Validation rejects 0 and values above 24 hours.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vary": {
+          "description": "Extra request header names folded into the cache key (the\nconfigured half of the variance model — see the module docs).\nThe policy-derived halves (`Accept` for `match.accept` routes,\n`Origin` for CORS routes) are added at snapshot compile and\nneed not (but may) be listed. Validation rejects duplicates,\nhop-by-hop/framing names, `Authorization`/`Cookie` (requests\ncarrying them are never cacheable, so varying on them is dead\nconfiguration), and `X-Consumer-*` (consumer identity is already\na key component).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ttl_secs"
       ]
     },
     "RouteMatch": {
