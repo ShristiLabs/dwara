@@ -79,6 +79,18 @@
 //! - `dwara_rate_limiter_live_keys` gauge (live per-key cells across
 //!   every compiled rule, approximate, bounded by the sharded store
 //!   cap; aggregate and unlabeled — cardinality is never per key)
+//! - `dwara_webhook_events_total{kind,outcome}` counter (DW-044):
+//!   webhook deliveries by event kind and outcome — `delivered` (2xx
+//!   on some attempt), `failed` (retries exhausted / non-transient
+//!   answer / budget spent), `dropped` (never tried: envelope over the
+//!   byte cap, or delivery concurrency saturated). Both labels are
+//!   closed sets, so cardinality is bounded by construction.
+//! - `dwara_events_dropped_total` / `dwara_events_emitted_total`
+//!   gauges (DW-044, scrape-time snapshots of the event bus's
+//!   monotonic counters — gauges rather than counters so the emit path
+//!   stays a plain atomic with zero registry coupling, the same model
+//!   as the rate-limiter eviction gauge): events dropped at EMIT time
+//!   (full queue / no deliverer) and events handed to the queue.
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -305,6 +317,14 @@ pub struct Observability {
     /// unlabeled (config-bounded cardinality: never per key).
     rate_limiter_evictions: IntGauge,
     rate_limiter_live_keys: IntGauge,
+    /// DW-044: webhook delivery outcomes by (kind, outcome) — both
+    /// labels closed sets (the event kinds and the three outcomes), so
+    /// cardinality is bounded by construction.
+    webhook_events_total: IntCounterVec,
+    /// DW-044: event-bus emit/drop snapshot gauges (see the module
+    /// docs for the gauge-not-counter rationale).
+    events_dropped: IntGauge,
+    events_emitted: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -446,6 +466,32 @@ impl Observability {
              store cap per window).",
         )
         .expect("valid metric definition");
+        let webhook_events_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_webhook_events_total",
+                "Webhook deliveries by event kind and outcome (DW-044). \
+                 outcome: delivered (2xx on some attempt), failed (retries \
+                 exhausted, non-transient answer, or budget spent), dropped \
+                 (never tried: envelope over the byte cap or delivery \
+                 concurrency saturated).",
+            ),
+            &["kind", "outcome"],
+        )
+        .expect("valid metric definition");
+        let events_dropped = IntGauge::new(
+            "dwara_events_dropped_total",
+            "Events dropped at EMIT time (event queue full or no deliverer \
+             draining); scrape-time snapshot of the event bus's monotonic \
+             counter (DW-044).",
+        )
+        .expect("valid metric definition");
+        let events_emitted = IntGauge::new(
+            "dwara_events_emitted_total",
+            "Events handed to the event queue since process start; \
+             scrape-time snapshot of the event bus's monotonic counter \
+             (DW-044).",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -464,6 +510,9 @@ impl Observability {
             Box::new(config_generation.clone()),
             Box::new(rate_limiter_evictions.clone()),
             Box::new(rate_limiter_live_keys.clone()),
+            Box::new(webhook_events_total.clone()),
+            Box::new(events_dropped.clone()),
+            Box::new(events_emitted.clone()),
         ] {
             registry
                 .register(m)
@@ -486,6 +535,9 @@ impl Observability {
             config_generation,
             rate_limiter_evictions,
             rate_limiter_live_keys,
+            webhook_events_total,
+            events_dropped,
+            events_emitted,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -643,6 +695,32 @@ impl Observability {
     /// snapshot setter; see [`Self::set_breaker_state`].
     pub fn set_rate_limiter_live_keys(&self, keys: i64) {
         self.rate_limiter_live_keys.set(keys);
+    }
+
+    /// Count one webhook delivery outcome (DW-044) in
+    /// `dwara_webhook_events_total{kind,outcome}`. `kind` is the
+    /// event-kind spelling, `outcome` one of `delivered`, `failed`,
+    /// `dropped` (the deliverer is the only caller, so both label
+    /// spaces stay the closed sets documented on the family).
+    pub fn record_webhook_event(&self, kind: &str, outcome: &str) {
+        self.webhook_events_total
+            .with_label_values(&[kind, outcome])
+            .inc();
+    }
+
+    /// Set the `dwara_events_dropped_total` gauge (DW-044): events
+    /// dropped at EMIT time. Scrape-time snapshot of the event bus's
+    /// monotonic counter; see [`Self::set_rate_limiter_evictions`] for
+    /// the gauge-not-counter model.
+    pub fn set_events_dropped(&self, dropped: i64) {
+        self.events_dropped.set(dropped);
+    }
+
+    /// Set the `dwara_events_emitted_total` gauge (DW-044): events
+    /// handed to the event queue since process start. Scrape-time
+    /// snapshot setter; see [`Self::set_events_dropped`].
+    pub fn set_events_emitted(&self, emitted: i64) {
+        self.events_emitted.set(emitted);
     }
 
     /// Set the `endpoint_health` gauge for one endpoint (1 available,

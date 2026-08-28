@@ -63,6 +63,18 @@
 //! (`BreakerParams` is resolved per generation, `Breaker` holds state
 //! only, and every method takes the params explicitly — the same
 //! split as `RetryParams`/`RetryBudget`).
+//!
+//! # Events (DW-044)
+//!
+//! A breaker constructed with
+//! [`Breaker::with_clock_and_events`] emits one event
+//! per STATE TRANSITION (never per report): `breaker_opened` (with the
+//! rule that tripped, or "half_open_probe_failed" for a failed probe
+//! re-opening it), `breaker_half_open` (the first admitted probe after
+//! the cooling-off), and `breaker_closed` (a successful probe). Emission
+//! is the event bus's bounded non-blocking hand-off — a full queue drops
+//! and counts, never blocks the report path. A `None` emitter (every
+//! direct/test construction) is a documented no-op.
 
 use std::collections::VecDeque;
 // DW-025: loom-model-checked Mutex under the `loom` dev feature.
@@ -143,6 +155,10 @@ struct BreakerInner {
 pub struct Breaker {
     now_ms: fn() -> u64,
     inner: Mutex<BreakerInner>,
+    /// Transition-event emitter (DW-044); `None` = no event wiring
+    /// (tests, direct construction). Bound to this breaker's upstream
+    /// label at construction; see the module docs.
+    events: Option<crate::events::UpstreamEmitter>,
 }
 
 fn system_now_ms() -> u64 {
@@ -167,12 +183,23 @@ impl Breaker {
     /// New closed breaker with a caller-supplied millisecond clock (Unix
     /// epoch). Intended for tests; production keeps the system clock.
     pub fn with_clock(now_ms: fn() -> u64) -> Self {
+        Breaker::with_clock_and_events(now_ms, None)
+    }
+
+    /// `with_clock` with transition events (DW-044): the upstream
+    /// handle's wiring (the emitter is pre-bound to the upstream's
+    /// label; `None` keeps event emission off).
+    pub fn with_clock_and_events(
+        now_ms: fn() -> u64,
+        events: Option<crate::events::UpstreamEmitter>,
+    ) -> Self {
         Breaker {
             now_ms,
             inner: Mutex::new(BreakerInner {
                 state: BreakerState::Closed { consecutive: 0 },
                 window: VecDeque::new(),
             }),
+            events,
         }
     }
 
@@ -183,6 +210,16 @@ impl Breaker {
             .is_some_and(|&(t, _)| now.saturating_sub(t) >= BREAKER_WINDOW_MS)
         {
             inner.window.pop_front();
+        }
+    }
+
+    /// Emit one transition event (DW-044). Called with the inner lock
+    /// HELD, immediately after the transition is written (so the event
+    /// can never disagree with the state): emission is a `try_send`
+    /// plus an atomic — it never blocks and never fails the transition.
+    fn emit_transition_locked(&self, kind: crate::events::EventKind, detail: Option<&'static str>) {
+        if let Some(events) = &self.events {
+            events.breaker_transition(kind, detail);
         }
     }
 
@@ -204,6 +241,9 @@ impl Breaker {
                     inner.state = BreakerState::HalfOpen {
                         probes_left: params.half_open_probes.saturating_sub(1),
                     };
+                    // DW-044: the cooling-off elapsed and this request
+                    // became the first half-open probe.
+                    self.emit_transition_locked(crate::events::EventKind::BreakerHalfOpen, None);
                     BreakerDecision::Allow
                 }
             }
@@ -239,13 +279,24 @@ impl Breaker {
                 let streak = consecutive + 1;
                 let total = inner.window.len() as u64;
                 let failures = inner.window.iter().filter(|(_, f)| *f).count() as u64;
-                let tripped = streak >= params.consecutive_failures
-                    || (total >= u64::from(params.error_volume)
-                        && failures as f64 / total as f64 >= params.error_ratio);
-                if tripped {
+                let streak_tripped = streak >= params.consecutive_failures;
+                let ratio_tripped = total >= u64::from(params.error_volume)
+                    && failures as f64 / total as f64 >= params.error_ratio;
+                if streak_tripped || ratio_tripped {
                     inner.state = BreakerState::Open {
                         until_ms: now.saturating_add(params.open_ms),
                     };
+                    // DW-044: name the rule that tripped (a stale detail
+                    // would send an operator chasing the wrong knob).
+                    let detail = if streak_tripped {
+                        "consecutive_failures"
+                    } else {
+                        "error_ratio"
+                    };
+                    self.emit_transition_locked(
+                        crate::events::EventKind::BreakerOpened,
+                        Some(detail),
+                    );
                 } else {
                     inner.state = BreakerState::Closed {
                         consecutive: streak,
@@ -258,12 +309,20 @@ impl Breaker {
                     inner.state = BreakerState::Open {
                         until_ms: now.saturating_add(params.open_ms),
                     };
+                    self.emit_transition_locked(
+                        crate::events::EventKind::BreakerOpened,
+                        Some("half_open_probe_failed"),
+                    );
                 } else {
                     // A successful probe closes and RESETS counters (the
                     // window too): stale pre-trip failures must not
                     // instantly re-trip the ratio.
                     inner.state = BreakerState::Closed { consecutive: 0 };
                     inner.window.clear();
+                    self.emit_transition_locked(
+                        crate::events::EventKind::BreakerClosed,
+                        Some("half_open_probe_succeeded"),
+                    );
                 }
             }
             BreakerState::Open { .. } => {

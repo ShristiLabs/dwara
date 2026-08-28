@@ -123,6 +123,7 @@ fn render_contains_families() {
             // (#129 opt-in).
             allow_empty_routes: true,
             hmac_auth: None,
+            webhooks: Vec::new(),
         })
         .expect("publish");
     let registry =

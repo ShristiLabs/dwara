@@ -378,6 +378,15 @@ max_concurrent_requests: 4096
 allow_empty_routes: true
 ```
 
+- `webhooks` (top-level, DW-044): alert/event webhook targets. See
+  "Alert and event webhooks" below.
+
+```yaml
+webhooks:
+  - url: https://hooks.example.com/alerts
+    events: [breaker_opened, endpoint_ejected, config_rejected]
+```
+
 ### Load shedding and priority
 
 Routes and consumers carry an optional `priority` — an integer 0
@@ -1361,6 +1370,23 @@ Cleartext `http` listeners accept HTTP/1.1 and h2c (HTTP/2 prior
 knowledge) — the connection preface is sniffed, no upgrade or ALPN
 needed.
 
+### Alert and event webhooks
+
+`gateway.webhooks` (DW-044) POSTs gateway state changes to HTTP
+endpoints: circuit-breaker transitions (`breaker_opened`,
+`breaker_half_open`, `breaker_closed`), endpoint ejection/recovery
+(`endpoint_ejected`, `endpoint_recovered`), and config lifecycle
+(`config_published`, `config_rejected`). Each delivery is one JSON
+envelope (`id`, `kind`, RFC 3339 `timestamp`, `gateway` instance id,
+`payload`) with bounded retries under ONE total `timeout_ms` budget
+(honoring seconds-form `Retry-After`); events are emitted onto a
+bounded in-process queue with drop-and-count overflow, so a slow, hung,
+or dead webhook target can never affect the dataplane. Header values
+may be `${...}` secret references (resolved at config-compile time,
+redacted in config echoes). See the
+[webhooks guide](./docs-site/guide/webhooks.md) for the full
+contract.
+
 ## Operations
 
 Reload: the config file is watched (the file's directory, so atomic
@@ -1666,6 +1692,12 @@ families:
 - `dwara_rate_limiter_live_keys` — gauge (live per-key rate-limiter
   cells across every compiled rule; aggregate and unlabeled —
   cardinality is never per key)
+- `dwara_webhook_events_total{kind,outcome}` — counter (webhook
+  deliveries by event kind and outcome: `delivered`, `failed`, or
+  `dropped`; both labels closed sets — DW-044)
+- `dwara_events_dropped_total` / `dwara_events_emitted_total` — gauges
+  (scrape-time snapshots of the event bus's counters: events dropped at
+  emit time — full queue or no deliverer — and events queued — DW-044)
 
 Breaker, endpoint-health, fail-open, and rate-limiter series are
 refreshed at scrape time from live state; series for

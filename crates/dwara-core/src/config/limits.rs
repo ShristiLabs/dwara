@@ -43,3 +43,14 @@ pub const MAX_RATE_LIMITER_KEYS_PER_SHARD: usize = 4_096;
 /// attacker floods nonces faster than expiry retires them (a fixed
 /// constant rather than an ops knob).
 pub const MAX_NONCE_CACHE_ENTRIES_PER_SHARD: usize = 4_096;
+
+/// Validation bound on `gateway.webhooks[].max_attempts` (DW-044):
+/// deliveries retry at most this many times in total, so a dead target
+/// cannot occupy its delivery task (or the retry budget) indefinitely.
+pub const MAX_WEBHOOK_ATTEMPTS: u32 = 10;
+
+/// Validation bound on `gateway.webhooks[].timeout_ms` (DW-044): one
+/// minute is the largest per-delivery budget worth waiting on an ALERT
+/// (the gateway is not a durable queue; anything slower should be an
+/// event sink, not a webhook).
+pub const MAX_WEBHOOK_TIMEOUT_MS: u64 = 60_000;

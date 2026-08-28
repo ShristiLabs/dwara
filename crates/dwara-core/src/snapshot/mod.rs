@@ -659,6 +659,163 @@ fn validate_maintenance(
     }
 }
 
+/// Validate the `gateway.webhooks` list (DW-044): every URL must be an
+/// absolute http(s) URL, every `events` entry must name an emitted kind
+/// (unknown spellings are rejected — including `quota_near_limit`,
+/// which arrives with quotas in DW-033), header names/values must be
+/// representable (with `${...}` references resolved NOW, the DW-045
+/// compile-time contract — an unresolvable reference fails the
+/// generation closed, and the issue names the reference, never the
+/// value), the retry knobs must be in bounds, and a duplicate URL is
+/// rejected (two identical targets would double-deliver every event).
+fn validate_webhooks(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let mut seen_urls = std::collections::BTreeSet::new();
+    for (i, hook) in gateway.webhooks.iter().enumerate() {
+        let field = format!("webhooks[{i}]");
+        match hook.url.parse::<hyper::Uri>() {
+            Ok(uri) => {
+                if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none()
+                {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("{field}.url"),
+                        format!(
+                            "'{}' must be an absolute http(s) URL with a host \
+                             (e.g. https://hooks.example.com/alerts)",
+                            hook.url
+                        ),
+                    ));
+                }
+            }
+            Err(_) => issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.url"),
+                format!("'{}' is not a valid URL", hook.url),
+            )),
+        }
+        if !seen_urls.insert(hook.url.trim().to_string()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.url"),
+                format!(
+                    "duplicate webhook url '{}' (an event would be delivered \
+                     twice; merge their events lists instead)",
+                    hook.url
+                ),
+            ));
+        }
+        if hook.events.is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.events"),
+                "events is empty: a webhook subscribing to nothing never fires \
+                 and is always a mistake; omit the entry",
+            ));
+        }
+        for (j, kind) in hook.events.iter().enumerate() {
+            if crate::events::EventKind::from_config(kind).is_none() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{field}.events[{j}]"),
+                    format!(
+                        "unknown event kind '{kind}' (emitted kinds: {}; \
+                         quota_near_limit is reserved for DW-033 and is not \
+                         emitted yet)",
+                        crate::events::EventKind::ALL
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+        for (name, value) in &hook.headers {
+            if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{field}.headers"),
+                    format!("header name '{name}' is not a valid HTTP header name"),
+                ));
+                continue;
+            }
+            // DW-045: resolve the value NOW (literals pass through) so an
+            // unresolvable reference fails the generation closed; then the
+            // RESOLVED bytes must be representable as a header value. The
+            // issue names the header and the reason, never the value.
+            let problem = match crate::config::credentials::resolve_configured_secret(value) {
+                Ok(resolved) => {
+                    if hyper::header::HeaderValue::from_str(&resolved).is_err() {
+                        Some(
+                            "the header value (after secret-reference resolution) \
+                             contains characters that cannot appear in an HTTP \
+                             header value"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+                Err(message) => Some(message),
+            };
+            if let Some(message) = problem {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{field}.headers"),
+                    format!("header '{name}': {message}"),
+                ));
+            }
+        }
+        if hook.timeout_ms == 0 || hook.timeout_ms > crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.timeout_ms"),
+                format!(
+                    "timeout_ms must be in 1..={} (one total budget per delivery, \
+                     shared by every retry attempt)",
+                    crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS
+                ),
+            ));
+        }
+        if hook.max_attempts == 0 || hook.max_attempts > crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+        {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.max_attempts"),
+                format!(
+                    "max_attempts must be in 1..={} (total attempts per delivery)",
+                    crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+                ),
+            ));
+        }
+        if hook.backoff_base_ms == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.backoff_base_ms"),
+                "backoff_base_ms must be > 0",
+            ));
+        }
+        if hook.backoff_cap_ms < hook.backoff_base_ms {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.backoff_cap_ms"),
+                "backoff_cap_ms must be >= backoff_base_ms",
+            ));
+        }
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -720,6 +877,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             ));
         }
     }
+
+    // DW-044: alert/event webhook targets.
+    validate_webhooks(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -2298,6 +2458,7 @@ impl Snapshot {
                 admin: None,
                 allow_empty_routes: false,
                 hmac_auth: None,
+                webhooks: Vec::new(),
             }),
             routes: Arc::new(RouteTable::empty()),
         }
@@ -2495,13 +2656,25 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
 
 /// Holds the currently published [`Snapshot`] behind an `ArcSwap` and owns
 /// the monotonic generation counter. Shared across the dataplane (read) and
-/// the config source / hot reload (write, DW-006).
+/// the config source / hot reload (write, DW-006). May carry the process's
+/// [`crate::events::EventBus`] (DW-044): every publish outcome emits one event
+/// (`config_published` / `config_rejected`) onto it, which is why the bus
+/// sits in a domain BELOW this one.
 pub struct ConfigState {
     snapshot: ArcSwap<Snapshot>,
     generation: AtomicU64,
     /// Serializes publish attempts so generation ids stay gap-free and
     /// monotonic under concurrent writers.
     publish_lock: Mutex<()>,
+    /// The event bus publish outcomes emit onto (DW-044). Attached at
+    /// construction ([`ConfigState::with_event_bus`]) or by the dataplane
+    /// ([`ConfigState::attach_event_bus`], first attach wins). Interior
+    /// mutability because the bus is created before/independently of the
+    /// state in some wiring orders (the binary creates both up front; a
+    /// bare `ConfigState::new` gets one when a `DataPlane` is built from
+    /// it, so config events are never silently missing in a live
+    /// gateway).
+    events: std::sync::RwLock<Option<Arc<crate::events::EventBus>>>,
 }
 
 impl Default for ConfigState {
@@ -2510,6 +2683,7 @@ impl Default for ConfigState {
             snapshot: ArcSwap::from_pointee(Snapshot::empty()),
             generation: AtomicU64::new(0),
             publish_lock: Mutex::new(()),
+            events: std::sync::RwLock::new(None),
         }
     }
 }
@@ -2517,6 +2691,36 @@ impl Default for ConfigState {
 impl ConfigState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// New state with its event bus attached from the start (DW-044):
+    /// the binary's wiring, so the very first (startup) publish already
+    /// emits onto the bus the deliverer will drain.
+    pub fn with_event_bus(bus: Arc<crate::events::EventBus>) -> Self {
+        let state = Self::default();
+        state.attach_event_bus(bus);
+        state
+    }
+
+    /// Attach the event bus if none is attached yet (first attach wins;
+    /// a live bus is never swapped underneath an emitter). Idempotent.
+    pub fn attach_event_bus(&self, bus: Arc<crate::events::EventBus>) {
+        let mut slot = self.events.write().expect("event bus slot poisoned");
+        if slot.is_none() {
+            *slot = Some(bus);
+        }
+    }
+
+    /// The attached event bus, if any (the dataplane adopts/creates it).
+    pub fn event_bus(&self) -> Option<Arc<crate::events::EventBus>> {
+        self.events.read().expect("event bus slot poisoned").clone()
+    }
+
+    /// The emitter for publish outcomes (a no-op handle when no bus is
+    /// attached — `None` at the call site keeps emission optional in
+    /// unwired constructions).
+    fn event_emitter(&self) -> Option<crate::events::Emitter> {
+        self.event_bus().map(|bus| bus.emitter())
     }
 
     /// Currently published snapshot (load is lock-free).
@@ -2527,9 +2731,38 @@ impl ConfigState {
     /// Validate, compile, and atomically publish. On ANY failure the
     /// currently-published snapshot is untouched (rollback = not-published);
     /// the generation counter is only advanced on success.
+    ///
+    /// DW-044: emits `config_published` (generation, content hash, route
+    /// count) on success and `config_rejected` (issue count, plus the
+    /// generation still running) on failure — every publish path (cold
+    /// start, hot reload, admin POST) funnels through here, so one
+    /// emission site covers them all. Emission is the bus's bounded
+    /// non-blocking hand-off; a full queue drops and counts.
     pub fn compile_and_publish(&self, gateway: &Gateway) -> Result<SnapshotInfo, CompileError> {
         let _guard = self.publish_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let compiled = compile(gateway)?;
+        let emitter = self.event_emitter();
+        let compiled = match compile(gateway) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                if let Some(emitter) = &emitter {
+                    let issue_count = match &err {
+                        CompileError::Validation(issues) => issues.len(),
+                        // A compile-stage failure (regex, route conflict)
+                        // is one named problem; its Display carries it.
+                        _ => 1,
+                    };
+                    emitter.emit(
+                        crate::events::EventKind::ConfigRejected,
+                        crate::events::EventPayload {
+                            issue_count: Some(issue_count),
+                            generation: Some(self.snapshot.load().generation),
+                            ..crate::events::EventPayload::default()
+                        },
+                    );
+                }
+                return Err(err);
+            }
+        };
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let snapshot = Snapshot {
             generation,
@@ -2543,6 +2776,17 @@ impl ConfigState {
             route_count: snapshot.gateway.routes.len(),
         };
         self.snapshot.store(Arc::new(snapshot));
+        if let Some(emitter) = &emitter {
+            emitter.emit(
+                crate::events::EventKind::ConfigPublished,
+                crate::events::EventPayload {
+                    generation: Some(info.generation),
+                    content_hash: Some(info.content_hash),
+                    route_count: Some(info.route_count),
+                    ..crate::events::EventPayload::default()
+                },
+            );
+        }
         Ok(info)
     }
 }

@@ -120,6 +120,10 @@ endpoints → `502`; upstream TLS misconfiguration → `500`.
 - `allow_empty_routes` — opt-in flag required to run a gateway with
   zero routes (guards against a truncated/torn config write silently
   dropping all routing while otherwise looking schema-valid).
+- `webhooks` — alert/event webhook targets: gateway state changes
+  (breaker transitions, endpoint ejection/recovery, config
+  published/rejected) POSTed as one JSON envelope, with bounded
+  retries. See [Alert webhooks](./webhooks).
 
 ## Traffic policy
 

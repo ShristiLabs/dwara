@@ -135,6 +135,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         admin: None,
         allow_empty_routes: false,
         hmac_auth: None,
+        webhooks: Vec::new(),
     }
 }
 

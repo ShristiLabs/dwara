@@ -33,7 +33,7 @@ features) are not yet implemented.
 
 ```sh
 cargo build --workspace
-cargo test --workspace            # ~875 tests; suites spawn real servers/binaries
+cargo test --workspace            # ~1090 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -97,6 +97,10 @@ crates/dwara-core/src/
                       AnalyticsSink, SecretSource) + local impls
   observability.rs    spans, access logs, metrics registry, envelope;
                       exposes plain setters only, depends on nothing
+  events/             the in-process event bus (DW-044) and the
+                      budget-bounded webhook deliverer; sits BELOW
+                      snapshot because the config publish pipeline and
+                      the resilience state machines both emit onto it
   state/              SQLite store + migrations
   security/           tls, authn, authz
   resilience/         health, retries, breaker (passive observation)
@@ -111,11 +115,12 @@ Dependency direction is strictly downward and **enforced in CI** by
 ```
 config          <- everything
 extensions      <- config
-snapshot        <- config
 observability   <- (none)
+events          <- config, observability
+snapshot        <- config, events
 state           <- config
 security        <- config, state, observability
-resilience      <- config, snapshot, extensions, observability
+resilience      <- config, snapshot, extensions, observability, events
 dataplane       <- all of the above
 bin/admin/cli   <- dwara-core (presentation layer)
 ```
@@ -285,6 +290,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
+| Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |

@@ -11,7 +11,8 @@ cases in `admin_api` (dwara-admin); unit level in
 `tests/unit/{credentials,secrets}.rs`. DW-045 / #46.
 
 Secret-bearing config fields — today `consumers[].credentials[]`
-`api_key.key` and `hmac.secret` (DW-036) — carry either the value
+`api_key.key`, `hmac.secret` (DW-036), and `gateway.webhooks[].headers`
+values (DW-044) — carry either the value
 INLINE or a `${...}` REFERENCE.
 Inline values remain accepted for backward compatibility, but they are
 redacted in every config echo (below); references are the recommended

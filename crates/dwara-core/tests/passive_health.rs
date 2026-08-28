@@ -610,6 +610,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         // health, not routing (#129 opt-in).
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -803,6 +804,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         admin: None,
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1056,6 +1058,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         // suite's issue assertions scoped to the upstream entity (#129).
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     }
 }
 

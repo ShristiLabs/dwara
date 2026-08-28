@@ -472,6 +472,25 @@ pub struct DataPlane {
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
     obs: Arc<Observability>,
+    /// The event bus (DW-044): adopted from the state's bus when one is
+    /// attached, else created here AND attached back to the state, so a
+    /// live gateway always has exactly one bus shared by the config
+    /// publish pipeline and the dataplane's state machines. Breaker
+    /// transitions, endpoint ejection/recovery, and config
+    /// published/rejected emit onto it; the webhook deliverer drains it.
+    events: Arc<crate::events::EventBus>,
+    /// The compiled webhook targets of the CURRENT generation (DW-044),
+    /// pushed to the deliverer task over this watch channel by every
+    /// `refresh` (config changes apply to the next event, no deliverer
+    /// restart).
+    webhook_targets: tokio::sync::watch::Sender<Arc<Vec<crate::events::webhook::WebhookTarget>>>,
+    /// The construction-time receiver of `webhook_targets`, held for the
+    /// dataplane's lifetime so the watch channel is never CLOSED between
+    /// construction and the deliverer's spawn (a closed watch silently
+    /// drops every `refresh` send; the deliverer subscribes later).
+    #[allow(dead_code)]
+    webhook_targets_anchor:
+        tokio::sync::watch::Receiver<Arc<Vec<crate::events::webhook::WebhookTarget>>>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -536,9 +555,25 @@ impl DataPlane {
     pub fn new(state: Arc<ConfigState>) -> Arc<Self> {
         let snapshot = state.snapshot();
         let generation = snapshot.generation();
-        let registry = Arc::new(UpstreamRegistry::from_snapshot(&snapshot));
+        // DW-044: exactly one bus per (state, dataplane) pair — adopt the
+        // state's, or create one and attach it back so config events are
+        // never silently missing in a live gateway.
+        let events = match state.event_bus() {
+            Some(bus) => bus,
+            None => {
+                let bus = crate::events::EventBus::new();
+                state.attach_event_bus(Arc::clone(&bus));
+                bus
+            }
+        };
+        let registry = Arc::new(UpstreamRegistry::from_snapshot_with_events(
+            &snapshot,
+            Some(&events.emitter()),
+        ));
         let global_cap = global_cap_of(snapshot.gateway());
         let rate_limits = RateLimitEngine::compile(snapshot.gateway());
+        let webhook_targets = Arc::new(compile_webhook_targets(&snapshot));
+        let (target_tx, target_anchor) = tokio::sync::watch::channel(webhook_targets);
         let dp = DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             global_cap: ArcSwap::from_pointee(global_cap),
@@ -550,6 +585,9 @@ impl DataPlane {
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
             obs: Arc::new(Observability::from_env()),
+            events,
+            webhook_targets: target_tx,
+            webhook_targets_anchor: target_anchor,
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -644,9 +682,10 @@ impl DataPlane {
     pub fn refresh(&self) {
         let snapshot = self.state.snapshot();
         let generation = snapshot.generation();
-        let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous(
+        let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous_and_events(
             &snapshot,
             &self.current().registry,
+            Some(&self.events.emitter()),
         ));
         self.global_cap
             .store(Arc::new(global_cap_of(snapshot.gateway())));
@@ -655,6 +694,15 @@ impl DataPlane {
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
         self.obs.set_config_generation(generation);
+        // DW-044: the new generation's webhook targets (secret references
+        // re-resolved at compile) apply from the next event on.
+        let compiled = Arc::new(compile_webhook_targets(&self.state.snapshot()));
+        if self.webhook_targets.send(compiled).is_err() {
+            tracing::error!(
+                code = "webhook_targets_watch_closed",
+                "webhook target watch channel closed; deliveries will keep using the last set"
+            );
+        }
         self.rebuild_authn();
     }
 
@@ -672,6 +720,51 @@ impl DataPlane {
     /// /metrics rendering, and the access-log sampling knob.
     pub fn observability(&self) -> &Observability {
         &self.obs
+    }
+
+    /// This dataplane's event bus (DW-044): breaker/ejection/config
+    /// events emit onto it; `spawn_webhook_deliverer` drains it.
+    pub fn events(&self) -> &Arc<crate::events::EventBus> {
+        &self.events
+    }
+
+    /// A fresh receiver of the CURRENT webhook target set (DW-044);
+    /// updates on every `refresh`. Tests driving the deliverer directly
+    /// (without [`DataPlane::spawn_webhook_deliverer`]) use this.
+    pub fn webhook_targets(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Arc<Vec<crate::events::webhook::WebhookTarget>>> {
+        self.webhook_targets.subscribe()
+    }
+
+    /// Spawn the webhook deliverer (DW-044) against this dataplane's bus,
+    /// target set, and metrics: one background task that drains the event
+    /// queue and POSTs matching events to the configured targets (see
+    /// `events::webhook` for the delivery contract). Exactly one
+    /// deliverer per dataplane: a second call logs and returns an
+    /// already-finished handle (the bus's single-consumer receiver is
+    /// gone). The task stops on `shutdown` (or when the dataplane is
+    /// dropped and the bus closes).
+    pub fn spawn_webhook_deliverer(
+        self: &Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        match self.events.take_receiver() {
+            Some(rx) => tokio::spawn(crate::events::webhook::run_deliverer(
+                rx,
+                self.webhook_targets(),
+                Arc::clone(&self.obs),
+                shutdown,
+            )),
+            None => {
+                tracing::error!(
+                    code = "webhook_deliverer_already_running",
+                    "webhook deliverer already spawned for this dataplane; \
+                     ignoring the duplicate spawn"
+                );
+                tokio::spawn(async {})
+            }
+        }
     }
 
     /// The current generation's upstream registry. Used by the
@@ -727,6 +820,7 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
             refresh_observation_gauges(&dp.current().registry, obs);
             let rate_limits = dp.rate_limits.load_full();
             refresh_rate_limiter_gauges(&rate_limits, obs);
+            crate::events::refresh_event_gauges(&dp.events, obs);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -749,6 +843,32 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
 pub fn refresh_rate_limiter_gauges(engine: &RateLimitEngine, obs: &Observability) {
     obs.set_rate_limiter_evictions(engine.evictions() as i64);
     obs.set_rate_limiter_live_keys(engine.live_keys() as i64);
+}
+
+/// Compile one generation's webhook targets (DW-044). Validation
+/// already resolved every secret reference at publish; this re-resolves
+/// per build (the same validate-then-resolve backstop as the
+/// authenticator's credentials): a target whose reference broke between
+/// validate and build is skipped with a loud error — never delivered
+/// with placeholder bytes, never fatal to the generation.
+fn compile_webhook_targets(snapshot: &Snapshot) -> Vec<crate::events::webhook::WebhookTarget> {
+    snapshot
+        .gateway()
+        .webhooks
+        .iter()
+        .filter_map(
+            |cfg| match crate::events::webhook::WebhookTarget::compile(cfg) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    tracing::error!(
+                        code = "webhook_target_unusable",
+                        "webhook target skipped for this generation (fail closed): {error}"
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
 }
 
 /// The response for UNROUTED traffic (#123): a request whose path

@@ -259,6 +259,31 @@ the project follows semantic versioning once 1.0 is reached.
   so the credential is config-served only, held zeroized in memory, and
   the credential pepper deliberately does not apply;
   `config-reference.json` regenerated.
+- Alert and event webhooks (DW-044): `gateway.webhooks` POSTs gateway
+  state changes to operator-configured HTTP endpoints as one stable
+  JSON envelope (`id`, `kind`, RFC 3339 `timestamp`, `gateway`
+  instance id, `payload` of bounded labels/numbers only). Emitted
+  events: circuit-breaker transitions (`breaker_opened` with the rule
+  that tripped, `breaker_half_open`, `breaker_closed`), endpoint
+  ejection and recovery (`endpoint_ejected`, `endpoint_recovered`),
+  and config lifecycle (`config_published` with generation/hash/routes,
+  `config_rejected` with the validation issue count — every publish
+  path, startup/reload/admin, emits). Emission rides a bounded
+  in-process event bus (new `events` domain, below `snapshot` so the
+  publish pipeline and the resilience state machines share one queue):
+  a full queue drops and counts (`dwara_events_dropped_total`), never
+  blocks the dataplane. Delivery runs on a background task with
+  bounded-concurrency per-delivery tasks, retries for transport
+  failures and 429/502/503/504 (honoring seconds-form `Retry-After`),
+  exponential backoff, and ONE total `timeout_ms` budget per delivery
+  shared by every attempt — a slow, hung, or dead target can never
+  affect the gateway. Outcomes land in
+  `dwara_webhook_events_total{kind,outcome}` (delivered/failed/dropped;
+  both labels closed sets). Webhook header values accept `${...}`
+  secret references (DW-045 grammar, resolved at config-compile time)
+  and inline values are redacted in config echoes; validation checks
+  URL shape, known event kinds (quota events arrive with quotas,
+  DW-033), header legality, duplicate URLs, and retry-knob bounds.
 - API versioning aids (DW-048): a new `match.accept` route criterion
   for media-type version selection — a bare `type/subtype` (e.g.
   `application/vnd.acme.v2+json`) that the request's `Accept` header

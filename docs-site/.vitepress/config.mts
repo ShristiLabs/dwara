@@ -71,6 +71,10 @@ export default withMermaid(
                   text: "Maintenance and dry-run",
                   link: "/guide/maintenance",
                 },
+                {
+                  text: "Alert webhooks",
+                  link: "/guide/webhooks",
+                },
                 { text: "Secrets", link: "/guide/secrets" },
                 {
                   text: "HMAC signing",

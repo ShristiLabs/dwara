@@ -112,6 +112,15 @@ pub const DEFAULT_CONNECTION_CAP: u32 = 64;
 /// Default connect timeout when `timeouts.connect_ms` is absent.
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
 
+/// System millisecond clock for a freshly built breaker (the breaker's
+/// own `system_now_ms` is private to its module).
+fn system_now_ms_for_breaker() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Error sending a request to an upstream.
 #[derive(Debug)]
 pub enum UpstreamError {
@@ -948,10 +957,15 @@ fn build_handle(
     u: &Upstream,
     root_store: rustls::RootCertStore,
     previous: Option<&Arc<UpstreamHandle>>,
+    events: Option<&crate::events::Emitter>,
 ) -> Arc<UpstreamHandle> {
     let cap = effective_cap(u);
     let connect_timeout = effective_connect_timeout(u);
     let stats = Arc::new(UpstreamStats::default());
+    // DW-044: one upstream-labeled emitter for this handle's state
+    // machines — the breaker's transitions and (via the balancer) the
+    // endpoint trackers' ejection/recovery events.
+    let upstream_events = events.map(|em| em.for_upstream(&u.name));
 
     let mut http = HttpConnector::new();
     http.set_connect_timeout(None); // our timeout wraps dial + TLS handshake
@@ -1011,29 +1025,40 @@ fn build_handle(
     let previous_lb = previous.map(|h| h.lb());
     let lb = match previous_lb {
         Some(prev) => {
-            prev.rebuild_with_health(
+            prev.rebuild_with_health_and_events(
                 &u.endpoints,
                 u.load_balancer,
                 effective_slow_start(u),
                 u.health.as_ref(),
+                upstream_events.as_ref(),
             );
             Arc::clone(prev)
         }
-        None => crate::dataplane::balance::UpstreamLb::new_with_health(
+        None => crate::dataplane::balance::UpstreamLb::new_with_health_and_events(
             &u.endpoints,
             u.load_balancer,
             effective_slow_start(u),
             u.health.as_ref(),
+            upstream_events.as_ref(),
         ),
     };
     let retry_budget = previous
         .map(|h| Arc::clone(h.retry_budget()))
         .unwrap_or_else(|| Arc::new(RetryBudget::new()));
     // Breaker state carries across reloads; PARAMETERS apply from the new
-    // config (the RetryBudget/RetryParams split, verbatim).
-    let breaker = previous
-        .map(|h| Arc::clone(h.breaker()))
-        .unwrap_or_else(|| Arc::new(Breaker::new()));
+    // config (the RetryBudget/RetryParams split, verbatim). A carried
+    // breaker keeps its emitter binding (state-only object; the emitter
+    // is per-dataplane and stable); a fresh one binds it here (DW-044).
+    let breaker =
+        previous
+            .map(|h| Arc::clone(h.breaker()))
+            .unwrap_or_else(|| match &upstream_events {
+                Some(events) => Arc::new(Breaker::with_clock_and_events(
+                    system_now_ms_for_breaker,
+                    Some(events.clone()),
+                )),
+                None => Arc::new(Breaker::new()),
+            });
 
     Arc::new(UpstreamHandle {
         name: u.name.clone(),
@@ -1082,6 +1107,30 @@ impl UpstreamRegistry {
             .expect("registry build without extra roots cannot fail")
     }
 
+    /// `from_snapshot` with the dataplane's event emitter attached
+    /// (DW-044): breaker transitions and endpoint ejection/recovery in
+    /// this registry's state machines emit onto the bus. Distinct
+    /// constructors rather than a changed signature so the many
+    /// event-agnostic call sites (tests, tooling) stay untouched.
+    pub fn from_snapshot_with_events(
+        snapshot: &Snapshot,
+        events: Option<&crate::events::Emitter>,
+    ) -> Self {
+        Self::with_root_certificates_previous_and_events(snapshot, &[], None, events)
+            .expect("registry build without extra roots cannot fail")
+    }
+
+    /// `from_snapshot_with_previous` with the dataplane's event emitter
+    /// attached (DW-044); the dataplane's reload path.
+    pub fn from_snapshot_with_previous_and_events(
+        snapshot: &Snapshot,
+        previous: &UpstreamRegistry,
+        events: Option<&crate::events::Emitter>,
+    ) -> Self {
+        Self::with_root_certificates_previous_and_events(snapshot, &[], Some(previous), events)
+            .expect("registry build without extra roots cannot fail")
+    }
+
     /// Build from a snapshot with EXTRA trusted root certificates (e.g. a
     /// private CA signing upstream certificates), added on top of the
     /// webpki roots. Fails if any extra root is malformed, so operators
@@ -1112,6 +1161,17 @@ impl UpstreamRegistry {
         snapshot: &Snapshot,
         extra_roots: &[CertificateDer<'_>],
         previous: Option<&UpstreamRegistry>,
+    ) -> Result<Self, UpstreamError> {
+        Self::with_root_certificates_previous_and_events(snapshot, extra_roots, previous, None)
+    }
+
+    /// `with_root_certificates_and_previous` with the dataplane's event
+    /// emitter (DW-044); the single build path behind every constructor.
+    pub fn with_root_certificates_previous_and_events(
+        snapshot: &Snapshot,
+        extra_roots: &[CertificateDer<'_>],
+        previous: Option<&UpstreamRegistry>,
+        events: Option<&crate::events::Emitter>,
     ) -> Result<Self, UpstreamError> {
         let mut default_roots = crate::security::tls::webpki_root_store();
         for c in extra_roots {
@@ -1144,7 +1204,7 @@ impl UpstreamRegistry {
                     None => default_roots.clone(),
                 };
                 let prev = previous.and_then(|p| p.handles.get(&u.name));
-                (u.name.clone(), build_handle(u, roots, prev))
+                (u.name.clone(), build_handle(u, roots, prev, events))
             })
             .collect();
         Ok(UpstreamRegistry { handles })
@@ -1227,7 +1287,7 @@ mod tests {
             max_pending: None,
             trusted_ca_file: None,
         };
-        let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None);
+        let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(
             handle.send(get_request("/x")).await,
             Err(UpstreamError::NoEndpoints)

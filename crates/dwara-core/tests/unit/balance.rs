@@ -413,6 +413,7 @@ async fn dataplane_reload_changes_weights_without_restart() {
         // Genuinely zero-route: LB weight behavior, not routing (#129).
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     };
     st.compile_and_publish(&g).expect("publish A");
     let dp = DataPlane::new(Arc::clone(&st));

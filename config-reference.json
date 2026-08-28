@@ -116,6 +116,13 @@
       "items": {
         "$ref": "#/$defs/Upstream"
       }
+    },
+    "webhooks": {
+      "description": "Alert/event webhook targets (DW-044): every gateway event whose\nkind appears in a target's `events` list is POSTed to that\ntarget's `url` as one JSON envelope (id, kind, timestamp,\ngateway instance, payload). Delivery runs on a background task,\nnever on the request path; emission is a bounded non-blocking\nhand-off (a full queue drops the event and counts the drop), so\nwebhook failures can never stall the dataplane. Header values\nmay be inline or `${...}` secret references (DW-045) — inline\nvalues are redacted in every config echo. See the `events`\nmodule docs for the envelope, the retry/budget shape, and the\negress posture. Empty (the default): no webhooks, and events\nare still counted (emitted/dropped) but delivered nowhere.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Webhook"
+      }
     }
   },
   "additionalProperties": false,
@@ -1869,6 +1876,59 @@
         "http1",
         "http2",
         "https"
+      ]
+    },
+    "Webhook": {
+      "description": "One alert/event webhook target (DW-044, `gateway.webhooks[]`).\nCompiled per generation into an `events::webhook::WebhookTarget`\n(secret references resolved at compile time, URL decomposed); see\nthat module for the delivery contract.",
+      "type": "object",
+      "properties": {
+        "backoff_base_ms": {
+          "description": "First backoff between delivery attempts, doubling per retry up to\n`backoff_cap_ms` (a `Retry-After` answer replaces the computed\nvalue for that wait). Default 100.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "backoff_cap_ms": {
+          "description": "Upper bound on the computed backoff. Default 1000; must be >=\n`backoff_base_ms`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "events": {
+          "description": "Event kinds this target receives (subset of the kinds the gateway\nemits; validation rejects unknown kinds). At least one entry.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "description": "Extra headers sent on every delivery. Values may be inline or\n`${ENV_NAME}` / `${file:/path}` secret references (DW-045),\nresolved at config-compile time; inline values are redacted in\nevery config echo. Use a reference for bearer tokens and signing\nsecrets.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "max_attempts": {
+          "description": "Total attempts per delivery (the first try plus retries). Retries\nhappen for transport failures and the transient status set\n(429/502/503/504), honoring a seconds-form `Retry-After` when the\ntarget sends one. Default 3; validation enforces\n1..=[`limits::MAX_WEBHOOK_ATTEMPTS`].",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "description": "TOTAL budget for one delivery (all retry attempts share it):\nconnect, write, and response-head read per attempt plus the\nbackoff waits between attempts. A slow or hung target can never\noccupy more than this. Default 2000; validation enforces\n1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "url": {
+          "description": "Absolute `http://` or `https://` URL the envelope is POSTed to.\nHost and port come from the URL; the path (and query, if any) is\npreserved. `https://` verifies against the public webpki root set\n(no `trusted_ca_file` override for webhooks in v1).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "events"
       ]
     }
   }

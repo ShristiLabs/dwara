@@ -420,6 +420,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         // sni_routes, ahead of the route table (#129 opt-in).
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     };
     (gateway, tls)
 }

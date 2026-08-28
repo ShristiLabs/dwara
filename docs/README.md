@@ -36,6 +36,9 @@ Feature areas written up so far (M1 complete; M2 in progress):
   — the per-route 503 + Retry-After availability short-circuit and
   the per-attachment monitor flags on every rejecting policy phase,
   with the metric/log report (DW-041).
+- [Alert and event webhooks](./features/alerting.md) — the in-process
+  event bus, the emission sites (breaker/health/config publish), and
+  the budget-bounded webhook deliverer (DW-044).
 - [API versioning](./features/versioning.md) — the version routing
   patterns (path segment / header / query / Accept media type), the
   `match.accept` criterion, Deprecation/Sunset header automation

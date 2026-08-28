@@ -74,6 +74,17 @@
 //! keyed by endpoint `address:port` and carried across config rebuilds like
 //! the in-flight counters; config changes to the health parameters apply to
 //! NEW observations (the window and consecutive counter live on).
+//!
+//! # Events (DW-044)
+//!
+//! A tracker constructed with [`EndpointHealth::with_events`] emits
+//! `endpoint_ejected` and `endpoint_recovered` on the two state
+//! transitions (bound to its upstream and `address:port` labels by the
+//! balancer at construction). Both passive reports and ACTIVE probe
+//! reports funnel through the same transition code, so either signal
+//! ejecting or recovering an endpoint emits. Emission is the event
+//! bus's bounded non-blocking hand-off (full queue = drop and count);
+//! `None` (direct/test constructions) is a documented no-op.
 
 use std::collections::VecDeque;
 // DW-025: under the `loom` dev feature the synchronization primitives are
@@ -168,12 +179,26 @@ pub struct EndpointHealth {
     events: Mutex<VecDeque<(u64, bool)>>,
     /// Total ejections observed on this tracker (observability).
     ejections: AtomicU64,
+    /// Ejection/recovery event sink (DW-044); `None` = no event wiring
+    /// (tests, direct construction). Bound to this tracker's upstream
+    /// and `address:port` labels by the balancer at construction — the
+    /// tracker itself knows its state machine, not its own address.
+    sink: Option<crate::events::EndpointEvents>,
 }
 
 impl EndpointHealth {
     /// Fresh tracker: healthy, empty window.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Fresh tracker with ejection/recovery events (DW-044); see the
+    /// module docs.
+    pub fn with_events(sink: crate::events::EndpointEvents) -> Self {
+        EndpointHealth {
+            sink: Some(sink),
+            ..Self::default()
+        }
     }
 
     /// Whether a pick may use this endpoint at `now` (Unix-epoch ms);
@@ -406,6 +431,11 @@ impl EndpointHealth {
         self.consecutive_failures.store(0, Ordering::Relaxed);
         events.clear();
         self.ejections.fetch_add(1, Ordering::Relaxed);
+        // DW-044: emitted under the events lock, immediately after the
+        // transition — a `try_send`, never a block.
+        if let Some(sink) = &self.sink {
+            sink.emit(crate::events::EventKind::EndpointEjected);
+        }
     }
 
     /// Move to HEALTHY with a clean history. Caller holds the events lock.
@@ -413,6 +443,12 @@ impl EndpointHealth {
         self.status.store(HEALTHY, Ordering::Release);
         self.consecutive_failures.store(0, Ordering::Relaxed);
         events.clear();
+        // DW-044: see eject_locked. Recovery covers both paths that
+        // restore an endpoint (a successful half-open probe and the
+        // all-ejected fail-open success).
+        if let Some(sink) = &self.sink {
+            sink.emit(crate::events::EventKind::EndpointRecovered);
+        }
     }
 }
 

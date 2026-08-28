@@ -160,7 +160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let source = FileConfigSource::new(&config_path);
-    let state = Arc::new(ConfigState::new());
+    // DW-044: the process's event bus exists BEFORE the first publish, so
+    // the startup publish's `config_published` event is queued for the
+    // deliverer spawned below (bounded queue; overflow drops and counts,
+    // never blocks startup).
+    let event_bus = Arc::new(dwara_core::events::EventBus::new());
+    let state = Arc::new(ConfigState::with_event_bus(Arc::clone(&event_bus)));
 
     // Startup load: a gateway that boots with a bad config must not serve at
     // all. Print every issue, exit non-zero.
@@ -446,6 +451,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let reload_dp = Arc::clone(&dp);
     let reload_tls = tls_states.clone();
     let reload_shutdown = shutdown_rx.clone();
+    // DW-044: the webhook deliverer — one task draining the event bus and
+    // POSTing matching events to the configured targets. Runs even with
+    // no webhooks configured (it just drains); stops on shutdown, where
+    // its pending queue is abandoned (the gateway is not a durable
+    // queue).
+    let webhook_task = dp.spawn_webhook_deliverer(shutdown_rx.clone());
     let reload_task = tokio::spawn(async move {
         let mut probes = dwara_core::active::ActiveProbes::new();
         probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
@@ -562,6 +573,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     reload_task.abort();
     cert_task.abort();
+    webhook_task.abort();
 
     // Final drain within the shutdown budget; whatever is left when the
     // deadline passes is force-closed by process exit. The deadline is

@@ -105,6 +105,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         // machinery, not routing (#129 opt-in).
         allow_empty_routes: true,
         hmac_auth: None,
+        webhooks: Vec::new(),
     }
 }
 
@@ -425,6 +426,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             // routes existing (#129 opt-in).
             allow_empty_routes: true,
             hmac_auth: None,
+            webhooks: Vec::new(),
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -538,6 +540,7 @@ async fn reserved_paths_shadow_configured_routes() {
             admin: None,
             allow_empty_routes: false,
             hmac_auth: None,
+            webhooks: Vec::new(),
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

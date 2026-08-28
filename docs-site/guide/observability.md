@@ -55,6 +55,9 @@ and cleartext listener just like `/healthz` (see
 | `jwks_refresh_total` | counter | `provider` |
 | `dwara_rate_limiter_evictions_total` | gauge | — |
 | `dwara_rate_limiter_live_keys` | gauge | — |
+| `dwara_webhook_events_total` | counter | `kind`, `outcome` |
+| `dwara_events_dropped_total` | gauge | — |
+| `dwara_events_emitted_total` | gauge | — |
 
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are

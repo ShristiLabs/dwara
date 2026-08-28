@@ -7,11 +7,12 @@ a review comment:
 
     config          depends on nothing
     extensions      <- config
-    snapshot        <- config
     observability   <- nothing
+    events          <- config, observability
+    snapshot        <- config, events
     state           <- config
     security        <- config, state, observability
-    resilience      <- config, snapshot, extensions, observability
+    resilience      <- config, snapshot, extensions, observability, events
     dataplane       <- everything
 
 Placement decisions this enforces (see lib.rs's dependency table):
@@ -24,7 +25,13 @@ Placement decisions this enforces (see lib.rs's dependency table):
   (config/credentials.rs) live in config so validation and every runtime
   consumer agree without upward imports;
 - observability exposes plain setters only — the state-gauge walk lives
-  in dataplane (upstream.rs), so observability depends on nothing.
+  in dataplane (upstream.rs), so observability depends on nothing;
+- the event bus sits in its own domain BELOW snapshot (DW-044) because
+  the config publish pipeline emits config_published/config_rejected
+  while resilience's breaker/health emit transitions; snapshot cannot
+  import resilience, so the bus lives lower than both and the two
+  publish/emit into it. The webhook deliverer reads config types and
+  counts outcomes in observability — hence events' two downward deps.
 
 Usage: python3 scripts/check_deps.py [path-to-dwara-core-src]
 Exits 1 listing every upward import.
@@ -37,16 +44,18 @@ from pathlib import Path
 ALLOWED = {
     "config": set(),
     "extensions": {"config"},
-    "snapshot": {"config"},
     "observability": set(),
+    "events": {"config", "observability"},
+    "snapshot": {"config", "events"},
     "state": {"config"},
     "security": {"config", "state", "observability"},
-    "resilience": {"config", "snapshot", "extensions", "observability"},
+    "resilience": {"config", "snapshot", "extensions", "observability", "events"},
     "dataplane": {
         "config",
         "extensions",
         "snapshot",
         "observability",
+        "events",
         "state",
         "security",
         "resilience",

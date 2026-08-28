@@ -215,6 +215,7 @@ fn build_state(
     slow_start: Duration,
     previous: Option<&LbState>,
     health: Option<Arc<HealthParams>>,
+    events: Option<&crate::events::UpstreamEmitter>,
 ) -> LbState {
     let mut eps: Vec<LbEndpoint> = Vec::with_capacity(endpoints.len());
     for e in endpoints {
@@ -230,10 +231,18 @@ fn build_state(
     // EVERY endpoint carries a tracker (fresh ones for new addresses, the
     // carried live tracker for unchanged addresses; enabling health on a
     // rebuild gives unchanged addresses a fresh tracker with no history).
+    // A fresh tracker is created WITH its ejection/recovery event binding
+    // (DW-044) when the balancer was built with an upstream emitter.
     if health.is_some() {
         for e in &mut eps {
             if e.health.is_none() {
-                e.health = Some(Arc::new(EndpointHealth::new()));
+                let tracker = match events {
+                    Some(events) => {
+                        EndpointHealth::with_events(events.for_endpoint(&endpoint_label(e)))
+                    }
+                    None => EndpointHealth::new(),
+                };
+                e.health = Some(Arc::new(tracker));
             }
         }
     }
@@ -318,6 +327,18 @@ impl Fnv1a {
     }
 }
 
+/// `address:port` label for one endpoint row, IPv6 literals bracketed
+/// (the same spelling `upstream.rs` dials and the `endpoint_health`
+/// metric uses, so an ejection event and the gauge series agree).
+fn endpoint_label(e: &LbEndpoint) -> String {
+    let host = if e.address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]", e.address)
+    } else {
+        e.address.clone()
+    };
+    format!("{host}:{}", e.port)
+}
+
 /// Smooth weighted round-robin pick (nginx algorithm) over effective
 /// weights, restricted to the candidate indices. Period = sum of effective
 /// weights; over any full period each endpoint is picked exactly its
@@ -372,6 +393,21 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) -> Arc<Self> {
+        Self::new_with_health_and_events(endpoints, algorithm, slow_start, health, None)
+    }
+
+    /// `new_with_health` with ejection/recovery events (DW-044): fresh
+    /// trackers are created bound to `events` (an upstream-labeled
+    /// emitter), so their ejection/recovery transitions emit onto the
+    /// event bus. Carried trackers keep the binding they were built
+    /// with. `None` behaves exactly like [`UpstreamLb::new_with_health`].
+    pub fn new_with_health_and_events(
+        endpoints: &[Endpoint],
+        algorithm: LoadBalancer,
+        slow_start: Duration,
+        health: Option<&PassiveHealth>,
+        events: Option<&crate::events::UpstreamEmitter>,
+    ) -> Arc<Self> {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -381,7 +417,7 @@ impl UpstreamLb {
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         Arc::new(UpstreamLb {
             state: ArcSwap::from_pointee(build_state(
-                endpoints, algorithm, slow_start, None, health,
+                endpoints, algorithm, slow_start, None, health, events,
             )),
             rng: AtomicU64::new(seed | 1),
             health_clock: RwLock::new(system_now_ms),
@@ -413,6 +449,22 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) {
+        self.rebuild_with_health_and_events(endpoints, algorithm, slow_start, health, None);
+    }
+
+    /// `rebuild_with_health` with ejection/recovery events (DW-044):
+    /// trackers created by THIS rebuild bind `events`; carried trackers
+    /// keep their original binding (the emitter is per-dataplane and
+    /// stable, so in practice the two agree). `None` behaves exactly
+    /// like [`UpstreamLb::rebuild_with_health`].
+    pub fn rebuild_with_health_and_events(
+        &self,
+        endpoints: &[Endpoint],
+        algorithm: LoadBalancer,
+        slow_start: Duration,
+        health: Option<&PassiveHealth>,
+        events: Option<&crate::events::UpstreamEmitter>,
+    ) {
         let prev = self.state.load_full();
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         self.state.store(Arc::new(build_state(
@@ -421,6 +473,7 @@ impl UpstreamLb {
             slow_start,
             Some(&prev),
             health,
+            events,
         )));
     }
 
@@ -767,12 +820,14 @@ mod tests {
             Duration::from_secs(10),
             None,
             None,
+            None,
         );
         assert_eq!(fresh.effective_weight(&fresh.endpoints[1]), 1);
         let mut aged = build_state(
             &spec,
             LoadBalancer::RoundRobin,
             Duration::from_secs(10),
+            None,
             None,
             None,
         );
@@ -784,7 +839,14 @@ mod tests {
 
         // Slow start disabled (window 0): effective weight is the raw
         // configured weight from the first pick on.
-        let off = build_state(&spec, LoadBalancer::RoundRobin, Duration::ZERO, None, None);
+        let off = build_state(
+            &spec,
+            LoadBalancer::RoundRobin,
+            Duration::ZERO,
+            None,
+            None,
+            None,
+        );
         assert_eq!(off.effective_weight(&off.endpoints[1]), 5);
     }
 

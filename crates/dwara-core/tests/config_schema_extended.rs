@@ -578,6 +578,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         admin: None,
         allow_empty_routes: false,
         hmac_auth: None,
+        webhooks: Vec::new(),
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");

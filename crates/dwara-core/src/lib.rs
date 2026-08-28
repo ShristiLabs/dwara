@@ -11,6 +11,7 @@
 //! - [`extensions`] — the OSS/Ent edition boundary as a type boundary
 //! - [`snapshot`] — the config compile pipeline (validate -> compile -> publish)
 //! - [`observability`] — tracing, metrics, and access logging
+//! - [`events`] — the in-process event bus and webhook delivery (DW-044)
 //! - [`state`] — SQLite-backed durable state and schema migrations
 //! - [`security`] — TLS, authentication, authorization
 //! - [`resilience`] — passive health, retries, circuit breaker
@@ -30,11 +31,12 @@
 //! |---|---|
 //! | `config` | (nothing) |
 //! | `extensions` | `config` |
-//! | `snapshot` | `config` |
 //! | `observability` | (nothing) |
+//! | `events` | `config`, `observability` |
+//! | `snapshot` | `config`, `events` |
 //! | `state` | `config` |
 //! | `security` | `config`, `state`, `observability` |
-//! | `resilience` | `config`, `snapshot`, `extensions`, `observability` |
+//! | `resilience` | `config`, `snapshot`, `extensions`, `observability`, `events` |
 //! | `dataplane` | all of the above |
 //! | `supervision` | (nothing — pure task plumbing, no domain imports) |
 //!
@@ -56,6 +58,7 @@
 pub mod config;
 pub mod dataplane;
 pub mod error;
+pub mod events;
 pub mod extensions;
 pub mod observability;
 pub mod resilience;

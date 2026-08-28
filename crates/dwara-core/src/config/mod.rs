@@ -175,6 +175,115 @@ pub struct Gateway {
     /// signing contract (canonical string, headers, replay window).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_auth: Option<HmacAuth>,
+    /// Alert/event webhook targets (DW-044): every gateway event whose
+    /// kind appears in a target's `events` list is POSTed to that
+    /// target's `url` as one JSON envelope (id, kind, timestamp,
+    /// gateway instance, payload). Delivery runs on a background task,
+    /// never on the request path; emission is a bounded non-blocking
+    /// hand-off (a full queue drops the event and counts the drop), so
+    /// webhook failures can never stall the dataplane. Header values
+    /// may be inline or `${...}` secret references (DW-045) — inline
+    /// values are redacted in every config echo. See the `events`
+    /// module docs for the envelope, the retry/budget shape, and the
+    /// egress posture. Empty (the default): no webhooks, and events
+    /// are still counted (emitted/dropped) but delivered nowhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<Webhook>,
+}
+
+/// One alert/event webhook target (DW-044, `gateway.webhooks[]`).
+/// Compiled per generation into an `events::webhook::WebhookTarget`
+/// (secret references resolved at compile time, URL decomposed); see
+/// that module for the delivery contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Webhook {
+    /// Absolute `http://` or `https://` URL the envelope is POSTed to.
+    /// Host and port come from the URL; the path (and query, if any) is
+    /// preserved. `https://` verifies against the public webpki root set
+    /// (no `trusted_ca_file` override for webhooks in v1).
+    pub url: String,
+    /// Event kinds this target receives (subset of the kinds the gateway
+    /// emits; validation rejects unknown kinds). At least one entry.
+    pub events: Vec<String>,
+    /// Extra headers sent on every delivery. Values may be inline or
+    /// `${ENV_NAME}` / `${file:/path}` secret references (DW-045),
+    /// resolved at config-compile time; inline values are redacted in
+    /// every config echo. Use a reference for bearer tokens and signing
+    /// secrets.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// TOTAL budget for one delivery (all retry attempts share it):
+    /// connect, write, and response-head read per attempt plus the
+    /// backoff waits between attempts. A slow or hung target can never
+    /// occupy more than this. Default 2000; validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`].
+    #[serde(
+        default = "default_webhook_timeout_ms",
+        skip_serializing_if = "is_default_webhook_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+    /// Total attempts per delivery (the first try plus retries). Retries
+    /// happen for transport failures and the transient status set
+    /// (429/502/503/504), honoring a seconds-form `Retry-After` when the
+    /// target sends one. Default 3; validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_ATTEMPTS`].
+    #[serde(
+        default = "default_webhook_attempts",
+        skip_serializing_if = "is_default_webhook_attempts"
+    )]
+    pub max_attempts: u32,
+    /// First backoff between delivery attempts, doubling per retry up to
+    /// `backoff_cap_ms` (a `Retry-After` answer replaces the computed
+    /// value for that wait). Default 100.
+    #[serde(
+        default = "default_webhook_backoff_base_ms",
+        skip_serializing_if = "is_default_webhook_backoff_base_ms"
+    )]
+    pub backoff_base_ms: u64,
+    /// Upper bound on the computed backoff. Default 1000; must be >=
+    /// `backoff_base_ms`.
+    #[serde(
+        default = "default_webhook_backoff_cap_ms",
+        skip_serializing_if = "is_default_webhook_backoff_cap_ms"
+    )]
+    pub backoff_cap_ms: u64,
+}
+
+/// Default `gateway.webhooks[].timeout_ms` (DW-044): one shared
+/// delivery budget, generous for a remote alerting endpoint, small
+/// enough that a hung target cannot pile up deliveries.
+pub const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 2_000;
+/// Default `gateway.webhooks[].max_attempts` (DW-044).
+pub const DEFAULT_WEBHOOK_ATTEMPTS: u32 = 3;
+/// Default `gateway.webhooks[].backoff_base_ms` (DW-044).
+pub const DEFAULT_WEBHOOK_BACKOFF_BASE_MS: u64 = 100;
+/// Default `gateway.webhooks[].backoff_cap_ms` (DW-044).
+pub const DEFAULT_WEBHOOK_BACKOFF_CAP_MS: u64 = 1_000;
+
+fn default_webhook_timeout_ms() -> u64 {
+    DEFAULT_WEBHOOK_TIMEOUT_MS
+}
+fn default_webhook_attempts() -> u32 {
+    DEFAULT_WEBHOOK_ATTEMPTS
+}
+fn default_webhook_backoff_base_ms() -> u64 {
+    DEFAULT_WEBHOOK_BACKOFF_BASE_MS
+}
+fn default_webhook_backoff_cap_ms() -> u64 {
+    DEFAULT_WEBHOOK_BACKOFF_CAP_MS
+}
+fn is_default_webhook_timeout_ms(v: &u64) -> bool {
+    *v == DEFAULT_WEBHOOK_TIMEOUT_MS
+}
+fn is_default_webhook_attempts(v: &u32) -> bool {
+    *v == DEFAULT_WEBHOOK_ATTEMPTS
+}
+fn is_default_webhook_backoff_base_ms(v: &u64) -> bool {
+    *v == DEFAULT_WEBHOOK_BACKOFF_BASE_MS
+}
+fn is_default_webhook_backoff_cap_ms(v: &u64) -> bool {
+    *v == DEFAULT_WEBHOOK_BACKOFF_CAP_MS
 }
 
 /// Gateway-wide HMAC request-signing policy (DW-036). The credential
@@ -232,6 +341,15 @@ impl Gateway {
                     }
                     Credential::Jwt { .. } | Credential::Mtls { .. } => {}
                 }
+            }
+        }
+        // DW-044: webhook header values are secret-bearing config fields
+        // exactly like api keys (bearer tokens, signing secrets) — the
+        // same placeholder, the same reference passthrough, the same
+        // unresolvable-by-design round-trip rejection.
+        for webhook in &mut redacted.webhooks {
+            for value in webhook.headers.values_mut() {
+                *value = credentials::redact_inline_secret(value);
             }
         }
         redacted
