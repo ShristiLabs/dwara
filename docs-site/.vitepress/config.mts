@@ -64,6 +64,10 @@ export default withMermaid(
                   link: "/guide/edge-policies",
                 },
                 {
+                  text: "Transforms and security headers",
+                  link: "/guide/transforms",
+                },
+                {
                   text: "API versioning",
                   link: "/guide/api-versioning",
                 },

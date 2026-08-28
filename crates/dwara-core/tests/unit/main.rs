@@ -20,6 +20,7 @@ mod secrets;
 mod snapshot;
 mod store_public;
 mod tls;
+mod transforms;
 mod upstream;
 mod versioning;
 mod webhooks;

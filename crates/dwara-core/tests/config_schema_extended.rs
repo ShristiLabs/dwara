@@ -528,6 +528,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             authorization: None,
             deprecation: None,
             maintenance: None,
+            transforms: None,
+            security_headers: None,
         }],
         services: vec![],
         upstreams: vec![Upstream {

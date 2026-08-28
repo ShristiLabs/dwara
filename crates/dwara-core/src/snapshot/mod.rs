@@ -659,6 +659,370 @@ fn validate_maintenance(
     }
 }
 
+/// Validate one `transforms` block (DW-028): no empty containers (a
+/// transforms block that transforms nothing is an authoring mistake),
+/// representable header names and values, no framing/hop-by-hop header
+/// names (the body pipeline owns framing; `deny`-listing them here is
+/// the request-smuggling guard — see `config::transforms`), sane
+/// query-component bytes, and JSON pointers that parse (the shared
+/// grammar in `config::transforms`, the same agreement validation
+/// holds with every other runtime grammar).
+fn validate_transforms(
+    name: &str,
+    transforms: &crate::config::transforms::Transforms,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if transforms.request.is_none() && transforms.response.is_none() {
+        issues.push(issue(
+            "route",
+            name,
+            "transforms",
+            "carries neither request nor response (nothing to transform) and is always a \
+             mistake: omit the transforms block entirely",
+        ));
+    }
+    if let Some(req) = &transforms.request {
+        if req.headers.is_none() && req.query.is_none() && req.body.is_none() {
+            issues.push(issue(
+                "route",
+                name,
+                "transforms.request",
+                "carries no headers, query, or body block and is always a mistake: omit it",
+            ));
+        }
+        if let Some(headers) = &req.headers {
+            validate_header_ops(name, "transforms.request.headers", headers, true, issues);
+        }
+        if let Some(query) = &req.query {
+            validate_query_ops(name, "transforms.request.query", query, issues);
+        }
+        if let Some(body) = &req.body {
+            validate_json_body(name, "transforms.request.body", &body.json, issues);
+        }
+    }
+    if let Some(resp) = &transforms.response {
+        if resp.headers.is_none() && resp.body.is_none() {
+            issues.push(issue(
+                "route",
+                name,
+                "transforms.response",
+                "carries no headers or body block and is always a mistake: omit it",
+            ));
+        }
+        if let Some(headers) = &resp.headers {
+            validate_header_ops(name, "transforms.response.headers", headers, false, issues);
+        }
+        if let Some(body) = &resp.body {
+            validate_json_body(name, "transforms.response.body", &body.json, issues);
+        }
+    }
+}
+
+/// Validate one header-ops block. `request_side` selects the forbidden
+/// set: the request side forbids `host` (the gateway names the origin
+/// it dials) and the framing pair; the response side forbids the
+/// framing pair plus `content-encoding` (only the compression pipeline
+/// may manage it — an op that stripped it without decoding would
+/// corrupt the body, and one that added it would misdescribe bytes it
+/// did not encode).
+fn validate_header_ops(
+    route: &str,
+    field: &str,
+    ops: &crate::config::transforms::HeaderOps,
+    request_side: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    use crate::config::transforms as t;
+    if ops.set.is_empty() && ops.add.is_empty() && ops.remove.is_empty() && ops.rename.is_empty() {
+        issues.push(issue(
+            "route",
+            route,
+            field,
+            "carries no set, add, remove, or rename entries and is always a mistake: omit it",
+        ));
+    }
+    let names: Vec<(&str, String)> = ops
+        .set
+        .keys()
+        .map(|k| ("set", k.clone()))
+        .chain(ops.add.keys().map(|k| ("add", k.clone())))
+        .chain(ops.remove.iter().map(|k| ("remove", k.clone())))
+        .chain(ops.rename.keys().map(|k| ("rename", k.clone())))
+        .chain(ops.rename.values().map(|k| ("rename (to)", k.clone())))
+        .collect();
+    for (op, header) in &names {
+        if hyper::header::HeaderName::from_bytes(header.as_bytes()).is_err() {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!("'{header}' ({op}) is not a valid HTTP header name"),
+            ));
+            continue;
+        }
+        let forbidden = if request_side {
+            t::is_forbidden_request_header(header)
+        } else {
+            t::is_forbidden_response_header(header)
+        };
+        if forbidden {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!(
+                    "'{header}' ({op}) is a framing/hop-by-hop header the gateway's body \
+                     pipeline owns: transforms may not touch it (request smuggling and \
+                     body-corruption guard)"
+                ),
+            ));
+        }
+    }
+    for (op, value) in ops
+        .set
+        .values()
+        .map(|v| ("set", v))
+        .chain(ops.add.values().map(|v| ("add", v)))
+    {
+        if hyper::header::HeaderValue::from_str(value).is_err() {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!(
+                    "the '{op}' value '{value}' is not representable in an HTTP header \
+                     (control characters and non-visible bytes are rejected)"
+                ),
+            ));
+        }
+    }
+    for (from, to) in &ops.rename {
+        if from == to {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!("rename '{from}' -> '{to}' is a no-op: rename to a different name"),
+            ));
+        }
+    }
+}
+
+/// Validate one query-ops block (DW-028): names and values must be
+/// plain ASCII without the query structural bytes (`&` separates
+/// pairs, `=` separates key from value, `#` would start a fragment).
+/// Everything else the runtime percent-encodes on emit.
+fn validate_query_ops(
+    route: &str,
+    field: &str,
+    ops: &crate::config::transforms::QueryOps,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if ops.set.is_empty() && ops.add.is_empty() && ops.remove.is_empty() && ops.rename.is_empty() {
+        issues.push(issue(
+            "route",
+            route,
+            field,
+            "carries no set, add, remove, or rename entries and is always a mistake: omit it",
+        ));
+    }
+    let check = |kind: &str, key: &str, value: Option<&str>, issues: &mut Vec<ValidationIssue>| {
+        let bad_name = key.is_empty()
+            || key.bytes().any(|b| {
+                !b.is_ascii() || b.is_ascii_control() || matches!(b, b'&' | b'=' | b'#' | b' ')
+            });
+        if bad_name {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!(
+                    "the {kind} name '{key}' is not a plain query name (non-empty ASCII, no \
+                     '&', '=', '#', or spaces)"
+                ),
+            ));
+        }
+        if let Some(v) = value {
+            if v.bytes()
+                .any(|b| !b.is_ascii() || b.is_ascii_control() || matches!(b, b'&' | b'#'))
+            {
+                issues.push(issue(
+                    "route",
+                    route,
+                    field,
+                    format!(
+                        "the {kind} value '{v}' is not representable in a query string \
+                         (ASCII without '&' or '#')"
+                    ),
+                ));
+            }
+        }
+    };
+    for (k, v) in &ops.set {
+        check("set", k, Some(v), issues);
+    }
+    for (k, v) in &ops.add {
+        check("add", k, Some(v), issues);
+    }
+    for k in &ops.remove {
+        check("remove", k, None, issues);
+    }
+    for (from, to) in &ops.rename {
+        check("rename", from, None, issues);
+        check("rename (to)", to, None, issues);
+        if from == to {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!("rename '{from}' -> '{to}' is a no-op: rename to a different key"),
+            ));
+        }
+    }
+}
+
+/// Validate one JSON body transform (DW-028): non-empty ops, a positive
+/// cap, pointers that parse (the shared `config::transforms` grammar),
+/// and no `remove` of the whole document.
+fn validate_json_body(
+    route: &str,
+    field: &str,
+    json: &crate::config::transforms::JsonBodyTransform,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    use crate::config::transforms as t;
+    if json.ops.is_empty() {
+        issues.push(issue(
+            "route",
+            route,
+            &format!("{field}.json.ops"),
+            "ops is empty: a body transform that transforms nothing is always a mistake \
+             (and still pays the content-type gate); omit the body block",
+        ));
+    }
+    if json.max_bytes == 0 {
+        issues.push(issue(
+            "route",
+            route,
+            &format!("{field}.json.max_bytes"),
+            "max_bytes must be > 0 (0 would fail every body against the transform cap)",
+        ));
+    }
+    for (i, op) in json.ops.iter().enumerate() {
+        let path = match op {
+            t::JsonOp::Set { path, .. } => path,
+            t::JsonOp::Remove { path } => path,
+        };
+        match t::JsonPointer::parse(path) {
+            None => issues.push(issue(
+                "route",
+                route,
+                &format!("{field}.json.ops[{i}].path"),
+                format!(
+                    "'{path}' is not an RFC 6901 JSON pointer (start with '/', use ~0 and ~1 \
+                     for '~' and '/', e.g. /items/0/id; '' addresses the whole document)"
+                ),
+            )),
+            Some(pointer) => {
+                if matches!(op, t::JsonOp::Remove { .. }) && pointer.is_root() {
+                    issues.push(issue(
+                        "route",
+                        route,
+                        &format!("{field}.json.ops[{i}].path"),
+                        "remove at the root pointer ('') would delete the whole document — \
+                         there is no 'no body' state to forward; use set at the root to \
+                         replace it",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Validate one `security_headers` block (DW-028): at least one header
+/// opted in, HSTS directives that compose (0 is the RFC 6797 deletion
+/// signal this policy cannot express; the subdomains/preload
+/// directives are meaningless without a max-age, and the preload list
+/// requires includeSubDomains), and a CSP that is non-empty and
+/// representable in an HTTP header (the runtime's silent-skip backstop
+/// must stay unreachable).
+fn validate_security_headers(
+    name: &str,
+    sh: &crate::config::transforms::SecurityHeaders,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if sh.hsts_max_age_secs.is_none()
+        && !sh.nosniff
+        && sh.content_security_policy.is_none()
+        && sh.frame_options.is_none()
+    {
+        issues.push(issue(
+            "route",
+            name,
+            "security_headers",
+            "carries no policy (no HSTS, nosniff, CSP, or frame_options) and is always a \
+             mistake: omit the security_headers block to disable injection",
+        ));
+    }
+    if sh.hsts_max_age_secs == Some(0) {
+        issues.push(issue(
+            "route",
+            name,
+            "security_headers.hsts_max_age_secs",
+            "hsts_max_age_secs must be > 0 (max-age=0 is the RFC 6797 deletion signal — \
+             delete the field to stop emitting HSTS on this route)",
+        ));
+    }
+    if sh.hsts_max_age_secs.is_none() && (sh.hsts_include_subdomains || sh.hsts_preload) {
+        issues.push(issue(
+            "route",
+            name,
+            "security_headers.hsts_include_subdomains",
+            "include_subdomains/preload require hsts_max_age_secs: the directives only \
+             exist inside a Strict-Transport-Security header, which a max-age starts",
+        ));
+    }
+    if sh.hsts_preload && !sh.hsts_include_subdomains {
+        issues.push(issue(
+            "route",
+            name,
+            "security_headers.hsts_preload",
+            "preload requires include_subdomains (the HSTS preload list rejects entries \
+             without it; emitting a header the list would refuse is an authoring mistake)",
+        ));
+    }
+    if sh
+        .content_security_policy
+        .as_deref()
+        .is_some_and(|p| p.trim().is_empty())
+    {
+        issues.push(issue(
+            "route",
+            name,
+            "security_headers.content_security_policy",
+            "content_security_policy is empty: omit the field to stop emitting CSP on \
+             this route",
+        ));
+    }
+    if let Some(csp) = sh.content_security_policy.as_deref() {
+        // The runtime stamps the policy inside a representable-only skip
+        // (`if let Ok(v) = HeaderValue::from_str(..)`); validation keeps
+        // that skip unreachable, so a publishable config can never carry
+        // a CSP the edge would silently not emit. The realistic trap is a
+        // YAML block scalar's trailing newline.
+        if !csp.trim().is_empty() && hyper::header::HeaderValue::from_str(csp).is_err() {
+            issues.push(issue(
+                "route",
+                name,
+                "security_headers.content_security_policy",
+                "content_security_policy is not representable in an HTTP header (control \
+                 characters are rejected — including the trailing newline a YAML block \
+                 scalar adds)",
+            ));
+        }
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected — including `quota_near_limit`,
@@ -1451,6 +1815,13 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
         if let Some(maintenance) = &r.maintenance {
             validate_maintenance(&r.name, maintenance, &mut issues);
+        }
+        // Route-scoped transforms + security headers (DW-028).
+        if let Some(transforms) = &r.transforms {
+            validate_transforms(&r.name, transforms, &mut issues);
+        }
+        if let Some(sh) = &r.security_headers {
+            validate_security_headers(&r.name, sh, &mut issues);
         }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
@@ -2314,6 +2685,16 @@ pub struct RouteTable {
     /// the same unreachable-skip contract as the compilations above
     /// (`compile` has already run validation by then).
     accept_media_types: Vec<Option<String>>,
+    /// Precompiled request JSON body transforms per route index
+    /// (DW-028), mirroring `routes[idx].transforms.request.body.json`
+    /// exactly: pointers parsed once here, never per request. Header
+    /// and query ops carry no parseable grammar (names are checked by
+    /// validation and applied verbatim), so they deliberately have no
+    /// compiled form — only the JSON pointers need precompute.
+    request_body_ops: Vec<Option<crate::config::transforms::CompiledJsonTransform>>,
+    /// Precompiled response JSON body transforms per route index
+    /// (DW-028), same mirroring as `request_body_ops`.
+    response_body_ops: Vec<Option<crate::config::transforms::CompiledJsonTransform>>,
 }
 
 impl RouteTable {
@@ -2328,6 +2709,8 @@ impl RouteTable {
             compression_types: Vec::new(),
             deprecations: Vec::new(),
             accept_media_types: Vec::new(),
+            request_body_ops: Vec::new(),
+            response_body_ops: Vec::new(),
         }
     }
 
@@ -2400,6 +2783,26 @@ impl RouteTable {
     /// string.
     pub fn accept_media_type(&self, idx: usize) -> Option<&str> {
         self.accept_media_types.get(idx).and_then(|a| a.as_deref())
+    }
+
+    /// The precompiled REQUEST JSON body transform for route `idx`
+    /// (`None`: the route transforms no request bodies — exactly
+    /// mirroring `gateway().routes[idx].transforms.request.body`).
+    pub fn request_body_ops(
+        &self,
+        idx: usize,
+    ) -> Option<&crate::config::transforms::CompiledJsonTransform> {
+        self.request_body_ops.get(idx).and_then(|t| t.as_ref())
+    }
+
+    /// The precompiled RESPONSE JSON body transform for route `idx`
+    /// (`None`: the route transforms no response bodies — exactly
+    /// mirroring `gateway().routes[idx].transforms.response.body`).
+    pub fn response_body_ops(
+        &self,
+        idx: usize,
+    ) -> Option<&crate::config::transforms::CompiledJsonTransform> {
+        self.response_body_ops.get(idx).and_then(|t| t.as_ref())
     }
 }
 
@@ -2636,6 +3039,32 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 .and_then(crate::config::versioning::normalize_media_type)
         })
         .collect();
+    // DW-028: the JSON body transforms' pointers, parsed once here
+    // (validation guarantees they parse; the same unreachable-skip
+    // contract as the compilations above). Header and query ops have
+    // no parseable grammar and deliberately ride the config value.
+    let request_body_ops = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.transforms
+                .as_ref()
+                .and_then(|t| t.request.as_ref())
+                .and_then(|req| req.body.as_ref())
+                .map(|b| crate::config::transforms::CompiledJsonTransform::compile(&b.json))
+        })
+        .collect();
+    let response_body_ops = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.transforms
+                .as_ref()
+                .and_then(|t| t.response.as_ref())
+                .and_then(|resp| resp.body.as_ref())
+                .map(|b| crate::config::transforms::CompiledJsonTransform::compile(&b.json))
+        })
+        .collect();
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -2649,6 +3078,8 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             compression_types,
             deprecations,
             accept_media_types,
+            request_body_ops,
+            response_body_ops,
         }),
         content_hash,
     })

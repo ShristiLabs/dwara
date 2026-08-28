@@ -57,6 +57,8 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         authorization: None,
         deprecation: None,
         maintenance: None,
+        transforms: None,
+        security_headers: None,
     }
 }
 
@@ -1806,4 +1808,426 @@ fn validation_rejects_limits_block_with_no_limits_or_zero_limits() {
         issues.iter().any(|i| i.field == "limits.max_body_bytes"),
         "issues: {issues:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DW-028: transforms + security headers validation
+// ---------------------------------------------------------------------------
+
+use dwara_core::config::transforms::{
+    BodyTransform, HeaderOps, JsonBodyTransform, JsonOp, QueryOps, RequestTransforms,
+    ResponseTransforms, SecurityHeaders, Transforms,
+};
+
+fn header_ops() -> HeaderOps {
+    HeaderOps {
+        set: [("x-a".into(), "1".into())].into_iter().collect(),
+        add: Default::default(),
+        remove: vec![],
+        rename: Default::default(),
+    }
+}
+
+fn transforms_route(t: Transforms) -> Gateway {
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.transforms = Some(t);
+    gw.routes = vec![r];
+    gw
+}
+
+fn json_body(ops: Vec<JsonOp>) -> BodyTransform {
+    BodyTransform {
+        json: JsonBodyTransform {
+            max_bytes: 1024,
+            ops,
+        },
+    }
+}
+
+#[test]
+fn validation_rejects_empty_transforms_containers() {
+    let gw = transforms_route(Transforms {
+        request: None,
+        response: None,
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms" && i.message.contains("omit the transforms block")),
+        "a transforms block that transforms nothing"
+    );
+
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: None,
+            query: None,
+            body: None,
+        }),
+        response: None,
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.request" && i.message.contains("no headers")),
+        "an empty request half"
+    );
+
+    let gw = transforms_route(Transforms {
+        request: None,
+        response: Some(ResponseTransforms {
+            headers: None,
+            body: None,
+        }),
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.response"),
+        "an empty response half"
+    );
+
+    // Header/query ops with every map/list empty likewise fail closed.
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: Some(HeaderOps::default()),
+            query: None,
+            body: None,
+        }),
+        response: None,
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.request.headers"),
+        "empty header ops"
+    );
+
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: None,
+            query: Some(QueryOps::default()),
+            body: None,
+        }),
+        response: None,
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.request.query"),
+        "empty query ops"
+    );
+
+    // A well-formed block passes.
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: Some(header_ops()),
+            query: None,
+            body: None,
+        }),
+        response: None,
+    });
+    assert!(
+        !validate(&gw)
+            .iter()
+            .any(|i| i.field.starts_with("transforms")),
+        "a real op set publishes cleanly"
+    );
+}
+
+#[test]
+fn validation_rejects_framing_and_hop_by_hop_header_names_in_ops() {
+    // Request side: host, content-length are the gateway's (framing +
+    // origin naming — the request-smuggling guard).
+    for bad in ["host", "content-length", "Connection"] {
+        let gw = transforms_route(Transforms {
+            request: Some(RequestTransforms {
+                headers: Some(HeaderOps {
+                    set: [(bad.into(), "x".into())].into_iter().collect(),
+                    add: Default::default(),
+                    remove: vec![],
+                    rename: Default::default(),
+                }),
+                query: None,
+                body: None,
+            }),
+            response: None,
+        });
+        assert!(
+            validate(&gw)
+                .iter()
+                .any(|i| i.field == "transforms.request.headers"
+                    && i.message.contains("framing/hop-by-hop")),
+            "{bad} rejected request-side"
+        );
+    }
+    // Response side: content-encoding belongs to the compression
+    // pipeline.
+    let gw = transforms_route(Transforms {
+        request: None,
+        response: Some(ResponseTransforms {
+            headers: Some(HeaderOps {
+                set: Default::default(),
+                add: Default::default(),
+                remove: vec!["content-encoding".into()],
+                rename: Default::default(),
+            }),
+            body: None,
+        }),
+    });
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.response.headers"
+                && i.message.contains("framing/hop-by-hop")),
+        "content-encoding rejected response-side"
+    );
+}
+
+#[test]
+fn validation_rejects_bad_header_names_values_and_noop_renames() {
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: Some(HeaderOps {
+                set: [("bad header".into(), "v".into())].into_iter().collect(),
+                add: [("x-ok".into(), "bad\nvalue".into())].into_iter().collect(),
+                remove: vec![],
+                rename: [("x-same".into(), "x-same".into())].into_iter().collect(),
+            }),
+            query: None,
+            body: None,
+        }),
+        response: None,
+    });
+    let issues = validate(&gw);
+    assert!(issues
+        .iter()
+        .any(|i| i.message.contains("not a valid HTTP header name")));
+    assert!(issues
+        .iter()
+        .any(|i| i.message.contains("not representable in an HTTP header")));
+    assert!(issues.iter().any(|i| i.message.contains("no-op")));
+}
+
+#[test]
+fn validation_rejects_structural_bytes_in_query_ops() {
+    let gw = transforms_route(Transforms {
+        request: Some(RequestTransforms {
+            headers: None,
+            query: Some(QueryOps {
+                set: [("a&b".into(), "1".into())].into_iter().collect(),
+                add: [("ok".into(), "c#d".into())].into_iter().collect(),
+                remove: vec!["e=f".into()],
+                rename: Default::default(),
+            }),
+            body: None,
+        }),
+        response: None,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("not a plain query name")),
+        "name &"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("not representable in a query string")),
+        "value #"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("not a plain query name")),
+        "name ="
+    );
+}
+
+#[test]
+fn validation_rejects_bad_json_pointers_and_caps() {
+    let mk = |ops: Vec<JsonOp>, max_bytes: u64| {
+        transforms_route(Transforms {
+            request: Some(RequestTransforms {
+                headers: None,
+                query: None,
+                body: Some(BodyTransform {
+                    json: JsonBodyTransform { max_bytes, ops },
+                }),
+            }),
+            response: None,
+        })
+    };
+    // Malformed pointer (no leading slash).
+    let gw = mk(
+        vec![JsonOp::Set {
+            path: "meta".into(),
+            value: 1.into(),
+        }],
+        1024,
+    );
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.field == "transforms.request.body.json.ops[0].path"
+                && i.message.contains("RFC 6901")),
+        "pointer grammar"
+    );
+    // remove of the whole document.
+    let gw = mk(vec![JsonOp::Remove { path: "".into() }], 1024);
+    assert!(
+        validate(&gw)
+            .iter()
+            .any(|i| i.message.contains("delete the whole document")),
+        "remove root"
+    );
+    // Zero cap and empty ops.
+    let gw = mk(vec![], 1024);
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field.ends_with("json.ops") && i.message.contains("empty")));
+    let gw = mk(vec![JsonOp::Remove { path: "/a".into() }], 0);
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field.ends_with("max_bytes") && i.message.contains("must be > 0")));
+}
+
+#[test]
+fn validation_rejects_incoherent_security_header_policies() {
+    let mk = |sh: SecurityHeaders| {
+        let mut gw = base_gateway();
+        let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+        r.security_headers = Some(sh);
+        gw.routes = vec![r];
+        gw
+    };
+    // Empty block.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: None,
+        hsts_include_subdomains: false,
+        hsts_preload: false,
+        nosniff: false,
+        content_security_policy: None,
+        frame_options: None,
+    }));
+    assert!(issues
+        .iter()
+        .any(|i| i.field == "security_headers" && i.message.contains("no policy")));
+    // max-age 0 is the RFC 6797 deletion signal.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: Some(0),
+        hsts_include_subdomains: false,
+        hsts_preload: false,
+        nosniff: false,
+        content_security_policy: None,
+        frame_options: None,
+    }));
+    assert!(issues
+        .iter()
+        .any(|i| i.field.ends_with("hsts_max_age_secs") && i.message.contains("0")));
+    // Directives without a max-age.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: None,
+        hsts_include_subdomains: true,
+        hsts_preload: false,
+        nosniff: false,
+        content_security_policy: None,
+        frame_options: None,
+    }));
+    assert!(issues
+        .iter()
+        .any(|i| i.message.contains("require hsts_max_age_secs")));
+    // preload without includeSubDomains.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: Some(60),
+        hsts_include_subdomains: false,
+        hsts_preload: true,
+        nosniff: false,
+        content_security_policy: None,
+        frame_options: None,
+    }));
+    assert!(issues
+        .iter()
+        .any(|i| i.message.contains("preload requires include_subdomains")));
+    // Empty CSP.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: None,
+        hsts_include_subdomains: false,
+        hsts_preload: false,
+        nosniff: false,
+        content_security_policy: Some("  ".into()),
+        frame_options: None,
+    }));
+    assert!(issues
+        .iter()
+        .any(|i| i.field.ends_with("content_security_policy")));
+    // A CSP that is not header-representable is rejected at publish: a
+    // YAML block scalar's trailing newline (or any other control byte)
+    // would otherwise make the runtime's representable-only stamp
+    // silently never emit the header. (Hyper allows obs-text bytes, so
+    // non-ASCII is NOT in this set — validation rejects exactly what
+    // the runtime would skip.)
+    for bad in ["default-src 'self'\n", "default-src\u{1}'self'"] {
+        let issues = validate(&mk(SecurityHeaders {
+            hsts_max_age_secs: None,
+            hsts_include_subdomains: false,
+            hsts_preload: false,
+            nosniff: true,
+            content_security_policy: Some(bad.into()),
+            frame_options: None,
+        }));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field.ends_with("content_security_policy")
+                    && i.message.contains("not representable")),
+            "CSP {bad:?} rejected as unrepresentable"
+        );
+    }
+    // A coherent policy publishes.
+    let issues = validate(&mk(SecurityHeaders {
+        hsts_max_age_secs: Some(31_536_000),
+        hsts_include_subdomains: true,
+        hsts_preload: true,
+        nosniff: true,
+        content_security_policy: Some("default-src 'self'".into()),
+        frame_options: Some(dwara_core::config::transforms::FrameOptions::Deny),
+    }));
+    assert!(
+        !issues
+            .iter()
+            .any(|i| i.field.starts_with("security_headers")),
+        "issues: {issues:?}"
+    );
+}
+
+#[test]
+fn compiled_body_ops_mirror_route_config_in_lockstep() {
+    // The DW-027/DW-048 lockstep contract, extended: the compiled
+    // table entry is present exactly when the route config carries a
+    // body transform, on each side independently.
+    let mut gw = base_gateway();
+    let mut r = proxy_route("r", PathMatchKind::Prefix, "/x");
+    r.transforms = Some(Transforms {
+        request: Some(RequestTransforms {
+            headers: None,
+            query: None,
+            body: Some(json_body(vec![JsonOp::Remove {
+                path: "/secret".into(),
+            }])),
+        }),
+        response: None,
+    });
+    gw.routes = vec![r];
+    let compiled = compile(&gw).expect("publishes");
+    let idx = compiled.route_table().find("/x").unwrap();
+    assert!(compiled.route_table().request_body_ops(idx).is_some());
+    assert!(compiled.route_table().response_body_ops(idx).is_none());
+    // No transforms on a bare route: neither side.
+    let gw2 = base_gateway();
+    let compiled2 = compile(&gw2).expect("publishes");
+    let idx2 = compiled2.route_table().find("/").unwrap_or(0);
+    assert!(compiled2.route_table().request_body_ops(idx2).is_none());
+    assert!(compiled2.route_table().response_body_ops(idx2).is_none());
 }

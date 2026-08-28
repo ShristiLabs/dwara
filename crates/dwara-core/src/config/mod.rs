@@ -20,17 +20,22 @@
 //! formats every credential holder must agree on plus the `${...}`
 //! secret-reference grammar (DW-045), [`limits`] the numeric
 //! bounds validation enforces, [`net`] the trusted-proxy IP/CIDR
-//! grammar shared by validation and the runtime matchers, and
+//! grammar shared by validation and the runtime matchers,
 //! [`versioning`] the HTTP-date and media-type grammar of the API
-//! versioning aids (DW-048).
+//! versioning aids (DW-048), and [`transforms`] the JSON-pointer
+//! grammar and shapes of the request/response transforms and
+//! security-header injection (DW-028).
 
 pub mod credentials;
 pub mod limits;
 pub mod net;
+pub mod transforms;
 pub mod versioning;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use transforms::{SecurityHeaders, Transforms};
 
 /// Error produced when a configuration document fails to parse.
 ///
@@ -679,6 +684,23 @@ pub struct Route {
     /// without it to leave. See [`Maintenance`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<Maintenance>,
+    /// Request/response transforms (DW-028, feature analysis 4.12):
+    /// header and query manipulation on the forwarded request and the
+    /// route's responses, plus the size-capped JSON-pointer body
+    /// transform — the transforms surface's ONE explicitly buffering
+    /// piece. Absent (the default): bytes and headers flow untouched.
+    /// See [`Transforms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transforms: Option<Transforms>,
+    /// Security-header injection (DW-028, feature analysis 5-Security):
+    /// HSTS, `X-Content-Type-Options: nosniff`,
+    /// `Content-Security-Policy`, and `X-Frame-Options`, stamped on
+    /// EVERY response the route emits (action responses and gateway
+    /// short-circuits alike), replacing any upstream-sent values — the
+    /// gateway is the source of truth at its edge. See
+    /// [`SecurityHeaders`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_headers: Option<SecurityHeaders>,
 }
 
 /// Route maintenance mode (DW-041): a per-route availability state that

@@ -238,3 +238,133 @@ fn config_error_display_includes_path() {
     let msg = err.to_string();
     assert!(msg.contains("listeners[0].port"), "display: {msg}");
 }
+
+#[test]
+fn transforms_and_security_headers_reject_unknown_fields() {
+    // deny_unknown_fields holds for the new DW-028 route blocks exactly
+    // like every other block; the error path names the block and field.
+    let err = parse_gateway(
+        r#"
+routes:
+  - name: r
+    service: s
+    match: { path: { type: prefix, value: /x } }
+    action: { type: proxy }
+    transforms:
+      request:
+        headers:
+          set: { x-a: "1" }
+          overwrite: true
+services:
+  - name: s
+    upstream: u
+upstreams:
+  - name: u
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+"#,
+    )
+    .expect_err("unknown transforms field must be rejected");
+    assert!(
+        err.path.contains("transforms") && err.message.contains("overwrite"),
+        "path names the transforms block: {err}"
+    );
+
+    let err = parse_gateway(
+        r#"
+routes:
+  - name: r
+    service: s
+    match: { path: { type: prefix, value: /x } }
+    action: { type: proxy }
+    security_headers:
+      nosniff: true
+      referrer_policy: no-referrer
+services:
+  - name: s
+    upstream: u
+upstreams:
+  - name: u
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+"#,
+    )
+    .expect_err("unknown security_headers field must be rejected");
+    assert!(
+        err.path.contains("security_headers") && err.message.contains("referrer_policy"),
+        "path names the security_headers block: {err}"
+    );
+}
+
+#[test]
+fn transforms_block_parses_end_to_end() {
+    // The full DW-028 surface in one route: both halves, every op kind,
+    // and the security-header block alongside.
+    let gateway = parse_gateway(
+        r#"
+routes:
+  - name: r
+    service: s
+    match: { path: { type: prefix, value: /x } }
+    action: { type: proxy }
+    transforms:
+      request:
+        headers:
+          set: { x-gateway: dwara }
+          add: { x-tags: edge }
+          remove: [x-client-secret]
+          rename: { x-legacy-id: x-request-ref }
+        query:
+          set: { region: us-east }
+          add: { source: gw }
+          remove: [debug]
+          rename: { uid: user_id }
+        body:
+          json:
+            max_bytes: 65536
+            ops:
+              - { op: set, path: /meta/via, value: dwara }
+              - { op: remove, path: /internal/secret }
+      response:
+        headers:
+          remove: [server]
+        body:
+          json:
+            max_bytes: 262144
+            ops:
+              - { op: remove, path: /debug/internal }
+    security_headers:
+      hsts_max_age_secs: 31536000
+      hsts_include_subdomains: true
+      hsts_preload: true
+      nosniff: true
+      content_security_policy: "default-src 'self'"
+      frame_options: deny
+services:
+  - name: s
+    upstream: u
+upstreams:
+  - name: u
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+"#,
+    );
+    let gateway = gateway.expect("the full DW-028 surface parses");
+    let route = &gateway.routes[0];
+    let t = route.transforms.as_ref().unwrap();
+    let req = t.request.as_ref().unwrap();
+    let h = req.headers.as_ref().unwrap();
+    assert_eq!(h.set.get("x-gateway").unwrap(), "dwara");
+    assert_eq!(h.rename.get("x-legacy-id").unwrap(), "x-request-ref");
+    assert_eq!(req.query.as_ref().unwrap().remove, vec!["debug"]);
+    let body = &req.body.as_ref().unwrap().json;
+    assert_eq!(body.max_bytes, 65536);
+    assert_eq!(body.ops.len(), 2);
+    let sh = route.security_headers.as_ref().unwrap();
+    assert_eq!(sh.hsts_max_age_secs, Some(31_536_000));
+    assert!(sh.hsts_include_subdomains && sh.hsts_preload && sh.nosniff);
+    assert_eq!(
+        sh.frame_options,
+        Some(dwara_core::config::transforms::FrameOptions::Deny)
+    );
+    let resp = t.response.as_ref().unwrap();
+    assert_eq!(resp.headers.as_ref().unwrap().remove, vec!["server"]);
+    assert_eq!(resp.body.as_ref().unwrap().json.max_bytes, 262_144);
+}

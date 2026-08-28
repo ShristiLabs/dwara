@@ -1167,7 +1167,9 @@ where
                     route = %route.name,
                     "request rejected by route limits"
                 );
-                return simple(status, code, &msg, rid);
+                let mut resp = simple(status, code, &msg, rid);
+                stamp_security_headers(&mut resp, route);
+                return resp;
             }
         }
     }
@@ -1184,8 +1186,11 @@ where
             // (RouteTable::cors_origins); a None here is unreachable for
             // a published snapshot and falls through to a normal proxy.
             if let Some(origins) = gen.snapshot.route_table().cors_origins(idx) {
-                return crate::dataplane::cors::preflight_response(cors, origins, req.headers())
-                    .map(ProxyBody::Full);
+                let mut resp =
+                    crate::dataplane::cors::preflight_response(cors, origins, req.headers())
+                        .map(ProxyBody::Full);
+                stamp_security_headers(&mut resp, route);
+                return resp;
             }
         }
     }
@@ -1225,23 +1230,31 @@ where
         .await
     {
         Ok(id) => id,
-        Err(AuthError::Invalid(_)) => return unauthorized(&authn.challenge(), rid),
+        Err(AuthError::Invalid(_)) => {
+            let mut resp = unauthorized(&authn.challenge(), rid);
+            stamp_security_headers(&mut resp, route);
+            return resp;
+        }
         Err(AuthError::Unavailable(msg)) => {
             tracing::error!(
                 code = "authentication_unavailable",
                 request_id = %rid,
                 "authentication backend unavailable: {msg}"
             );
-            return simple(
+            let mut resp = simple(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "authentication_unavailable",
                 "authentication unavailable",
                 rid,
             );
+            stamp_security_headers(&mut resp, route);
+            return resp;
         }
     };
     if route.auth_required && identity.is_none() {
-        return unauthorized(&authn.challenge(), rid);
+        let mut resp = unauthorized(&authn.challenge(), rid);
+        stamp_security_headers(&mut resp, route);
+        return resp;
     }
     if let Some(id) = &identity {
         rec.consumer = id.consumer_name.clone();
@@ -1359,7 +1372,11 @@ where
         crate::security::authz::Decision::Deny {
             unauthenticated: true,
             ..
-        } => return unauthorized(&authn.challenge(), rid),
+        } => {
+            let mut resp = unauthorized(&authn.challenge(), rid);
+            stamp_security_headers(&mut resp, route);
+            return resp;
+        }
         crate::security::authz::Decision::Deny { reason, .. } => {
             // Reason is server-side only: which list matched, which claim
             // was absent — none of it is the client's business.
@@ -1373,7 +1390,9 @@ where
                     .unwrap_or("<anonymous>"),
                 "authorization denied: {reason}"
             );
-            return forbidden(rid);
+            let mut resp = forbidden(rid);
+            stamp_security_headers(&mut resp, route);
+            return resp;
         }
     }
 
@@ -1430,7 +1449,10 @@ where
                 } => {
                     rec.rate_limited = true;
                     dp.obs.record_rate_limited(&route.name);
-                    return rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
+                    let mut resp =
+                        rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
+                    stamp_security_headers(&mut resp, route);
+                    return resp;
                 }
                 RateLimitOutcome::Allowed {
                     limit,
@@ -1520,12 +1542,14 @@ where
                                 priority = priority,
                                 "gateway concurrency cap saturated; request shed"
                             );
-                            return simple(
+                            let mut resp = simple(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "gateway_saturated",
                                 "gateway saturated",
                                 rid,
                             );
+                            stamp_security_headers(&mut resp, route);
+                            return resp;
                         }
                     }
                 }
@@ -1626,6 +1650,32 @@ where
         } => respond(*status, body.as_deref(), headers),
     };
 
+    // Response body transforms (DW-028), the decoration tail's FIRST
+    // stage: buffers only when the route configured a JSON body
+    // transform AND the response declares a JSON body within the cap —
+    // every other response (SSE, streamed downloads, other content
+    // types, already-encoded) passes untouched, the streaming
+    // guarantee. Before compression so the codec encodes the
+    // TRANSFORMED bytes and the eligibility check below sees the
+    // final Content-Type (header ops may have rewritten it).
+    if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
+        resp = crate::dataplane::transforms::transform_response_body(resp, compiled, rid).await;
+    }
+
+    // Response header transforms (DW-028): the operator's final shape
+    // of the upstream's headers, before the gateway's own policy
+    // stamps (compression's Vary/Content-Encoding, versioning, CORS,
+    // security headers, rate headers — each owns headers validation
+    // keeps the ops out of, so no stage here can be undone by an op).
+    if let Some(ops) = route
+        .transforms
+        .as_ref()
+        .and_then(|t| t.response.as_ref())
+        .and_then(|resp_t| resp_t.headers.as_ref())
+    {
+        crate::dataplane::transforms::apply_header_ops(resp.headers_mut(), ops);
+    }
+
     // Response compression (DW-027): route-scoped, negotiated against
     // the captured Accept-Encoding, applied after the action so every
     // action reports identically. The content-type filter is compiled
@@ -1698,6 +1748,16 @@ where
             );
         }
     }
+
+    // Security headers (DW-028): the LAST policy stamp before the rate
+    // headers — the gateway's edge policy has the final word over
+    // upstream values AND over operator transforms (an operator who
+    // needs per-route exceptions omits the field here and sets it via
+    // transforms). REPLACE semantics: the gateway is the source of
+    // truth at its edge.
+    if let Some(sh) = &route.security_headers {
+        crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
+    }
     // Admitted requests carry the binding constraint's rate headers (only
     // when a policy actually matched — see DW-017 module docs). Applied
     // after the action so every action (including streaming proxy bodies
@@ -1706,6 +1766,19 @@ where
         apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
     }
     resp
+}
+
+/// Stamp the route's security-header policy (DW-028) onto a gateway
+/// short-circuit response. Security headers are an EDGE property of
+/// every route-matched response — a browser parsing a 401 or a 429
+/// deserves the same `nosniff`/HSTS guarantees as one parsing a 200
+/// (the deliberate asymmetry with deprecation stamps, which announce
+/// API lifecycle and stay off short-circuits; see
+/// `config::transforms::SecurityHeaders`).
+fn stamp_security_headers(resp: &mut Response<ProxyBody>, route: &Route) {
+    if let Some(sh) = &route.security_headers {
+        crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
+    }
 }
 
 /// The 503 maintenance response (DW-041): `Retry-After` in whole seconds
@@ -1741,6 +1814,9 @@ fn maintenance_response(
     ) {
         crate::dataplane::cors::decorate_actual(cors, origins, origin, resp.headers_mut());
     }
+    // Security headers (DW-028): the 503 is a route-matched response —
+    // the edge policy stamps it like every other.
+    stamp_security_headers(&mut resp, route);
     resp
 }
 
@@ -2136,6 +2212,23 @@ where
         }
     }
 
+    // Query transforms (DW-028): the one place the forwarded query may
+    // change. After the path rewrite (which re-attaches the ORIGINAL
+    // query verbatim — DW-010 never saw transforms) and before route
+    // matching is a memory: matching, limits, authn, and rate limiting
+    // all evaluated the request's ORIGINAL query. Untouched pairs keep
+    // their exact bytes; only pairs a named op touches are re-encoded.
+    if let Some(ops) = route
+        .transforms
+        .as_ref()
+        .and_then(|t| t.request.as_ref())
+        .and_then(|req_t| req_t.query.as_ref())
+    {
+        if let Some(new_uri) = crate::dataplane::transforms::apply_query_ops(req.uri(), ops) {
+            *req.uri_mut() = new_uri;
+        }
+    }
+
     // The inbound upgrade handle, if the listener enabled upgrades: pulled
     // out of the request extensions so the request itself can be rebuilt.
     let on_client_upgrade = req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>();
@@ -2186,6 +2279,64 @@ where
         }
     }
 
+    // Request header transforms (DW-028): LAST hands on the forwarded
+    // headers, after hop-by-hop stripping and the gateway's trusted
+    // injections — ops see (and may shape, including removing the
+    // trust headers; the operator owns the upstream's contract) the
+    // near-final request. Framing/hop-by-hop names were rejected by
+    // validation, so the ops cannot disturb the pipeline's own
+    // headers here.
+    if let Some(ops) = route
+        .transforms
+        .as_ref()
+        .and_then(|t| t.request.as_ref())
+        .and_then(|req_t| req_t.headers.as_ref())
+    {
+        crate::dataplane::transforms::apply_header_ops(&mut parts.headers, ops);
+    }
+
+    // Request body transform (DW-028): BEFORE the retry buffering, so
+    // a retried attempt replays the TRANSFORMED bytes, and before any
+    // upstream contact. The compiled ops come from the snapshot table
+    // (pointers parsed once at compile); a None policy leaves the
+    // body streaming untouched. Reading through the wrappers below
+    // (limit counting, HMAC digest fold) keeps enforcement on the
+    // CLIENT's original bytes — the transform shapes what the upstream
+    // receives, never what the gateway verifies.
+    let mut transformed_body: Option<Bytes> = None;
+    let mut body_rest: Option<B> = Some(body);
+    if let Some(compiled) = gen.snapshot.route_table().request_body_ops(route_idx) {
+        match crate::dataplane::transforms::transform_request_body(
+            body_rest
+                .take()
+                .expect("body present before the transform step"),
+            compiled,
+            &parts.headers,
+        )
+        .await
+        {
+            // No transform applied (non-JSON, encoded, or empty): the
+            // ORIGINAL body streams on — the streaming guarantee of
+            // this feature.
+            crate::dataplane::transforms::RequestBodyOutcome::Original(b) => body_rest = Some(b),
+            crate::dataplane::transforms::RequestBodyOutcome::Replaced(bytes) => {
+                // Framing: the forwarded body IS these bytes now —
+                // rewrite the declared length to match (a stale length
+                // would misframe the hop; the value is always
+                // representable).
+                parts.headers.insert(
+                    hyper::header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&bytes.len().to_string())
+                        .expect("a length is a valid header value"),
+                );
+                transformed_body = Some(bytes);
+            }
+            crate::dataplane::transforms::RequestBodyOutcome::Failed(e) => {
+                return request_body_transform_failed(e, rid);
+            }
+        }
+    }
+
     let out_req_parts = parts;
     // The peer IP is the ip_hash key (X-Real-IP peer; other algorithms
     // ignore it); every attempt re-picks the endpoint through the
@@ -2225,8 +2376,19 @@ where
     // still accumulates denominator headroom for its idempotent share.
     budget.record_request();
     let mut replay: Option<Bytes> = None;
-    let first_body: AttemptBody<B> = if retries_enabled {
-        match buffer_request_body(body, rp.buffer_max_bytes).await {
+    let first_body: AttemptBody<B> = if let Some(bytes) = transformed_body {
+        // DW-028: the transform already buffered (and replaced) the
+        // body — it is replayable by construction, and a retry re-sends
+        // the TRANSFORMED bytes.
+        replay = Some(bytes.clone());
+        AttemptBody::Replay(bytes)
+    } else if retries_enabled {
+        match buffer_request_body(
+            body_rest.take().expect("untransformed body present"),
+            rp.buffer_max_bytes,
+        )
+        .await
+        {
             Ok(bytes) => {
                 replay = Some(bytes.clone());
                 AttemptBody::Replay(bytes)
@@ -2248,7 +2410,7 @@ where
         // to the pre-DW-014 path.
         AttemptBody::OneShot {
             prefix: None,
-            rest: Box::pin(body),
+            rest: Box::pin(body_rest.take().expect("untransformed body present")),
         }
     };
 
@@ -2668,6 +2830,67 @@ where
                 _ => rest.size_hint(),
             },
         }
+    }
+}
+
+/// Map a failed REQUEST body transform (DW-028) to its client answer.
+/// The two marker arms keep the answer of the layer that tripped (the
+/// route limit's 413, the HMAC family's 401); the transform's own
+/// failures answer in its envelope with generic client-facing text
+/// (the offending POINTER is logged server-side only — it names the
+/// route's contract, not the client's business).
+fn request_body_transform_failed(
+    e: crate::dataplane::transforms::RequestBodyTransformError,
+    rid: &str,
+) -> Response<ProxyBody> {
+    use crate::dataplane::transforms::RequestBodyTransformError;
+    match e {
+        RequestBodyTransformError::RouteLimit => simple(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "request body exceeded the route limit mid-stream",
+            rid,
+        ),
+        RequestBodyTransformError::SignatureMismatch => {
+            tracing::warn!(
+                code = "signature_body_mismatch",
+                request_id = %rid,
+                "signed request body did not match its digest while buffering for a transform"
+            );
+            unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
+        }
+        RequestBodyTransformError::TooLarge { cap } => simple(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            &format!("request body exceeds the route's transform cap of {cap} bytes"),
+            rid,
+        ),
+        RequestBodyTransformError::InvalidJson => simple(
+            StatusCode::BAD_REQUEST,
+            "request_body_invalid_json",
+            "request body is not valid JSON (a JSON body transform is configured on this route)",
+            rid,
+        ),
+        RequestBodyTransformError::Unresolved { path } => {
+            tracing::warn!(
+                code = "request_transform_failed",
+                request_id = %rid,
+                pointer = %path,
+                "request body pointer did not resolve against the route's transform policy"
+            );
+            simple(
+                StatusCode::BAD_REQUEST,
+                "request_transform_failed",
+                "request body did not match the route's transform policy",
+                rid,
+            )
+        }
+        RequestBodyTransformError::Body(_) => simple(
+            StatusCode::BAD_REQUEST,
+            "request_body_invalid",
+            "request body could not be read",
+            rid,
+        ),
     }
 }
 

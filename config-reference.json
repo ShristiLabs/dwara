@@ -285,6 +285,20 @@
       },
       "additionalProperties": false
     },
+    "BodyTransform": {
+      "description": "A body transform (DW-028). The `json` variant is the whole of v1:\nany other body transform family (templating, XML) would be a new\nvariant here — the wrapper exists so adding one does not reshape\nthe config surface.",
+      "type": "object",
+      "properties": {
+        "json": {
+          "description": "JSON-pointer operations on JSON bodies, size-capped. See\n[`JsonBodyTransform`].",
+          "$ref": "#/$defs/JsonBodyTransform"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "json"
+      ]
+    },
     "BreakerConfig": {
       "description": "Per-upstream circuit breaker knobs (DW-015). All fields default; a\n`breaker:` block with no keys enables the breaker with the defaults.\n\nFrozen semantics (see the `breaker` module docs):\n- The breaker gates the WHOLE upstream (all endpoints); per-endpoint\n  ejection (DW-012) is an independent layer beneath it.\n- It opens on `consecutive_failures` consecutive failures (5xx or\n  transport) OR an in-window error ratio >= `error_ratio` once at least\n  `error_volume` observations are in the 60 s window.\n- While open, requests fail fast with 503 and a `Retry-After` header\n  (seconds until half-open); in-flight requests complete normally.\n- After `open_ms` a half-open probe (`half_open_probes` concurrent\n  trials) closes the breaker on success or re-opens it on failure.",
       "type": "object",
@@ -649,6 +663,56 @@
         "port"
       ]
     },
+    "FrameOptions": {
+      "description": "The `X-Frame-Options` value (DW-028).",
+      "oneOf": [
+        {
+          "description": "`DENY`: no framing at all.",
+          "type": "string",
+          "const": "deny"
+        },
+        {
+          "description": "`SAMEORIGIN`: same-origin frames only.",
+          "type": "string",
+          "const": "sameorigin"
+        }
+      ]
+    },
+    "HeaderOps": {
+      "description": "Header manipulation ops (DW-028). Applied in ONE deterministic\norder regardless of YAML key order: `set` (replace all values of the\nname with one value), then `add` (append one value, keeping any\nexisting values), then `rename` (move every value of `from` to\n`to`), then `remove` (drop every value of the name) — so `remove`\ncan clean up what earlier ops placed, and `rename` sees both\nupstream and just-set values. Maps iterate in sorted key order\n(BTreeMap), making multi-entry application deterministic.\n\nThe block runs after hop-by-hop stripping on the request side and\nbefore the gateway's own policy stamps on the response side;\nframing and hop-by-hop header names are rejected by validation in\nBOTH directions (see `dataplane::transforms` module docs for the\nrationale).",
+      "type": "object",
+      "properties": {
+        "add": {
+          "description": "Append one value to the header name, keeping any existing\nvalues (the way to build multi-value headers deterministically).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "remove": {
+          "description": "Drop every value of these header names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rename": {
+          "description": "Relabel every value of `from` onto `to` (existing `to` values\nare kept; the renamed values append after them). One entry per\nsource name; a `from == to` entry is rejected by validation.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "description": "Replace every value of the header name with this single value\n(an absent name is inserted).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "HmacAuth": {
       "description": "Gateway-wide HMAC request-signing policy (DW-036). The credential\nitself (key id + secret) lives on a consumer\n(`credentials: [{type: hmac, ...}]`); this block carries the\nVERIFICATION policy that applies to every signed request.",
       "type": "object",
@@ -700,6 +764,77 @@
           "description": "Unmatched IPs are rejected: only the allow list passes.",
           "type": "string",
           "const": "deny"
+        }
+      ]
+    },
+    "JsonBodyTransform": {
+      "description": "JSON-pointer body transform (DW-028): RFC 6901 pointers against a\nparsed JSON document, applied in listed order (each op sees the\nprevious op's result). THIS IS THE EXPLICITLY BUFFERING TRANSFORM —\nthe only place in the transforms surface that reads a body. Hard\nrules, enforced by `dataplane::transforms`:\n\n- Size cap: `max_bytes` bounds the buffered body both against a\n  declared `Content-Length` (rejected up front) and against the\n  live stream (aborted at the frame that crosses). Over-cap fails\n  CLOSED: 413 on the request side, 502 on the response side.\n- Content-type gate: the transform applies only when the body's\n  media type is JSON (`application/json` or any\n  `application/<*+json>`), parameters ignored. Non-JSON and empty\n  bodies pass through untouched (streaming preserved; an empty body\n  has nothing to transform). A body already carrying\n  `Content-Encoding` passes through untouched: the transform does\n  not decode (the documented pass-through of the compression\n  policy, mirrored here).\n- A JSON-typed body that fails to PARSE is a client/upstream\n  error, not a skip: 400 request-side, 502 response-side.\n- A pointer that does not RESOLVE fails the transform (see the\n  module docs for why strictness is the safe default).",
+      "type": "object",
+      "properties": {
+        "max_bytes": {
+          "description": "Maximum body size (bytes) this route will buffer to transform.\nMust be >= 1 (validation); there is deliberately no upper\nbound — the operator owns this route's memory budget, the same\nstance as `limits.max_body_bytes`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ops": {
+          "description": "Pointer operations, applied in order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonOp"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_bytes",
+        "ops"
+      ]
+    },
+    "JsonOp": {
+      "description": "One JSON-pointer operation (DW-028). `set` writes any JSON value at\nthe pointer (creating the final key in an object parent that must\nalready exist; replacing an existing element in an array parent);\n`remove` deletes the addressed value. The ROOT pointer (`\"\"`) is\nvalid for `set` (whole-document replacement) and rejected for\n`remove` by validation (a body with no document is not a state this\ntransform can produce).",
+      "oneOf": [
+        {
+          "description": "Write `value` at `path` (RFC 6901 pointer).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "set"
+            },
+            "path": {
+              "description": "RFC 6901 JSON pointer (e.g. `/meta/via`, `/items/0/id`, ``\nfor the whole document).",
+              "type": "string"
+            },
+            "value": {
+              "description": "Any JSON value to place at the pointer."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        },
+        {
+          "description": "Delete the value at `path` (RFC 6901 pointer, not the root).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "remove"
+            },
+            "path": {
+              "description": "RFC 6901 JSON pointer; the root (`\"\"`) is rejected by\nvalidation.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path"
+          ]
         }
       ]
     },
@@ -1130,6 +1265,41 @@
         }
       ]
     },
+    "QueryOps": {
+      "description": "Query-string manipulation ops (DW-028), applied to the forwarded\nrequest's query. The original query is split into pairs WITHOUT\ndecoding (each pair's key and value stay byte-verbatim, so untouched\nparameters — including their exact percent-encoding — survive); only\npairs a named op touches are re-encoded (new values are\npercent-encoded by the gateway). Ops apply in the same deterministic\norder as header ops: `set`, `add`, `rename`, `remove`.\n\n`set` replaces EVERY pair of the key with one pair at the END of\nthe query (position cannot be preserved for a replaced key);\n`rename` keeps position, re-labeling each matching pair in place;\n`add` appends at the end; `remove` drops every matching pair.",
+      "type": "object",
+      "properties": {
+        "add": {
+          "description": "Append one pair at the end of the query.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "remove": {
+          "description": "Drop every pair of these keys.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rename": {
+          "description": "Re-label every pair of `from` with the new key, value verbatim,\nposition preserved.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "description": "Replace every pair of the key with this single pair (appended at\nthe end of the result).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "RateLimit": {
       "description": "Local GCRA-style rate limit.",
       "type": "object",
@@ -1278,6 +1448,75 @@
           ],
           "format": "uint32",
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RequestTransforms": {
+      "description": "Request-side transforms (DW-028).",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Body transform (JSON) on the forwarded request — the explicitly\nbuffering transform, size-capped. See [`BodyTransform`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyTransform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headers": {
+          "description": "Header manipulation on the forwarded request.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeaderOps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "description": "Query-string manipulation on the forwarded request (the path is\nDW-010's `path_rewrite`; this block never touches it).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryOps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseTransforms": {
+      "description": "Response-side transforms (DW-028), applied to the route's action\nresponses (proxy, redirect, respond) — not to gateway\nshort-circuits (limits, authn/authz, rate limits, maintenance,\nsheds), which describe the request, not the upstream's output.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Body transform (JSON) on the route's responses — the explicitly\nbuffering transform, size-capped. See [`BodyTransform`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyTransform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headers": {
+          "description": "Header manipulation on the route's responses.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeaderOps"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -1447,9 +1686,31 @@
           "maximum": 255,
           "minimum": 0
         },
+        "security_headers": {
+          "description": "Security-header injection (DW-028, feature analysis 5-Security):\nHSTS, `X-Content-Type-Options: nosniff`,\n`Content-Security-Policy`, and `X-Frame-Options`, stamped on\nEVERY response the route emits (action responses and gateway\nshort-circuits alike), replacing any upstream-sent values — the\ngateway is the source of truth at its edge. See\n[`SecurityHeaders`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityHeaders"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "service": {
           "description": "Name of the service this route targets.",
           "type": "string"
+        },
+        "transforms": {
+          "description": "Request/response transforms (DW-028, feature analysis 4.12):\nheader and query manipulation on the forwarded request and the\nroute's responses, plus the size-capped JSON-pointer body\ntransform — the transforms surface's ONE explicitly buffering\npiece. Absent (the default): bytes and headers flow untouched.\nSee [`Transforms`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Transforms"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1615,6 +1876,52 @@
         "path"
       ]
     },
+    "SecurityHeaders": {
+      "description": "Security-header injection policy (DW-028, feature analysis\n5-Security \"security header injection\"). Each field that is present\ninjects (REPLACING any upstream-sent value — the gateway is the\nsource of truth at its edge) exactly one standard hardening header\non every response the route emits, including gateway\nshort-circuits (401/403/413/429/503, CORS preflights): unlike\ndeprecation stamps, these harden every byte the edge sends, and a\nbrowser parsing an error page deserves the same guarantees as one\nparsing a 200.\n\nNot on responses with no route to consult: the framing 400 (the\npre-parse sniff rejects the request before any route exists) and\nunrouted 404s.",
+      "type": "object",
+      "properties": {
+        "content_security_policy": {
+          "description": "Emit `Content-Security-Policy: <policy>` verbatim (the operator\nauthors the policy; non-empty and header-representable,\nvalidation — a trailing newline or other control byte is\nrejected rather than silently not emitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame_options": {
+          "description": "Emit `X-Frame-Options` (legacy but still load-bearing for older\nbrowsers). `ALLOW-FROM` is obsolete and deliberately absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrameOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hsts_include_subdomains": {
+          "description": "Append the `includeSubDomains` directive to the HSTS header\n(meaningful only with `hsts_max_age_secs`; rejected alone by\nvalidation).",
+          "type": "boolean"
+        },
+        "hsts_max_age_secs": {
+          "description": "Emit `Strict-Transport-Security: max-age=<secs>` (RFC 6797) on\nevery response of the route. The presence of this field is the\npolicy; 0 is rejected (max-age=0 is the spec's deletion signal,\na state this policy cannot express — delete the field instead).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "hsts_preload": {
+          "description": "Append the `preload` directive to the HSTS header (the HSTS\npreload-list signal; meaningful only with `hsts_max_age_secs`\nand, per the preload list requirements, with\n`hsts_include_subdomains`; that combination is enforced by\nvalidation).",
+          "type": "boolean"
+        },
+        "nosniff": {
+          "description": "Emit `X-Content-Type-Options: nosniff` (the MIME-sniffing\noff-switch; the only value the header has).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "Service": {
       "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream.",
       "type": "object",
@@ -1752,6 +2059,35 @@
         "terminate",
         "passthrough"
       ]
+    },
+    "Transforms": {
+      "description": "Route-scoped request and response transforms (DW-028, feature\nanalysis 4.12). Absent (the default): the gateway forwards bytes and\nheaders untouched. Presence opts the route's traffic into the\ndeclared manipulations — nothing here applies to any other route.\n\nSemantics (frozen; enforcement lives in `dataplane::transforms`):\n\n- REQUEST transforms run on the forward path only, after route\n  matching, the trusted-header injection (`X-Forwarded-*`,\n  `X-Consumer-*`), and the DW-010 path rewrite: they shape the\n  request the upstream receives. Route matching, limits, authn, and\n  rate limiting all evaluated the ORIGINAL request; reordering that\n  is a policy change this block cannot make.\n- RESPONSE transforms run in the decoration tail, before compression\n  (so a body transform rewrites the bytes compression then encodes,\n  and a header transform's final `Content-Type` is what the\n  compression eligibility check sees).\n- The one deliberately sharp edge: request header ops may remove or\n  rename the gateway-injected trust headers (`X-Consumer-*`,\n  `X-Forwarded-*`). The operator owns the upstream's contract; if\n  their upstream must not see consumer identity, removing it here is\n  the mechanism. Framing and hop-by-hop headers are NOT theirs to\n  touch (validation rejects those names).",
+      "type": "object",
+      "properties": {
+        "request": {
+          "description": "Manipulations applied to the forwarded request (headers, query,\nbody).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestTransforms"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response": {
+          "description": "Manipulations applied to the route's action responses (headers,\nbody).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseTransforms"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "Upstream": {
       "description": "Load-balancing pool: algorithm, protocol, endpoints.",

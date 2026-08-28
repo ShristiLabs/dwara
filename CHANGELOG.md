@@ -313,6 +313,61 @@ the project follows semantic versioning once 1.0 is reached.
   rejections, sheds; the action-path HMAC digest 401 carries them);
   `config-reference.json` regenerated.
 
+- Request/response transforms and security headers (DW-028): a
+  per-route `transforms` block (`request.headers` / `request.query` /
+  `request.body` / `response.headers` / `response.body`) and a sibling
+  `security_headers` block. Header ops (`set`, `add`, `remove`,
+  `rename`) apply in one frozen order — set, add, rename, remove —
+  with BTreeMap iteration keeping multi-entry application
+  deterministic; request-side ops run on the forward path after the
+  DW-010 path rewrite, hop-by-hop stripping, and the trusted-header
+  injection (ops see — and may shape — the near-final forwarded
+  request, including removing `X-Consumer-*`/`X-Forwarded-*`: the
+  operator owns the upstream's contract); query ops carry untouched
+  pairs VERBATIM (no decode/re-encode round trip — a client's exact
+  percent-encoding survives) and percent-encode only the pairs a named
+  op touches; framing and hop-by-hop header names are REJECTED by
+  validation in both directions (request smuggling and
+  body-corruption guards; `host` additionally request-side,
+  `content-encoding` response-side — the compression pipeline owns
+  it). The JSON body transform (`body.json`, RFC 6901 pointers, `set`
+  any value / `remove`) is the transforms surface's ONE explicitly
+  buffering piece, preserving the streaming dataplane elsewhere: it
+  applies only to JSON-typed bodies (`application/json` and
+  `application/*+json`, parameters ignored), enforces a hard
+  `max_bytes` cap against both a declared `Content-Length` and the
+  live stream, rewrites the forwarded `Content-Length` to the
+  transformed length, runs BEFORE retry buffering so retries replay
+  the transformed bytes, and reads THROUGH the route-limit and
+  HMAC-digest wrappers (enforcement stays on the client's original
+  bytes; policy shapes what the upstream receives). It fails CLOSED:
+  over-cap 413 (request) / 502 (response), unparseable JSON 400 /
+  502, and an unresolved pointer 400 / 502 — a silent skip would be
+  fail-open in exactly the masking direction DW-029 builds on this
+  machinery; non-JSON, already-encoded, and empty bodies pass
+  through untouched (SSE and streamed downloads keep streaming).
+  Pointers parse once at snapshot compile into the route table (the
+  same lockstep precompute contract as the CORS/compression/
+  deprecation tables); header/query ops carry no grammar and
+  deliberately have no compiled form. Response-side transforms run in
+  the decoration tail BEFORE compression (the codec encodes the
+  transformed bytes and eligibility sees the final content type) and
+  apply to action responses only, like deprecation stamps.
+  `security_headers` injects HSTS (`max-age` + optional
+  `includeSubDomains`/`preload`, composition validated), `X-Content-Type-Options:
+  nosniff`, `Content-Security-Policy`, and `X-Frame-Options`
+  (`deny`/`sameorigin`; obsolete `ALLOW-FROM` deliberately absent) on
+  EVERY route-matched response — action responses AND gateway
+  short-circuits (401/403/413/429/503, CORS preflights: a browser
+  parsing an error page deserves the same edge guarantees, the
+  deliberate asymmetry with deprecation stamps — but not the pre-route
+  framing 400 or unrouted 404s, which have no route to consult) —
+  REPLACING any upstream-sent values (the gateway is the source of
+  truth at its edge, the deprecation/rate-header rule); it stamps last
+  in the tail, after operator transforms, so the edge policy has the
+  final word. Zero new dependencies (hand-rolled RFC 6901 grammar in
+  `config::transforms`); `config-reference.json` regenerated.
+
 ### Fixed
 
 - Linux config-watcher reload loop: each reload's own read bumped the

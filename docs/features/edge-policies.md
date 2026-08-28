@@ -54,9 +54,11 @@ sequenceDiagram
     G->>G: authn -> authz -> rate limit -> cap admission (unchanged)
     G->>U: action (proxy / redirect / respond)
     U-->>G: response
+    G->>G: transforms: body then header ops (DW-028, if configured)
     G->>G: compression: negotiate, decide, wrap (streaming)
     G->>G: versioning: Vary: Accept merge + Deprecation/Sunset stamps
     G->>G: CORS decoration: policy headers + Vary: Origin
+    G->>G: security headers: HSTS/nosniff/CSP/XFO (DW-028, if configured)
     G-->>C: response
 ```
 

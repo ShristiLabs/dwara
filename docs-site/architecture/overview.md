@@ -65,7 +65,7 @@ flowchart TD
     I --> J[Endpoint pick\nload balancing]
     J --> K[Pending-request cap]
     K --> P[Connect + proxy\nstreaming, no buffering]
-    P --> RC[Response edge\ncompression + CORS headers]
+    P --> RC[Response edge\ntransforms + compression\n+ CORS + security headers]
 ```
 
 A few consequences worth knowing as an operator:

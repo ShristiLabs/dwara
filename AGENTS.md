@@ -33,7 +33,7 @@ features) are not yet implemented.
 
 ```sh
 cargo build --workspace
-cargo test --workspace            # ~1090 tests; suites spawn real servers/binaries
+cargo test --workspace            # ~1135 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -89,7 +89,10 @@ crates/dwara-core/src/
                       grammar everything validates against: net.rs
                       (IP/CIDR utilities), limits.rs (schema
                       validation bounds), credentials.rs (credential
-                      selector/hash formats)
+                      selector/hash formats), transforms.rs (RFC 6901
+                      JSON pointers + the transforms/security-headers
+                      shapes, DW-028), versioning.rs (HTTP-date and
+                      media-type grammar, DW-048)
   snapshot/           validate -> compile -> publish pipeline; the
                       immutable Snapshot behind ArcSwap
   extensions/         the five swappable subsystem traits
@@ -198,10 +201,16 @@ Rules for new code:
   (503 + Retry-After, preflight-exempt, DW-041) → route limits
   (413/431) → CORS preflight short-circuit (204, pre-authn) → authn
   → authz → rate limit → gateway cap admission (priority-aware) →
-  breaker → endpoint pick → pending cap → connect; responses then
-  gain route compression (DW-027) → versioning stamps (Vary: Accept
-  fold + Deprecation/Sunset/Link, DW-048) → CORS decoration (DW-027)
-  → rate headers. Unrouted traffic
+  breaker → endpoint pick → pending cap → connect (request transforms
+  run on the forward path inside the proxy action, DW-028: query ops
+  after the DW-010 path rewrite, header ops after the trusted-header
+  injection, the JSON body transform before retry buffering — matching
+  and every policy above evaluated the ORIGINAL request); responses
+  then gain body/header transforms (DW-028) → route compression
+  (DW-027) → versioning stamps (Vary: Accept fold +
+  Deprecation/Sunset/Link, DW-048) → CORS decoration (DW-027) →
+  security headers (DW-028, every route-matched response including
+  short-circuits) → rate headers. Unrouted traffic
   stops at route resolution: listener- and global-attached policies
   rate-limit the request before the 404; authn/authz never run
   pre-route. Dry-run (DW-041) does not reorder anything: a phase with
@@ -289,6 +298,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Health | dwara-core | `passive_health`, `active_health` |
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
+| Transforms + security headers (DW-028) | dwara-core | `transforms` (end to end), `tests/unit/transforms.rs` |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |

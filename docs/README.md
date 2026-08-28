@@ -32,6 +32,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
   windows, bounded key-space eviction.
 - [Route edge policies](./features/edge-policies.md) — CORS,
   response compression, per-route request limits (DW-027).
+- [Request/response transforms and security
+  headers](./features/transforms.md) — header/query manipulation,
+  size-capped JSON-pointer body transforms (the one buffering
+  transform), and edge security-header injection (DW-028).
 - [Maintenance mode and policy dry-run](./features/maintenance-dry-run.md)
   — the per-route 503 + Retry-After availability short-circuit and
   the per-attachment monitor flags on every rejecting policy phase,

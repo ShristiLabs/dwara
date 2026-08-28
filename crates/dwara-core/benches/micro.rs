@@ -65,6 +65,8 @@ fn bench_gateway() -> Gateway {
                 authorization: None,
                 deprecation: None,
                 maintenance: None,
+                transforms: None,
+                security_headers: None,
             });
         }
     }
