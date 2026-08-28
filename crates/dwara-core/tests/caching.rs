@@ -971,4 +971,700 @@ fn cache_validation_bounds_and_grammar() {
     assert!(err(&format!("      ttl_secs: 30\n      vary: [{many}]")).contains("at most 8"));
     // Unknown fields in the block are rejected (strict schema).
     assert!(err("      ttl_secs: 30\n      enabled: true").contains("enabled"));
+    // DW-038: the coalescing wait bound.
+    assert!(ok("      ttl_secs: 30\n      coalescing: {}"));
+    assert!(ok(
+        "      ttl_secs: 30\n      coalescing: { wait_ms: 60000 }"
+    ));
+    assert!(err("      ttl_secs: 30\n      coalescing: { wait_ms: 0 }").contains("wait_ms"));
+    assert!(err("      ttl_secs: 30\n      coalescing: { wait_ms: 60001 }").contains("wait_ms"));
+    assert!(err("      ttl_secs: 30\n      coalescing: { wait: 5 }")
+        .to_ascii_lowercase()
+        .contains("unknown field"));
+}
+
+// --- request coalescing (DW-038): N concurrent misses -> 1 upstream call ----
+
+/// Route cache block with coalescing enabled and a generous wait (the
+/// default 5 s would race the test rendezvous on a loaded CI runner).
+const COALESCING: &str = "      ttl_secs: 30\n      coalescing: { wait_ms: 60000 }";
+
+/// One gauge/unlabeled-counter value off the observability text render
+/// (0 when the family has not rendered a sample yet).
+fn metric(dp: &Arc<DataPlane>, name: &str) -> i64 {
+    let prefix = format!("{name} ");
+    for line in dp.observability().render().lines() {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            if let Ok(v) = rest.trim().parse::<i64>() {
+                return v;
+            }
+        }
+    }
+    0
+}
+
+/// One labeled-counter child value off the render (0 when absent).
+fn outcome(dp: &Arc<DataPlane>, family: &str, label: &str) -> i64 {
+    metric(dp, &format!("{family}{{outcome=\"{label}\"}}"))
+}
+
+/// Bounded poll until `cond` holds (the suite's rendezvous pattern:
+/// observable state, never bare sleeps).
+async fn await_state(cond: impl Fn() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// A one-way gate: arrivals park until [`Gate::release`], and once
+/// released, LATER arrivals pass straight through (fail-open fetches
+/// that reach the upstream after the test opened the gate must not
+/// park on a notification that already fired — Notify stores no
+/// permits). The subscribe-before-check in `wait` closes the
+/// release-races-wait registration window.
+struct Gate {
+    open: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Gate {
+            open: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn release(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            let mut notified = Box::pin(self.notify.notified());
+            notified.as_mut().enable();
+            if self.open.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// A gated counting backend: every arrival records itself, then parks
+/// until the returned gate is released. Bodies carry the arrival
+/// number so leader/follower answers are distinguishable.
+async fn gated_backend() -> (
+    u16,
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<Gate>,
+) {
+    let gate = Gate::new();
+    let arrived = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let g0 = Arc::clone(&gate);
+    let a0 = Arc::clone(&arrived);
+    let c0 = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let g = Arc::clone(&g0);
+        let a = Arc::clone(&a0);
+        let c = Arc::clone(&c0);
+        async move {
+            let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            g.wait().await;
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .body(Full::new(Bytes::from(format!("b{n}"))))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    (port, arrived, count, gate)
+}
+
+/// Fire N concurrent GETs at the dataplane (same path).
+fn fire(
+    dp: &Arc<DataPlane>,
+    path: &str,
+    n: usize,
+    headers: &[(&'static str, &'static str)],
+) -> Vec<tokio::task::JoinHandle<(StatusCode, hyper::HeaderMap, Bytes)>> {
+    let mut joins = Vec::new();
+    for _ in 0..n {
+        let dp = Arc::clone(dp);
+        let path = path.to_string();
+        let headers: Vec<(&'static str, String)> =
+            headers.iter().map(|(k, v)| (*k, v.to_string())).collect();
+        joins.push(tokio::spawn(async move {
+            let hs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            get_with(&dp, &path, &hs).await
+        }));
+    }
+    joins
+}
+
+/// THE done-when pin: eight concurrent misses on one coalescing-enabled
+/// route collapse into ONE upstream call; every follower receives the
+/// leader's exact stored outcome (x-cache hit), and the coalescing
+/// metrics tell the whole story.
+#[tokio::test]
+async fn concurrent_misses_collapse_to_one_upstream_call() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let dp = dataplane_from(&cache_yaml(port, COALESCING, ""));
+
+    let joins = fire(&dp, "/api/x", 8, &[]);
+    // Rendezvous: the leader is parked at the backend AND all seven
+    // followers are parked on its slot (the waiters gauge) before the
+    // gate opens — the collapse is observed, not assumed.
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 1
+                && metric(&dp, "dwara_coalescing_waiters") == 7
+        },
+        "1 backend arrival + 7 parked followers",
+    )
+    .await;
+    gate.release();
+
+    let (mut misses, mut hits) = (0, 0);
+    for j in joins {
+        let (status, h, body) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body, "b1", "every client gets the leader's answer");
+        match x_cache(&h) {
+            "miss" => misses += 1,
+            "hit" => hits += 1,
+            other => panic!("unexpected x-cache {other:?}"),
+        }
+    }
+    assert_eq!((misses, hits), (1, 7));
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "8 concurrent misses -> 1 upstream call"
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_leaders_total"), 1);
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        7
+    );
+    assert_eq!(
+        metric(&dp, "dwara_coalescing_saved_upstream_calls_total"),
+        7
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
+    // The entry the leader stored is a normal cache entry: a LATER
+    // request hits it without coalescing at all.
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "hit");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Without the coalescing block nothing changes: every miss fetches.
+#[tokio::test]
+async fn without_the_coalescing_block_every_miss_fetches() {
+    let (port, count) = counting_backend(r#"{"n":{n}}"#).await;
+    let dp = dataplane_from(&cache_yaml(port, PLAIN_CACHE, ""));
+    let joins = fire(&dp, "/api/x", 3, &[]);
+    for j in joins {
+        let (status, h, _) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(x_cache(&h), "miss");
+    }
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(metric(&dp, "dwara_coalescing_leaders_total"), 0);
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
+}
+
+/// The wait bound fails open: a follower that out-waits its bound does
+/// its own upstream call (a 1 ms bound against a 300 ms upstream), and
+/// the client is never errored.
+#[tokio::test]
+async fn follower_timeout_fails_open_to_its_own_fetch() {
+    let big: &'static str = "{}";
+    let (port, count) = spawn_backend(
+        move |_n, _m, _p, _b| {
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(big.as_bytes())))
+                .unwrap()
+        },
+        Duration::from_millis(300),
+    )
+    .await;
+    let dp = dataplane_from(&cache_yaml(
+        port,
+        "      ttl_secs: 30\n      coalescing: { wait_ms: 1 }",
+        "",
+    ));
+    let joins = fire(&dp, "/api/x", 2, &[]);
+    for j in joins {
+        let (status, h, _) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "fail open, never a client error");
+        assert_eq!(x_cache(&h), "miss");
+    }
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(outcome(&dp, "dwara_coalescing_followers_total", "fell_back_timeout") >= 1);
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        0
+    );
+}
+
+/// A purge (epoch bump) mid-flight strands the follower open: it must
+/// NOT inherit the dead generation's answer — it fetches its own, and
+/// the leader's store is dropped by the epoch guard.
+#[tokio::test]
+async fn epoch_flip_midflight_strands_followers_open() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let dp = dataplane_from(&cache_yaml(port, COALESCING, ""));
+    let joins = fire(&dp, "/api/x", 2, &[]);
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 1
+                && metric(&dp, "dwara_coalescing_waiters") == 1
+        },
+        "leader parked + 1 follower waiting",
+    )
+    .await;
+    // The admin purge path (same epoch advance).
+    dp.response_cache().bump_route("api");
+    gate.release();
+    let mut bodies = Vec::new();
+    for j in joins {
+        let (status, _h, body) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        bodies.push(String::from_utf8_lossy(&body).into_owned());
+    }
+    bodies.sort();
+    assert_eq!(bodies, vec!["b1".to_string(), "b2".to_string()]);
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the stranded follower fetched its own answer"
+    );
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "fell_back_epoch"),
+        1
+    );
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        0
+    );
+    // The leader's store was dropped (epoch guard): cold miss next.
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// Deterministic failure propagation, pinned: a leader whose outcome is
+/// NOT storable (no-store veto) publishes nothing — its followers each
+/// run their own fetch (full retry policy included), never an inherited
+/// failure and never a shared unstored body.
+#[tokio::test]
+async fn unstoreable_leader_outcome_never_reaches_followers() {
+    let gate = Gate::new();
+    let arrived = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let g0 = Arc::clone(&gate);
+    let a0 = Arc::clone(&arrived);
+    let c0 = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let g = Arc::clone(&g0);
+        let a = Arc::clone(&a0);
+        let c = Arc::clone(&c0);
+        async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            g.wait().await;
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .header("cache-control", "no-store")
+                    .body(Full::new(Bytes::from_static(b"fresh")))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, COALESCING, ""));
+    let joins = fire(&dp, "/api/x", 3, &[]);
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 1
+                && metric(&dp, "dwara_coalescing_waiters") == 2
+        },
+        "unstoreable leader parked + 2 followers waiting",
+    )
+    .await;
+    gate.release();
+    for j in joins {
+        let (status, _h, body) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body, "fresh");
+    }
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "coalescing claims nothing for non-cacheable content"
+    );
+    assert_eq!(
+        outcome(
+            &dp,
+            "dwara_coalescing_followers_total",
+            "fell_back_unshared"
+        ),
+        2
+    );
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        0
+    );
+    assert_eq!(
+        metric(&dp, "dwara_coalescing_saved_upstream_calls_total"),
+        0
+    );
+}
+
+/// The coalescing key is the whole cache key: concurrent requests that
+/// differ in a vary dimension never coalesce (both reach the upstream,
+/// neither parks behind the other).
+#[tokio::test]
+async fn distinct_vary_values_never_coalesce() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let dp = dataplane_from(&cache_yaml(
+        port,
+        "      ttl_secs: 30\n      vary: [x-tenant]\n      coalescing: { wait_ms: 60000 }",
+        "",
+    ));
+    let a = fire(&dp, "/api/t", 1, &[("x-tenant", "a")]);
+    let b = fire(&dp, "/api/t", 1, &[("x-tenant", "b")]);
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 2
+                && metric(&dp, "dwara_coalescing_waiters") == 0
+        },
+        "both vary variants fetched independently",
+    )
+    .await;
+    gate.release();
+    let mut bodies = Vec::new();
+    for mut j in [a, b] {
+        let (status, _h, body) = j.pop().unwrap().await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        bodies.push(String::from_utf8_lossy(&body).into_owned());
+    }
+    bodies.sort();
+    // Both variants answered (arrival order is racy; the SET is not).
+    assert_eq!(bodies, vec!["b1".to_string(), "b2".to_string()]);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(metric(&dp, "dwara_coalescing_leaders_total"), 2);
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
+}
+
+/// Backpressure: the leader map saturates at MAX_COALESCING_KEYS
+/// distinct in-flight keys and everything past it fails open to an
+/// independent fetch (uncounted by coalescing metrics — it was neither
+/// leader nor follower). The upstream's connection_cap is raised so
+/// all 300 fetches are genuinely in flight at once (the default 64
+/// would queue them behind parked connections and never reach the
+/// map).
+#[tokio::test]
+async fn leader_map_saturation_fails_open() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let yaml = format!(
+        r#"
+routes:
+  - name: api
+    service: svc
+    match: {{ path: {{ type: prefix, value: /api }} }}
+    action: {{ type: proxy }}
+    cache:
+      ttl_secs: 30
+      coalescing: {{ wait_ms: 60000 }}
+services:
+  - name: svc
+    upstream: up
+upstreams:
+  - name: up
+    connection_cap: 512
+    endpoints: [{{ address: 127.0.0.1, port: {port} }}]
+"#
+    );
+    let dp = dataplane_from(&yaml);
+    const N: usize = 300; // 256 leaders + 44 uncounted independent fetches
+    let mut joins = Vec::new();
+    for i in 0..N {
+        let dp = Arc::clone(&dp);
+        joins.push(tokio::spawn(async move {
+            get(&dp, &format!("/api/sat?k={i}")).await
+        }));
+    }
+    await_state(
+        || arrived.load(std::sync::atomic::Ordering::SeqCst) == N as u64,
+        "all 300 independent fetches reached the upstream",
+    )
+    .await;
+    assert_eq!(
+        metric(&dp, "dwara_coalescing_leaders_total"),
+        256,
+        "the map capped at MAX_COALESCING_KEYS leaders"
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
+    gate.release();
+    for j in joins {
+        let (status, _h, _) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "saturation never sheds or errors");
+    }
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), N as u64);
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        0
+    );
+}
+
+/// No deadlock or double-subscribe with the DW-037 single-flight
+/// revalidation: a background revalidation parked mid-fetch on one key
+/// while coalescing collapses a cold miss on ANOTHER key — disjoint
+/// state, no shared locks, both behaviors intact.
+#[tokio::test]
+async fn swr_revalidation_and_coalescing_do_not_deadlock() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let g0 = Arc::clone(&gate);
+    let c0 = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let g = Arc::clone(&g0);
+        let c = Arc::clone(&c0);
+        async move {
+            let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            // ONLY the revalidation (arrival 2) parks; every other
+            // arrival answers instantly.
+            if n == 2 {
+                g.notified().await;
+            }
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .body(Full::new(Bytes::from(format!("b{n}"))))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(
+        port,
+        "      ttl_secs: 1\n      stale_while_revalidate_secs: 30\n      coalescing: { wait_ms: 60000 }",
+        "",
+    ));
+    let _ = get(&dp, "/api/x").await; // miss, stores b1
+    let _ = get(&dp, "/api/x").await; // hit
+    tokio::time::sleep(Duration::from_millis(1500)).await; // stale now
+                                                           // Stale serving triggers the gated background revalidation (arrival 2).
+    let stale = fire(&dp, "/api/x", 3, &[]);
+    for j in stale {
+        let (_, h, body) = j.await.unwrap();
+        assert_eq!(x_cache(&h), "stale");
+        assert_eq!(&body, "b1");
+    }
+    await_state(
+        || count.load(std::sync::atomic::Ordering::SeqCst) == 2,
+        "revalidation parked at the upstream",
+    )
+    .await;
+    // With the revalidation still parked, a cold burst on another path
+    // MUST still collapse and complete — no shared lock, no waiting on
+    // the revalidation's in-flight set.
+    let joins = fire(&dp, "/api/other", 3, &[]);
+    let (mut misses, mut hits) = (0, 0);
+    for j in joins {
+        let (status, h, body) = j.await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "coalescing completes while a revalidation is parked"
+        );
+        assert_eq!(&body, "b3");
+        match x_cache(&h) {
+            "miss" => misses += 1,
+            "hit" => hits += 1,
+            other => panic!("unexpected x-cache {other:?}"),
+        }
+    }
+    assert_eq!((misses, hits), (1, 2));
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+    gate.notify_waiters(); // let the revalidation finish and drain
+}
+
+/// GET-only scope (DW-038): the shapes the cache lookup bypasses
+/// (POST, body-bearing GET, upgrade-header GET) never coalesce — with
+/// a leader parked on the key's slot, none of them joins it (the
+/// waiters gauge stays at zero and the leader count stays at one);
+/// each fetches independently exactly as before the feature existed.
+#[tokio::test]
+async fn bypassed_shapes_never_join_a_coalescing_leader() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let dp = dataplane_from(&cache_yaml(port, COALESCING, ""));
+
+    // The GET leader: parked at the backend holding the key's slot.
+    let mut leader = fire(&dp, "/api/x", 1, &[]);
+    await_state(
+        || arrived.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "GET leader parked at the backend",
+    )
+    .await;
+    assert_eq!(metric(&dp, "dwara_coalescing_leaders_total"), 1);
+
+    // Three bypassed shapes at the SAME path while the leader holds
+    // the slot. A shape that (wrongly) joined would park as a waiter;
+    // instead all three arrive at the upstream on their own.
+    let bypassed: Vec<tokio::task::JoinHandle<(StatusCode, hyper::HeaderMap, Bytes)>> = [
+        (
+            hyper::Method::POST,
+            vec![],
+            Some(Bytes::from_static(b"payload")),
+        ),
+        (
+            hyper::Method::GET,
+            vec![],
+            Some(Bytes::from_static(b"body")),
+        ),
+        (hyper::Method::GET, vec![("upgrade", "websocket")], None),
+    ]
+    .into_iter()
+    .map(|(method, headers, body)| {
+        let dp = Arc::clone(&dp);
+        tokio::spawn(async move {
+            let mut builder = Request::builder().method(method).uri("/api/x");
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+            let payload = body.unwrap_or_default();
+            let resp = proxy::handle(&dp, ip(), builder.body(Full::new(payload)).unwrap()).await;
+            let (parts, bod) = resp.into_parts();
+            let bytes = bod.collect().await.unwrap().to_bytes();
+            (parts.status, parts.headers, bytes)
+        })
+    })
+    .collect();
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 4
+                && metric(&dp, "dwara_coalescing_waiters") == 0
+        },
+        "all three bypassed shapes reached the upstream, none parked",
+    )
+    .await;
+    assert_eq!(
+        metric(&dp, "dwara_coalescing_leaders_total"),
+        1,
+        "bypassed shapes never lead either"
+    );
+    gate.release();
+
+    for j in bypassed {
+        let (status, h, _) = j.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(x_cache(&h), "bypass");
+    }
+    let (status, _, _) = leader.pop().unwrap().await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "one leader + three independent bypass fetches"
+    );
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        0
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
+}
+
+/// Consumer isolation (DW-038): the coalescing key embeds the
+/// consumer identity, so two consumers' concurrent identical GETs on
+/// the same path collapse WITHIN each identity (one leader each) but
+/// never ACROSS — no follower is ever handed an outcome computed for
+/// another consumer.
+#[tokio::test]
+async fn consumers_never_coalesce_across_identities() {
+    let (port, arrived, count, gate) = gated_backend().await;
+    let dp = dataplane_from(&cache_yaml(
+        port,
+        COALESCING,
+        r#"consumers:
+  - name: partner-co
+    credentials:
+      - { type: api_key, key: partner-key }
+  - name: plain-co
+    credentials:
+      - { type: api_key, key: plain-key }
+"#,
+    ));
+
+    // Two concurrent GETs per consumer on the SAME path: per identity
+    // one leader fetches while its follower parks; the identities
+    // never merge (that would need identical cache keys, and the
+    // consumer name is a key component).
+    let partner = fire(&dp, "/api/x", 2, &[("x-api-key", "partner-key")]);
+    let plain = fire(&dp, "/api/x", 2, &[("x-api-key", "plain-key")]);
+    await_state(
+        || {
+            arrived.load(std::sync::atomic::Ordering::SeqCst) == 2
+                && metric(&dp, "dwara_coalescing_waiters") == 2
+        },
+        "one leader per identity parked, one follower each",
+    )
+    .await;
+    gate.release();
+
+    let collect = |joins: Vec<tokio::task::JoinHandle<(StatusCode, hyper::HeaderMap, Bytes)>>| async {
+        let mut bodies = Vec::new();
+        for j in joins {
+            let (status, h, body) = j.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            match x_cache(&h) {
+                "miss" | "hit" => {}
+                other => panic!("unexpected x-cache {other:?}"),
+            }
+            bodies.push(String::from_utf8_lossy(&body).into_owned());
+        }
+        bodies
+    };
+    let partner_bodies = collect(partner).await;
+    let plain_bodies = collect(plain).await;
+
+    // Within an identity the follower replayed the leader's exact
+    // stored outcome; across identities the answers differ.
+    assert_eq!(partner_bodies[0], partner_bodies[1]);
+    assert_eq!(plain_bodies[0], plain_bodies[1]);
+    assert_ne!(
+        partner_bodies[0], plain_bodies[0],
+        "each consumer received its own leader's outcome"
+    );
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "one upstream call per consumer identity, never one shared"
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_leaders_total"), 2);
+    assert_eq!(
+        outcome(&dp, "dwara_coalescing_followers_total", "served"),
+        2
+    );
+    assert_eq!(
+        metric(&dp, "dwara_coalescing_saved_upstream_calls_total"),
+        2
+    );
+    assert_eq!(metric(&dp, "dwara_coalescing_waiters"), 0);
 }

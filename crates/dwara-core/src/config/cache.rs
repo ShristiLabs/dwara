@@ -68,6 +68,18 @@ pub const MAX_CACHE_STALE_SECS: u64 = 86400;
 /// the key space per route; eight extra dimensions is already generous.
 pub const MAX_CACHE_VARY_HEADERS: usize = 8;
 
+/// Default `cache.coalescing.wait_ms` (DW-038): 5 s — comfortably above
+/// a typical upstream fetch so a follower normally out-waits the leader
+/// instead of piling its own call on top (the wait bound exists for the
+/// pathological leader, not the common one).
+pub const DEFAULT_COALESCE_WAIT_MS: u64 = 5000;
+
+/// Upper bound for `cache.coalescing.wait_ms` (DW-038): 60 s. A follower
+/// parked longer than a minute is a stuck request from the client's
+/// point of view; the route's own timeouts bound the leader, so a wait
+/// beyond them only delays the inevitable fail-open.
+pub const MAX_COALESCE_WAIT_MS: u64 = 60_000;
+
 /// Route-scoped response caching policy (DW-037). Absent (the
 /// default): the route's responses are never cached, buffered, or
 /// stamped with cache headers — bytes flow exactly as before. Presence
@@ -127,6 +139,47 @@ pub struct RouteCache {
     /// a key component).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vary: Vec<String>,
+    /// Request coalescing (DW-038): collapse concurrent identical
+    /// cacheable GETs on this route into ONE upstream call — the first
+    /// miss (the leader) fetches while the rest (followers) wait,
+    /// bounded, and replay the leader's stored outcome. Absent (the
+    /// default): every miss fetches independently, exactly as before.
+    /// Presence enables; see [`RouteCacheCoalescing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalescing: Option<RouteCacheCoalescing>,
+}
+
+/// Request-coalescing knobs (DW-038). Presence of the block on a
+/// route's `cache` is the opt-in (the same presence-means-enabled rule
+/// as every other block); this struct carries the one bound the
+/// behavior needs.
+///
+/// Scope (deliberate, spec-faithful): coalescing applies ONLY to the
+/// cache-miss path of cache-enabled routes — "concurrent identical
+/// CACHEABLE GETs". Requests on routes without a `cache` block (or
+/// shapes the cache bypasses: non-GET, credentialed, body-bearing,
+/// upgrade) are never coalesced; they were never cacheable, so there is
+/// no shared outcome to hand a follower.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteCacheCoalescing {
+    /// How long a follower waits for the leader's outcome before doing
+    /// its own upstream call (fail open — a client is never errored
+    /// because coalescing gave up). Absent: 5 s. Validation bounds the
+    /// value to (0, 60 s].
+    #[serde(
+        default = "default_coalesce_wait_ms",
+        skip_serializing_if = "is_default_coalesce_wait_ms"
+    )]
+    pub wait_ms: u64,
+}
+
+fn default_coalesce_wait_ms() -> u64 {
+    DEFAULT_COALESCE_WAIT_MS
+}
+
+fn is_default_coalesce_wait_ms(v: &u64) -> bool {
+    *v == DEFAULT_COALESCE_WAIT_MS
 }
 
 fn default_cache_max_body_bytes() -> u64 {
@@ -190,6 +243,9 @@ pub struct CompiledRouteCache {
     /// in, and exactly what a stored response's `Vary` must be a
     /// subset of.
     pub vary: Vec<String>,
+    /// Follower wait bound for request coalescing (DW-038). None:
+    /// coalescing disabled on this route (the default).
+    pub coalesce_wait: Option<Duration>,
 }
 
 impl CompiledRouteCache {
@@ -217,6 +273,10 @@ impl CompiledRouteCache {
             ),
             max_body_bytes: cache.max_body_bytes,
             vary,
+            coalesce_wait: cache
+                .coalescing
+                .as_ref()
+                .map(|c| Duration::from_millis(c.wait_ms)),
         }
     }
 }

@@ -28,6 +28,7 @@ fn policy(vary: &[&str]) -> CompiledRouteCache {
         stale_while_revalidate: std::time::Duration::from_secs(0),
         max_body_bytes: 1024,
         vary: vary.iter().map(|s| s.to_string()).collect(),
+        coalesce_wait: None,
     }
 }
 
@@ -208,6 +209,7 @@ fn compiled_policy_folds_policy_derived_vary() {
         stale_while_revalidate_secs: Some(5),
         max_body_bytes: 4096,
         vary: vec!["x-tenant".to_string()],
+        coalescing: None,
     };
     let compiled = CompiledRouteCache::compile(&rc, true, true);
     // Configured + Accept (match.accept route) + Origin (CORS route).
@@ -215,15 +217,22 @@ fn compiled_policy_folds_policy_derived_vary() {
     assert_eq!(compiled.ttl.as_secs(), 30);
     assert_eq!(compiled.stale_while_revalidate.as_secs(), 5);
     assert_eq!(compiled.max_body_bytes, 4096);
+    assert_eq!(compiled.coalesce_wait, None);
     // No folds without the policies; configured duplicates dedupe.
     let rc2 = RouteCache {
         ttl_secs: 30,
         stale_while_revalidate_secs: None,
         max_body_bytes: 4096,
         vary: vec!["accept".to_string()],
+        coalescing: Some(dwara_core::config::cache::RouteCacheCoalescing { wait_ms: 1500 }),
     };
     assert_eq!(
         CompiledRouteCache::compile(&rc2, false, false).vary,
         vec!["accept"]
+    );
+    assert_eq!(
+        CompiledRouteCache::compile(&rc2, false, false).coalesce_wait,
+        Some(std::time::Duration::from_millis(1500)),
+        "the coalescing wait compiles through (DW-038)"
     );
 }

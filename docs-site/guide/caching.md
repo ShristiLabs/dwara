@@ -17,6 +17,7 @@ routes:
       stale_while_revalidate_secs: 60   # optional: serve stale while refreshing
       max_body_bytes: 1048576           # optional: per-entry cap (default 1 MiB)
       vary: [x-tenant]                  # optional: extra request headers to key on
+      coalescing: { wait_ms: 5000 }     # optional: collapse concurrent misses (below)
 ```
 
 ## What gets cached
@@ -58,6 +59,42 @@ answers `304 Not Modified`, the stored body re-serves without
 re-sending it. A client that sends a matching `If-None-Match` on a
 fresh entry gets an immediate `304`.
 
+## Request coalescing
+
+When N identical cacheable GETs miss at the same moment (a cache-cold
+route, a burst after a deploy), only the FIRST should pay for the
+upstream call. Adding a `coalescing` block to the route's `cache`
+enables exactly that: the first miss (the leader) fetches upstream
+while the rest (followers) wait — bounded by `wait_ms` (default 5 s)
+— and then receive the leader's stored answer (`x-cache: hit`), like
+any other cache hit.
+
+```yaml
+    cache:
+      ttl_secs: 30
+      coalescing: {}          # enable with the default 5 s wait bound
+```
+
+Coalescing applies only to the miss path of cache-enabled routes:
+requests the cache bypasses (non-GET, credentialed, body-bearing) and
+routes without a `cache` block are never coalesced — there is no
+shared cacheable outcome to hand a follower. Followers are keyed by
+the full cache key (route, consumer, path, query, vary), so a follower
+can only ever receive an answer computed for an identical request of
+its own consumer.
+
+Coalescing never makes things worse — every fallback is "do your own
+fetch":
+
+- the leader's response is not storable (for example `no-store`) or
+  the leader fails: each follower fetches on its own, with the route's
+  full retry policy;
+- a purge or config change lands mid-flight: followers fetch on their
+  own rather than inherit an invalidated answer;
+- a follower's `wait_ms` expires: it fetches on its own;
+- more than 256 distinct keys are already in flight: new misses fetch
+  independently instead of joining.
+
 ## Purging
 
 The [admin API](./admin-api) invalidates cached entries:
@@ -92,4 +129,9 @@ The `/metrics` endpoint exposes `dwara_cache_lookups_total{outcome=...}`
 (hit/stale/miss/bypass), `dwara_cache_stores_total{outcome=...}`,
 `dwara_cache_revalidated_total`, `dwara_cache_purges_total{scope=...}`,
 and the live-entry gauge `dwara_cache_entries` — see
-[Observability](./observability).
+[Observability](./observability). With coalescing enabled,
+`dwara_coalescing_leaders_total`,
+`dwara_coalescing_followers_total{outcome=served|fell_back_timeout|fell_back_unshared|fell_back_epoch}`,
+`dwara_coalescing_saved_upstream_calls_total` (upstream calls avoided),
+and the `dwara_coalescing_waiters` gauge report how much the collapse
+is saving and why followers fell back.

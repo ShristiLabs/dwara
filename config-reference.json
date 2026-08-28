@@ -1880,6 +1880,17 @@
       "description": "Route-scoped response caching policy (DW-037). Absent (the\ndefault): the route's responses are never cached, buffered, or\nstamped with cache headers — bytes flow exactly as before. Presence\nopts the route's GET traffic into the local response cache behind\nthe `CacheStore` extension seam (extensions domain).\n\nSemantics (frozen; enforcement lives in `dataplane::response_cache`):\n\n- Only PROXY-action routes cache. The key folds in the route name,\n  the consumer, the inbound path + query, and the effective vary\n  set's request header values — two consumers (or two vary\n  dimensions) never share an entry.\n- Freshness is the configured `ttl_secs`, full stop: upstream\n  freshness directives other than the storage vetoes\n  (`no-store`/`private`/`no-cache`) are deliberately ignored — the\n  OPERATOR, not the origin, owns how long the gateway holds an\n  entry. Within `stale_while_revalidate_secs` after expiry the\n  entry is served stale while a single background revalidation\n  refreshes it; past that window the next request revalidates\n  synchronously (conditional on the stored validator).\n- `ETag` round-trips: a stored entry's ETag backs client\n  `If-None-Match` 304s from the cache and upstream revalidation\n  (`If-None-Match` on the forwarded fetch; a 304 refreshes the\n  entry without re-sending the body).",
       "type": "object",
       "properties": {
+        "coalescing": {
+          "description": "Request coalescing (DW-038): collapse concurrent identical\ncacheable GETs on this route into ONE upstream call — the first\nmiss (the leader) fetches while the rest (followers) wait,\nbounded, and replay the leader's stored outcome. Absent (the\ndefault): every miss fetches independently, exactly as before.\nPresence enables; see [`RouteCacheCoalescing`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteCacheCoalescing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "max_body_bytes": {
           "description": "Per-entry body cap in bytes: responses at or under the cap are\nbuffered and stored; larger responses pass through unstored and\nunbuffered (the zero-buffering principle — the cap is the\nbuffering opt-in's hard edge). Absent: 1 MiB. Validation bounds\nthe range [1, 16 MiB].",
           "type": "integer",
@@ -1913,6 +1924,19 @@
       "required": [
         "ttl_secs"
       ]
+    },
+    "RouteCacheCoalescing": {
+      "description": "Request-coalescing knobs (DW-038). Presence of the block on a\nroute's `cache` is the opt-in (the same presence-means-enabled rule\nas every other block); this struct carries the one bound the\nbehavior needs.\n\nScope (deliberate, spec-faithful): coalescing applies ONLY to the\ncache-miss path of cache-enabled routes — \"concurrent identical\nCACHEABLE GETs\". Requests on routes without a `cache` block (or\nshapes the cache bypasses: non-GET, credentialed, body-bearing,\nupgrade) are never coalesced; they were never cacheable, so there is\nno shared outcome to hand a follower.",
+      "type": "object",
+      "properties": {
+        "wait_ms": {
+          "description": "How long a follower waits for the leader's outcome before doing\nits own upstream call (fail open — a client is never errored\nbecause coalescing gave up). Absent: 5 s. Validation bounds the\nvalue to (0, 60 s].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "RouteMatch": {
       "description": "Matching rules for incoming requests.",

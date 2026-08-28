@@ -1617,7 +1617,19 @@ where
     // post-transform bytes for this exact consumer — and the response
     // re-enters the pipeline at the store-stage/tail below, so the
     // decoration tail (compression onward) still runs on every replay.
+    //
+    // Request coalescing (DW-038) rides the MISS arm: a coalescing-
+    // enabled miss either leads (fetches while holding the key's
+    // slot, `coalesce_lead` below), follows (parks bounded and is
+    // Served the leader's stored outcome — same guarantees as a hit,
+    // since the entry IS a hit by the time it replays), or fetches
+    // independently (Solo: every fail-open fallback is just this
+    // normal miss path). Everything upstream of this point —
+    // maintenance, limits, authn/authz, rate limiting, admission —
+    // already ran for the follower too, so a 503 or a 429 is never
+    // coalesced and no policy is bypassed by following.
     let mut cache_flow: Option<crate::dataplane::response_cache::CacheFlow> = None;
+    let mut coalesce_lead: Option<crate::dataplane::response_cache::CoalesceLead> = None;
     let replayed: Option<Response<ProxyBody>> = if let (RouteAction::Proxy { .. }, Some(policy)) =
         (&route.action, gen.snapshot.route_table().cache(idx))
     {
@@ -1658,8 +1670,27 @@ where
                         }
                     }
                 }
-                cache_flow = Some(crate::dataplane::response_cache::CacheFlow::Miss(flow));
-                None
+                if flow.coalesce_wait().is_some() {
+                    match dp.response_cache().attach(&flow, &dp.obs).await {
+                        crate::dataplane::response_cache::CoalesceOutcome::Served(resp) => {
+                            Some(*resp)
+                        }
+                        crate::dataplane::response_cache::CoalesceOutcome::Lead(lead) => {
+                            coalesce_lead = Some(lead);
+                            cache_flow =
+                                Some(crate::dataplane::response_cache::CacheFlow::Miss(flow));
+                            None
+                        }
+                        crate::dataplane::response_cache::CoalesceOutcome::Solo => {
+                            cache_flow =
+                                Some(crate::dataplane::response_cache::CacheFlow::Miss(flow));
+                            None
+                        }
+                    }
+                } else {
+                    cache_flow = Some(crate::dataplane::response_cache::CacheFlow::Miss(flow));
+                    None
+                }
             }
         }
     } else {
@@ -1826,6 +1857,15 @@ where
             .store_stage(flow, resp, rid, &dp.obs)
             .await;
     }
+
+    // DW-038: publish the coalescing leader's outcome NOW — the store
+    // write above has completed, so the parked followers that wake
+    // re-read a settled store and either replay the entry or fetch on
+    // their own. Dropping here (not at function end) lets followers
+    // proceed while this response's decoration tail still runs; a
+    // leader that panicked or was cancelled mid-fetch publishes the
+    // same way via Drop, failing its followers open.
+    drop(coalesce_lead);
 
     // Response compression (DW-027): route-scoped, negotiated against
     // the captured Accept-Encoding, applied after the action so every

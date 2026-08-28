@@ -70,8 +70,9 @@
 //! Fresh for `ttl_secs`; within `stale_while_revalidate_secs` after
 //! expiry the entry is served stale (`x-cache: stale`) while ONE
 //! background revalidation runs per key (a bounded in-flight set
-//! deduplicates; DW-038's request coalescing generalizes this). Past
-//! the window the next request revalidates synchronously: the stored
+//! deduplicates; DW-038's request coalescing applies the same
+//! single-flight discipline to the foreground miss path). Past the
+//! window the next request revalidates synchronously: the stored
 //! validator rides the forwarded fetch as `If-None-Match` (only when
 //! the client sent none of its own — a client conditional always wins
 //! the forwarded request), and an upstream 304 refreshes the entry
@@ -79,6 +80,49 @@
 //! `If-None-Match` that matches a FRESH entry's validator is answered
 //! 304 straight from the cache. Weak comparison (W/ prefixes ignored)
 //! per RFC 9110 section 8.8.3.
+//!
+//! ## Request coalescing (DW-038)
+//!
+//! A cache MISS on a route whose cache block carries `coalescing`
+//! either becomes the LEADER (fetches upstream while holding the key's
+//! slot) or a FOLLOWER (parks, bounded by the route's
+//! `coalescing.wait_ms`). The coalescing key IS the cache key — route
+//! epoch, consumer, path, query, vary — so a follower can only ever be
+//! handed an outcome computed for a byte-identical request shape of
+//! its OWN consumer and generation; per-consumer isolation is
+//! inherited from the key, not reimplemented. The STORE is the share
+//! point: the leader's store stage completes before it publishes, and
+//! a woken follower re-reads the store and replays the entry exactly
+//! like a hit (`x-cache: hit`; the decoration tail re-runs — the same
+//! replay guarantees as a normal hit). Scope: the miss path of
+//! cache-enabled routes only. A request shape the cache bypasses
+//! (non-GET, credentialed, body-bearing, upgrade) never coalesces,
+//! and routes without a cache block never coalesce — "concurrent
+//! identical cacheable GETs" is the whole claim.
+//!
+//! Every failure mode fails OPEN (no client is ever errored because
+//! coalescing gave up), each rule pinned by test:
+//!
+//! - Leader finished with nothing storable (vetoed, non-200, upstream
+//!   error, over-cap) or died outright (panic, client-cancel abort):
+//!   followers fetch on their own, each running the route's FULL
+//!   retry policy — a leader's failure is never inherited.
+//! - Epoch flipped mid-flight (purge or config change): followers
+//!   fetch on their own rather than inherit a dead generation's
+//!   answer.
+//! - Follower wait bound expired: the follower fetches on its own.
+//! - The leader map is saturated ([`MAX_COALESCING_KEYS`] distinct
+//!   in-flight keys): the request never joins — it just fetches
+//!   (uncounted by coalescing metrics; it was neither leader nor
+//!   follower).
+//!
+//! The map holds LEADER slots only (waiters carry no per-key state);
+//! a slot leaves the map at completion by the leader's guard, and the
+//! guard's Drop is the publish — so a leader that dies unpublishes
+//! into the fail-open path too. Nothing in the coalescing path waits
+//! on the SWR revalidation in-flight set or vice versa: the two
+//! single-flight mechanisms have disjoint state and no shared locks,
+//! so they cannot deadlock or double-subscribe each other.
 //!
 //! ## Invalidations (why epochs)
 //!
@@ -147,6 +191,19 @@ const ENVELOPE_VERSION: u8 = 1;
 /// revalidates synchronously) so a cache-wide expiry cannot stampede.
 pub const MAX_INFLIGHT_REVALIDATIONS: usize = 32;
 
+/// Upper bound on concurrently held coalescing LEADER slots (DW-038).
+/// The map bounds memory (each slot is a key string + a watch channel)
+/// and the stampede-collapse itself: beyond this many DISTINCT
+/// in-flight cache keys, new misses never join — they fetch
+/// independently (fail open, uncounted by coalescing metrics). Slots
+/// are not evicted early (an in-flight leader cannot be preempted —
+/// its followers are parked on it); the map drains as leaders
+/// complete, which IS the eviction policy: hold-while-in-flight,
+/// remove-at-completion, refuse-at-capacity. A same-process burst
+/// with more than this many distinct keys was never going to collapse
+/// anyway — the keys are distinct.
+pub const MAX_COALESCING_KEYS: usize = 256;
+
 /// Wall-clock milliseconds since the Unix epoch (the freshness clock
 /// domain; a backwards clock step reads as age 0 — never negative).
 fn now_ms() -> u64 {
@@ -157,8 +214,8 @@ fn now_ms() -> u64 {
 }
 
 /// The local response cache: opaque store + route epochs + the
-/// single-flight revalidation guard. Owned by the
-/// [`DataPlane`]; survives reloads.
+/// single-flight revalidation guard + the request-coalescing leader
+/// map. Owned by the [`DataPlane`]; survives reloads.
 pub struct ResponseCache {
     store: Arc<dyn CacheStore>,
     /// Route name -> cache epoch (DW-037 invalidations). Grows with
@@ -169,6 +226,14 @@ pub struct ResponseCache {
     /// Keys with a background revalidation in flight (bounded by
     /// [`MAX_INFLIGHT_REVALIDATIONS`]).
     inflight: Arc<Mutex<HashSet<String>>>,
+    /// In-flight coalescing LEADERS (DW-038): cache key -> publication
+    /// slot. A leader holds its slot from the miss decision until its
+    /// store stage completes (or its task dies — the guard drops).
+    /// Bounded by [`MAX_COALESCING_KEYS`]. Runtime state like the
+    /// revalidation set: survives reloads, and its keys embed the
+    /// route epoch, so a generation change strands waiters into the
+    /// fail-open path rather than serving them a dead generation.
+    coalescing: Arc<Mutex<HashMap<String, Arc<CoalesceSlot>>>>,
     /// Purges and epoch bumps performed (for /stats; the metrics
     /// counter lives in observability).
     purges: AtomicU64,
@@ -188,6 +253,7 @@ impl ResponseCache {
             store,
             epochs: RwLock::new(HashMap::new()),
             inflight: Arc::new(Mutex::new(HashSet::new())),
+            coalescing: Arc::new(Mutex::new(HashMap::new())),
             purges: AtomicU64::new(0),
         }
     }
@@ -760,6 +826,176 @@ impl ResponseCache {
             }
         }
     }
+
+    /// Request coalescing (DW-038): resolve ONE cache miss into the
+    /// leader, a served follower, or an independent fetch. The
+    /// coalescing key is the cache key itself (route epoch, consumer,
+    /// path, query, vary — see [`derive_key`]), so a follower can only
+    /// be handed an outcome computed for an identical request shape of
+    /// its own consumer and generation. The caller runs its fetch on
+    /// `Lead`/`Solo` and drops the guard when its store stage is done.
+    ///
+    /// Follower resolution, in the pinned order: (1) wait, bounded by
+    /// the route's `coalescing.wait_ms`; (2) epoch check FIRST — a
+    /// mid-flight purge/config change detours to an independent fetch
+    /// even if the leader stored something; (3) store re-read — a live
+    /// entry replays exactly like a hit; (4) otherwise an independent
+    /// fetch (leader finished unstored, or the wait expired). Every
+    /// fallback is the caller's NORMAL miss path: failures are never
+    /// inherited, and each fetching follower runs the route's full
+    /// retry policy.
+    pub async fn attach(&self, flow: &MissFlow, obs: &Observability) -> CoalesceOutcome {
+        let Some(wait) = flow.policy.coalesce_wait else {
+            return CoalesceOutcome::Solo;
+        };
+        // Decide under the lock: follower (a leader slot exists),
+        // leader (room in the map), or neither (saturated — fail open,
+        // uncounted: this request is neither leader nor follower).
+        enum Park {
+            Lead(CoalesceLead),
+            Follow(Arc<CoalesceSlot>),
+            Solo,
+        }
+        let park = {
+            let mut map = self.coalescing.lock().expect("coalescing lock poisoned");
+            if let Some(slot) = map.get(&flow.key) {
+                Park::Follow(Arc::clone(slot))
+            } else if map.len() >= MAX_COALESCING_KEYS {
+                Park::Solo
+            } else {
+                let slot = Arc::new(CoalesceSlot::default());
+                map.insert(flow.key.clone(), Arc::clone(&slot));
+                Park::Lead(CoalesceLead {
+                    map: Arc::clone(&self.coalescing),
+                    key: flow.key.clone(),
+                    slot,
+                })
+            }
+        };
+        match park {
+            Park::Lead(lead) => {
+                obs.record_coalescing_leader();
+                CoalesceOutcome::Lead(lead)
+            }
+            Park::Solo => CoalesceOutcome::Solo,
+            Park::Follow(slot) => {
+                // Subscribe to the slot's watch: a leader that already
+                // published is visible through the CURRENT value (watch
+                // receivers start at the sender's version), so there is
+                // no register-before-notify race to close.
+                let mut done = slot.done.subscribe();
+                obs.coalescing_waiter(true);
+                let woke = tokio::time::timeout(wait, async {
+                    if !*done.borrow() {
+                        // Err = the sender dropped without publishing
+                        // (leader died mid-unpublish): treat exactly
+                        // like a publication — the store re-read below
+                        // decides what, if anything, is shareable.
+                        let _ = done.changed().await;
+                    }
+                })
+                .await
+                .is_ok();
+                obs.coalescing_waiter(false);
+                // (1) Epoch first, pinned: a dead generation's answer
+                // is never served to a stranded follower.
+                if self.epoch(&flow.route_name) != flow.epoch {
+                    obs.record_coalescing_follower("fell_back_epoch");
+                    return CoalesceOutcome::Solo;
+                }
+                // (2) The store re-read: the leader's store stage
+                // completed before it published (guard Drop order), so
+                // a present entry is the leader's outcome — replay it
+                // exactly like a hit.
+                let stored = match self.store.get(&flow.key).await {
+                    Ok(Some(bytes)) => match EntryEnvelope::decode(&bytes) {
+                        Some(entry) if entry.epoch == flow.epoch => Some(entry),
+                        _ => None,
+                    },
+                    Ok(None) | Err(_) => None,
+                };
+                if let Some(entry) = stored {
+                    let age_ms = now_ms().saturating_sub(entry.stored_at_ms);
+                    if let Some(resp) = serve_from_entry(&flow.policy, &entry, age_ms, None, "hit")
+                    {
+                        obs.record_coalescing_follower("served");
+                        obs.record_coalescing_saved();
+                        return CoalesceOutcome::Served(Box::new(resp));
+                    }
+                }
+                // (3) Nothing shareable: independent fetch. The label
+                // distinguishes "waited out the bound" from "the leader
+                // finished, just not with something storable".
+                obs.record_coalescing_follower(if woke {
+                    "fell_back_unshared"
+                } else {
+                    "fell_back_timeout"
+                });
+                CoalesceOutcome::Solo
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request coalescing (DW-038): leader map, publication slot, guard
+// ---------------------------------------------------------------------------
+
+/// One coalescing leader's publication point: followers subscribe to
+/// the watch; the leader's [`CoalesceLead`] Drop sends `true` (or the
+/// sender's own drop wakes them with an error, handled identically by
+/// the follower's store re-read).
+struct CoalesceSlot {
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for CoalesceSlot {
+    fn default() -> Self {
+        CoalesceSlot {
+            done: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+/// What [`ResponseCache::attach`] decided for one cache miss (DW-038).
+pub enum CoalesceOutcome {
+    /// This request is the leader: run the fetch, then drop the guard
+    /// (explicitly after the store stage, or implicitly on
+    /// panic/cancel) to publish to followers.
+    Lead(CoalesceLead),
+    /// A leader's stored outcome replayed for this follower: serve it
+    /// exactly like a lookup `Serve` (the decoration tail still runs;
+    /// `x-cache: hit`, `Age` stamped).
+    Served(Box<Response<ProxyBody>>),
+    /// Coalescing made no claim (disabled, map saturated, or the
+    /// follower fell back): run an independent fetch — the caller's
+    /// normal miss path, retries and all.
+    Solo,
+}
+
+/// A leader's hold on one coalescing key (DW-038). Dropping IS the
+/// publication: the slot leaves the map, then every parked follower
+/// wakes and re-reads the store. The guard pattern (not manual
+/// cleanup) so a leader that panics or is cancelled mid-fetch still
+/// publishes — its followers wake, find nothing shareable, and fetch
+/// on their own.
+pub struct CoalesceLead {
+    map: Arc<Mutex<HashMap<String, Arc<CoalesceSlot>>>>,
+    key: String,
+    slot: Arc<CoalesceSlot>,
+}
+
+impl Drop for CoalesceLead {
+    fn drop(&mut self) {
+        self.map
+            .lock()
+            .expect("coalescing lock poisoned")
+            .remove(&self.key);
+        // Publish after the unlock: the woken follower's first acts
+        // (store re-read, epoch check) take no coalescing lock, and
+        // the map lock is never held across an await anywhere.
+        let _ = self.slot.done.send(true);
+    }
 }
 
 /// What a lookup decided (DW-037): replay now, carry a miss to the
@@ -833,6 +1069,13 @@ impl MissFlow {
             .as_ref()
             .and_then(|e| e.header("etag"))
             .map(|b| String::from_utf8_lossy(b).to_string())
+    }
+
+    /// The route's coalescing follower wait bound, if the route's
+    /// cache block enables request coalescing (DW-038). The proxy path
+    /// gates on this before consulting the coalescing map.
+    pub fn coalesce_wait(&self) -> Option<std::time::Duration> {
+        self.policy.coalesce_wait
     }
 }
 

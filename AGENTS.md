@@ -33,7 +33,7 @@ features) are not yet implemented.
 
 ```sh
 cargo build --workspace
-cargo test --workspace            # ~1180 tests; suites spawn real servers/binaries
+cargo test --workspace            # ~1188 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -304,7 +304,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
 | Transforms + security headers (DW-028) | dwara-core | `transforms` (end to end), `tests/unit/transforms.rs` |
 | Response field masking (DW-029) | dwara-core | `masking` (end to end), `tests/unit/transforms.rs` (union + miss-is-the-leak cases) |
-| Response caching (DW-037) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
+| Response caching (DW-037) + request coalescing (DW-038) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation; coalescing single-flight, fail-open fallbacks, saturation, SWR no-deadlock), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |

@@ -9,6 +9,20 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Request coalescing for cache misses (DW-038): an optional
+  `coalescing` block on a route's `cache` policy collapses concurrent
+  identical cacheable GETs into one upstream call — the first miss
+  leads while followers wait (bounded by `wait_ms`, default 5 s,
+  validated) and replay the leader's stored answer exactly like a
+  cache hit. The coalescing key is the full cache key (route epoch,
+  consumer, path, query, vary), so followers can only receive an
+  outcome computed for an identical request of their own consumer;
+  every failure mode fails open to an independent fetch (unstorable
+  leader outcome, mid-flight purge/config change, wait expiry, leader
+  map saturation at 256 keys) — a client is never errored because
+  coalescing gave up, and a leader's failure is never inherited. New
+  closed-set `dwara_coalescing_*` metric families report leaders,
+  follower outcomes, upstream calls saved, and parked waiters.
 - Route-scoped response caching (DW-037): a local cache behind the
   `CacheStore` extension seam (moka-backed, byte-weighed, per-entry
   TTL) with per-consumer keys folding the effective vary set

@@ -343,6 +343,27 @@ pub struct Observability {
     /// walk of the store's `entry_count`, the same gauge model as the
     /// rate-limiter live-keys gauge).
     cache_entries: IntGauge,
+    /// DW-038: cache misses that became the coalescing LEADER (their
+    /// own upstream fetch ran while followers could attach). Plain
+    /// counter — no label space to close.
+    coalescing_leaders_total: IntCounter,
+    /// DW-038: coalescing follower resolutions — a CLOSED label set
+    /// (`served`, `fell_back_timeout`, `fell_back_unshared`,
+    /// `fell_back_epoch`), so the family's cardinality is four series
+    /// total. `served` = the leader's stored outcome replayed;
+    /// `fell_back_timeout` = the wait bound expired; `fell_back_unshared`
+    /// = the leader finished without a storable outcome (vetoed,
+    /// non-200, error — the follower fetched on its own);
+    /// `fell_back_epoch` = a purge/config change invalidated the
+    /// generation mid-flight (checked first; the follower fetched on
+    /// its own).
+    coalescing_followers_total: IntCounterVec,
+    /// DW-038: upstream calls avoided by coalescing (one per `served`
+    /// follower — the direct answer to "is coalescing paying for
+    /// itself").
+    coalescing_saved_upstream_calls_total: IntCounter,
+    /// DW-038: requests currently parked as coalescing followers.
+    coalescing_waiters: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -554,6 +575,38 @@ impl Observability {
              snapshot of the backing store's entry count.",
         )
         .expect("valid metric definition");
+        let coalescing_leaders_total = IntCounter::new(
+            "dwara_coalescing_leaders_total",
+            "Cache misses that became the request-coalescing leader (DW-038): \
+             their upstream fetch ran while later identical misses waited.",
+        )
+        .expect("valid metric definition");
+        let coalescing_followers_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_coalescing_followers_total",
+                "Request-coalescing follower resolutions by outcome (DW-038). \
+                 outcome: served (the leader's stored outcome replayed, one \
+                 upstream call saved), fell_back_timeout (the wait bound \
+                 expired), fell_back_unshared (the leader finished without a \
+                 storable outcome; the follower fetched on its own), \
+                 fell_back_epoch (a purge/config change invalidated the \
+                 generation mid-flight; the follower fetched on its own).",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        let coalescing_saved_upstream_calls_total = IntCounter::new(
+            "dwara_coalescing_saved_upstream_calls_total",
+            "Upstream calls avoided by request coalescing (DW-038); one per \
+             served follower.",
+        )
+        .expect("valid metric definition");
+        let coalescing_waiters = IntGauge::new(
+            "dwara_coalescing_waiters",
+            "Requests currently parked as request-coalescing followers \
+             (DW-038).",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -580,6 +633,10 @@ impl Observability {
             Box::new(cache_revalidated_total.clone()),
             Box::new(cache_purges_total.clone()),
             Box::new(cache_entries.clone()),
+            Box::new(coalescing_leaders_total.clone()),
+            Box::new(coalescing_followers_total.clone()),
+            Box::new(coalescing_saved_upstream_calls_total.clone()),
+            Box::new(coalescing_waiters.clone()),
         ] {
             registry
                 .register(m)
@@ -610,6 +667,10 @@ impl Observability {
             cache_revalidated_total,
             cache_purges_total,
             cache_entries,
+            coalescing_leaders_total,
+            coalescing_followers_total,
+            coalescing_saved_upstream_calls_total,
+            coalescing_waiters,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -752,6 +813,34 @@ impl Observability {
     /// the dataplane walks it at scrape time).
     pub fn set_cache_entries(&self, entries: i64) {
         self.cache_entries.set(entries);
+    }
+
+    /// DW-038: this cache miss became the coalescing leader.
+    pub fn record_coalescing_leader(&self) {
+        self.coalescing_leaders_total.inc();
+    }
+
+    /// DW-038: a coalescing follower resolved — `outcome` is one of the
+    /// closed set `served` / `fell_back_timeout` / `fell_back_unshared`
+    /// / `fell_back_epoch` (see the field docs; callers pass literals).
+    pub fn record_coalescing_follower(&self, outcome: &str) {
+        self.coalescing_followers_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// DW-038: one upstream call avoided (a follower was served).
+    pub fn record_coalescing_saved(&self) {
+        self.coalescing_saved_upstream_calls_total.inc();
+    }
+
+    /// DW-038: follower waiters gauge, +/- on park/resolve.
+    pub fn coalescing_waiter(&self, parked: bool) {
+        if parked {
+            self.coalescing_waiters.inc();
+        } else {
+            self.coalescing_waiters.dec();
+        }
     }
 
     pub fn active_requests(&self) -> &IntGauge {

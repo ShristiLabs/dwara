@@ -1025,9 +1025,9 @@ fn validate_security_headers(
 
 /// Validate one `cache` block (DW-037): bounded ttl/stale window/body
 /// cap, and a vary list whose entries are real header names, dedupli-
-/// cated, and not one of the names the variance model forbids (the
-/// grammar lives in `config::cache`, the same validate/compile split
-/// as every other route block).
+/// cated, and not one of the names the variance model forbids; the
+/// DW-038 coalescing wait bound (the grammar lives in `config::cache`,
+/// the same validate/compile split as every other route block).
 fn validate_route_cache(
     name: &str,
     cache: &crate::config::cache::RouteCache,
@@ -1035,7 +1035,7 @@ fn validate_route_cache(
 ) {
     use crate::config::cache::{
         forbidden_vary_reason, MAX_CACHE_MAX_BODY_BYTES, MAX_CACHE_STALE_SECS, MAX_CACHE_TTL_SECS,
-        MAX_CACHE_VARY_HEADERS,
+        MAX_CACHE_VARY_HEADERS, MAX_COALESCE_WAIT_MS,
     };
     if cache.ttl_secs == 0 {
         issues.push(issue(
@@ -1138,6 +1138,31 @@ fn validate_route_cache(
             ));
         }
         seen.push(lowered);
+    }
+    // DW-038: the coalescing follower wait bound. 0 would time every
+    // follower out before the leader could possibly answer (a wait is
+    // the only reason the block exists); a minute-plus wait just parks
+    // clients behind a leader the route's own timeouts already bound.
+    if let Some(coalescing) = &cache.coalescing {
+        if coalescing.wait_ms == 0 {
+            issues.push(issue(
+                "route",
+                name,
+                "cache.coalescing.wait_ms",
+                "wait_ms must be >= 1 (0 would fail every follower open before the leader \
+                 answers; omit the coalescing block to disable coalescing)",
+            ));
+        } else if coalescing.wait_ms > MAX_COALESCE_WAIT_MS {
+            issues.push(issue(
+                "route",
+                name,
+                "cache.coalescing.wait_ms",
+                format!(
+                    "wait_ms must be <= {MAX_COALESCE_WAIT_MS} (60 s; a follower parked longer \
+                     is a stuck request from the client's point of view)"
+                ),
+            ));
+        }
     }
 }
 
