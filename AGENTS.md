@@ -33,7 +33,7 @@ features) are not yet implemented.
 
 ```sh
 cargo build --workspace
-cargo test --workspace            # ~1135 tests; suites spawn real servers/binaries
+cargo test --workspace            # ~1150 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -206,7 +206,11 @@ Rules for new code:
   after the DW-010 path rewrite, header ops after the trusted-header
   injection, the JSON body transform before retry buffering — matching
   and every policy above evaluated the ORIGINAL request); responses
-  then gain body/header transforms (DW-028) → route compression
+  then gain field masking (DW-029: proxy actions only, union of the
+  route floor and the consumer's groups, fail-closed 502 on
+  encoded/non-JSON/over-cap/unparseable/unresolved-pointer bodies —
+  the sentinel replaces secrets before any later stage reads the
+  body) → body/header transforms (DW-028) → route compression
   (DW-027) → versioning stamps (Vary: Accept fold +
   Deprecation/Sunset/Link, DW-048) → CORS decoration (DW-027) →
   security headers (DW-028, every route-matched response including
@@ -299,6 +303,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
 | Transforms + security headers (DW-028) | dwara-core | `transforms` (end to end), `tests/unit/transforms.rs` |
+| Response field masking (DW-029) | dwara-core | `masking` (end to end), `tests/unit/transforms.rs` (union + miss-is-the-leak cases) |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |

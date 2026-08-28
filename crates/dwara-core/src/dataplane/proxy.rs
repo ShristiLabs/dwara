@@ -1650,8 +1650,37 @@ where
         } => respond(*status, body.as_deref(), headers),
     };
 
-    // Response body transforms (DW-028), the decoration tail's FIRST
-    // stage: buffers only when the route configured a JSON body
+    // Response field masking (DW-029), the decoration tail's FIRST
+    // stage and the security floor of the response path: the effective
+    // pointer set (route floor + the consumer's groups, the union
+    // rule) is replaced with the fixed sentinel BEFORE anything else
+    // can read the body — once masked, the original bytes exist
+    // nowhere in the gateway, so no later stage (operator transforms,
+    // the DW-027 compression codec) can resurrect them; the gateway's
+    // own compression runs later and never trips the encoding gate.
+    // Every gate here FAILS CLOSED (502): masking guards the UPSTREAM's
+    // output, so it applies to PROXY action responses only —
+    // gateway-authored bodies (redirect, respond) carry no upstream
+    // data, and bodiless statuses carry nothing at all.
+    if matches!(&route.action, RouteAction::Proxy { .. }) {
+        if let Some(masking) = gen.snapshot.route_table().masking(idx) {
+            resp = crate::dataplane::transforms::mask_response_body(
+                resp,
+                masking,
+                identity
+                    .as_ref()
+                    .map(|id| id.groups.as_slice())
+                    .unwrap_or(&[]),
+                &route.name,
+                identity.as_ref().map(|id| id.consumer_name.as_str()),
+                rid,
+            )
+            .await;
+        }
+    }
+
+    // Response body transforms (DW-028), the tail's stage after
+    // masking: buffers only when the route configured a JSON body
     // transform AND the response declares a JSON body within the cap —
     // every other response (SSE, streamed downloads, other content
     // types, already-encoded) passes untouched, the streaming

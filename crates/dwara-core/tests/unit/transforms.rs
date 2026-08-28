@@ -482,3 +482,119 @@ fn forbidden_header_lists_cover_framing_and_hop_by_hop() {
     assert!(!is_forbidden_request_header("x-custom"));
     assert!(!is_forbidden_response_header("x-custom"));
 }
+
+// --- Response field masking (DW-029) --------------------------------------
+
+use dwara_core::config::transforms::{CompiledMasking, Masking, MASKED_VALUE};
+
+fn masking_cfg(fields: &[&str], groups: &[(&str, &[&str])]) -> Masking {
+    Masking {
+        max_bytes: 4096,
+        fields: fields.iter().map(|s| s.to_string()).collect(),
+        groups: groups
+            .iter()
+            .map(|(g, paths)| (g.to_string(), paths.iter().map(|s| s.to_string()).collect()))
+            .collect(),
+    }
+}
+
+fn groups_of(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn masking_replaces_resolved_pointers_with_the_fixed_sentinel() {
+    let compiled = CompiledMasking::compile(&masking_cfg(
+        &["/user/email", "/cards/0/cvv"],
+        &[("partners", &["/internal/margin"])],
+    ));
+    let mut d = doc(r#"{"user":{"email":"a@b.c"},"cards":[{"cvv":"123"}],
+            "internal":{"margin":0.2},"ok":true}"#);
+    let applied = compiled.apply(&mut d, &groups_of(&[])).unwrap();
+    // Anonymous: the floor only.
+    assert_eq!(applied, 2);
+    assert_eq!(d["user"]["email"], MASKED_VALUE);
+    assert_eq!(d["cards"][0]["cvv"], MASKED_VALUE);
+    assert_eq!(d["internal"]["margin"], 0.2, "group pointer not applied");
+    assert_eq!(d["ok"], true, "untouched fields survive verbatim");
+
+    let mut d =
+        doc(r#"{"user":{"email":"a@b.c"},"cards":[{"cvv":"123"}],"internal":{"margin":0.2}}"#);
+    let applied = compiled.apply(&mut d, &groups_of(&["partners"])).unwrap();
+    assert_eq!(applied, 3, "floor (2) + group (1), distinct pointers");
+    assert_eq!(d["user"]["email"], MASKED_VALUE);
+    assert_eq!(d["cards"][0]["cvv"], MASKED_VALUE);
+    assert_eq!(d["internal"]["margin"], MASKED_VALUE);
+}
+
+#[test]
+fn masking_unions_groups_with_the_floor_and_deduplicates() {
+    // The precedence rule (deny-anywhere-wins analog): a group can only
+    // ADD pointers; the same pointer in two places applies once.
+    let compiled = CompiledMasking::compile(&masking_cfg(
+        &["/floor"],
+        &[("a", &["/floor", "/extra-a"]), ("b", &["/extra-b"])],
+    ));
+    let mut d = doc(r#"{"floor":1,"extra-a":2,"extra-b":3}"#);
+    let applied = compiled.apply(&mut d, &groups_of(&["a", "b"])).unwrap();
+    assert_eq!(applied, 3, "floor + extra-a + extra-b (floor not doubled)");
+    assert_eq!(d["floor"], MASKED_VALUE);
+    assert_eq!(d["extra-a"], MASKED_VALUE);
+    assert_eq!(d["extra-b"], MASKED_VALUE);
+
+    // A consumer in an unlisted group gets the floor alone.
+    let mut d = doc(r#"{"floor":1,"extra-a":2}"#);
+    assert_eq!(compiled.apply(&mut d, &groups_of(&["other"])).unwrap(), 1);
+    assert_eq!(d["floor"], MASKED_VALUE);
+    assert_eq!(d["extra-a"], 2);
+}
+
+#[test]
+fn masking_fails_on_pointer_misses_and_never_inserts() {
+    let compiled = CompiledMasking::compile(&masking_cfg(&["/secret/inner"], &[]));
+    // Miss at the leaf: the parent exists, the leaf does not — masking
+    // must not INSERT the sentinel over a miss (that would hide the
+    // drift); it fails.
+    let mut d = doc(r#"{"secret":{}}"#);
+    assert!(matches!(
+        compiled.apply(&mut d, &[]),
+        Err(JsonTransformError::Unresolved { .. })
+    ));
+    // Miss at the parent.
+    let mut d = doc(r#"{}"#);
+    assert!(matches!(
+        compiled.apply(&mut d, &[]),
+        Err(JsonTransformError::Unresolved { .. })
+    ));
+    // Array element out of range.
+    let compiled = CompiledMasking::compile(&masking_cfg(&["/items/2"], &[]));
+    let mut d = doc(r#"{"items":[1,2]}"#);
+    assert!(matches!(
+        compiled.apply(&mut d, &[]),
+        Err(JsonTransformError::Unresolved { .. })
+    ));
+    // Scalar parents cannot resolve deeper pointers.
+    let compiled = CompiledMasking::compile(&masking_cfg(&["/a/b"], &[]));
+    let mut d = doc(r#"{"a":"scalar"}"#);
+    assert!(matches!(
+        compiled.apply(&mut d, &[]),
+        Err(JsonTransformError::Unresolved { .. })
+    ));
+}
+
+#[test]
+fn masking_replaces_values_of_every_json_type() {
+    // The sentinel is a JSON STRING regardless of what it replaces —
+    // objects, arrays, numbers, booleans, null all become "***".
+    let compiled = CompiledMasking::compile(&masking_cfg(
+        &["/obj", "/arr", "/num", "/bool", "/null"],
+        &[],
+    ));
+    let mut d = doc(r#"{"obj":{"deep":"x"},"arr":[1,2],"num":1.5,"bool":true,"null":null}"#);
+    assert_eq!(compiled.apply(&mut d, &[]).unwrap(), 5);
+    assert_eq!(d["obj"], MASKED_VALUE);
+    assert_eq!(d["arr"], MASKED_VALUE);
+    assert_eq!(d["num"], MASKED_VALUE);
+    assert_eq!(d["bool"], MASKED_VALUE);
+    assert_eq!(d["null"], MASKED_VALUE);
+}

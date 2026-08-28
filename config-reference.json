@@ -1049,6 +1049,39 @@
       },
       "additionalProperties": false
     },
+    "Masking": {
+      "description": "Response field masking policy (DW-029, feature analysis 5-Security\n\"response field masking\"): RFC 6901 pointers whose values are\nreplaced with the fixed [`MASKED_VALUE`] sentinel on the route's\nresponses, before any other body-handling stage. The\nmass-assignment/data-leak guard: a field named here NEVER reaches\nthe client, whatever the upstream put in it.\n\nSemantics (frozen; enforcement lives in `dataplane::transforms`):\n\n- PRECEDENCE is the deny-anywhere-wins analog for a redaction\n  policy: the effective pointer set is the UNION of `fields` (the\n  floor, every consumer on the route) and every `groups` entry the\n  authenticated consumer belongs to. A group entry can only ADD\n  pointers — there is deliberately no mechanism by which a group is\n  EXEMPTED from the route floor (that would be a allow-anywhere\n  escape hatch on a security policy).\n- The redacted value is the FIXED string [`MASKED_VALUE`], not\n  configurable: one sentinel everywhere, so clients and audit\n  tooling can rely on the exact shape.\n- Masking is explicitly buffering under `max_bytes` and FAILS\n  CLOSED: a response that is content-encoded, not JSON, over the\n  cap, unparseable, or misses a configured pointer answers 502 —\n  never a passthrough of bytes the gateway could not prove clean\n  (see the module docs; the inverse of the DW-028 transform gates).",
+      "type": "object",
+      "properties": {
+        "fields": {
+          "description": "Pointers masked for EVERY consumer on this route (the floor).\nEach must parse as an RFC 6901 pointer and not be the root\n(validation); each must RESOLVE on every JSON response the\nroute serves, or the response fails closed (schema drift, the\nsame strictness as the DW-028 body transform).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groups": {
+          "description": "Extra pointers masked per consumer GROUP: group name -> pointers\n(unioned with `fields` for members of the group; consumers in\nno listed group get the floor alone). Validation checks the\ngroup names resolve against some config consumer's `groups`\n(the same store-only-group caveat as authorization group rules).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "max_bytes": {
+          "description": "Maximum response body size (bytes) this route will buffer to\nmask. Must be >= 1 (validation); no upper bound, the same\noperator-owns-the-memory-budget stance as the DW-028 transform\ncap.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_bytes"
+      ]
+    },
     "NameValueMatch": {
       "description": "One query-parameter or cookie criterion: the parameter/cookie must be\npresent; when `value` is given it must equal that exact string.",
       "type": "object",
@@ -1657,6 +1690,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/Maintenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "masking": {
+          "description": "Response field masking (DW-029, feature analysis 5-Security):\nredacts the named RFC 6901 JSON pointers from the route's\nresponses — the floor `fields` for every consumer, plus the\n`groups` additions for members of each consumer group — before\nany other body-handling stage. The redaction is fail-closed: a\nresponse the gateway cannot prove clean (encoded, non-JSON,\nover the cap, unparseable, or missing a configured pointer)\nanswers 502, never a passthrough. See [`Masking`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Masking"
             },
             {
               "type": "null"

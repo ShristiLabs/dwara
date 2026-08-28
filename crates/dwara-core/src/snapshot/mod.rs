@@ -1023,6 +1023,104 @@ fn validate_security_headers(
     }
 }
 
+/// Validate one `masking` block (DW-029): a positive cap, at least one
+/// pointer somewhere (a masking policy that masks nothing is an
+/// authoring mistake), pointers that parse and are not the root, and
+/// group names that resolve against some config consumer's membership
+/// — a typo'd group name silently never masks, which is fail-OPEN, the
+/// exact posture this policy forbids (same check, and same store-only
+/// caveat, as authorization group rules).
+fn validate_masking(
+    name: &str,
+    masking: &crate::config::transforms::Masking,
+    consumer_groups: &std::collections::BTreeSet<&str>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    use crate::config::transforms as t;
+    if masking.fields.is_empty() && masking.groups.is_empty() {
+        issues.push(issue(
+            "route",
+            name,
+            "masking",
+            "carries no fields and no groups (nothing to mask) and is always a mistake: \
+             omit the masking block to disable masking on this route",
+        ));
+    }
+    if masking.max_bytes == 0 {
+        issues.push(issue(
+            "route",
+            name,
+            "masking.max_bytes",
+            "max_bytes must be > 0 (0 would fail every response against the masking cap)",
+        ));
+    }
+    let check_pointer =
+        |field: String, path: &str, issues: &mut Vec<ValidationIssue>| match t::JsonPointer::parse(
+            path,
+        ) {
+            None => issues.push(issue(
+                "route",
+                name,
+                &field,
+                format!(
+                    "'{path}' is not an RFC 6901 JSON pointer (start with '/', use ~0 and ~1 for \
+                 '~' and '/', e.g. /items/0/id)"
+                ),
+            )),
+            Some(pointer) => {
+                if pointer.is_root() {
+                    issues.push(issue(
+                    "route",
+                    name,
+                    &field,
+                    "the root pointer ('') would replace the whole document with the sentinel — \
+                     a body the route cannot usefully serve; mask fields, not the document",
+                ));
+                }
+            }
+        };
+    for (i, path) in masking.fields.iter().enumerate() {
+        check_pointer(format!("masking.fields[{i}]"), path, issues);
+    }
+    for (group, paths) in &masking.groups {
+        if group.trim().is_empty() {
+            issues.push(issue(
+                "route",
+                name,
+                "masking.groups",
+                format!("group key '{group}' is empty: group names are non-empty strings"),
+            ));
+        }
+        if !consumer_groups.contains(group.as_str()) {
+            issues.push(issue(
+                "route",
+                name,
+                "masking.groups",
+                format!(
+                    "group '{group}' matches no configured consumer's groups membership — a \
+                     typo here silently never masks (fail-open); grant a consumer the group \
+                     or fix the name (store-managed consumers carry groups the config cannot \
+                     see, the known caveat of this check)"
+                ),
+            ));
+        }
+        if paths.is_empty() {
+            issues.push(issue(
+                "route",
+                name,
+                "masking.groups",
+                format!(
+                    "group '{group}' carries no pointers and is always a mistake: omit \
+                         the entry (the route floor still applies to the group's consumers)"
+                ),
+            ));
+        }
+        for (i, path) in paths.iter().enumerate() {
+            check_pointer(format!("masking.groups.{group}[{i}]"), path, issues);
+        }
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected — including `quota_near_limit`,
@@ -1822,6 +1920,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
         if let Some(sh) = &r.security_headers {
             validate_security_headers(&r.name, sh, &mut issues);
+        }
+        // Response field masking (DW-029).
+        if let Some(masking) = &r.masking {
+            validate_masking(&r.name, masking, &consumer_groups, &mut issues);
         }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
@@ -2695,6 +2797,11 @@ pub struct RouteTable {
     /// Precompiled response JSON body transforms per route index
     /// (DW-028), same mirroring as `request_body_ops`.
     response_body_ops: Vec<Option<crate::config::transforms::CompiledJsonTransform>>,
+    /// Precompiled response field masking policies per route index
+    /// (DW-029), mirroring `routes[idx].masking`: pointers parsed once
+    /// here; the per-request union with the consumer's groups is
+    /// resolved at apply time (group membership is per-request state).
+    masking: Vec<Option<crate::config::transforms::CompiledMasking>>,
 }
 
 impl RouteTable {
@@ -2711,6 +2818,7 @@ impl RouteTable {
             accept_media_types: Vec::new(),
             request_body_ops: Vec::new(),
             response_body_ops: Vec::new(),
+            masking: Vec::new(),
         }
     }
 
@@ -2803,6 +2911,13 @@ impl RouteTable {
         idx: usize,
     ) -> Option<&crate::config::transforms::CompiledJsonTransform> {
         self.response_body_ops.get(idx).and_then(|t| t.as_ref())
+    }
+
+    /// The precompiled response field masking policy for route `idx`
+    /// (`None`: the route masks nothing — exactly mirroring
+    /// `gateway().routes[idx].masking`).
+    pub fn masking(&self, idx: usize) -> Option<&crate::config::transforms::CompiledMasking> {
+        self.masking.get(idx).and_then(|m| m.as_ref())
     }
 }
 
@@ -3065,6 +3180,18 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 .map(|b| crate::config::transforms::CompiledJsonTransform::compile(&b.json))
         })
         .collect();
+    // DW-029: masking pointers, parsed once here (validation guarantees
+    // they parse; the same unreachable-skip contract). Group membership
+    // varies per request, so the union resolves at apply time.
+    let masking = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.masking
+                .as_ref()
+                .map(crate::config::transforms::CompiledMasking::compile)
+        })
+        .collect();
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -3080,6 +3207,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             accept_media_types,
             request_body_ops,
             response_body_ops,
+            masking,
         }),
         content_hash,
     })

@@ -35,7 +35,7 @@ pub mod versioning;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use transforms::{SecurityHeaders, Transforms};
+use transforms::{Masking, SecurityHeaders, Transforms};
 
 /// Error produced when a configuration document fails to parse.
 ///
@@ -701,6 +701,16 @@ pub struct Route {
     /// [`SecurityHeaders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_headers: Option<SecurityHeaders>,
+    /// Response field masking (DW-029, feature analysis 5-Security):
+    /// redacts the named RFC 6901 JSON pointers from the route's
+    /// responses — the floor `fields` for every consumer, plus the
+    /// `groups` additions for members of each consumer group — before
+    /// any other body-handling stage. The redaction is fail-closed: a
+    /// response the gateway cannot prove clean (encoded, non-JSON,
+    /// over the cap, unparseable, or missing a configured pointer)
+    /// answers 502, never a passthrough. See [`Masking`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masking: Option<Masking>,
 }
 
 /// Route maintenance mode (DW-041): a per-route availability state that

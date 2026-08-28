@@ -49,6 +49,23 @@
 //! headers. They apply last in the response decoration tail, after
 //! operator transforms: an operator who needs per-route-exception
 //! behavior omits the field here and sets it via transforms.
+//!
+//! ## Response field masking (DW-029) — the security sharp edge
+//!
+//! [`Masking`] redacts JSON fields on the way OUT, per consumer group
+//! (the mass-assignment/data-leak guard). It reuses the buffering and
+//! pointer machinery above with ONE posture change: every gate that the
+//! DW-028 body transform treats as pass-through (an already-encoded
+//! body, a non-JSON content type) is, for masking, a REJECTION — the
+//! gateway cannot prove fields absent from bytes it cannot parse, and a
+//! skipped masking policy is exactly the leak the policy exists to
+//! prevent. Over-cap, invalid JSON, and unresolved pointers fail the
+//! same way (502), the strictness the pointer rules above already
+//! argue for. Masking runs FIRST in the response decoration tail —
+//! before the DW-028 body transform and before compression (DW-027) —
+//! so no later stage can resurrect a redacted value: once the sentinel
+//! replaces the secret, the original bytes exist nowhere in the
+//! gateway.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -336,6 +353,68 @@ impl FrameOptions {
     }
 }
 
+/// Response field masking policy (DW-029, feature analysis 5-Security
+/// "response field masking"): RFC 6901 pointers whose values are
+/// replaced with the fixed [`MASKED_VALUE`] sentinel on the route's
+/// responses, before any other body-handling stage. The
+/// mass-assignment/data-leak guard: a field named here NEVER reaches
+/// the client, whatever the upstream put in it.
+///
+/// Semantics (frozen; enforcement lives in `dataplane::transforms`):
+///
+/// - PRECEDENCE is the deny-anywhere-wins analog for a redaction
+///   policy: the effective pointer set is the UNION of `fields` (the
+///   floor, every consumer on the route) and every `groups` entry the
+///   authenticated consumer belongs to. A group entry can only ADD
+///   pointers — there is deliberately no mechanism by which a group is
+///   EXEMPTED from the route floor (that would be a allow-anywhere
+///   escape hatch on a security policy).
+/// - The redacted value is the FIXED string [`MASKED_VALUE`], not
+///   configurable: one sentinel everywhere, so clients and audit
+///   tooling can rely on the exact shape.
+/// - Masking is explicitly buffering under `max_bytes` and FAILS
+///   CLOSED: a response that is content-encoded, not JSON, over the
+///   cap, unparseable, or misses a configured pointer answers 502 —
+///   never a passthrough of bytes the gateway could not prove clean
+///   (see the module docs; the inverse of the DW-028 transform gates).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Masking {
+    /// Maximum response body size (bytes) this route will buffer to
+    /// mask. Must be >= 1 (validation); no upper bound, the same
+    /// operator-owns-the-memory-budget stance as the DW-028 transform
+    /// cap.
+    pub max_bytes: u64,
+    /// Pointers masked for EVERY consumer on this route (the floor).
+    /// Each must parse as an RFC 6901 pointer and not be the root
+    /// (validation); each must RESOLVE on every JSON response the
+    /// route serves, or the response fails closed (schema drift, the
+    /// same strictness as the DW-028 body transform).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    /// Extra pointers masked per consumer GROUP: group name -> pointers
+    /// (unioned with `fields` for members of the group; consumers in
+    /// no listed group get the floor alone). Validation checks the
+    /// group names resolve against some config consumer's `groups`
+    /// (the same store-only-group caveat as authorization group rules).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, Vec<String>>,
+}
+
+/// The value a masked field is replaced with (DW-029): the JSON string
+/// `"***"` (the feature analysis row's `JSON paths -> ***`). FIXED, not
+/// configurable — the sentinel is a fixed marker the client can rely
+/// on (a value the gateway itself chose and documents) and identical
+/// on every route, so nothing about a masked response depends on
+/// per-route config a client cannot see. One ambiguity is inherent
+/// and documented: source data that is literally `"***"` at a masked
+/// position is indistinguishable from the sentinel — treat every
+/// `"***"` at a configured pointer as masked (the operator docs carry
+/// the same caveat). Operators who need a different shape on a
+/// specific route combine masking with a DW-028 response transform
+/// (which runs after masking and sees the sentinel).
+pub const MASKED_VALUE: &str = "***";
+
 /// Header names no REQUEST-side header op may touch (DW-028). Framing
 /// (`content-length`, `transfer-encoding`) is rebuilt by the forward
 /// pipeline from the actual body — an op that forced a disagreeing
@@ -601,6 +680,137 @@ impl CompiledJsonTransform {
             }
         }
         Ok(())
+    }
+}
+
+/// Snapshot-compiled form of a [`Masking`] policy (DW-029): every
+/// pointer parsed once at snapshot-compile time. The effective pointer
+/// set is resolved per request (the floor plus the authenticated
+/// consumer's groups — the union rule), which is why groups stay a map
+/// here rather than being flattened at compile time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledMasking {
+    max_bytes: u64,
+    /// The every-consumer floor (`fields`), parsed.
+    base: Vec<JsonPointer>,
+    /// Per-group additional pointers, parsed (`groups`).
+    groups: BTreeMap<String, Vec<JsonPointer>>,
+}
+
+impl CompiledMasking {
+    /// Compile a (validated) masking policy. Validation guarantees
+    /// every pointer parses, so compilation drops nothing on any
+    /// publishable config (the same unreachable-skip contract as
+    /// [`CompiledJsonTransform::compile`]).
+    pub fn compile(cfg: &Masking) -> CompiledMasking {
+        let base = cfg
+            .fields
+            .iter()
+            .filter_map(|p| JsonPointer::parse(p))
+            .collect();
+        let groups = cfg
+            .groups
+            .iter()
+            .map(|(g, paths)| {
+                (
+                    g.clone(),
+                    paths.iter().filter_map(|p| JsonPointer::parse(p)).collect(),
+                )
+            })
+            .collect();
+        CompiledMasking {
+            max_bytes: cfg.max_bytes,
+            base,
+            groups,
+        }
+    }
+
+    /// The buffering cap (bytes).
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Mask `doc` in place for a consumer in `consumer_groups`: every
+    /// pointer in the floor plus every listed group the consumer
+    /// belongs to is replaced with [`MASKED_VALUE`]. Returns how many
+    /// DISTINCT pointers were applied (the audit count; a pointer
+    /// listed in the floor and in one or more groups applies once).
+    /// Fails on the first pointer that does not resolve — the
+    /// strictness rule the DW-028 transform argues for, mandatory in
+    /// the redaction direction: a silent miss is the leak.
+    pub fn apply(
+        &self,
+        doc: &mut serde_json::Value,
+        consumer_groups: &[String],
+    ) -> Result<usize, JsonTransformError> {
+        // Resolve the effective set first (floor, then each matching
+        // group's extras, deduplicated): replacement is
+        // pointer-independent, so only the FIRST FAILURE depends on
+        // order — floor order, then the consumer's group-list order,
+        // both deterministic config orders.
+        let mut effective: Vec<&JsonPointer> = Vec::new();
+        for pointer in &self.base {
+            effective.push(pointer);
+        }
+        for group in consumer_groups {
+            let Some(extra) = self.groups.get(group) else {
+                continue;
+            };
+            for pointer in extra {
+                if !effective.contains(&pointer) {
+                    effective.push(pointer);
+                }
+            }
+        }
+        let count = effective.len();
+        for pointer in effective {
+            apply_mask_pointer(pointer, doc)?;
+        }
+        Ok(count)
+    }
+}
+
+/// Replace the value AT `pointer` with [`MASKED_VALUE`] — only where
+/// the pointer RESOLVES; a miss is [`JsonTransformError::Unresolved`]
+/// (masking never inserts: a field that is not there to redact means
+/// the response drifted from the contract the policy pinned).
+fn apply_mask_pointer(
+    pointer: &JsonPointer,
+    doc: &mut serde_json::Value,
+) -> Result<(), JsonTransformError> {
+    // Validation rejects the root pointer for masking; keep the walker
+    // total anyway (a generation-tear backstop, never a panic).
+    if pointer.is_root() {
+        *doc = serde_json::Value::String(MASKED_VALUE.to_string());
+        return Ok(());
+    }
+    let tokens = pointer.tokens();
+    let indexes = &pointer.indexes;
+    let (last, parent_tokens) = tokens.split_last().expect("non-root has tokens");
+    let (last_index, parent_indexes) = indexes.split_last().expect("indexes parallel tokens");
+    let path = render(pointer);
+    let parent = resolve_tokens(parent_tokens, parent_indexes, &path, doc)?;
+    let sentinel = serde_json::Value::String(MASKED_VALUE.to_string());
+    match parent {
+        serde_json::Value::Object(map) => {
+            if let Some(slot) = map.get_mut(last) {
+                *slot = sentinel;
+                Ok(())
+            } else {
+                Err(JsonTransformError::Unresolved { path })
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let idx = last_index.ok_or(JsonTransformError::Unresolved { path: path.clone() })?;
+            match items.get_mut(idx) {
+                Some(slot) => {
+                    *slot = sentinel;
+                    Ok(())
+                }
+                None => Err(JsonTransformError::Unresolved { path: path.clone() }),
+            }
+        }
+        _ => Err(JsonTransformError::Unresolved { path: path.clone() }),
     }
 }
 

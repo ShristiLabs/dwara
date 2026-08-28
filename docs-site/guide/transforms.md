@@ -162,8 +162,11 @@ without it); `content_security_policy` must be non-empty.
 Order matters when combining features. Request transforms run after
 routing, authentication, and rate limiting — every policy evaluated
 the request the client sent; transforms shape what the upstream
-receives. Response transforms run before [compression](./edge-policies)
-(a body transform rewrites the bytes compression then encodes) and
+receives. Response transforms run after [field
+masking](./masking) (a transform sees — and may rewrite or remove —
+the `"***"` sentinel masking left) and before
+[compression](./edge-policies) (a body transform rewrites the bytes
+compression then encodes) and
 before [versioning stamps](./api-versioning); security headers apply
 last, so the edge policy has the final word.
 

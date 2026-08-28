@@ -99,6 +99,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             maintenance: None,
             transforms: None,
             security_headers: None,
+            masking: None,
         }],
         services: vec![Service {
             name: "svc".into(),

@@ -68,6 +68,10 @@ export default withMermaid(
                   link: "/guide/transforms",
                 },
                 {
+                  text: "Response field masking",
+                  link: "/guide/masking",
+                },
+                {
                   text: "API versioning",
                   link: "/guide/api-versioning",
                 },

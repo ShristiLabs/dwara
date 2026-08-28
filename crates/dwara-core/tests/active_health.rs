@@ -473,6 +473,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     maintenance: None,
                     transforms: None,
                     security_headers: None,
+                    masking: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -505,6 +506,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     maintenance: None,
                     transforms: None,
                     security_headers: None,
+                    masking: None,
                 },
             ],
             services: vec![Service {

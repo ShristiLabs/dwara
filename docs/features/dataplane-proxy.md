@@ -25,10 +25,11 @@ page focuses on what happens inside the `proxy` action itself once
 policy has already let the request through. Between route resolution
 and the action sit the DW-027 route limits and the CORS preflight
 short-circuit, and after the action the response gains the route's
-transforms (body first, then headers — DW-028), compression, and CORS
-decoration — see
-[edge policies](./edge-policies.md) and
-[transforms](./transforms.md).
+masking (first — DW-029), transforms (body, then headers — DW-028),
+compression, and CORS decoration — see
+[edge policies](./edge-policies.md),
+[transforms](./transforms.md), and
+[masking](./masking.md).
 
 ## Streaming, zero default buffering
 
@@ -40,11 +41,12 @@ spawns an unbounded buffering task to "help" a slow consumer. This is
 what makes Server-Sent Events and large uploads/downloads work through
 the gateway without a size cap, and it is a repo-wide invariant (see
 [`AGENTS.md`](../../AGENTS.md#conventions): "any change that introduces
-buffering must be opt-in and size-capped"). The one opt-in exception
-to date is the DW-028 JSON body transform (`transforms.*.body.json`):
-when a route configures one, that transform buffers up to its declared
-`max_bytes` and nothing else on the path does — see
-[transforms](./transforms.md).
+buffering must be opt-in and size-capped"). The opt-in exceptions
+to date are the DW-028 JSON body transform (`transforms.*.body.json`)
+and the DW-029 response field masker (`masking`): when a route
+configures one, that stage buffers up to its declared `max_bytes` and
+nothing else on the path does — see
+[transforms](./transforms.md) and [masking](./masking.md).
 
 ## Host header and forwarded headers
 

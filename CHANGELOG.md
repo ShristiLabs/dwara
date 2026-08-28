@@ -367,6 +367,50 @@ the project follows semantic versioning once 1.0 is reached.
   in the tail, after operator transforms, so the edge policy has the
   final word. Zero new dependencies (hand-rolled RFC 6901 grammar in
   `config::transforms`); `config-reference.json` regenerated.
+- Response field masking (DW-029): a per-route `masking` block
+  (`max_bytes`, `fields`, `groups`) that redacts RFC 6901 pointers
+  from the route's PROXIED responses — replaced with the FIXED
+  sentinel `"***"` (a JSON string; not configurable, so clients and
+  audit tooling can rely on the exact shape — a literal `"***"` in
+  source data is documented as indistinguishable) — before any other
+  body-handling stage runs. The effective pointer set is the UNION of
+  `fields` (the floor, every consumer on the route) and every `groups`
+  entry the authenticated consumer belongs to, deduplicated: groups
+  only ADD pointers, and there is deliberately no mechanism by which a
+  group is exempted from the floor (an exemption would be an
+  allow-anywhere escape hatch on a redaction policy, the
+  deny-anywhere-wins analog). Every DW-028 body-transform
+  pass-through gate is INVERTED into a fail-closed 502: a
+  content-encoded body (the gateway does not decode, and cannot prove
+  fields absent from bytes it cannot read — the flagged DW-028 review
+  surface), a non-JSON content type, a declared or streamed length
+  over `max_bytes`, JSON that does not parse, and a configured pointer
+  that does not resolve (schema drift — a silent miss IS the leak)
+  each answer a generic `response_mask_failed` 502 envelope, with the
+  refusal class named server-side only; bodiless statuses (1xx/101/
+  204/304) and empty bodies pass (nothing to leak), and
+  gateway-authored `respond`/`redirect` bodies never face the gates
+  (operator config bytes, no upstream data). Masking runs FIRST in the
+  response decoration tail — before the DW-028 body/header transforms
+  and before DW-027 compression — so no later stage can resurrect a
+  redacted value, while the gateway's OWN compression (which runs
+  later) never trips the encoding gate; only upstream-pre-encoded
+  responses are refused. `Content-Length` is rewritten to the masked
+  length; upstream trailers are dropped when buffering. Audit trail:
+  one `dwara::policy` info event per masked response
+  (`response_masked`: route, consumer, distinct-pointer count,
+  request-id) and one warn per refusal (`response_mask_failed`: the
+  refusal class) — labels and counts only, masked VALUES never appear
+  in events. Validation is fail-closed at publish: the block must mask
+  something, `max_bytes > 0`, every pointer parses as RFC 6901 and is
+  not the root, group entries non-empty, and every group name must
+  match some configured consumer's groups membership (a typo'd name
+  silently never masks — fail-open — with the same store-managed-
+  consumers caveat as authorization group rules). Pointers parse once
+  at snapshot compile into the route table (`CompiledMasking`; the
+  per-request group union resolves at apply time); zero new
+  dependencies; `config-reference.json` regenerated; new
+  `docs/features/masking.md` and docs-site `guide/masking.md`.
 
 ### Fixed
 

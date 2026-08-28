@@ -36,6 +36,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
   headers](./features/transforms.md) — header/query manipulation,
   size-capped JSON-pointer body transforms (the one buffering
   transform), and edge security-header injection (DW-028).
+- [Response field masking](./features/masking.md) — fail-closed
+  per-consumer-group redaction of response JSON fields (the inverted
+  DW-028 gates: encoded/non-JSON/over-cap/pointer-miss all 502), the
+  union-only group rule, and the audit trail (DW-029).
 - [Maintenance mode and policy dry-run](./features/maintenance-dry-run.md)
   — the per-route 503 + Retry-After availability short-circuit and
   the per-attachment monitor flags on every rejecting policy phase,

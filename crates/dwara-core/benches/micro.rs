@@ -67,6 +67,7 @@ fn bench_gateway() -> Gateway {
                 maintenance: None,
                 transforms: None,
                 security_headers: None,
+                masking: None,
             });
         }
     }

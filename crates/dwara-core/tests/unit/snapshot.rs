@@ -46,6 +46,7 @@ fn good_gateway() -> Gateway {
                 maintenance: None,
                 transforms: None,
                 security_headers: None,
+                masking: None,
             },
             Route {
                 name: "static".into(),
@@ -74,6 +75,7 @@ fn good_gateway() -> Gateway {
                 maintenance: None,
                 transforms: None,
                 security_headers: None,
+                masking: None,
             },
             Route {
                 name: "legacy".into(),
@@ -102,6 +104,7 @@ fn good_gateway() -> Gateway {
                 maintenance: None,
                 transforms: None,
                 security_headers: None,
+                masking: None,
             },
         ],
         services: vec![Service {

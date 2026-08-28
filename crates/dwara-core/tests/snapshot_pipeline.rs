@@ -59,6 +59,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         maintenance: None,
         transforms: None,
         security_headers: None,
+        masking: None,
     }
 }
 

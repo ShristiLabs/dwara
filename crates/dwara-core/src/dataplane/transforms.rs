@@ -33,17 +33,41 @@
 //! BEFORE retry buffering, so a retried attempt replays the
 //! TRANSFORMED bytes.
 //!
-//! Response side, in the decoration tail: body transform (first —
-//! compression then encodes the transformed bytes and its eligibility
-//! check sees the final content type), then header ops, then the
-//! existing compression -> versioning -> CORS stages, then
-//! [`apply_security_headers`] (last policy stamp before rate headers),
-//! then rate headers.
+//! Response side, in the decoration tail: FIELD MASKING first (DW-029,
+//! [`mask_response_body`] — before anything else can so much as read
+//! the body: once the sentinel replaces a secret, the original bytes
+//! exist nowhere in the gateway, so no later stage — operator
+//! transforms, the compression codec — can resurrect or re-emit them),
+//! then the body transform (compression then encodes the transformed
+//! bytes and its eligibility check sees the final content type), then
+//! header ops, then the existing compression -> versioning -> CORS
+//! stages, then [`apply_security_headers`] (last policy stamp before
+//! rate headers), then rate headers.
 //!
 //! Response HEADER and BODY transforms apply to action responses only;
 //! security headers apply to every route-matched response including
 //! gateway short-circuits (see `config::transforms::SecurityHeaders`
-//! for the asymmetry with deprecation stamps).
+//! for the asymmetry with deprecation stamps). MASKING applies to
+//! PROXY action responses only: the leak surface it guards is the
+//! upstream's output — gateway-authored bodies (redirect, respond) are
+//! operator config bytes with no upstream data to redact, and bodiless
+//! statuses (1xx/101/204/304) have nothing to leak; both pass.
+//!
+//! ## Masking's inverted gate posture (DW-029)
+//!
+//! The DW-028 body transform PASSES THROUGH what it cannot handle
+//! (encoded or non-JSON bodies) — a convenience transform skipping
+//! itself is harmless. Masking inverts every one of those gates into a
+//! 502 REFUSAL: the gateway cannot prove the configured fields absent
+//! from bytes it cannot parse, and for a redaction policy a skipped
+//! pass IS the leak (the module docs of `config::transforms` carry the
+//! full argument). A route that configures masking pins its proxied
+//! responses to the contract "identity-encoded JSON within the cap,
+//! with every configured pointer present" — an upstream that violates
+//! it answers 502 with a generic envelope, and one `dwara::policy`
+//! warn event names the refusal class server-side. Every successful
+//! mask emits one `dwara::policy` info event (the audit trail the
+//! issue's done-when asks for: route, consumer, count, request-id).
 //!
 //! ## Why header/query ops are lenient where JSON pointers are strict
 //!
@@ -431,7 +455,6 @@ pub async fn transform_response_body(
     compiled: &CompiledJsonTransform,
     rid: &str,
 ) -> Response<ProxyBody> {
-    use http_body_util::BodyExt as _;
     use hyper::body::Body as _;
 
     let status = resp.status();
@@ -450,35 +473,19 @@ pub async fn transform_response_body(
         return response_transform_failure(rid);
     }
 
-    let (mut parts, mut body) = resp.into_parts();
-    let mut buf: Vec<u8> = Vec::new();
-    let failure: Option<ResponseBodyTransformError> = loop {
-        match body.frame().await {
-            Some(Ok(frame)) => {
-                let Ok(data) = frame.into_data() else {
-                    continue; // trailer: dropped (see the doc comment)
-                };
-                if buf.len() as u64 + data.len() as u64 > cap {
-                    break Some(ResponseBodyTransformError::TooLarge { cap });
-                }
-                buf.extend_from_slice(&data);
-            }
-            Some(Err(e)) => {
-                break Some(ResponseBodyTransformError::Upstream(e.to_string()));
-            }
-            None => break None,
+    let (mut parts, body) = resp.into_parts();
+    let bytes = match collect_capped(body, cap).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(
+                code = "response_transform_failed",
+                request_id = %rid,
+                error = ?e,
+                "upstream response failed the route's body transform"
+            );
+            return response_transform_failure(rid);
         }
     };
-    if let Some(e) = failure {
-        tracing::warn!(
-            code = "response_transform_failed",
-            request_id = %rid,
-            error = ?e,
-            "upstream response failed the route's body transform"
-        );
-        return response_transform_failure(rid);
-    }
-    let bytes = Bytes::from(buf);
     // An empty JSON-typed body has nothing to transform; forwarding
     // the collected emptiness is byte-identical to passthrough.
     let out = if bytes.is_empty() {
@@ -505,6 +512,40 @@ pub async fn transform_response_body(
     }
 }
 
+/// Buffer a response body up to `cap` bytes (the shared DW-028/DW-029
+/// response-side capped collector). Trailers are dropped: they
+/// described the pre-transform body, and forwarding a stale checksum
+/// trailer alongside replaced bytes would be a lie. Over-cap and
+/// mid-body stream death surface as the two failure arms; both callers
+/// answer 502 (buffering before headers reach the client is what makes
+/// that a clean envelope instead of a torn stream).
+async fn collect_capped<B>(body: B, cap: u64) -> Result<Bytes, ResponseBodyTransformError>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: std::fmt::Display,
+{
+    use http_body_util::BodyExt as _;
+    let mut body = std::pin::pin!(body);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match body.as_mut().frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue; // trailer: dropped (see the doc comment)
+                };
+                if buf.len() as u64 + data.len() as u64 > cap {
+                    return Err(ResponseBodyTransformError::TooLarge { cap });
+                }
+                buf.extend_from_slice(&data);
+            }
+            Some(Err(e)) => {
+                return Err(ResponseBodyTransformError::Upstream(e.to_string()));
+            }
+            None => return Ok(Bytes::from(buf)),
+        }
+    }
+}
+
 /// The 502 for a failed response transform: generic message (no
 /// upstream internals leak), uniform JSON envelope.
 fn response_transform_failure(rid: &str) -> Response<ProxyBody> {
@@ -515,6 +556,198 @@ fn response_transform_failure(rid: &str) -> Response<ProxyBody> {
             crate::observability::envelope_body(
                 "response_transform_failed",
                 "upstream response failed the route's transform policy",
+                rid,
+            ),
+        )))
+        .expect("static 502 response is valid")
+}
+
+// ---------------------------------------------------------------------------
+// Response field masking (DW-029)
+// ---------------------------------------------------------------------------
+
+/// Why masking refused a response (DW-029). Every arm answers the same
+/// 502 envelope; the distinction exists for the server-side
+/// `dwara::policy` warn event (which refusal class fired).
+#[derive(Debug)]
+enum MaskRefusal {
+    /// The upstream sent a content-encoded body: the gateway does not
+    /// decode, and cannot prove anything about bytes it cannot read.
+    Encoded,
+    /// The body is not JSON-media-typed: pointers cannot apply to it,
+    /// so its contents cannot be proven clean.
+    NotJson,
+    /// Over the masking cap (declared or streamed).
+    TooLarge { cap: u64 },
+    /// JSON-typed but unparseable.
+    InvalidJson,
+    /// A configured pointer did not resolve (schema drift; the strict
+    /// miss-is-the-leak rule).
+    Unresolved { path: String },
+    /// The upstream stream died mid-body while buffering.
+    Upstream(String),
+}
+
+impl std::fmt::Display for MaskRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MaskRefusal::Encoded => {
+                write!(f, "response is content-encoded; masking cannot read it")
+            }
+            MaskRefusal::NotJson => {
+                write!(
+                    f,
+                    "response is not JSON; masking cannot prove fields absent"
+                )
+            }
+            MaskRefusal::TooLarge { cap } => {
+                write!(f, "response exceeds the masking cap of {cap} bytes")
+            }
+            MaskRefusal::InvalidJson => write!(f, "response claims JSON but does not parse"),
+            MaskRefusal::Unresolved { path } => {
+                write!(f, "masking pointer '{path}' does not resolve")
+            }
+            MaskRefusal::Upstream(e) => write!(f, "upstream stream failed mid-body: {e}"),
+        }
+    }
+}
+
+/// The RESPONSE field masking pass (DW-029), the decoration tail's
+/// first stage and the security floor of the response path. Gates, in
+/// order — every one of them FAILS CLOSED (the inverted posture; see
+/// the module docs): bodiless statuses pass (nothing to leak), then a
+/// content-encoded body, a non-JSON content type, a declared length
+/// over the cap, an over-cap or dying stream, unparseable JSON, and a
+/// pointer miss each answer 502 with a generic envelope plus one
+/// `dwara::policy` warn event naming the refusal class server-side.
+/// The gateway's OWN compression (DW-027) runs later in the tail, so
+/// it can never trip the encoding gate — only upstream-pre-encoded
+/// responses do.
+///
+/// On success every effective pointer (route floor plus the consumer's
+/// groups — the union rule, `config::transforms::Masking`) is replaced
+/// with the fixed sentinel, `Content-Length` is rewritten, and one
+/// `dwara::policy` info event records route, consumer, masked count,
+/// and request-id: the audit trail the issue's done-when requires.
+pub async fn mask_response_body(
+    resp: Response<ProxyBody>,
+    compiled: &crate::config::transforms::CompiledMasking,
+    consumer_groups: &[String],
+    route: &str,
+    consumer: Option<&str>,
+    rid: &str,
+) -> Response<ProxyBody> {
+    use hyper::body::Body as _;
+
+    let status = resp.status();
+    if status.is_informational()
+        || status == hyper::StatusCode::SWITCHING_PROTOCOLS
+        || status == hyper::StatusCode::NO_CONTENT
+        || status == hyper::StatusCode::NOT_MODIFIED
+    {
+        return resp;
+    }
+    if resp.headers().contains_key(&CONTENT_ENCODING) {
+        return masking_refusal(rid, route, consumer, &MaskRefusal::Encoded);
+    }
+    if !is_json_body(resp.headers()) {
+        return masking_refusal(rid, route, consumer, &MaskRefusal::NotJson);
+    }
+    let cap = compiled.max_bytes();
+    if resp.body().size_hint().exact().is_some_and(|d| d > cap) {
+        return masking_refusal(rid, route, consumer, &MaskRefusal::TooLarge { cap });
+    }
+    let (mut parts, body) = resp.into_parts();
+    let bytes = match collect_capped(body, cap).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let refusal = match e {
+                ResponseBodyTransformError::TooLarge { cap } => MaskRefusal::TooLarge { cap },
+                // collect_capped cannot produce the parse/pointer arms;
+                // the debug-formatted fallback keeps the match total with
+                // no unreachable panic on the request path (server-side
+                // log only, like every refusal reason).
+                other => MaskRefusal::Upstream(format!("{other:?}")),
+            };
+            return masking_refusal(rid, route, consumer, &refusal);
+        }
+    };
+    // An empty body has nothing to mask — byte-identical passthrough
+    // (a proxied HEAD lands here, among others).
+    if bytes.is_empty() {
+        if let Ok(v) = HeaderValue::from_str("0") {
+            parts.headers.insert(CONTENT_LENGTH, v);
+        }
+        return Response::from_parts(parts, ProxyBody::Full(Full::new(bytes)));
+    }
+    let mut doc: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(doc) => doc,
+        Err(_) => return masking_refusal(rid, route, consumer, &MaskRefusal::InvalidJson),
+    };
+    let masked = match compiled.apply(&mut doc, consumer_groups) {
+        Ok(masked) => masked,
+        Err(t::JsonTransformError::Unresolved { path }) => {
+            return masking_refusal(rid, route, consumer, &MaskRefusal::Unresolved { path })
+        }
+        // Validation rejects the root pointer for masking; this arm is
+        // the same generation-tear backstop mapping the request-side
+        // transform uses (RemoveRoot -> empty-path Unresolved).
+        Err(t::JsonTransformError::RemoveRoot) => {
+            return masking_refusal(
+                rid,
+                route,
+                consumer,
+                &MaskRefusal::Unresolved {
+                    path: String::new(),
+                },
+            )
+        }
+    };
+    let out = match serde_json::to_vec(&doc) {
+        Ok(out) => Bytes::from(out),
+        Err(_) => return masking_refusal(rid, route, consumer, &MaskRefusal::InvalidJson),
+    };
+    tracing::info!(
+        target: "dwara::policy",
+        code = "response_masked",
+        route = route,
+        consumer = consumer.unwrap_or("anonymous"),
+        masked = masked,
+        request_id = rid,
+        "masked response fields (DW-029 audit trail)"
+    );
+    if let Ok(v) = HeaderValue::from_str(&out.len().to_string()) {
+        parts.headers.insert(CONTENT_LENGTH, v);
+    }
+    Response::from_parts(parts, ProxyBody::Full(Full::new(out)))
+}
+
+/// The fail-closed 502 for a response masking refused: generic client
+/// message (no pointer paths, no upstream detail), uniform JSON
+/// envelope, and the server-side `dwara::policy` warn event that names
+/// the refusal class — the correlation key is the request-id.
+fn masking_refusal(
+    rid: &str,
+    route: &str,
+    consumer: Option<&str>,
+    refusal: &MaskRefusal,
+) -> Response<ProxyBody> {
+    tracing::warn!(
+        target: "dwara::policy",
+        code = "response_mask_failed",
+        route = route,
+        consumer = consumer.unwrap_or("anonymous"),
+        request_id = rid,
+        reason = %refusal,
+        "response refused by the route's masking policy (fail-closed)"
+    );
+    Response::builder()
+        .status(hyper::StatusCode::BAD_GATEWAY)
+        .header(CONTENT_TYPE, "application/json")
+        .body(ProxyBody::Full(Full::new(
+            crate::observability::envelope_body(
+                "response_mask_failed",
+                "response failed the route's masking policy",
                 rid,
             ),
         )))
