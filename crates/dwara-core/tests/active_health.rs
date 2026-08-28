@@ -98,6 +98,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Genuinely zero-route shape: these suites exercise upstream health
@@ -417,6 +418,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             global_policies: Vec::new(),
             authorization: None,
             max_concurrent_requests: None,
+            load_shed_dry_run: false,
             jwt_providers: Vec::new(),
             admin: None,
             // Zero-route by design: readiness flips on first publish, not on
@@ -466,6 +468,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     limits: None,
                     authorization: None,
                     deprecation: None,
+                    maintenance: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -495,6 +498,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     limits: None,
                     authorization: None,
                     deprecation: None,
+                    maintenance: None,
                 },
             ],
             services: vec![Service {
@@ -529,6 +533,7 @@ async fn reserved_paths_shadow_configured_routes() {
             global_policies: vec![],
             authorization: None,
             max_concurrent_requests: None,
+            load_shed_dry_run: false,
             jwt_providers: Vec::new(),
             admin: None,
             allow_empty_routes: false,

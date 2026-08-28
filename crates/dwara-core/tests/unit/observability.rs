@@ -116,6 +116,7 @@ fn render_contains_families() {
             global_policies: Vec::new(),
             authorization: None,
             max_concurrent_requests: None,
+            load_shed_dry_run: false,
             jwt_providers: Vec::new(),
             admin: None,
             // Genuinely zero-route: only the registry-driven gauges matter

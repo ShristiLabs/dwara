@@ -936,3 +936,80 @@ async fn evictions_and_live_keys_surface_through_the_scrape_walk() {
         "live-keys gauge carries the engine's figure:\n{text}"
     );
 }
+
+// --- dry-run bundles (DW-041) ----------------------------------------------
+
+const DRY_AND_LIVE_YAML: &str = r#"
+policies:
+  - name: dry-one
+    dry_run: true
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 1 }
+  - name: live-five
+    rate_limits:
+      - selector: [ip]
+        requests_per: { minute: 5 }
+"#;
+
+#[tokio::test]
+async fn engine_dry_bundle_reports_denials_without_enforcing() {
+    let engine = engine_from(DRY_AND_LIVE_YAML);
+    let dry: Vec<String> = vec!["dry-one".into()];
+    // First request: the dry bundle's single-token minute bucket allows
+    // — but a dry bundle contributes NOTHING to the response, so the
+    // enforcement outcome reads NotLimited (no live rule applied) with
+    // nothing to report.
+    let e = engine.evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[]);
+    assert!(
+        matches!(e.outcome, RateLimitOutcome::NotLimited),
+        "a dry bundle's ALLOW also contributes no outcome or headers"
+    );
+    assert!(e.dry_denied.is_none());
+    // Second request within the window: the dry bundle WOULD deny — the
+    // enforcement outcome stays NotLimited (no live rule applied) and
+    // the would-deny is reported.
+    let e = engine.evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[]);
+    assert!(
+        matches!(e.outcome, RateLimitOutcome::NotLimited),
+        "a dry bundle alone never denies"
+    );
+    assert!(matches!(
+        e.dry_denied,
+        Some(RateLimitOutcome::Denied { .. })
+    ));
+    // The enforcement view (check) is the same NotLimited.
+    assert!(matches!(
+        engine.check(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[]),
+        RateLimitOutcome::NotLimited
+    ));
+}
+
+#[tokio::test]
+async fn engine_live_bundle_binds_headers_and_enforces_alongside_dry_sibling() {
+    let engine = engine_from(DRY_AND_LIVE_YAML);
+    let both: Vec<String> = vec!["dry-one".into(), "live-five".into()];
+    for i in 0..5u32 {
+        let e = engine.evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[]);
+        match e.outcome {
+            RateLimitOutcome::Allowed { limit, .. } => assert_eq!(
+                limit, 5,
+                "request {i}: headers come from the LIVE rule even while the dry sibling holds less budget"
+            ),
+            other => panic!("request {i}: live rule allows 5/min, got {other:?}"),
+        }
+        if i == 0 {
+            assert!(e.dry_denied.is_none());
+        } else {
+            assert!(
+                e.dry_denied.is_some(),
+                "request {i}: the dry bundle would deny from the second request on"
+            );
+        }
+    }
+    // Sixth request: the live rule denies (enforced) and the dry
+    // sibling's would-deny is reported on the same evaluation.
+    let e = engine.evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[]);
+    assert!(matches!(e.outcome, RateLimitOutcome::Denied { .. }));
+    assert!(e.dry_denied.is_some());
+}

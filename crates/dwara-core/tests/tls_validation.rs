@@ -96,6 +96,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             limits: None,
             authorization: None,
             deprecation: None,
+            maintenance: None,
         }],
         services: vec![Service {
             name: "svc".into(),
@@ -129,6 +130,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         global_policies: vec![],
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: false,

@@ -55,6 +55,16 @@
 //! the stricter-not-looser stop-at-first-denial semantics above stay,
 //! per limiter, for WINDOWS stacked within one rule.
 //!
+//! **Dry-run bundles (DW-041):** a policy bundle may set `dry_run` —
+//! its rules still evaluate (buckets advance exactly as if enforcing,
+//! so denial rates preview enforcement) but its denials are reported to
+//! the caller ([`RateLimitEngine::evaluate`]'s `dry_denied`]) instead of
+//! enforced, and its allowed outcomes contribute no `X-RateLimit-*`
+//! headers. LIVE bundles attached to the same request enforce
+//! unaffected: monitor mode observes without ever making enforcement
+//! more permissive. Extensions may not import observability, so the
+//! log/metric side of the report lives on the dataplane caller.
+//!
 //! **Per-key eviction (#122):** every window's keyed GCRA state lives in
 //! a `GcraShardStore` — [`GCRA_STORE_SHARDS`] independent lock-guarded
 //! maps replacing governor's unbounded `DashMapStateStore` (whose key
@@ -672,9 +682,14 @@ impl RateLimiter for GcraRateLimiter {
 // --- policy engine (DW-017 wiring) --------------------------------------
 
 /// One compiled rate-limit rule: selector set plus its stacked windows.
+/// `dry_run` (DW-041) is the owning policy bundle's monitor flag: the
+/// rule still evaluates (its GCRA buckets advance exactly as if
+/// enforcing), but its denials are REPORTED to the caller instead of
+/// returned as the enforcement outcome.
 struct EngineRule {
     selectors: Vec<crate::config::RateLimitSelector>,
     limiter: GcraRateLimiter,
+    dry_run: bool,
 }
 
 /// The per-request attributes a rule key can be built from (DW-017).
@@ -804,6 +819,7 @@ impl RateLimitEngine {
                                 burst: Some(requests),
                             }])
                             .expect("one window spec"),
+                            dry_run: policy.dry_run,
                         },
                     ));
                 }
@@ -818,6 +834,7 @@ impl RateLimitEngine {
                     EngineRule {
                         selectors: rule.selector.clone(),
                         limiter,
+                        dry_run: policy.dry_run,
                     },
                 ));
             }
@@ -869,6 +886,9 @@ impl RateLimitEngine {
     /// `retry_after_s` (and the matching Reset) reflect the MAXIMUM wait
     /// any denying rule demands — a client honoring the hint never
     /// retries into a second 429 with an understated Retry-After.
+    /// Dry-run bundles (DW-041, `policies[].dry_run`) never contribute
+    /// to this outcome — see [`RateLimitEngine::evaluate`], which this
+    /// delegates to.
     pub fn check(
         &self,
         ctx: &RateLimitKeyContext<'_>,
@@ -878,6 +898,36 @@ impl RateLimitEngine {
         listener_policies: &[String],
         global_policies: &[String],
     ) -> RateLimitOutcome {
+        self.evaluate(
+            ctx,
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            global_policies,
+        )
+        .outcome
+    }
+
+    /// [`Self::check`] with the dry-run observation attached (DW-041):
+    /// every applicable rule still EVALUATES (dry bundles' GCRA buckets
+    /// advance exactly as if enforcing, so their denial rates reflect
+    /// what enforcement would do), but the enforcement `outcome` is
+    /// computed from LIVE rules only, while `dry_denied` carries the
+    /// first (most specific) dry bundle's would-be denial for the caller
+    /// to log and count. Dry bundles also contribute no
+    /// `X-RateLimit-*` header values: a monitor never touches the
+    /// response. A request can therefore be BOTH 429'd by a live rule
+    /// and reported as a dry would-deny in the same evaluation.
+    pub fn evaluate(
+        &self,
+        ctx: &RateLimitKeyContext<'_>,
+        consumer_policies: &[String],
+        route_policies: &[String],
+        service_policies: &[String],
+        listener_policies: &[String],
+        global_policies: &[String],
+    ) -> RateLimitEvaluation {
         // Resolution order (precedence): consumer > route > service >
         // listener > global. One policy is ONE evaluation: a name listed
         // at several levels (or twice in one list) resolves its rules
@@ -888,12 +938,15 @@ impl RateLimitEngine {
         // allocation-free rescan of the earlier positions — cheaper
         // than any heap set on this per-request path.
         //
-        // Header binding: the FIRST denying rule supplies Limit /
+        // Header binding: the FIRST denying LIVE rule supplies Limit /
         // Remaining / Reset (the tightest constraint in resolution
-        // order); Retry-After is the MAX wait across every denying
+        // order); Retry-After is the MAX wait across every denying live
         // rule, so a client honoring it never retries into a second 429
         // with an understated hint. Allowed outcomes are irrelevant
-        // once any rule has denied (the response is a 429 regardless).
+        // once a live rule has denied (the response is a 429
+        // regardless). Dry denials (DW-041) run through the same loop
+        // into their own accumulator: the first one is the report, the
+        // rest only stretch its Retry-After for the log line.
         let attached = [
             consumer_policies,
             route_policies,
@@ -904,6 +957,7 @@ impl RateLimitEngine {
         let attached_names = || attached.iter().flat_map(|l| l.iter());
         let mut acc: Option<RateLimitOutcome> = None;
         let mut denied: Option<RateLimitOutcome> = None;
+        let mut dry_denied: Option<RateLimitOutcome> = None;
         for (pos, name) in attached_names().enumerate() {
             if attached_names().take(pos).any(|prev| prev == name) {
                 // Already resolved at a more specific position.
@@ -920,33 +974,46 @@ impl RateLimitEngine {
                         remaining,
                         reset_epoch_s,
                         retry_after_s,
-                    } => match denied.as_mut() {
-                        // First denial binds the headers.
-                        None => {
-                            denied = Some(RateLimitOutcome::Denied {
-                                limit,
-                                remaining,
-                                reset_epoch_s,
-                                retry_after_s,
-                            });
-                        }
-                        // Later denials only stretch Retry-After (and the
-                        // matching Reset) when they wait longer.
-                        Some(RateLimitOutcome::Denied {
-                            retry_after_s: max_ra,
-                            reset_epoch_s: max_rs,
-                            ..
-                        }) => {
-                            if retry_after_s > *max_ra {
-                                *max_ra = retry_after_s;
-                                *max_rs = reset_epoch_s;
+                    } => {
+                        // Dry bundles report instead of enforce (DW-041);
+                        // the accumulator is the same first-binds /
+                        // later-stretches shape as the live one.
+                        let sink = if rule.dry_run {
+                            &mut dry_denied
+                        } else {
+                            &mut denied
+                        };
+                        match sink.as_mut() {
+                            // First denial binds the headers (live) or
+                            // the report (dry).
+                            None => {
+                                *sink = Some(RateLimitOutcome::Denied {
+                                    limit,
+                                    remaining,
+                                    reset_epoch_s,
+                                    retry_after_s,
+                                });
                             }
+                            // Later denials only stretch Retry-After (and
+                            // the matching Reset) when they wait longer.
+                            Some(RateLimitOutcome::Denied {
+                                retry_after_s: max_ra,
+                                reset_epoch_s: max_rs,
+                                ..
+                            }) => {
+                                if retry_after_s > *max_ra {
+                                    *max_ra = retry_after_s;
+                                    *max_rs = reset_epoch_s;
+                                }
+                            }
+                            // The sinks only ever hold Denied variants.
+                            Some(_) => unreachable!("denial sinks only hold Denied"),
                         }
-                        // `denied` only ever holds a Denied variant.
-                        Some(_) => unreachable!("denied is only set to Denied"),
-                    },
+                    }
                     next @ RateLimitOutcome::Allowed { remaining, .. } => {
-                        if denied.is_some() {
+                        // Dry bundles never contribute headers: their
+                        // allowed outcomes are dropped entirely.
+                        if denied.is_some() || rule.dry_run {
                             continue;
                         }
                         // The tightest constraint (least remaining
@@ -964,8 +1031,24 @@ impl RateLimitEngine {
                 }
             }
         }
-        denied.unwrap_or(acc.unwrap_or(RateLimitOutcome::NotLimited))
+        RateLimitEvaluation {
+            outcome: denied.unwrap_or(acc.unwrap_or(RateLimitOutcome::NotLimited)),
+            dry_denied,
+        }
     }
+}
+
+/// The full rate-limit decision for one request (DW-041): the LIVE
+/// enforcement outcome (exactly the pre-dry-run `check` semantics over
+/// live bundles) plus the first dry bundle's would-be denial, if any
+/// evaluated to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitEvaluation {
+    pub outcome: RateLimitOutcome,
+    /// The first (most specific) `dry_run` bundle that would have denied
+    /// this request: a [`RateLimitOutcome::Denied`] payload for the log
+    /// line and metric — never enforced, never on the response.
+    pub dry_denied: Option<RateLimitOutcome>,
 }
 
 fn rate_outcome(result: GcraOutcome) -> RateLimitOutcome {

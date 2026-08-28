@@ -189,7 +189,8 @@ Rules for new code:
   Consumer/Credential/Policy/Plugin/Workspace/Snapshot. Policy precedence:
   consumer > route > service > listener > global (deny-anywhere-wins).
 - **Request-path order** (do not reorder casually): reserved paths
-  (/healthz, /readyz, /metrics) → route resolution → route limits
+  (/healthz, /readyz, /metrics) → route resolution → route maintenance
+  (503 + Retry-After, preflight-exempt, DW-041) → route limits
   (413/431) → CORS preflight short-circuit (204, pre-authn) → authn
   → authz → rate limit → gateway cap admission (priority-aware) →
   breaker → endpoint pick → pending cap → connect; responses then
@@ -198,7 +199,9 @@ Rules for new code:
   → rate headers. Unrouted traffic
   stops at route resolution: listener- and global-attached policies
   rate-limit the request before the 404; authn/authz never run
-  pre-route.
+  pre-route. Dry-run (DW-041) does not reorder anything: a phase with
+  a `dry_run` attachment evaluates in place and reports instead of
+  rejecting (route limits, authz, rate limits, load shedding).
 - **Gateway-generated responses** use the JSON error envelope
   `{error:{code,message,request_id}}`; never leak upstream internals.
 - **Secrets:** never logged, never in Debug output, redaction is exhaustive
@@ -281,6 +284,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Health | dwara-core | `passive_health`, `active_health` |
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
+| Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |

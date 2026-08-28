@@ -56,6 +56,13 @@
 //! - `retries_total{upstream}` counter
 //! - `rate_limited_total{route}` counter
 //! - `shed_total{priority}` counter
+//! - `dwara_policy_dry_run_total{phase,route}` counter (DW-041) —
+//!   requests a dry-run (monitor) policy would have rejected, by phase
+//!   (`route_limits`, `authz`, `rate_limit`, `load_shed`) and route
+//!   (`unrouted` for pre-404 listener/global policies); the request was
+//!   ALLOWED. Together with the `dwara::policy` warn events (phase,
+//!   would-be status, reason, route, consumer, request id) this family
+//!   IS the dry-run report — no separate endpoint.
 //! - `breaker_state{upstream}` gauge (0 closed, 1 open, 2 half-open)
 //! - `endpoint_health{upstream,endpoint}` gauge (1 available, 0 ejected)
 //! - `upstream_fail_open_picks{upstream}` gauge (scrape-time snapshot of
@@ -287,6 +294,7 @@ pub struct Observability {
     retries_total: IntCounterVec,
     rate_limited_total: IntCounterVec,
     shed_total: IntCounterVec,
+    policy_dry_run_total: IntCounterVec,
     breaker_state: IntGaugeVec,
     endpoint_health: IntGaugeVec,
     fail_open_picks: IntGaugeVec,
@@ -372,6 +380,16 @@ impl Observability {
             &["priority"],
         )
         .expect("valid metric definition");
+        let policy_dry_run_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_policy_dry_run_total",
+                "Requests a dry-run (monitor) policy would have rejected, by phase and \
+                 route; the request was allowed (DW-041). Phases: route_limits, authz, \
+                 rate_limit, load_shed.",
+            ),
+            &["phase", "route"],
+        )
+        .expect("valid metric definition");
         let breaker_state = IntGaugeVec::new(
             Opts::new(
                 "breaker_state",
@@ -437,6 +455,7 @@ impl Observability {
             Box::new(retries_total.clone()),
             Box::new(rate_limited_total.clone()),
             Box::new(shed_total.clone()),
+            Box::new(policy_dry_run_total.clone()),
             Box::new(breaker_state.clone()),
             Box::new(endpoint_health.clone()),
             Box::new(fail_open_picks.clone()),
@@ -458,6 +477,7 @@ impl Observability {
             retries_total,
             rate_limited_total,
             shed_total,
+            policy_dry_run_total,
             breaker_state,
             endpoint_health,
             fail_open_picks,
@@ -527,6 +547,48 @@ impl Observability {
         self.shed_total
             .with_label_values(&[&priority.to_string()])
             .inc();
+    }
+
+    /// Count one dry-run (monitor) would-have-rejected observation
+    /// (DW-041): a policy phase evaluated a DENY (or shed, or limit
+    /// violation) and the request was allowed anyway. `phase` is one of
+    /// `route_limits`, `authz`, `rate_limit`, `load_shed`; `route` is
+    /// the matched route name (`unrouted` for the pre-404 listener/
+    /// global policy pass) — both config-bounded label spaces.
+    pub fn record_policy_dry_run(&self, phase: &str, route: &str) {
+        self.policy_dry_run_total
+            .with_label_values(&[phase, route])
+            .inc();
+    }
+
+    /// The dry-run report's log side (DW-041): one structured warn
+    /// event at target `dwara::policy` per would-have-rejected request,
+    /// carrying the phase, the status the phase WOULD have answered, the
+    /// route and consumer (when known), and the phase's own reason —
+    /// the request-id correlation key ties it to the trace and access
+    /// line of the request that was allowed. Field list is exhaustive
+    /// and redacted by construction (no headers, no query string).
+    pub fn emit_policy_dry_run(
+        &self,
+        phase: &str,
+        would_be_status: u16,
+        route: &str,
+        consumer: Option<&str>,
+        request_id: &str,
+        detail: &str,
+    ) {
+        tracing::warn!(
+            target: "dwara::policy",
+            code = "policy_dry_run",
+            phase = phase,
+            would_be_status = would_be_status,
+            route = route,
+            consumer = consumer.unwrap_or("anonymous"),
+            request_id = request_id,
+            detail = detail,
+            "policy would have rejected this request (dry-run); \
+             enforcement of this phase skipped"
+        );
     }
 
     /// The JWKS refresh counter child for one provider (handed to the

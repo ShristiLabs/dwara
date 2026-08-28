@@ -59,6 +59,13 @@
 //! requests that resolved a route, per the documented request-path
 //! order; unrouted 404s never reach the chain.
 //!
+//! **Dry run (DW-041):** any attachment may set `dry_run: true` — its
+//! denials are then evaluated, logged, and counted by the caller
+//! instead of enforced. The resolver ([`resolve`]) walks PAST a dry
+//! deny and stops only at a live one, so a live deny at ANY level still
+//! enforces: monitor mode observes what a block would reject without
+//! ever making enforcement more permissive.
+//!
 //! # Failure posture
 //!
 //! Authorization failures are logged server-side only (via the
@@ -290,14 +297,56 @@ pub struct AuthzChain<'a> {
     pub global: Option<&'a Authz>,
 }
 
+/// Which chain level produced an authorization decision (DW-041): the
+/// proxy needs the denying link's own config (its `dry_run` flag) to
+/// decide whether a deny is enforced or only observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthzLevel {
+    Consumer,
+    Route,
+    Service,
+    Listener,
+    Global,
+}
+
+impl AuthzLevel {
+    /// The level's name as it appears in logs and metrics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthzLevel::Consumer => "consumer",
+            AuthzLevel::Route => "route",
+            AuthzLevel::Service => "service",
+            AuthzLevel::Listener => "listener",
+            AuthzLevel::Global => "global",
+        }
+    }
+}
+
+/// One resolved chain evaluation (DW-041): the enforcement verdict plus,
+/// when a `dry_run` attachment would have denied, the observation the
+/// caller logs and counts instead of enforcing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The verdict to ENFORCE. A `dry_run` block's deny is already
+    /// resolved to an allow here (dry run must never make enforcement
+    /// MORE permissive than the live rules — a LIVE deny at any level
+    /// still wins, so the walk continues past a dry deny and stops only
+    /// at a live one).
+    pub decision: Decision,
+    /// The FIRST (most specific) `dry_run` level that would have denied:
+    /// `(level, the deny it would have enforced)`. The caller logs the
+    /// reason, counts the would-be status, and proceeds.
+    pub would_deny: Option<(AuthzLevel, Decision)>,
+}
+
 impl<'a> AuthzChain<'a> {
-    fn links(&self) -> [Option<&'a Authz>; 5] {
+    fn links(&self) -> [(AuthzLevel, Option<&'a Authz>); 5] {
         [
-            self.consumer,
-            self.route,
-            self.service,
-            self.listener,
-            self.global,
+            (AuthzLevel::Consumer, self.consumer),
+            (AuthzLevel::Route, self.route),
+            (AuthzLevel::Service, self.service),
+            (AuthzLevel::Listener, self.listener),
+            (AuthzLevel::Global, self.global),
         ]
     }
 }
@@ -308,14 +357,43 @@ impl<'a> AuthzChain<'a> {
 ///    deny beats a route-level allow and vice versa).
 /// 2. Otherwise the most specific level WITH rules governs: its verdict
 ///    is final and less-specific levels are not consulted.
+///
+/// Dry run (DW-041) refines rule 1 per level: a deny from a `dry_run`
+/// block does not STOP the walk — it is recorded in
+/// [`Resolved::would_deny`] and the walk continues, so a LIVE deny at a
+/// less specific level still enforces. A config with no `dry_run` blocks
+/// resolves exactly as before (every deny is live, the walk stops at the
+/// first one).
 pub fn authorize(chain: &AuthzChain<'_>, ctx: &AuthzContext<'_>) -> Decision {
+    resolve(chain, ctx).decision
+}
+
+/// [`authorize`] with the dry-run observation attached (DW-041): the
+/// enforced verdict plus the would-have-denied attachment for the caller
+/// to log and count. See [`Resolved`] for why a dry deny never masks a
+/// live one.
+pub fn resolve(chain: &AuthzChain<'_>, ctx: &AuthzContext<'_>) -> Resolved {
     let mut governing: Option<Decision> = None;
-    for link in chain.links() {
+    let mut would_deny: Option<(AuthzLevel, Decision)> = None;
+    for (level, link) in chain.links() {
         let Some(authz) = link else { continue };
         match evaluate_one(authz, ctx) {
-            // A deny anywhere is absolute — report it immediately.
-            Some(decision @ Decision::Deny { .. }) => return decision,
-            // The first (most specific) deciding level governs.
+            // A LIVE deny anywhere is absolute — enforce it immediately.
+            Some(decision @ Decision::Deny { .. }) if !authz.dry_run => {
+                return Resolved {
+                    decision,
+                    would_deny,
+                };
+            }
+            // A DRY deny is observed (first/most specific wins the
+            // report) and the walk CONTINUES: a live deny at a less
+            // specific level must still enforce.
+            Some(decision @ Decision::Deny { .. }) => {
+                if would_deny.is_none() {
+                    would_deny = Some((level, decision));
+                }
+            }
+            // The first (most specific) deciding level governs an allow.
             Some(decision) => {
                 if governing.is_none() {
                     governing = Some(decision);
@@ -324,5 +402,8 @@ pub fn authorize(chain: &AuthzChain<'_>, ctx: &AuthzContext<'_>) -> Decision {
             None => {}
         }
     }
-    governing.unwrap_or(Decision::Allow)
+    Resolved {
+        decision: governing.unwrap_or(Decision::Allow),
+        would_deny,
+    }
 }

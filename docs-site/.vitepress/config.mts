@@ -67,6 +67,10 @@ export default withMermaid(
                   text: "API versioning",
                   link: "/guide/api-versioning",
                 },
+                {
+                  text: "Maintenance and dry-run",
+                  link: "/guide/maintenance",
+                },
                 { text: "Secrets", link: "/guide/secrets" },
                 {
                   text: "HMAC signing",

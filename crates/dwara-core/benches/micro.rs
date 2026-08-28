@@ -64,6 +64,7 @@ fn bench_gateway() -> Gateway {
                 limits: None,
                 authorization: None,
                 deprecation: None,
+                maintenance: None,
             });
         }
     }
@@ -111,6 +112,7 @@ fn bench_gateway() -> Gateway {
         authorization: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: false,

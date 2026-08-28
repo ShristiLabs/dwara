@@ -21,6 +21,7 @@ fn authz() -> Authz {
         required_scopes: vec![],
         required_claims: BTreeMap::new(),
         ip_acl: None,
+        dry_run: false,
     }
 }
 
@@ -313,5 +314,209 @@ fn chain_most_specific_governs_when_no_deny() {
             &c
         ),
         Decision::Allow
+    );
+}
+
+// --- dry run (DW-041) ------------------------------------------------------
+
+fn authz_denying_alpha() -> Authz {
+    let mut a = authz();
+    a.denied_consumers = vec!["alpha".to_string()];
+    a
+}
+
+#[test]
+fn resolve_reports_dry_deny_but_allows() {
+    let mut block = authz_denying_alpha();
+    block.dry_run = true;
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: None,
+            route: Some(&block),
+            service: None,
+            listener: None,
+            global: None,
+        },
+        &c,
+    );
+    assert!(
+        matches!(resolved.decision, Decision::Allow),
+        "a dry deny is not enforced"
+    );
+    let (level, decision) = resolved.would_deny.expect("the deny is observed");
+    assert_eq!(level, AuthzLevel::Route);
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            unauthenticated: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn resolve_walks_past_dry_deny_to_a_live_deny() {
+    let mut dry = authz_denying_alpha();
+    dry.dry_run = true;
+    let live = authz_denying_alpha();
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: None,
+            route: Some(&dry),
+            service: Some(&live),
+            listener: None,
+            global: None,
+        },
+        &c,
+    );
+    assert!(
+        matches!(resolved.decision, Decision::Deny { .. }),
+        "a live deny at a less specific level still enforces"
+    );
+    assert_eq!(
+        resolved.would_deny.map(|(l, _)| l),
+        Some(AuthzLevel::Route),
+        "the dry deny is still reported alongside the live enforcement"
+    );
+}
+
+#[test]
+fn resolve_dry_identity_rules_report_the_unauthenticated_deny() {
+    let mut block = authz();
+    block.allowed_consumers = vec!["alpha".to_string()];
+    block.dry_run = true;
+    let c = ctx(None, &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: None,
+            route: Some(&block),
+            service: None,
+            listener: None,
+            global: None,
+        },
+        &c,
+    );
+    assert!(matches!(resolved.decision, Decision::Allow));
+    let (_, decision) = resolved.would_deny.expect("observed");
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            unauthenticated: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn authorize_is_unchanged_for_live_rules() {
+    let live = authz_denying_alpha();
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    assert!(matches!(
+        authorize(
+            &AuthzChain {
+                consumer: None,
+                route: Some(&live),
+                service: None,
+                listener: None,
+                global: None,
+            },
+            &c
+        ),
+        Decision::Deny { .. }
+    ));
+}
+
+/// The dry deny's walk continues to the LAST level: a route-level dry
+/// deny must not mask a live deny sitting at the GLOBAL level (the
+/// least specific link) — monitor mode never weakens live enforcement.
+#[test]
+fn resolve_walks_past_route_dry_deny_to_a_live_global_deny() {
+    let mut dry = authz_denying_alpha();
+    dry.dry_run = true;
+    let live = authz_denying_alpha();
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: None,
+            route: Some(&dry),
+            service: None,
+            listener: None,
+            global: Some(&live),
+        },
+        &c,
+    );
+    assert!(
+        matches!(resolved.decision, Decision::Deny { .. }),
+        "the live GLOBAL deny enforces"
+    );
+    assert_eq!(
+        resolved.would_deny.map(|(l, _)| l),
+        Some(AuthzLevel::Route),
+        "the route-level dry deny is still observed"
+    );
+}
+
+/// The walk STOPS at the first live deny: a dry block at a LESS
+/// specific level than the live deny is never even consulted, so it
+/// produces no observation — there is nothing to report once the
+/// request is really rejected.
+#[test]
+fn resolve_stops_at_live_deny_before_a_less_specific_dry_block() {
+    let live = authz_denying_alpha();
+    let mut dry = authz_denying_alpha();
+    dry.dry_run = true;
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: None,
+            route: Some(&live),
+            service: None,
+            listener: None,
+            global: Some(&dry),
+        },
+        &c,
+    );
+    assert!(matches!(resolved.decision, Decision::Deny { .. }));
+    assert!(
+        resolved.would_deny.is_none(),
+        "the global dry block past the live deny is not consulted"
+    );
+}
+
+/// Cross-attachment muting: a dry block mutes only its OWN denials. A
+/// consumer-level dry deny is observed while the route-level LIVE deny
+/// enforces on the same request.
+#[test]
+fn resolve_reports_consumer_dry_deny_alongside_route_live_deny() {
+    let mut dry = authz_denying_alpha();
+    dry.dry_run = true;
+    let live = authz_denying_alpha();
+    let id = identity("alpha", &[]);
+    let c = ctx(Some(&id), &[], ip(1, 1, 1, 1));
+    let resolved = resolve(
+        &AuthzChain {
+            consumer: Some(&dry),
+            route: Some(&live),
+            service: None,
+            listener: None,
+            global: None,
+        },
+        &c,
+    );
+    assert!(
+        matches!(resolved.decision, Decision::Deny { .. }),
+        "the route live deny enforces"
+    );
+    assert_eq!(
+        resolved.would_deny.map(|(l, _)| l),
+        Some(AuthzLevel::Consumer),
+        "the consumer-level dry deny is reported under its own level"
     );
 }

@@ -133,8 +133,13 @@ for the exact policy fields.
 
 Cross-origin access (CORS), response compression, per-route request
 limits, and the API deprecation-signal block are not policy
-attachments — each is a single optional block on the route itself. See
-[CORS, compression, and request limits](./edge-policies) and
+attachments — each is a single optional block on the route itself.
+The per-route `maintenance` block (answer 503 + `Retry-After` without
+touching the upstream) and the `dry_run` monitor flags — on request
+limits, on any `authorization` block, on a rate-limit policy bundle,
+and on load shedding — are likewise route/gateway-level blocks; see
+[Maintenance and dry-run](./maintenance),
+[CORS, compression, and request limits](./edge-policies), and
 [API versioning](./api-versioning).
 
 ## Authentication and authorization

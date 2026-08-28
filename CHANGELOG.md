@@ -436,3 +436,42 @@ the project follows semantic versioning once 1.0 is reached.
   parsed key values (terminate listeners and the admin mTLS key) are
   wiped on drop via the `zeroize` crate instead of lingering in heap
   memory (DW-007 follow-up).
+- Maintenance mode and policy dry-run (DW-041): a per-route
+  `maintenance` block (optional `retry_after_secs`, default 60, and
+  `message`) makes the gateway answer every matched request with
+  `503` + `Retry-After` + the `maintenance` JSON envelope — checked
+  immediately after route resolution, BEFORE the route's request
+  limits (maintenance is a statement about the route's availability,
+  not the request's shape, so an over-limit request is told "we're
+  down" rather than handed a 431 it cannot fix) and before every
+  action (redirect/respond never run; the upstream is never
+  contacted). CORS preflights are the one exemption — they keep their
+  204 (the Fetch handshake is about the gateway's cross-origin
+  policy; failing it would surface in browsers as an opaque CORS
+  error and hide the 503), while the actual request's 503 carries the
+  policy's CORS actual-response headers so browser clients can read
+  the envelope. Reserved paths answer before routing and stay live
+  through maintenance; unrouted traffic still 404s. Toggled by
+  ordinary config reload (file watch/SIGHUP/admin PATCH publish).
+  Validation rejects `retry_after_secs: 0` (a retry stampede against
+  a route just taken down) and an empty `message`. Alongside it,
+  monitor-mode `dry_run` flags on every policy phase that can reject:
+  `routes[].limits.dry_run` (413/431; the streaming body guard stays
+  unarmed — only the up-front checks are observable), a `dry_run` on
+  any of the five `authorization` attachment levels (401/403), a
+  `dry_run` on a named rate-limit policy bundle (429 — the bundle
+  still evaluates, its GCRA buckets advance exactly as if enforcing,
+  and it contributes no `X-RateLimit-*` headers), and
+  `gateway.load_shed_dry_run` (the concurrency cap's 503; a would-shed
+  is admitted over the cap — the documented trade of previewing a
+  cap). A dry attachment evaluates, logs one structured
+  `dwara::policy` warn event (phase, would-be status, reason, route,
+  consumer, request id), increments the new
+  `dwara_policy_dry_run_total{phase,route}` counter, and lets the
+  request proceed; the invariant throughout is that dry run never
+  makes enforcement more permissive — the authz resolver walks past a
+  dry deny and stops only at a live one, and live rate-limit bundles
+  429 regardless of dry siblings on the same request. The metric and
+  the log events ARE the dry-run report (no endpoint; scrape and
+  grep). Unrouted traffic reports dry global/listener policies under
+  the `unrouted` route label. `config-reference.json` regenerated.

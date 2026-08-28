@@ -118,6 +118,18 @@ pub struct Gateway {
     /// probes still answer under saturation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_requests: Option<u32>,
+    /// Monitor mode (DW-041) for the gateway concurrency cap's load
+    /// shedding: when the cap is saturated and a request would be shed,
+    /// the would-shed is LOGGED and counted
+    /// (`dwara_policy_dry_run_total{phase="load_shed"}` + a
+    /// `dwara::policy` warn event) and the request is ADMITTED over the
+    /// cap instead — deliberately exceeding `max_concurrent_requests` so
+    /// an operator can observe what a cap would shed (and at which
+    /// priorities) before enforcing it. Only meaningful with a cap set;
+    /// validation rejects it on an uncapped gateway (it would be a
+    /// no-op flag that reads as coverage).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub load_shed_dry_run: bool,
     /// JWT verification providers (DW-019): trusted token issuers whose
     /// keys are fetched from a JWKS endpoint. Each provider independently
     /// verifies `Authorization: Bearer` tokens (alg allowlist, iss/aud,
@@ -538,6 +550,82 @@ pub struct Route {
     /// signal headers on this route's responses. See [`Deprecation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecation: Option<Deprecation>,
+    /// Route maintenance mode (DW-041): when present, every request the
+    /// route matches is answered by the GATEWAY with a 503 carrying
+    /// `Retry-After` and the JSON error envelope (`maintenance` code) —
+    /// before route limits, CORS preflight handling (preflights
+    /// themselves are exempt, see [`Maintenance`]), authentication, and
+    /// the route action (proxy, redirect, and respond actions alike
+    /// never run). Toggled by config reload like every route field:
+    /// publish a generation with the block to enter maintenance and one
+    /// without it to leave. See [`Maintenance`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<Maintenance>,
+}
+
+/// Route maintenance mode (DW-041): a per-route availability state that
+/// short-circuits every matched request with a gateway-generated 503.
+///
+/// Frozen semantics (enforcement lives in `dataplane::proxy`):
+///
+/// - Checked IMMEDIATELY after route resolution, BEFORE the route's
+///   request limits: maintenance is a statement about the route's
+///   availability, not about any one request's shape, so every matched
+///   request gets the same 503 + `Retry-After` answer (an over-limit
+///   request during maintenance is told "we're down", not "your headers
+///   are too big" — fixing the headers would still leave it refused).
+/// - The response is `503` with `Retry-After: <retry_after_secs>` (a
+///   whole-seconds delay-suggestion, NOT a promise of recovery) and the
+///   uniform JSON error envelope; `message` replaces the envelope's
+///   default human text (it never leaks upstream internals — it is
+///   operator-authored).
+/// - CORS: an actual (non-preflight) request on a CORS-configured route
+///   gets the policy's actual-response headers on the 503, so a browser
+///   client can READ the maintenance envelope cross-origin. A CORS
+///   PREFLIGHT is exempt: it still answers 204 exactly as without
+///   maintenance. The preflight is a Fetch-protocol handshake about the
+///   GATEWAY's cross-origin policy, answered from static config and sent
+///   without credentials — failing it would surface in the browser as an
+///   opaque CORS error and hide the very 503 the operator wants clients
+///   to see on the subsequent actual request.
+/// - Reserved paths (`/healthz`, `/readyz`, `/metrics`) never match a
+///   route, so probes and scrapes keep answering through maintenance —
+///   an orchestrator must not restart a deliberately idling gateway.
+/// - Unrouted traffic is unaffected (maintenance is per-route; a 404
+///   stays a 404).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Maintenance {
+    /// `Retry-After` value, in whole seconds, sent with the 503. Absent:
+    /// 60 (one minute — long enough to shed load, short enough that a
+    /// client polling for recovery notices the route return). Validation
+    /// rejects 0 (it would invite an immediate retry stampede against a
+    /// route the operator just took down).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+    /// Human-readable text for the error envelope's `message` field.
+    /// Absent: "route under maintenance". Validation rejects an
+    /// empty/whitespace string (omit the field for the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Default `maintenance.retry_after_secs` (DW-041).
+pub const DEFAULT_MAINTENANCE_RETRY_AFTER_SECS: u64 = 60;
+
+impl Maintenance {
+    /// The `Retry-After` seconds to send (the configured value or the
+    /// default; validation has rejected 0, so this is always >= 1).
+    pub fn retry_after(&self) -> u64 {
+        self.retry_after_secs
+            .unwrap_or(DEFAULT_MAINTENANCE_RETRY_AFTER_SECS)
+            .max(1)
+    }
+
+    /// The envelope `message` text (the configured value or the default).
+    pub fn message(&self) -> &str {
+        self.message.as_deref().unwrap_or("route under maintenance")
+    }
 }
 
 /// Route-level API deprecation policy (DW-048): automates the RFC
@@ -727,6 +815,18 @@ pub struct Authz {
     /// IP allow/deny gate on the effective client IP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_acl: Option<IpAcl>,
+    /// Monitor mode (DW-041): evaluate this block's rules, LOG and count
+    /// every would-be denial (the `dwara_policy_dry_run_total{phase=
+    /// "authz"}` counter plus a `dwara::policy` warn event), but let the
+    /// request PROCEED as if allowed. The flag is per ATTACHMENT and
+    /// mutes only this block's OWN denials: a LIVE deny at any other
+    /// level of the chain still enforces (dry run never makes
+    /// enforcement more permissive — the resolver walks past a dry deny
+    /// and stops only at a live one). Route `auth_required` is an
+    /// authentication-phase check, not an authorization rule, and is
+    /// never muted by this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// IP access control on the effective client IP (DW-020, feature
@@ -1101,6 +1201,17 @@ pub struct RequestLimits {
     /// Absent: unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_header_bytes: Option<u64>,
+    /// Monitor mode (DW-041): evaluate the limits, LOG and count every
+    /// would-be rejection (`dwara_policy_dry_run_total{phase="route_
+    /// limits"}` + a `dwara::policy` warn event), but let the request
+    /// PROCEED — including its body: the streaming `max_body_bytes` guard
+    /// is not armed, so a chunked body that would have been aborted mid-
+    /// stream streams through (only the cheap up-front checks — header
+    /// count/bytes, a declared `Content-Length` — are observable in dry
+    /// run). The staging tool for turning limits on against live traffic
+    /// without breaking clients.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// Matching rules for incoming requests.
@@ -1926,6 +2037,21 @@ pub struct Policy {
     pub rate_limits: Vec<RateLimitRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
+    /// Monitor mode (DW-041) for this bundle's rate-limit rules: they
+    /// still EVALUATE (their GCRA buckets advance exactly as if
+    /// enforcing, so denial rates reflect what enforcement would do),
+    /// but a request they would deny is LOGGED and counted
+    /// (`dwara_policy_dry_run_total{phase="rate_limit"}` + a
+    /// `dwara::policy` warn event) and PROCEEDS — no 429, and none of
+    /// the rule's `X-RateLimit-*` headers on the response. LIVE policies
+    /// attached to the same request still enforce: the flag mutes only
+    /// this bundle's own denials. The flag sits on the named bundle (not
+    /// on each `policies: [...]` attachment list entry) because rate
+    /// limits attach BY NAME at the five precedence levels — marking the
+    /// bundle dries every attachment of it uniformly. Timeouts carry no
+    /// rejection and are unaffected.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// One rate-limit rule (DW-017): a key selector plus one or more stacked

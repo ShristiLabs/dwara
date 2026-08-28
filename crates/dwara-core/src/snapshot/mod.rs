@@ -626,6 +626,39 @@ fn validate_deprecation(
     }
 }
 
+/// Validate one `maintenance` block (DW-041): `retry_after_secs` 0 would
+/// invite an immediate retry stampede against the route the operator just
+/// took down (the whole point of the header is "come back later"), and an
+/// empty `message` is indistinguishable from an absent one (omit it for
+/// the default text).
+fn validate_maintenance(
+    name: &str,
+    maintenance: &crate::config::Maintenance,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if maintenance.retry_after_secs == Some(0) {
+        issues.push(issue(
+            "route",
+            name,
+            "maintenance.retry_after_secs",
+            "retry_after_secs must be > 0 (0 tells clients to retry immediately against a \
+             route that is down; omit the field for the 60s default)",
+        ));
+    }
+    if maintenance
+        .message
+        .as_deref()
+        .is_some_and(|m| m.trim().is_empty())
+    {
+        issues.push(issue(
+            "route",
+            name,
+            "maintenance.message",
+            "message is empty: omit the field for the default 'route under maintenance' text",
+        ));
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -650,6 +683,21 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             "max_concurrent_requests",
             "max_concurrent_requests must be > 0 (unlimited is expressed by \
              omitting the field, so an explicit 0 is rejected as ambiguous)",
+        ));
+    }
+
+    // Load-shed monitor mode (DW-041) is only meaningful with a cap: an
+    // uncapped gateway never sheds, so the flag would be a silent no-op
+    // that reads as monitoring coverage. Rejected rather than ignored so
+    // the config cannot imply a guarantee it does not provide.
+    if gateway.load_shed_dry_run && gateway.max_concurrent_requests.is_none() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "load_shed_dry_run",
+            "load_shed_dry_run requires max_concurrent_requests: an uncapped gateway \
+             never sheds, so the flag would be a silent no-op (set a cap, or omit \
+             the flag)",
         ));
     }
 
@@ -1240,6 +1288,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
         if let Some(dep) = &r.deprecation {
             validate_deprecation(&r.name, dep, &mut issues);
+        }
+        if let Some(maintenance) = &r.maintenance {
+            validate_maintenance(&r.name, maintenance, &mut issues);
         }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
@@ -2242,6 +2293,7 @@ impl Snapshot {
                 global_policies: Vec::new(),
                 authorization: None,
                 max_concurrent_requests: None,
+                load_shed_dry_run: false,
                 jwt_providers: Vec::new(),
                 admin: None,
                 allow_empty_routes: false,

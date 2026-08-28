@@ -159,6 +159,13 @@ the circuit breaker — see the docs-site
 [architecture overview](../../docs-site/architecture/overview.md#request-pipeline) for
 exactly where it sits relative to every other stage.
 
+`gateway.load_shed_dry_run` (DW-041) previews the cap before
+enforcing it: a would-shed is admitted over the cap and reported
+(`dwara_policy_dry_run_total{phase="load_shed"}` plus a
+`dwara::policy` warn event) instead of 503'd — the shed counters stay
+untouched, since the request was admitted, not shed. See
+[maintenance mode and policy dry-run](./maintenance-dry-run.md).
+
 ## Config reload semantics
 
 Breaker state (current state, failure streak, rolling window) and the

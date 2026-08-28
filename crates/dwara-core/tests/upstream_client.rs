@@ -43,6 +43,7 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Genuinely zero-route: upstream connector/pool behavior, not
@@ -693,6 +694,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             global_policies: Vec::new(),
             authorization: None,
             max_concurrent_requests: None,
+            load_shed_dry_run: false,
             jwt_providers: Vec::new(),
             admin: None,
             // Zero-route: the exact-count assertion scopes to the one
@@ -740,6 +742,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Zero-route (#129 opt-in): must validate clean, so the routes

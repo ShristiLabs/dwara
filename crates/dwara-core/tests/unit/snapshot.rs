@@ -43,6 +43,7 @@ fn good_gateway() -> Gateway {
                 limits: None,
                 authorization: None,
                 deprecation: None,
+                maintenance: None,
             },
             Route {
                 name: "static".into(),
@@ -68,6 +69,7 @@ fn good_gateway() -> Gateway {
                 limits: None,
                 authorization: None,
                 deprecation: None,
+                maintenance: None,
             },
             Route {
                 name: "legacy".into(),
@@ -93,6 +95,7 @@ fn good_gateway() -> Gateway {
                 limits: None,
                 authorization: None,
                 deprecation: None,
+                maintenance: None,
             },
         ],
         services: vec![Service {
@@ -127,6 +130,7 @@ fn good_gateway() -> Gateway {
         global_policies: vec![],
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: false,
@@ -265,6 +269,7 @@ fn validate_rejects_malformed_rate_limit_rules() {
             rate_limit: None,
             rate_limits: vec![],
             timeouts: None,
+            dry_run: false,
         }];
         gw
     }

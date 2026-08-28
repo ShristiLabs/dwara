@@ -46,6 +46,7 @@ and cleartext listener just like `/healthz` (see
 | `retries_total` | counter | `upstream` |
 | `rate_limited_total` | counter | `route` |
 | `shed_total` | counter | `priority` |
+| `dwara_policy_dry_run_total` | counter | `phase`, `route` |
 | `breaker_state` | gauge (0/1/2 = closed/open/half-open) | `upstream` |
 | `endpoint_health` | gauge (1/0 = available/ejected) | `upstream`, `endpoint` |
 | `upstream_fail_open_picks` | gauge | `upstream` |
@@ -58,9 +59,14 @@ and cleartext listener just like `/healthz` (see
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are
 aggregate/unlabeled even though the engine tracks many per-key cells
-internally. A starter dashboard ships at `grafana/dwara-overview.json`;
-import it in Grafana via Dashboards → New → Import and point it at a
-Prometheus instance scraping the gateway's `/metrics`.
+internally. `dwara_policy_dry_run_total` counts requests a
+[dry-run policy](./maintenance#dry-run-preview-a-policy-before-enforcing-it)
+would have rejected, by phase (`route_limits`, `authz`,
+`rate_limit`, `load_shed`) and route — its log counterpart is the
+`dwara::policy` warn event. A starter dashboard ships at
+`grafana/dwara-overview.json`; import it in Grafana via
+Dashboards → New → Import and point it at a Prometheus instance
+scraping the gateway's `/metrics`.
 
 ## Error envelope
 

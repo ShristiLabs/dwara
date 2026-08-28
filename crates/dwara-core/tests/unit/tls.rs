@@ -413,6 +413,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Genuinely zero-route: SNI passthrough resolves on the LISTENER's

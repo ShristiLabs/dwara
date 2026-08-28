@@ -39,6 +39,7 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Genuinely zero-route: upstream registry/connector unit tests
@@ -409,6 +410,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Zero-route: the assertions scope to upstream timeout fields
@@ -453,6 +455,7 @@ fn with_root_certificates_rejects_malformed_root() {
             global_policies: Vec::new(),
             authorization: None,
             max_concurrent_requests: None,
+            load_shed_dry_run: false,
             jwt_providers: Vec::new(),
             admin: None,
             // Zero-route on purpose: only the registry's root-store build

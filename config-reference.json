@@ -69,6 +69,10 @@
         "$ref": "#/$defs/Listener"
       }
     },
+    "load_shed_dry_run": {
+      "description": "Monitor mode (DW-041) for the gateway concurrency cap's load\nshedding: when the cap is saturated and a request would be shed,\nthe would-shed is LOGGED and counted\n(`dwara_policy_dry_run_total{phase=\"load_shed\"}` + a\n`dwara::policy` warn event) and the request is ADMITTED over the\ncap instead — deliberately exceeding `max_concurrent_requests` so\nan operator can observe what a cap would shed (and at which\npriorities) before enforcing it. Only meaningful with a cap set;\nvalidation rejects it on an uncapped gateway (it would be a\nno-op flag that reads as coverage).",
+      "type": "boolean"
+    },
     "max_concurrent_requests": {
       "description": "Gateway-level concurrency cap (DW-015): the maximum number of\nrequests admitted concurrently across the WHOLE gateway. Absent\n(the default) is unlimited; 0 is invalid (validation rejects it —\nomit the field for unlimited). Over-cap requests are rejected\nimmediately with 503 \"gateway saturated\" (no queueing). A slot is\nreserved at request admission and released when the response body\ncompletes (or the connection drops). The reserved paths\n`/healthz` and `/readyz` bypass the cap so liveness/readiness\nprobes still answer under saturation.",
       "type": [
@@ -241,6 +245,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "dry_run": {
+          "description": "Monitor mode (DW-041): evaluate this block's rules, LOG and count\nevery would-be denial (the `dwara_policy_dry_run_total{phase=\n\"authz\"}` counter plus a `dwara::policy` warn event), but let the\nrequest PROCEED as if allowed. The flag is per ATTACHMENT and\nmutes only this block's OWN denials: a LIVE deny at any other\nlevel of the chain still enforces (dry run never makes\nenforcement more permissive — the resolver walks past a dry deny\nand stops only at a live one). Route `auth_required` is an\nauthentication-phase check, not an authorization rule, and is\nnever muted by this flag.",
+          "type": "boolean"
         },
         "ip_acl": {
           "description": "IP allow/deny gate on the effective client IP.",
@@ -876,6 +884,29 @@
         "ip_hash"
       ]
     },
+    "Maintenance": {
+      "description": "Route maintenance mode (DW-041): a per-route availability state that\nshort-circuits every matched request with a gateway-generated 503.\n\nFrozen semantics (enforcement lives in `dataplane::proxy`):\n\n- Checked IMMEDIATELY after route resolution, BEFORE the route's\n  request limits: maintenance is a statement about the route's\n  availability, not about any one request's shape, so every matched\n  request gets the same 503 + `Retry-After` answer (an over-limit\n  request during maintenance is told \"we're down\", not \"your headers\n  are too big\" — fixing the headers would still leave it refused).\n- The response is `503` with `Retry-After: <retry_after_secs>` (a\n  whole-seconds delay-suggestion, NOT a promise of recovery) and the\n  uniform JSON error envelope; `message` replaces the envelope's\n  default human text (it never leaks upstream internals — it is\n  operator-authored).\n- CORS: an actual (non-preflight) request on a CORS-configured route\n  gets the policy's actual-response headers on the 503, so a browser\n  client can READ the maintenance envelope cross-origin. A CORS\n  PREFLIGHT is exempt: it still answers 204 exactly as without\n  maintenance. The preflight is a Fetch-protocol handshake about the\n  GATEWAY's cross-origin policy, answered from static config and sent\n  without credentials — failing it would surface in the browser as an\n  opaque CORS error and hide the very 503 the operator wants clients\n  to see on the subsequent actual request.\n- Reserved paths (`/healthz`, `/readyz`, `/metrics`) never match a\n  route, so probes and scrapes keep answering through maintenance —\n  an orchestrator must not restart a deliberately idling gateway.\n- Unrouted traffic is unaffected (maintenance is per-route; a 404\n  stays a 404).",
+      "type": "object",
+      "properties": {
+        "message": {
+          "description": "Human-readable text for the error envelope's `message` field.\nAbsent: \"route under maintenance\". Validation rejects an\nempty/whitespace string (omit the field for the default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry_after_secs": {
+          "description": "`Retry-After` value, in whole seconds, sent with the 503. Absent:\n60 (one minute — long enough to shed load, short enough that a\nclient polling for recovery notices the route return). Validation\nrejects 0 (it would invite an immediate retry stampede against a\nroute the operator just took down).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "NameValueMatch": {
       "description": "One query-parameter or cookie criterion: the parameter/cookie must be\npresent; when `value` is given it must equal that exact string.",
       "type": "object",
@@ -1037,6 +1068,10 @@
       "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
       "type": "object",
       "properties": {
+        "dry_run": {
+          "description": "Monitor mode (DW-041) for this bundle's rate-limit rules: they\nstill EVALUATE (their GCRA buckets advance exactly as if\nenforcing, so denial rates reflect what enforcement would do),\nbut a request they would deny is LOGGED and counted\n(`dwara_policy_dry_run_total{phase=\"rate_limit\"}` + a\n`dwara::policy` warn event) and PROCEEDS — no 429, and none of\nthe rule's `X-RateLimit-*` headers on the response. LIVE policies\nattached to the same request still enforce: the flag mutes only\nthis bundle's own denials. The flag sits on the named bundle (not\non each `policies: [...]` attachment list entry) because rate\nlimits attach BY NAME at the five precedence levels — marking the\nbundle dries every attachment of it uniformly. Timeouts carry no\nrejection and are unaffected.",
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
         },
@@ -1206,6 +1241,10 @@
       "description": "Route-scoped request size limits (DW-027, feature analysis 4.16).\n\nSemantics (frozen; enforcement lives in `dataplane::hardening`):\n\n- Header limits (`max_header_count`, `max_header_bytes`) are checked\n  immediately after route resolution, before CORS preflight handling\n  and authentication; a violation answers 431 with the JSON error\n  envelope. `max_header_bytes` is the SUM of all header name and\n  value bytes of the request (hyper's per-connection buffer limits\n  still apply beneath this, process-wide).\n- `max_body_bytes`: a request whose `Content-Length` declares more is\n  rejected 413 before any upstream contact. A body of UNKNOWN length\n  (chunked / h2 without content-length) is wrapped in a counting\n  guard: crossing the cap aborts the request (the upstream attempt\n  fails; the client receives 413 when the failure precedes the\n  upstream's response headers, a torn stream otherwise).\n- A block with NO field set is rejected by validation (always an\n  authoring mistake; omit the block).",
       "type": "object",
       "properties": {
+        "dry_run": {
+          "description": "Monitor mode (DW-041): evaluate the limits, LOG and count every\nwould-be rejection (`dwara_policy_dry_run_total{phase=\"route_\nlimits\"}` + a `dwara::policy` warn event), but let the request\nPROCEED — including its body: the streaming `max_body_bytes` guard\nis not armed, so a chunked body that would have been aborted mid-\nstream streams through (only the cheap up-front checks — header\ncount/bytes, a declared `Content-Length` — are observable in dry\nrun). The staging tool for turning limits on against live traffic\nwithout breaking clients.",
+          "type": "boolean"
+        },
         "max_body_bytes": {
           "description": "Maximum request body size in bytes (declared via `Content-Length`\nor enforced streaming). Absent: unlimited.",
           "type": [
@@ -1361,6 +1400,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RequestLimits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maintenance": {
+          "description": "Route maintenance mode (DW-041): when present, every request the\nroute matches is answered by the GATEWAY with a 503 carrying\n`Retry-After` and the JSON error envelope (`maintenance` code) —\nbefore route limits, CORS preflight handling (preflights\nthemselves are exempt, see [`Maintenance`]), authentication, and\nthe route action (proxy, redirect, and respond actions alike\nnever run). Toggled by config reload like every route field:\npublish a generation with the block to enter maintenance and one\nwithout it to leave. See [`Maintenance`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Maintenance"
             },
             {
               "type": "null"

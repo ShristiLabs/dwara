@@ -603,6 +603,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Genuinely zero-route: this suite exercises upstream passive
@@ -797,6 +798,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: true,
@@ -1047,6 +1049,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         // Zero-route: validates health knobs only; the opt-in keeps the

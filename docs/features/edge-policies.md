@@ -232,6 +232,13 @@ knobs still apply beneath the route limits):
 Validation: a `limits` block with no field set is rejected (always an
 authoring mistake — omit the block); every set value must be > 0.
 
+`limits.dry_run` (DW-041) stages the block against live traffic
+instead of enforcing it: the cheap up-front checks above still
+evaluate, every would-be 413/431 is logged and counted, and the
+request proceeds — with the streaming `LimitedBody` guard left
+unarmed (the one blind spot). See
+[maintenance mode and policy dry-run](./maintenance-dry-run.md).
+
 ## Config, reload, tests
 
 All three blocks are strict-schema (`deny_unknown_fields`) additive

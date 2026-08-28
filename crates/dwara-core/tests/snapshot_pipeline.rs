@@ -56,6 +56,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         limits: None,
         authorization: None,
         deprecation: None,
+        maintenance: None,
     }
 }
 
@@ -106,6 +107,7 @@ fn base_gateway() -> Gateway {
         global_policies: Vec::new(),
         authorization: None,
         max_concurrent_requests: None,
+        load_shed_dry_run: false,
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: false,
@@ -191,12 +193,14 @@ fn validation_rejects_duplicate_policy_name() {
         rate_limit: None,
         timeouts: None,
         rate_limits: vec![],
+        dry_run: false,
     });
     gw.policies.push(dwara_core::config::Policy {
         name: "p".into(),
         rate_limit: None,
         timeouts: None,
         rate_limits: vec![],
+        dry_run: false,
     });
     assert_single_issue(&gw, "policy", "p", "name");
 }
@@ -1026,6 +1030,7 @@ fn policy_gateway(rl: RateLimit) -> Gateway {
         rate_limit: Some(rl),
         timeouts: None,
         rate_limits: vec![],
+        dry_run: false,
     });
     gw
 }
@@ -1321,6 +1326,7 @@ fn empty_authz() -> dwara_core::config::Authz {
         required_scopes: vec![],
         required_claims: Default::default(),
         ip_acl: None,
+        dry_run: false,
     }
 }
 
@@ -1348,6 +1354,7 @@ fn validation_accepts_resolved_global_and_listener_policy_references() {
             window_seconds: 60,
         }),
         rate_limits: vec![],
+        dry_run: false,
         timeouts: None,
     }];
     gw.global_policies = vec!["p".into()];
@@ -1713,6 +1720,7 @@ fn validation_accepts_a_well_formed_edge_policy_route() {
         max_body_bytes: Some(1024),
         max_header_count: Some(32),
         max_header_bytes: Some(8192),
+        dry_run: false,
     });
     gw.routes = vec![r];
     let issues = validate(&gw);
@@ -1772,6 +1780,7 @@ fn validation_rejects_limits_block_with_no_limits_or_zero_limits() {
         max_body_bytes: None,
         max_header_count: None,
         max_header_bytes: None,
+        dry_run: false,
     });
     gw.routes = vec![r];
     let issues = validate(&gw);
@@ -1788,6 +1797,7 @@ fn validation_rejects_limits_block_with_no_limits_or_zero_limits() {
         max_body_bytes: Some(0),
         max_header_count: None,
         max_header_bytes: None,
+        dry_run: false,
     });
     gw.routes = vec![r];
     let issues = validate(&gw);

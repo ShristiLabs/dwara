@@ -124,3 +124,10 @@ admission and the circuit breaker — see the docs-site
 Listener- and global-attached limits also apply to requests that will
 ultimately 404, so a flood of garbage paths is capped before it turns
 into a wall of unrouted responses.
+
+A bundle may set `dry_run` (DW-041): its rules still evaluate —
+buckets advance exactly as if enforcing — but would-be denials are
+logged and counted (`dwara_policy_dry_run_total{phase="rate_limit"}`)
+instead of answered, and the bundle contributes no `X-RateLimit-*`
+headers. Live bundles on the same request enforce unaffected. See
+[maintenance mode and policy dry-run](./maintenance-dry-run.md).

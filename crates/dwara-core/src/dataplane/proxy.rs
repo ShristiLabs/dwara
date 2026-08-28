@@ -181,6 +181,49 @@
 //! upstream wanted to accept one. RFC-strict proxies that strip
 //! connection-oriented headers wholesale would reject this; we chose
 //! upgrade transparency, and the behavior is pinned by the coverage suite.
+//!
+//! Maintenance mode (DW-041): a route carrying a `maintenance` block is
+//! answered by the GATEWAY, never the route action — a 503 carrying
+//! `Retry-After` and the JSON envelope (`maintenance` code,
+//! operator-optional message).
+//! The check runs IMMEDIATELY after route resolution, BEFORE the route's
+//! request limits: maintenance is a statement about the route's
+//! availability, not about any request's shape, so every matched request
+//! gets the same answer (an over-limit request is told "we're down", not
+//! "your headers are too big" — fixing the headers would still leave it
+//! refused) and the gateway skips evaluating limits for a request it will
+//! refuse anyway. Preflights are the one exemption: a CORS preflight on
+//! a CORS-configured route still answers 204 (the preflight is a Fetch
+//! handshake about the gateway's own cross-origin policy, sent without
+//! credentials; failing it surfaces in the browser as an opaque CORS
+//! error and hides the 503 the operator wants clients to see on the
+//! actual request — which DOES get 503, carrying the policy's
+//! actual-response CORS headers so browser clients can read the
+//! envelope). Reserved paths answer before route resolution and are
+//! unaffected: probes and scrapes keep working through maintenance.
+//! Toggled per generation by config reload; unrouted traffic is
+//! unaffected (404 stays 404).
+//!
+//! Policy dry run (DW-041, monitor mode): every policy phase that can
+//! reject supports a per-attachment `dry_run` flag — route limits
+//! (`routes[].limits.dry_run`, 413/431), authorization
+//! (`authorization.dry_run` at any of the five levels, 401/403), rate
+//! limiting (`policies[].dry_run`, 429), and load shedding
+//! (`gateway.load_shed_dry_run`, 503). A dry phase still EVALUATES, but
+//! on a would-reject it logs one structured `dwara::policy` warn event
+//! (phase, would-be status, reason, route, consumer, request id),
+//! increments `dwara_policy_dry_run_total{phase,route}`, and lets the
+//! request PROCEED. The invariant throughout: dry run never makes
+//! enforcement more permissive — a LIVE deny always enforces (the authz
+//! resolver walks past a dry deny and stops only at a live one; live
+//! rate-limit bundles 429 regardless of dry bundles on the same
+//! request). Dry rate-limit rules contribute no `X-RateLimit-*` headers;
+//! a dry route-limits block leaves the streaming body guard unarmed
+//! (only the cheap up-front checks are observable). Authentication
+//! (401 on invalid/missing credentials, `auth_required`) is identity
+//! verification, not a policy phase, and has no dry-run flag. The
+//! metric + log events ARE the dry-run report (§9.3): no endpoint, no
+//! buffer — scrape the counter and grep `dwara::policy`.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -745,7 +788,24 @@ fn unrouted_response(
         consumer: None,
         route: "",
     };
-    match engine.check(&ctx, &[], &[], &[], listener_policies, global_policies) {
+    // Dry-run bundles (DW-041) observe here exactly as on routed traffic
+    // (route label "unrouted"); live bundles alone decide the 429.
+    let evaluation = engine.evaluate(&ctx, &[], &[], &[], listener_policies, global_policies);
+    if let Some(crate::extensions::rate_limiter::RateLimitOutcome::Denied {
+        retry_after_s, ..
+    }) = evaluation.dry_denied
+    {
+        dp.obs.record_policy_dry_run("rate_limit", "unrouted");
+        dp.obs.emit_policy_dry_run(
+            "rate_limit",
+            429,
+            "unrouted",
+            None,
+            rid,
+            &format!("rate limit would deny (retry after {retry_after_s}s)"),
+        );
+    }
+    match evaluation.outcome {
         crate::extensions::rate_limiter::RateLimitOutcome::Denied {
             limit,
             remaining,
@@ -916,11 +976,34 @@ where
     rec.route = route.name.clone();
     root.record("route", route.name.as_str());
 
+    // Maintenance mode (DW-041): the earliest post-resolution
+    // short-circuit — see the module docs for why it precedes the route
+    // limits and why CORS preflights are the one exemption (they keep
+    // their 204 so browser clients can read the 503 envelope on the
+    // actual request, which carries the policy's CORS headers).
+    if let Some(maintenance) = &route.maintenance {
+        let preflight_exempt = route.cors.is_some()
+            && crate::dataplane::cors::is_preflight(req.method(), req.headers());
+        if !preflight_exempt {
+            tracing::warn!(
+                code = "maintenance",
+                request_id = %rid,
+                route = %route.name,
+                retry_after_secs = maintenance.retry_after(),
+                "route is in maintenance; request refused with 503"
+            );
+            let origin = req.headers().get(&ORIGIN).cloned();
+            return maintenance_response(route, idx, &gen, origin.as_ref(), maintenance, rid);
+        }
+    }
+
     // Route-scoped request limits (DW-027): header caps and a declared
     // (`Content-Length`) body cap are enforced immediately after route
     // resolution — before CORS preflight handling, authentication, and
     // any upstream contact. 431 for headers, 413 for the body, both in
-    // the JSON error envelope.
+    // the JSON error envelope. Monitor mode (DW-041, `limits.dry_run`):
+    // the violation is logged and counted instead, and the request
+    // proceeds (the streaming body guard is left unarmed below).
     if let Some(limits) = &route.limits {
         if let Some(violation) = crate::dataplane::hardening::check_route_limits(
             limits,
@@ -944,13 +1027,28 @@ where
                     format!("request body declares {declared} bytes; the route allows {max}"),
                 ),
             };
-            tracing::warn!(
-                code = code,
-                request_id = %rid,
-                route = %route.name,
-                "request rejected by route limits"
-            );
-            return simple(status, code, &msg, rid);
+            // Dry-run note: this phase runs before authn, so the log's
+            // consumer field is always "anonymous" here — it reflects
+            // evaluation order, not that the traffic was unauthenticated.
+            if limits.dry_run {
+                dp.obs.record_policy_dry_run("route_limits", &route.name);
+                dp.obs.emit_policy_dry_run(
+                    "route_limits",
+                    status.as_u16(),
+                    &route.name,
+                    None,
+                    rid,
+                    &msg,
+                );
+            } else {
+                tracing::warn!(
+                    code = code,
+                    request_id = %rid,
+                    route = %route.name,
+                    "request rejected by route limits"
+                );
+                return simple(status, code, &msg, rid);
+            }
         }
     }
 
@@ -1066,8 +1164,11 @@ where
     let global_authz = gateway.authorization.as_ref();
     // The authz phase span (DW-021) opens unconditionally — the phase
     // runs on every routed request (a chain with no rules allows), and
-    // the trace contract pins its presence.
-    let authz_decision = {
+    // the trace contract pins its presence. Resolution is level-aware
+    // (DW-041): a `dry_run` attachment's deny is reported
+    // (`Resolved::would_deny`) instead of enforced, and the walk inside
+    // the resolver guarantees a LIVE deny at any level still wins.
+    let authz_resolved = {
         let _authz_phase = tracing::info_span!("authz").entered();
         if consumer_authz.is_some()
             || route.authorization.is_some()
@@ -1104,12 +1205,36 @@ where
                 listener: listener_authz,
                 global: global_authz,
             };
-            crate::security::authz::authorize(&chain, &authz_ctx)
+            crate::security::authz::resolve(&chain, &authz_ctx)
         } else {
-            crate::security::authz::Decision::Allow
+            crate::security::authz::Resolved {
+                decision: crate::security::authz::Decision::Allow,
+                would_deny: None,
+            }
         }
     };
-    match authz_decision {
+    if let Some((level, decision)) = &authz_resolved.would_deny {
+        let crate::security::authz::Decision::Deny {
+            unauthenticated,
+            reason,
+        } = decision
+        else {
+            unreachable!("would_deny only carries Deny decisions")
+        };
+        dp.obs.record_policy_dry_run("authz", &route.name);
+        dp.obs.emit_policy_dry_run(
+            "authz",
+            if *unauthenticated { 401 } else { 403 },
+            &route.name,
+            identity.as_ref().map(|id| id.consumer_name.as_str()),
+            rid,
+            &format!(
+                "authorization deny at {} level (dry-run): {reason}",
+                level.as_str()
+            ),
+        );
+    }
+    match authz_resolved.decision {
         crate::security::authz::Decision::Allow => {}
         crate::security::authz::Decision::Deny {
             unauthenticated: true,
@@ -1143,7 +1268,9 @@ where
     let consumer_policies: &[String] = consumer_cfg.map(|c| c.policies.as_slice()).unwrap_or(&[]);
     let listener_policies: &[String] = listener_cfg.map(|l| l.policies.as_slice()).unwrap_or(&[]);
     // The ratelimit phase span (DW-021); sync bookkeeping, so a plain
-    // entered guard is correct (nothing is awaited under it).
+    // entered guard is correct (nothing is awaited under it). Dry-run
+    // bundles (DW-041) report their would-be denial through the same
+    // evaluation; live bundles alone decide the 429 and the headers.
     let rate_headers = {
         let _ratelimit_phase = tracing::info_span!("ratelimit").entered();
         let engine = dp.rate_limits.load_full();
@@ -1155,14 +1282,26 @@ where
                 consumer: identity.as_ref().map(|id| id.consumer_name.as_str()),
                 route: &route.name,
             };
-            match engine.check(
+            let evaluation = engine.evaluate(
                 &ctx,
                 consumer_policies,
                 &route.policies,
                 service_policies,
                 listener_policies,
                 &gateway.global_policies,
-            ) {
+            );
+            if let Some(RateLimitOutcome::Denied { retry_after_s, .. }) = evaluation.dry_denied {
+                dp.obs.record_policy_dry_run("rate_limit", &route.name);
+                dp.obs.emit_policy_dry_run(
+                    "rate_limit",
+                    429,
+                    &route.name,
+                    identity.as_ref().map(|id| id.consumer_name.as_str()),
+                    rid,
+                    &format!("rate limit would deny (retry after {retry_after_s}s)"),
+                );
+            }
+            match evaluation.outcome {
                 RateLimitOutcome::Denied {
                     limit,
                     remaining,
@@ -1229,21 +1368,45 @@ where
                         Some(permit)
                     }
                     None => {
-                        dp.priority_counters.record_shed(priority);
-                        rec.shed = true;
-                        dp.obs.record_shed(priority);
-                        tracing::warn!(
-                            code = "gateway_saturated",
-                            request_id = %rid,
-                            priority = priority,
-                            "gateway concurrency cap saturated; request shed"
-                        );
-                        return simple(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "gateway_saturated",
-                            "gateway saturated",
-                            rid,
-                        );
+                        // Monitor mode (DW-041): the would-shed is logged
+                        // and counted, and the request is admitted OVER
+                        // the cap (no permit) — the point is observing
+                        // what a cap would shed before enforcing it, so
+                        // over-admission is the documented trade, not an
+                        // accident.
+                        if gateway.load_shed_dry_run {
+                            dp.priority_counters.record_admitted(priority);
+                            dp.obs.record_policy_dry_run("load_shed", &route.name);
+                            dp.obs.emit_policy_dry_run(
+                                "load_shed",
+                                503,
+                                &route.name,
+                                identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                rid,
+                                &format!(
+                                    "gateway concurrency cap saturated at priority {priority}; \
+                                     request would have been shed (dry-run) and is admitted \
+                                     over the cap"
+                                ),
+                            );
+                            None
+                        } else {
+                            dp.priority_counters.record_shed(priority);
+                            rec.shed = true;
+                            dp.obs.record_shed(priority);
+                            tracing::warn!(
+                                code = "gateway_saturated",
+                                request_id = %rid,
+                                priority = priority,
+                                "gateway concurrency cap saturated; request shed"
+                            );
+                            return simple(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "gateway_saturated",
+                                "gateway saturated",
+                                rid,
+                            );
+                        }
                     }
                 }
             }
@@ -1296,7 +1459,15 @@ where
                     parts,
                     crate::dataplane::hardening::LimitedBody::new(
                         digesting,
-                        route.limits.as_ref().and_then(|l| l.max_body_bytes),
+                        // A dry-run limits block (DW-041) leaves the
+                        // streaming guard unarmed: the cap is monitor
+                        // mode, so a body that would have been aborted
+                        // mid-stream flows through.
+                        route
+                            .limits
+                            .as_ref()
+                            .filter(|l| !l.dry_run)
+                            .and_then(|l| l.max_body_bytes),
                     ),
                 );
                 proxy_request(
@@ -1384,9 +1555,10 @@ where
     //   with any CORS/compression Vary the response already carries);
     // - the route's deprecation policy stamps Deprecation (RFC 9745),
     //   Sunset (RFC 8594), and the Link;rel=deprecation companion on
-    //   every action response (not on gateway short-circuits — 413/431
-    //   limits, preflights, 401/403/429, sheds — those describe the
-    //   request, not the route's lifecycle).
+    //   every action response (not on gateway short-circuits —
+    //   maintenance 503s, 413/431 limits, preflights, 401/403/429,
+    //   sheds — those describe the request or the route's
+    //   availability, not the route's lifecycle).
     if route.r#match.accept.is_some() {
         crate::dataplane::hardening::merge_vary(resp.headers_mut(), "Accept");
     }
@@ -1412,6 +1584,42 @@ where
     // and 101 upgrades) reports identically.
     if let Some((limit, remaining, reset_epoch_s)) = rate_headers {
         apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
+    }
+    resp
+}
+
+/// The 503 maintenance response (DW-041): `Retry-After` in whole seconds
+/// plus the uniform JSON envelope with the `maintenance` code and the
+/// operator-optional message. On a CORS-configured route whose request
+/// origin is allowed, the policy's actual-response CORS headers are
+/// applied so a browser client can READ the envelope cross-origin (the
+/// companion of the preflight exemption — see the module docs).
+fn maintenance_response(
+    route: &Route,
+    idx: usize,
+    gen: &Generation,
+    origin: Option<&HeaderValue>,
+    maintenance: &crate::config::Maintenance,
+    rid: &str,
+) -> Response<ProxyBody> {
+    let mut resp = Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .header(
+            hyper::header::RETRY_AFTER,
+            maintenance.retry_after().to_string(),
+        )
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
+            "maintenance",
+            maintenance.message(),
+            rid,
+        ))))
+        .expect("static 503 response is valid");
+    if let (Some(cors), Some(origins)) = (
+        route.cors.as_ref(),
+        gen.snapshot.route_table().cors_origins(idx),
+    ) {
+        crate::dataplane::cors::decorate_actual(cors, origins, origin, resp.headers_mut());
     }
     resp
 }
