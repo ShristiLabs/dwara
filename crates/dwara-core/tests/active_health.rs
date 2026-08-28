@@ -103,6 +103,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         // Genuinely zero-route shape: these suites exercise upstream health
         // machinery, not routing (#129 opt-in).
         allow_empty_routes: true,
+        hmac_auth: None,
     }
 }
 
@@ -421,6 +422,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             // Zero-route by design: readiness flips on first publish, not on
             // routes existing (#129 opt-in).
             allow_empty_routes: true,
+            hmac_auth: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -526,6 +528,7 @@ async fn reserved_paths_shadow_configured_routes() {
             jwt_providers: Vec::new(),
             admin: None,
             allow_empty_routes: false,
+            hmac_auth: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

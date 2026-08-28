@@ -12,7 +12,8 @@ pinned toolchain (`rust-toolchain.toml`, Rust 1.94.0). Public GitHub repo:
 TLS (multi-SNI terminate + SNI passthrough, h2/h2c), routing and rewrites,
 load balancing, passive/active health, retries and timeouts, circuit
 breaking, load shedding, rate limiting, authn (API key / Basic / JWT via
-JWKS / mTLS client-cert), authz + IP ACL, SQLite state + migrations,
+JWKS / mTLS client-cert / HMAC request signing), authz + IP ACL,
+SQLite state + migrations,
 observability, mTLS admin API, CLI, protocol hardening, fuzzing/benchmarks,
 and packaging. Later milestones (management plane, extensions, AI/LLM
 features) are not yet implemented.
@@ -271,7 +272,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
 | Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
 | State | dwara-core | `store` |
-| Auth | dwara-core | `authn`, `authz` |
+| Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |
 | Admin API | dwara-admin | `admin_api` |
 | Tooling | dwara-core / dwara-cli | `swap_stress`, `loom` (feature-gated) / `cli`, `loadgen_e2e`, `loadgen_unit` |

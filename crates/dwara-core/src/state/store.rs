@@ -74,6 +74,12 @@ pub enum CredentialKind {
     ApiKey,
     Jwt,
     Mtls,
+    /// HMAC request-signing credential (DW-036). Resolves to a
+    /// CONFIG-declared key only: the store's hash-at-rest contract
+    /// cannot hold MAC-verifiable material (recomputing an HMAC needs
+    /// the raw key bytes), so no row of this kind is ever written —
+    /// the kind exists so the resolved identity can name its family.
+    Hmac,
 }
 
 impl CredentialKind {
@@ -82,6 +88,7 @@ impl CredentialKind {
             CredentialKind::ApiKey => "api_key",
             CredentialKind::Jwt => "jwt",
             CredentialKind::Mtls => "mtls",
+            CredentialKind::Hmac => "hmac",
         }
     }
 
@@ -90,6 +97,7 @@ impl CredentialKind {
             "api_key" => Some(CredentialKind::ApiKey),
             "jwt" => Some(CredentialKind::Jwt),
             "mtls" => Some(CredentialKind::Mtls),
+            "hmac" => Some(CredentialKind::Hmac),
             _ => None,
         }
     }
@@ -1005,6 +1013,15 @@ pub fn sync_consumers_from_config(
     for consumer in &gateway.consumers {
         let record = store.upsert_consumer(&consumer.name, consumer.priority, &consumer.groups)?;
         for credential in &consumer.credentials {
+            // DW-036: HMAC credentials are CONFIG-served only. The store
+            // never sees plaintext secrets and an HMAC cannot be verified
+            // from a hash — the authenticator holds the resolved raw key
+            // in memory — so there is no row to seed or retire. The
+            // consumer record itself is still upserted above (groups and
+            // priority apply to HMAC consumers like any other).
+            if matches!(credential, Credential::Hmac { .. }) {
+                continue;
+            }
             // DW-045: resolve ${...} references before hashing; an error is
             // the validate-vs-seed microsecond race (validation already
             // rejected unresolvable references for this generation). Fail
@@ -1100,6 +1117,14 @@ fn credential_parts(
             issuer.clone(),
             format!("config:jwt:{issuer}"),
         )),
+        // DW-036: unreachable through every caller — the sync loop skips
+        // hmac credentials before hashing (raw key material cannot be
+        // store-served; see the module note there). The arm exists only
+        // to keep this match exhaustive, and fails closed if a future
+        // caller forgets the skip.
+        Credential::Hmac { .. } => {
+            Err("hmac credentials are config-served only (no store row)".to_string())
+        }
         // The mTLS selector is the credential's MATCH VALUE (#124): the
         // subject CN when `subject` is set, else the certificate
         // fingerprint. The authenticator looks up a presented certificate

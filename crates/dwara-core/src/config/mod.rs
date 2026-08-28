@@ -152,6 +152,41 @@ pub struct Gateway {
     /// the documented request-path order.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_empty_routes: bool,
+    /// HMAC request-signing verification policy (DW-036): the
+    /// gateway-wide clock-skew window applied to the
+    /// `X-Dwara-Timestamp` header of every signed request. Absent
+    /// (the default) = [`DEFAULT_HMAC_CLOCK_SKEW_SECS`] (±5 minutes).
+    /// See the `security::authn` module docs for the full
+    /// signing contract (canonical string, headers, replay window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_auth: Option<HmacAuth>,
+}
+
+/// Gateway-wide HMAC request-signing policy (DW-036). The credential
+/// itself (key id + secret) lives on a consumer
+/// (`credentials: [{type: hmac, ...}]`); this block carries the
+/// VERIFICATION policy that applies to every signed request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HmacAuth {
+    /// Maximum accepted absolute difference, in seconds, between the
+    /// request's `X-Dwara-Timestamp` and the gateway clock. A timestamp
+    /// outside the window is rejected 401 BEFORE any HMAC computation
+    /// (an expired window is not a MAC problem). The window is also the
+    /// replay window: nonces are remembered for twice this duration.
+    /// Default 300 (±5 minutes, the §4.6 recommendation); validation
+    /// enforces 1..=3600 (a sub-second window rejects every request
+    /// with any clock drift; an unbounded one pins nonce-cache memory
+    /// forever).
+    #[serde(default = "default_hmac_clock_skew_secs")]
+    pub max_clock_skew_secs: u64,
+}
+
+/// Default `hmac_auth.max_clock_skew_secs` (±5 minutes, DW-036 §4.6).
+pub const DEFAULT_HMAC_CLOCK_SKEW_SECS: u64 = 300;
+
+fn default_hmac_clock_skew_secs() -> u64 {
+    DEFAULT_HMAC_CLOCK_SKEW_SECS
 }
 
 impl Gateway {
@@ -170,8 +205,17 @@ impl Gateway {
         let mut redacted = self.clone();
         for consumer in &mut redacted.consumers {
             for credential in &mut consumer.credentials {
-                if let Credential::ApiKey { key } = credential {
-                    *key = credentials::redact_inline_secret(key);
+                match credential {
+                    Credential::ApiKey { key } => {
+                        *key = credentials::redact_inline_secret(key);
+                    }
+                    // DW-036: the HMAC secret is inline secret material
+                    // exactly like an api key — same placeholder, same
+                    // unresolvable-by-design round-trip rejection.
+                    Credential::Hmac { secret, .. } => {
+                        *secret = credentials::redact_inline_secret(secret);
+                    }
+                    Credential::Jwt { .. } | Credential::Mtls { .. } => {}
                 }
             }
         }
@@ -1609,11 +1653,12 @@ pub struct Consumer {
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience
-/// binding, or mTLS client-certificate match.
+/// binding, mTLS client-certificate match, or HMAC signing key (DW-036).
 ///
-/// `Debug` is manual (DW-045): the api-key value is SECRET and a derived
-/// impl would print it — this keeps the config tree safe to Debug-log as
-/// a whole (`Gateway` and every holder derive `Debug` over this type).
+/// `Debug` is manual (DW-045): the api-key and hmac-secret values are
+/// SECRET and a derived impl would print them — this keeps the config
+/// tree safe to Debug-log as a whole (`Gateway` and every holder derive
+/// `Debug` over this type).
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
@@ -1627,6 +1672,33 @@ pub enum Credential {
         /// References are re-read on every reload; an unresolvable
         /// reference fails validation naming this field.
         key: String,
+    },
+    /// HMAC request-signing credential (DW-036): the consumer presents
+    /// per-request signatures over the canonical string documented in
+    /// the `security::authn` module docs, carried in the
+    /// `X-Dwara-Signature` header family. Unlike API keys the secret
+    /// cannot be hash-at-rest stored — recomputing an HMAC needs the
+    /// RAW key bytes — so this credential is config-declared only (the
+    /// state store's hashed rows cannot serve it) and the resolved
+    /// bytes live solely in the authenticator's memory, zeroized on
+    /// drop. The pepper (#124) deliberately does NOT apply here: it
+    /// guards stored hashes, and there is no stored hash to guard.
+    Hmac {
+        /// Public key identifier: the `X-Dwara-Key-Id` header value the
+        /// client presents to SELECT this credential (the AWS
+        /// access-key-id shape — it names the key, it is not secret).
+        /// Non-empty visible ASCII, at most 128 bytes; unique across
+        /// every consumer (validation rejects duplicates — an ambiguous
+        /// selector cannot pick a consumer deterministically).
+        key_id: String,
+        /// The HMAC-SHA256 signing secret. INLINE values are accepted
+        /// (redacted in every config echo, like api keys) but
+        /// `${ENV_NAME}` / `${file:/path/to/secret}` references are the
+        /// recommended shape; resolved at config-compile time and
+        /// re-read on every reload. Must be non-empty; use at least 32
+        /// bytes of entropy (shorter keys weaken the MAC construction
+        /// — documented, not enforced, the same posture as the pepper).
+        secret: String,
     },
     Jwt {
         issuer: String,
@@ -1656,15 +1728,20 @@ pub enum Credential {
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // DW-045: the api-key value is the one piece of inline secret
-        // material in the schema; everything else is binding metadata
-        // (issuer, fingerprint, subject) that validation matches, not a
-        // secret. Redact exactly the key and keep the variant shape so
-        // debug output stays useful.
+        // DW-045: the api-key and hmac-secret values are the inline
+        // secret material in the schema; everything else is binding
+        // metadata (issuer, fingerprint, subject, key id) that
+        // validation matches, not a secret. Redact exactly the secrets
+        // and keep the variant shape so debug output stays useful.
         match self {
             Credential::ApiKey { .. } => f
                 .debug_struct("ApiKey")
                 .field("key", &"[redacted]")
+                .finish(),
+            Credential::Hmac { key_id, .. } => f
+                .debug_struct("Hmac")
+                .field("key_id", key_id)
+                .field("secret", &"[redacted]")
                 .finish(),
             Credential::Jwt { issuer, audiences } => f
                 .debug_struct("Jwt")

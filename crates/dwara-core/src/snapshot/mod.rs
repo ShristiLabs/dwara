@@ -527,6 +527,26 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // HMAC signing policy bounds (DW-036): a zero-second window rejects
+    // every signed request with any clock drift at all, and an unbounded
+    // one pins nonce-cache memory for the process lifetime (nonces are
+    // remembered for twice the window).
+    if let Some(hmac) = &gateway.hmac_auth {
+        let skew = hmac.max_clock_skew_secs;
+        if !(1..=3600).contains(&skew) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "hmac_auth.max_clock_skew_secs",
+                format!(
+                    "max_clock_skew_secs {skew} is out of range: must be 1..=3600 seconds \
+                     (0 rejects every signer with any clock drift; a larger window pins \
+                     replay-nonce memory for its whole duration)"
+                ),
+            ));
+        }
+    }
+
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
     // exactly here — publishing it would drop all routing mid-run. Rejected
@@ -1552,6 +1572,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
     }
 
+    // DW-036: hmac key ids are the SELECTOR a signed request presents;
+    // a duplicate would make consumer resolution ambiguous. First
+    // declarant wins the map, later ones get the issue.
+    let mut hmac_key_ids: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for c in &gateway.consumers {
         // The consumer name is injected upstream as the X-Consumer-Name
         // header value; non-visible-ASCII names cannot be represented in a
@@ -1578,6 +1602,27 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
         for (i, cred) in c.credentials.iter().enumerate() {
             let field = format!("credentials[{i}]");
+            // DW-036: cross-consumer key-id uniqueness (see the map's
+            // declaration note above).
+            if let Credential::Hmac { key_id, .. } = cred {
+                match hmac_key_ids.get_key_value(key_id.as_str()) {
+                    Some((_, other_consumer)) => {
+                        issues.push(issue(
+                            "consumer",
+                            &c.name,
+                            &field,
+                            format!(
+                                "hmac key_id '{key_id}' is already declared by consumer \
+                                 '{other_consumer}' (key ids select the credential a signed \
+                                 request presents; they must be unique)"
+                            ),
+                        ));
+                    }
+                    None => {
+                        hmac_key_ids.insert(key_id.as_str(), c.name.as_str());
+                    }
+                }
+            }
             let problem = match cred {
                 Credential::ApiKey { key } if key.is_empty() => {
                     Some("api key is empty".to_string())
@@ -1594,6 +1639,35 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                         None => None,
                         Some(Ok(reference)) => reference.resolve().err(),
                         Some(Err(malformed)) => Some(malformed),
+                    }
+                }
+                // DW-036: an hmac signing credential. The key id is the
+                // PRESENTED selector (a header value), so it must be
+                // representable: non-empty visible ASCII, bounded length.
+                // The secret follows the same reference contract as api
+                // keys (resolve at compile time, fail closed naming the
+                // reference). Duplicate key ids across ALL consumers are
+                // rejected inside the loop below (an ambiguous selector
+                // cannot pick a consumer deterministically).
+                Credential::Hmac { key_id, secret } => {
+                    if key_id.is_empty() {
+                        Some("hmac key_id is empty".to_string())
+                    } else if !key_id.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                        Some(
+                            "hmac key_id must be visible ASCII (0x21-0x7E): it is presented \
+                             as the X-Dwara-Key-Id header value"
+                                .to_string(),
+                        )
+                    } else if key_id.len() > 128 {
+                        Some("hmac key_id is longer than 128 bytes".to_string())
+                    } else if secret.is_empty() {
+                        Some("hmac secret is empty".to_string())
+                    } else {
+                        match crate::config::credentials::parse_secret_reference(secret) {
+                            None => None,
+                            Some(Ok(reference)) => reference.resolve().err(),
+                            Some(Err(malformed)) => Some(malformed),
+                        }
                     }
                 }
                 Credential::Jwt { issuer, .. } if issuer.is_empty() => {
@@ -1993,6 +2067,7 @@ impl Snapshot {
                 jwt_providers: Vec::new(),
                 admin: None,
                 allow_empty_routes: false,
+                hmac_auth: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

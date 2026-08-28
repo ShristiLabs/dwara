@@ -43,7 +43,8 @@ outside one.
 **Security posture worth internalizing as a contributor:** `GET
 /config` returns the current published config as YAML from the
 TYPED-redacted copy (`Gateway::redacted()`, DW-045) — inline `api_key`
-values appear only as `${redacted:sha256:<8 hex>}` fingerprints, and
+and `hmac` secret values appear only as
+`${redacted:sha256:<8 hex>}` fingerprints, and
 `${...}` references echo as references; no secret value is returned,
 by construction. Before DW-045 this surface echoed inline credential
 material in plaintext, making the mTLS CA chain the sole access-control

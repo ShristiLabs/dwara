@@ -137,11 +137,13 @@ block on the route itself. See
 ## Authentication and authorization
 
 Consumers authenticate via API key, HTTP Basic, JWT Bearer (verified
-against a JWKS endpoint), or an mTLS client certificate; authorization
+against a JWKS endpoint), an mTLS client certificate, or per-request
+HMAC signatures (see [HMAC signing](./hmac-signing)); authorization
 is IP-ACL and consumer/route/service/listener/global policy attachment,
-evaluated in that same precedence order. A consumer API key can be
-written inline or as a `${...}` reference to an environment variable
-or a secret file — see [Secrets](./secrets). See the
+evaluated in that same precedence order. Consumer secrets — API keys
+and HMAC signing secrets — can be written inline or as a `${...}`
+reference to an environment variable or a secret file — see
+[Secrets](./secrets). See the
 [configuration schema](../reference/configuration-schema) for the
 `consumers`, `credentials`, and `policies` shapes.
 

@@ -1,7 +1,8 @@
 # Secrets
 
-A secret-bearing config field — today, a consumer's
-`consumers[].credentials[].api_key.key` — accepts either the value
+A secret-bearing config field — today, a consumer's API key
+(`consumers[].credentials[].api_key.key`) or HMAC signing secret
+(`consumers[].credentials[].hmac.secret`) — accepts either the value
 inline or a **reference** that is resolved when the config is loaded.
 References are the recommended shape for new configs: the config file
 then never holds the secret bytes at all, which keeps it safe to back

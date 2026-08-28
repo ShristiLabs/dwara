@@ -64,6 +64,10 @@ export default withMermaid(
                   link: "/guide/edge-policies",
                 },
                 { text: "Secrets", link: "/guide/secrets" },
+                {
+                  text: "HMAC signing",
+                  link: "/guide/hmac-signing",
+                },
                 { text: "Deployment", link: "/guide/deployment" },
                 { text: "Operations", link: "/guide/operations" },
                 { text: "Observability", link: "/guide/observability" },

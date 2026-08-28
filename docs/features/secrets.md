@@ -11,7 +11,8 @@ cases in `admin_api` (dwara-admin); unit level in
 `tests/unit/{credentials,secrets}.rs`. DW-045 / #46.
 
 Secret-bearing config fields — today `consumers[].credentials[]`
-`api_key.key` — carry either the value INLINE or a `${...}` REFERENCE.
+`api_key.key` and `hmac.secret` (DW-036) — carry either the value
+INLINE or a `${...}` REFERENCE.
 Inline values remain accepted for backward compatibility, but they are
 redacted in every config echo (below); references are the recommended
 shape because the config file then never holds the secret bytes at all.
@@ -91,6 +92,11 @@ authn compares hashes only; keeping the plaintext reachable per
 request would multiply the surfaces it can leak through (every log
 line, every error path, every future feature) for zero behavioral
 gain. The plaintext never outlives the build call that resolved it.
+The one exception is the HMAC signing secret (DW-036): recomputing a
+MAC needs the raw key bytes, so the resolved value is held —
+zeroized, `Debug`-redacted — in the authenticator's in-memory key map
+rather than hashed; the rest of the model (compile-time resolution,
+fail-closed validation, redaction of inline values) is identical.
 
 **Why the build and seeding re-resolve after validation already did:**
 the file can change (or an env var be unset) in the microseconds
@@ -114,8 +120,8 @@ authenticating through the store, the opposite of fail-closed.
 
 Every surface that echoes configuration — today admin
 `GET /config` — serves `Gateway::redacted()`: a clone of the config in
-which each inline `api_key` value is replaced by
-`${redacted:sha256:<8 hex>}`. References pass through unchanged (an
+which each inline `api_key` value and inline `hmac` secret is replaced
+by `${redacted:sha256:<8 hex>}`. References pass through unchanged (an
 env-var name or file path is not secret bytes; the config file already
 carries it). Alongside this, `Credential`'s `Debug` impl is manual and
 prints `[redacted]` for the key, so the whole config tree is safe to

@@ -70,6 +70,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hyper::body::{Body, Bytes, Frame};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
 use tokio::io::AsyncWriteExt as _;
 
 /// Default HTTP/1 max header COUNT (hyper's own default, made explicit).
@@ -725,6 +727,216 @@ impl<B> std::fmt::Debug for LimitedBody<B> {
         f.debug_struct("LimitedBody")
             .field("cap", &self.cap)
             .field("seen", &self.seen)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Error of the signed-request digesting body (DW-036).
+#[derive(Debug)]
+pub enum SignatureBodyError {
+    /// The streamed body's SHA-256 disagrees with the digest the
+    /// verified signature bound (`X-Dwara-Body-Sha256`): the request
+    /// body was tampered with (or truncated) in flight. The upstream
+    /// saw a truncated request — the wrapper aborts the stream at the
+    /// final frame — and the client receives 401 (the proxy recognizes
+    /// this marker in the failure's source chain, the
+    /// `request_limit_exceeded` precedent).
+    DigestMismatch,
+    /// The underlying body stream errored.
+    Inner(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for SignatureBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignatureBodyError::DigestMismatch => {
+                write!(f, "request body does not match the signed digest")
+            }
+            SignatureBodyError::Inner(e) => write!(f, "request body failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SignatureBodyError {}
+
+/// Request body that enforces an HMAC-signed body digest while
+/// STREAMING (DW-036): every data frame is folded into an incremental
+/// SHA-256 — nothing is buffered, so a signed body of any size costs
+/// O(1) memory beyond the frame in flight — and the final digest is
+/// compared (constant-time, `subtle`) against the digest the verified
+/// signature bound at authn time (`Identity::body_digest`,
+/// `security::authn`). A mismatch surfaces as
+/// [`SignatureBodyError::DigestMismatch`], aborting the upstream send
+/// WITH the last frame withheld on declared-length bodies (the digest
+/// is final the moment the declared byte count is hashed) or at the
+/// terminating frame on unknown-length bodies: the tampered request
+/// never completes upstream and the proxy answers 401.
+///
+/// The hashed read is therefore exactly the forwarded read — and when
+/// the route caps bodies (`max_body_bytes`, DW-027), this wrapper sits
+/// INSIDE the route's [`LimitedBody`], so the cap still rejects
+/// oversized bodies first. Unsigned requests construct the wrapper
+/// with `None` (one uniform type on the proxy path): the `None` form
+/// is a strict passthrough — no hashing, and
+/// `is_end_stream`/`size_hint` delegate untouched. The `Some` form
+/// reports `is_end_stream: false` so the consumer always polls to the
+/// terminating frame (the last resort of the digest check — an
+/// end-stream short-circuit would skip verification for empty and
+/// chunked bodies; declared-length bodies additionally check at
+/// saturation, see `exact_hint`). The one shape the forwarding
+/// encoder never polls is a declared size of EXACTLY zero — hyper
+/// writes `Content-Length: 0` straight from the size hint and drops
+/// the stream without a single `poll_frame` — so `new` decides that
+/// case eagerly and the proxy consults
+/// [`DigestingBody::eager_digest_mismatch`] before forwarding: an
+/// empty signed body is verified against its signed digest like any
+/// other.
+pub struct DigestingBody<B> {
+    inner: Pin<Box<B>>,
+    hasher: Sha256,
+    expected: Option<[u8; 32]>,
+    /// Outcome of the digest check once computed, so a body polled
+    /// past its decision answers consistently.
+    finished: Option<bool>,
+    /// Data bytes hashed so far, and the inner body's EXACT size when
+    /// it declares one. A declared size lets the digest check fire the
+    /// moment the last declared byte is hashed — hyper's h1 encoder
+    /// stops polling a Content-Length body once the declared count is
+    /// written, so the end-of-stream poll below is NOT guaranteed to
+    /// run for length-delimited bodies (it is for chunked/unknown
+    /// length, where the terminating frame is the only end signal).
+    /// A declared size of zero never sees even one frame — `new`
+    /// decides that case outright.
+    seen: u64,
+    exact_hint: Option<u64>,
+}
+
+impl<B> DigestingBody<B>
+where
+    B: Body<Data = Bytes>,
+{
+    /// `expected` is the SIGNED digest (decoded from the presented
+    /// `X-Dwara-Body-Sha256` header) — public material, already
+    /// verified as MAC-covered at authn time. `None` wraps without
+    /// enforcing (see the struct docs).
+    pub fn new(inner: B, expected: Option<[u8; 32]>) -> Self {
+        let exact_hint = match expected {
+            Some(_) => inner.size_hint().exact(),
+            None => None,
+        };
+        let mut body = DigestingBody {
+            inner: Box::pin(inner),
+            hasher: Sha256::new(),
+            expected,
+            finished: None,
+            seen: 0,
+            exact_hint,
+        };
+        // Exact-zero saturation hoisted out of `poll_frame`: a body
+        // declaring EXACTLY zero bytes is never polled on the h1
+        // forwarding path (hyper writes `Content-Length: 0` from the
+        // size hint and drops the stream without a single poll), so
+        // the end-of-stream decision below would never run for it.
+        // The digest of zero bytes is final NOW — decide here, and
+        // any poll that does happen answers from the memoized
+        // verdict. The proxy consults `eager_digest_mismatch` to
+        // surface a mismatch as a 401 before forwarding.
+        if body.exact_hint == Some(0) {
+            body.digest_ok();
+        }
+        body
+    }
+
+    /// The digest verdict `new` could already decide without seeing a
+    /// frame (the wrapped body declared exact size 0, the one shape
+    /// the forwarding encoder never polls). The proxy MUST consult
+    /// this before forwarding an enforced body: a mismatch on a
+    /// zero-length body has no poll to surface through, so this is
+    /// its only signal — the same decision the streaming path
+    /// enforces in `poll_frame`.
+    pub fn eager_digest_mismatch(&self) -> bool {
+        self.finished == Some(false)
+    }
+
+    /// Run the digest decision: constant-time compare of the computed
+    /// hash against the signed digest, memoized into `finished`.
+    /// Returns false on mismatch.
+    fn digest_ok(&mut self) -> bool {
+        if let Some(verdict) = self.finished {
+            return verdict;
+        }
+        let Some(expected) = self.expected else {
+            self.finished = Some(true);
+            return true;
+        };
+        // `finalize` consumes the hasher; the decision is memoized, so
+        // the hasher is dead by construction — swap in a fresh one.
+        let hasher = std::mem::replace(&mut self.hasher, Sha256::new());
+        let computed: [u8; 32] = Digest::finalize(hasher).into();
+        let ok = bool::from(computed.ct_eq(&expected));
+        self.finished = Some(ok);
+        ok
+    }
+}
+
+impl<B> Body for DigestingBody<B>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = SignatureBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, SignatureBodyError>>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let (Some(_), Some(data)) = (&this.expected, frame.data_ref()) {
+                    Digest::update(&mut this.hasher, data);
+                    this.seen += data.len() as u64;
+                    // Declared-size saturation: this frame carries the
+                    // last declared byte, so the digest is final NOW.
+                    // On mismatch the frame is WITHHELD (never reaches
+                    // the upstream) and the stream aborts.
+                    if this.exact_hint.is_some_and(|n| this.seen >= n) && !this.digest_ok() {
+                        return Poll::Ready(Some(Err(SignatureBodyError::DigestMismatch)));
+                    }
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(SignatureBodyError::Inner(e.into()))))
+            }
+            Poll::Ready(None) => {
+                if this.digest_ok() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Ready(Some(Err(SignatureBodyError::DigestMismatch)))
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+
+    fn is_end_stream(&self) -> bool {
+        // Passthrough when unsigned; when a digest must be enforced the
+        // terminating poll_frame carries the check, so never short-
+        // circuit (empty bodies included).
+        self.expected.is_none() && self.inner.is_end_stream()
+    }
+}
+
+impl<B> std::fmt::Debug for DigestingBody<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DigestingBody")
+            .field("expected", &"[signed digest]")
             .finish_non_exhaustive()
     }
 }

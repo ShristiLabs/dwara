@@ -44,6 +44,7 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         // Genuinely zero-route: upstream registry/connector unit tests
         // (#129 opt-in).
         allow_empty_routes: true,
+        hmac_auth: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -413,6 +414,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         // Zero-route: the assertions scope to upstream timeout fields
         // (#129 opt-in keeps the routes guard out of the picture).
         allow_empty_routes: true,
+        hmac_auth: None,
     });
     let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
     assert!(fields.contains(&"connection_cap"));
@@ -456,6 +458,7 @@ fn with_root_certificates_rejects_malformed_root() {
             // Zero-route on purpose: only the registry's root-store build
             // matters here (#129 opt-in).
             allow_empty_routes: true,
+            hmac_auth: None,
         })
         .expect("publish");
     let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate

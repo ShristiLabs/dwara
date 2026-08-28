@@ -61,7 +61,8 @@ including `405` for a known path with the wrong method and `404` for
 unknown admin paths — one error shape to grep across both surfaces.
 The admin listener drains gracefully on shutdown alongside the gateway.
 
-`GET /config` never returns secret values: inline API keys appear as
+`GET /config` never returns secret values: inline API keys and HMAC
+signing secrets appear as
 `${redacted:sha256:<prefix>}` fingerprints and `${...}` references
 echo unchanged. A `PATCH` that carries a redacted placeholder back is
 rejected with `400` naming the field — a placeholder can never become

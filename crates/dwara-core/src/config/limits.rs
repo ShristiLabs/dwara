@@ -34,3 +34,12 @@ pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 /// after which idlest-first eviction takes over (a deliberately fixed
 /// constant rather than an ops knob; revisit if operators need to tune).
 pub const MAX_RATE_LIMITER_KEYS_PER_SHARD: usize = 4_096;
+
+/// Runtime bound on the replay-nonce entries the HMAC request-signing
+/// nonce cache (DW-036, `security::authn`) holds PER SHARD. Not a
+/// schema bound — a process-lifetime memory guarantee under nonce
+/// flood, exactly the GCRA cap's rationale: entries expire after twice
+/// the clock-skew window anyway, and the cap only binds when an
+/// attacker floods nonces faster than expiry retires them (a fixed
+/// constant rather than an ops knob).
+pub const MAX_NONCE_CACHE_ENTRIES_PER_SHARD: usize = 4_096;

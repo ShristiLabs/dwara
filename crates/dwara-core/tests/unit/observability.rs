@@ -121,6 +121,7 @@ fn render_contains_families() {
             // Genuinely zero-route: only the registry-driven gauges matter
             // (#129 opt-in).
             allow_empty_routes: true,
+            hmac_auth: None,
         })
         .expect("publish");
     let registry =

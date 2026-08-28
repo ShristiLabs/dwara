@@ -1,7 +1,7 @@
 //! Request authentication (DW-019, feature analysis section 4.6; pepper
-//! and mTLS hardening per #124).
+//! and mTLS hardening per #124; HMAC request signing per DW-036).
 //!
-//! Four credential families behind one [`Authenticator`] trait:
+//! Five credential families behind one [`Authenticator`] trait:
 //!
 //! - **API keys**: `X-API-Key: <key>`. The lookup SELECTOR is
 //!   `hex(sha256(key))` — never the plaintext key — and the stored hash is
@@ -62,22 +62,153 @@
 //!   equals that selector. Passthrough listeners never speak HTTP, and
 //!   cleartext listeners have no certificates, so the family is inert
 //!   there by construction.
+//! - **HMAC request signing** (DW-036): a per-request signature over the
+//!   request line, payload digest, timestamp, and nonce, presented in
+//!   the `X-Dwara-*` header family — see the dedicated section below
+//!   for the canonical-string contract (interop depends on it).
 //!
 //! Accepted formats (composite dispatch on request shape): `X-API-Key`
 //! wins over `Authorization`; within `Authorization`, `Basic` and
-//! `Bearer` are distinguished by the scheme token; the client
-//! certificate is the AMBIENT family — consulted only when NO header
-//! credential was presented (a header expresses explicit intent and
-//! wins; the certificate is connection-level context). A `Bearer` header
-//! with no JWT provider stays pass-through (not interpreted), so such a
-//! request still falls through to the certificate family. A gateway with
-//! NO consumers and NO JWT providers has authentication disabled: the
-//! authenticator resolves `Anonymous` for everything and `Authorization`
-//! is forwarded upstream untouched (pass-through mode). Once ANY
-//! credential is configured, the gateway INTERPRETS `Authorization` —
-//! except that `Bearer` stays pass-through unless a JWT provider exists
-//! (a gateway fronting an OAuth-protected upstream without its own JWT
-//! config must keep forwarding tokens).
+//! `Bearer` are distinguished by the scheme token; a presented
+//! `X-Dwara-Signature` engages the HMAC family after the
+//! `Authorization` schemes; the client certificate is the AMBIENT
+//! family — consulted only when NO header credential was presented (a
+//! header expresses explicit intent and wins; the certificate is
+//! connection-level context). A `Bearer` header with no JWT provider
+//! stays pass-through (not interpreted), so such a request still falls
+//! through to the HMAC headers and then the certificate family. A
+//! gateway with NO consumers and NO JWT providers has authentication
+//! disabled: the authenticator resolves `Anonymous` for everything and
+//! `Authorization` is forwarded upstream untouched (pass-through mode).
+//! Once ANY credential is configured, the gateway INTERPRETS
+//! `Authorization` — except that `Bearer` stays pass-through unless a
+//! JWT provider exists (a gateway fronting an OAuth-protected upstream
+//! without its own JWT config must keep forwarding tokens).
+//!
+//! # HMAC request signing (DW-036)
+//!
+//! A consumer with an `hmac` credential (`key_id` + `secret`, the secret
+//! inline or a `${...}` reference, DW-045) signs every request. The
+//! secret never becomes a stored hash: recomputing an HMAC needs the
+//! raw key bytes, so the RESOLVED secret lives only in this module's
+//! in-memory key map (zeroized on drop) and the state store never sees
+//! an `hmac` row. The pepper (#124) does not apply — it guards stored
+//! hashes, and there is none.
+//!
+//! ## Wire format
+//!
+//! Five request headers, all REQUIRED when `X-Dwara-Signature` is
+//! presented (any missing or malformed one is a 401, like any other
+//! presented-but-invalid credential):
+//!
+//! | Header | Content |
+//! |---|---|
+//! | `X-Dwara-Key-Id` | the credential's `key_id` (public selector; 1..=128 visible-ASCII bytes) |
+//! | `X-Dwara-Timestamp` | decimal Unix epoch seconds of signing (digits only) |
+//! | `X-Dwara-Nonce` | opaque client string, 16..=256 visible-ASCII bytes, unique per request within the replay window (use >= 128 bits of entropy) |
+//! | `X-Dwara-Body-Sha256` | lowercase hex SHA-256 of the request body (the empty body signs `e3b0c4...b855`, SHA-256 of the empty string) |
+//! | `X-Dwara-Signature` | lowercase hex HMAC-SHA256(secret, canonical string) |
+//!
+//! The custom `X-Dwara-*` family (not an `Authorization` scheme)
+//! follows the codebase's `X-API-Key` precedent: discrete headers make
+//! each signed element explicit and keep the signature material
+//! inspectable without parsing a parameterized scheme. Like the other
+//! credential headers they are forwarded upstream untouched (only
+//! `X-Consumer-*` are stripped).
+//!
+//! ## Canonical string (v1) — the interop contract
+//!
+//! A version line followed by the seven signed elements, each pair
+//! joined by exactly one `\n` byte (no trailing newline). No element
+//! may itself contain `\n` — the
+//! grammar guarantees it (visible ASCII excludes control characters,
+//! the timestamp is digits, the digest is hex, and hyper's parser
+//! rejects raw control bytes in a request target):
+//!
+//! ```text
+//! dwara-hmac-v1
+//! <key id>            the X-Dwara-Key-Id value, exactly as presented
+//! <method>            the HTTP method, uppercased (GET, POST, ...)
+//! <path>              the request path EXACTLY as received: percent-encoding preserved, no normalization
+//! <query>             the raw query string as received (no leading '?'), or an EMPTY line when absent
+//! <timestamp>         the X-Dwara-Timestamp value, exactly as presented
+//! <nonce>             the X-Dwara-Nonce value, exactly as presented
+//! <body digest>       the X-Dwara-Body-Sha256 value, exactly as presented
+//! ```
+//!
+//! Design decisions, each load-bearing:
+//!
+//! - **Path/query exactly as received.** The signer cannot know what
+//!   normalization a proxy chain might apply, so the only lossless
+//!   contract is the raw bytes the client put on the wire; the gateway
+//!   re-reads them from its parsed (but un-normalized) request target.
+//!   Query ORDER is signed: `?a=1&b=2` and `?b=2&a=1` are different
+//!   canonical strings.
+//! - **Body by digest, carried in a signed header.** Signing the body
+//!   inline would require buffering it (the gateway hashes nothing
+//!   until it streams); the digest header lets the gateway verify the
+//!   MAC over headers only and then enforce the digest while STREAMING
+//!   the body to the upstream — zero buffering, any body size, and the
+//!   stream is aborted (401 to the client, truncated request to the
+//!   upstream) the moment the final byte's hash disagrees. A tampered
+//!   body therefore never completes upstream. The route's
+//!   `max_body_bytes` (DW-027) composes with this: the digesting
+//!   wrapper sits inside the route's limit wrapper, so an over-cap
+//!   body is still rejected 413 first.
+//! - **No other headers in v1.** The signed set binds the request
+//!   line (method/path/query), the payload (digest), freshness
+//!   (timestamp), uniqueness (nonce), and identity (key id). The
+//!   `Host` header is NOT signed: it is a routing input, so a party
+//!   able to tamper headers between signer and gateway (a non-TLS
+//!   listener or an untrusted proxy hop) could retarget a validly
+//!   signed request to a different host-matched route while MAC and
+//!   digest still verify — TLS termination makes that party mostly
+//!   hypothetical, and the gateway rebuilds Host from the upstream
+//!   pick, so no cross-host forwarding occurs. `Content-Type` and
+//!   friends are not authn inputs here, and signing arbitrary header
+//!   lists drags in header-selection and canonicalization ambiguity
+//!   every signer must replicate exactly. The versioned first line
+//!   leaves room for a v2 with opt-in header (including Host)
+//!   coverage without breaking v1 signers.
+//!
+//! ## Verification order and failure posture
+//!
+//! 1. Header presence/format parse (401 on any malformed element).
+//! 2. Timestamp inside `±max_clock_skew_secs` (default 300s, the §4.6
+//!    recommendation; gateway `hmac_auth` block, validated 1..=3600).
+//!    Checked BEFORE any HMAC work — an expired window is not a MAC
+//!    problem, and refusing early keeps the hot path cheap for
+//!    stale traffic. Outside the window: 401.
+//! 3. Key lookup, then `HMAC-SHA256(secret, canonical)` compared to
+//!    the presented signature with `subtle::ConstantTimeEq` over the
+//!    full 32-byte digests — no early return on a byte mismatch. A
+//!    key-miss computes a dummy HMAC first (fixed zero key) so the
+//!    timing shape of "unknown key" matches "wrong signature" and
+//!    key-existence is not readable from latency; both answer the
+//!    same 401 shape as every other family.
+//! 4. Nonce replay check, AFTER a successful MAC: the nonce is
+//!    remembered under `key_id + '\n' + nonce` for twice the skew
+//!    window (a timestamp stays acceptable for at most one full
+//!    window after its request was first seen, so the doubled TTL
+//!    covers the boundary with margin). A remembered nonce inside
+//!    its TTL: 401. Burned only on VALID signatures — junk traffic
+//!    cannot flood legitimate nonces out of the cache.
+//!
+//! ## Replay window boundary (single instance, M2)
+//!
+//! The nonce cache is in-memory, sharded (`NONCE_CACHE_SHARDS` locks,
+//! the GCRA store's pattern), TTL-expired, and capped at
+//! [`crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD`]
+//! entries per shard with soonest-expiry-first eviction — under a
+//! nonce flood the cache degrades fail-open to eviction (the
+//! documented GCRA trade: an availability DoS must not become a
+//! gateway outage), and replay protection is only as strong as the
+//! cache's retention. It is also PER-INSTANCE: dwara M2 is a
+//! single-process deployment, and a multi-instance fleet behind one
+//! VIP would let a replayed request hit a cold instance. A shared
+//! nonce store is the enterprise/Redis seam (DW-031's world), not
+//! this module's; the boundary is documented here so operators do not
+//! mistake per-instance replay protection for fleet-wide.
 //!
 //! Identity-to-consumer mapping: API keys and Basic map via the credential
 //! record; JWTs map via the provider's `consumer` binding, or by matching
@@ -123,22 +254,25 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::hash::BuildHasher;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use hmac::{Hmac, Mac};
 use hyper::header::HeaderMap;
-use hyper::Uri;
+use hyper::{Method, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use rustls::pki_types::CertificateDer;
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tower_service::Service;
 use zeroize::Zeroizing;
@@ -146,7 +280,9 @@ use zeroize::Zeroizing;
 use crate::config::credentials::{
     credential_selector, hmac_stored_hash, sha256_hex, sha256_stored_hash,
 };
-use crate::config::{Credential, Gateway, JwtProvider as JwtProviderConfig};
+use crate::config::{
+    Credential, Gateway, JwtProvider as JwtProviderConfig, DEFAULT_HMAC_CLOCK_SKEW_SECS,
+};
 use crate::observability::Observability;
 use crate::state::store::{CredentialKind, CredentialRecord, StateStore};
 
@@ -179,6 +315,15 @@ pub struct Identity {
     /// to their space-separated form — the OAuth `scope` convention,
     /// DW-020 — capped at 32 entries). Never contains the raw token.
     pub claims: BTreeMap<String, String>,
+    /// HMAC only (DW-036): the signed body digest (the decoded
+    /// `X-Dwara-Body-Sha256` value) the FORWARD path must enforce while
+    /// streaming the request body to the upstream — the MAC was verified
+    /// over this digest at authn time; the dataplane's digesting wrapper
+    /// (`dataplane::hardening`) compares the streamed body's SHA-256
+    /// against it and aborts the request on mismatch (see the module
+    /// docs' canonical-string section). Not secret: it is a public hash
+    /// that already traveled in a header. Every other family sets `None`.
+    pub body_digest: Option<[u8; 32]>,
 }
 
 /// The VERIFIED client certificate of a connection, as the authenticator
@@ -236,19 +381,28 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
+/// The request material an [`Authenticator`] may consume (DW-036):
+/// headers plus the request TARGET — method, path, query — the HMAC
+/// family signs. Borrowed for one authenticate call; the request body
+/// is deliberately NOT here (authn never buffers; the HMAC body digest
+/// is enforced on the forward path, see [`Identity::body_digest`]).
+#[derive(Debug, Clone, Copy)]
+pub struct AuthnRequest<'a> {
+    pub method: &'a Method,
+    pub uri: &'a Uri,
+    pub headers: &'a HeaderMap,
+    /// The VERIFIED client certificate of the connection when the
+    /// accepting TLS listener requested one (#124) — absent on
+    /// cleartext listeners and connections that presented none.
+    pub client_cert: Option<&'a ClientCertificate>,
+}
+
 /// One pluggable authenticator (dyn-compatible seam). `Ok(None)` is
 /// Anonymous; `Err(AuthError::Invalid(..))` means a credential was
-/// PRESENTED and rejected. `client_cert` is the VERIFIED client
-/// certificate of the connection when the accepting TLS listener
-/// requested one (#124; see [`ClientCertificate`]) — absent on cleartext
-/// listeners and connections that presented none.
+/// PRESENTED and rejected.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
-    async fn authenticate(
-        &self,
-        headers: &HeaderMap,
-        client_cert: Option<&ClientCertificate>,
-    ) -> Result<Option<Identity>, AuthError>;
+    async fn authenticate(&self, req: &AuthnRequest<'_>) -> Result<Option<Identity>, AuthError>;
 
     /// The `WWW-Authenticate` challenge value for 401 responses, built
     /// from the schemes this authenticator actually interprets. Client
@@ -314,6 +468,244 @@ pub fn verify_secret(stored_hash: &str, presented: &str, pepper: Option<&Pepper>
         return alg.verify_password(presented.as_bytes(), &parsed).is_ok();
     }
     false
+}
+
+// --- HMAC request signing (DW-036) -----------------------------------------
+
+/// The `X-Dwara-*` header family (DW-036). See the module docs for the
+/// canonical-string contract; these consts are the single source of the
+/// header names so the verifier and the challenge cannot drift.
+pub const X_DWARA_SIGNATURE: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("x-dwara-signature");
+pub const X_DWARA_KEY_ID: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("x-dwara-key-id");
+pub const X_DWARA_TIMESTAMP: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("x-dwara-timestamp");
+pub const X_DWARA_NONCE: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("x-dwara-nonce");
+pub const X_DWARA_BODY_SHA256: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("x-dwara-body-sha256");
+
+/// Version tag opening the canonical string (see the module docs). Bumped
+/// only for an incompatible grammar change; v1 signers keep verifying.
+const CANONICAL_VERSION_LINE: &str = "dwara-hmac-v1";
+
+/// The `WWW-Authenticate` scheme token the HMAC family offers (a custom
+/// token per RFC 9110's scheme grammar; the family is presented through
+/// headers, but the challenge still needs a name clients can recognize).
+/// `pub(crate)`: the dataplane's mid-stream digest-mismatch 401 (the one
+/// HMAC-originated failure the proxy itself answers) reuses the same
+/// token so both 401 shapes carry an identical challenge.
+pub(crate) const HMAC_CHALLENGE: &str = "Dwara-HMAC-SHA256 realm=\"dwara\"";
+
+/// Bounds on the PRESENTED credential material (401 on violation). The
+/// key id is a public label; the nonce must carry real entropy — 16
+/// bytes is the floor for a random nonce, 256 keeps the nonce-cache key
+/// and the canonical string cheap under hostile headers.
+const MAX_KEY_ID_BYTES: usize = 128;
+const MIN_NONCE_BYTES: usize = 16;
+const MAX_NONCE_BYTES: usize = 256;
+
+/// `true` for the visible-ASCII range a presented header value may carry
+/// without control characters (`\n` exclusion keeps the canonical string
+/// line grammar unambiguous; the space is excluded too — header values
+/// here are opaque tokens, and hyper trims leading/trailing spaces a
+/// signer cannot re-derive byte-for-byte).
+fn is_visible_ascii(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|b| (0x21..=0x7e).contains(b))
+}
+
+/// Decode exactly 32 bytes from a 64-character hex string (the signature
+/// and body-digest header values). Case-insensitive on input — the spec
+/// says signers emit lowercase, but accepting upper-case hex costs
+/// nothing and rejects nothing the MAC would have accepted.
+fn decode_hex32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+/// Build the canonical string (DW-036 v1). The elements are the
+/// PRESENTED header values and the request target EXACTLY as received —
+/// the signer's bytes and the verifier's bytes must agree without any
+/// normalization step (see the module docs for the grammar and the
+/// rationale). Public because the grammar is the interop contract:
+/// tests re-implement it independently to pin the documentation, and
+/// operators may build signing tooling against the same function the
+/// gateway verifies with.
+pub fn canonical_string(
+    key_id: &str,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    timestamp: &str,
+    nonce: &str,
+    body_sha256_hex: &str,
+) -> String {
+    // Methods are already uppercase on the wire (hyper parses them as
+    // sent); uppercasing again is the explicit grammar guarantee for
+    // signers behind a case-mangling chain.
+    let method = method.as_str().to_ascii_uppercase();
+    let mut out = String::with_capacity(
+        CANONICAL_VERSION_LINE.len()
+            + key_id.len()
+            + method.len()
+            + path.len()
+            + query.map_or(0, str::len)
+            + timestamp.len()
+            + nonce.len()
+            + body_sha256_hex.len()
+            + 7,
+    );
+    out.push_str(CANONICAL_VERSION_LINE);
+    for element in [
+        key_id,
+        method.as_str(),
+        path,
+        query.unwrap_or(""),
+        timestamp,
+        nonce,
+        body_sha256_hex,
+    ] {
+        out.push('\n');
+        out.push_str(element);
+    }
+    out
+}
+
+/// Compute HMAC-SHA256 over the canonical string. Shared by the verify
+/// path and the key-miss dummy (timing uniformity; see
+/// [`CompositeAuthenticator::authenticate_hmac`]).
+fn request_mac(secret: &[u8], canonical: &str) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(canonical.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Number of independent shard locks in the nonce cache. Fixed (not
+/// CPU-count-derived) so the worst-case entry bound
+/// (`NONCE_CACHE_SHARDS * MAX_NONCE_CACHE_ENTRIES_PER_SHARD`) is the
+/// same number on every machine — the GCRA store's rationale.
+pub const NONCE_CACHE_SHARDS: usize = 16;
+
+/// One HMAC signing key as the authenticator holds it (DW-036). The
+/// secret is the RESOLVED config value (inline or `${...}` reference,
+/// resolved at build time): raw key bytes, never a hash, never logged,
+/// zeroized when the last holder drops. Manual `Debug` redacts it.
+pub struct HmacCredential {
+    pub consumer_name: String,
+    secret: Arc<Zeroizing<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for HmacCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HmacCredential")
+            .field("consumer_name", &self.consumer_name)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Per-instance replay-nonce store (DW-036): sharded keyed TTL map, the
+/// GCRA shard store's shape (`GcraShardStore`). [`Self::check_and_insert`]
+/// is the single critical section — one shard lock covers the
+/// expired-read and the insert, so two concurrent presentations of one
+/// nonce linearize (exactly one wins). Entries expire after the
+/// caller-supplied TTL (twice the clock-skew window, set per insert so a
+/// skew change on reload applies to new nonces without rebuilding the
+/// cache); a shard at
+/// [`crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD`] entries
+/// first drops expired entries, then evicts soonest-expiry-first (the
+/// documented fail-open-under-flood trade; see the module docs).
+pub struct NonceCache {
+    shards: Vec<std::sync::Mutex<HashMap<String, Instant>>>,
+    hasher: std::collections::hash_map::RandomState,
+    /// Per-shard entry cap (see [`Self::with_shard_capacity`]).
+    cap: usize,
+}
+
+impl NonceCache {
+    /// The production cache: [`NONCE_CACHE_SHARDS`] shards, each capped
+    /// at [`crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD`].
+    pub fn new() -> Self {
+        Self::with_shard_capacity(crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD)
+    }
+
+    /// Test constructor with a small per-shard cap (exercises the
+    /// eviction cascade without inserting thousands of keys).
+    pub fn with_shard_capacity(cap: usize) -> Self {
+        NonceCache {
+            shards: (0..NONCE_CACHE_SHARDS)
+                .map(|_| std::sync::Mutex::new(HashMap::new()))
+                .collect(),
+            hasher: std::collections::hash_map::RandomState::new(),
+            cap,
+        }
+    }
+
+    fn shard_for(&self, key: &str) -> &std::sync::Mutex<HashMap<String, Instant>> {
+        &self.shards[(self.hasher.hash_one(key) as usize) & (NONCE_CACHE_SHARDS - 1)]
+    }
+
+    /// Remember `key` for `ttl` and report whether it was FRESH (not
+    /// remembered, or remembered-but-expired): `true` = this caller is
+    /// the first presentation inside the window; `false` = replay.
+    pub fn check_and_insert(&self, key: &str, ttl: Duration) -> bool {
+        let now = Instant::now();
+        let expires = now + ttl;
+        let shard = self.shard_for(key);
+        let mut guard = shard.lock().expect("nonce cache shard poisoned");
+        match guard.get(key) {
+            Some(&seen_expiry) if seen_expiry > now => false,
+            _ => {
+                // Expired-or-absent: same path. Sweep only when crowded
+                // (the inline cascade; see the module docs) so the
+                // common case is one hash lookup plus one insert.
+                if guard.len() >= self.cap {
+                    guard.retain(|_, expiry| *expiry > now);
+                    while guard.len() >= self.cap {
+                        // Soonest-expiry-first: the entries closest to
+                        // leaving the window cost the least protection
+                        // to drop.
+                        let victim = guard
+                            .iter()
+                            .min_by_key(|(_, expiry)| **expiry)
+                            .map(|(k, _)| k.clone());
+                        match victim {
+                            Some(k) => {
+                                guard.remove(&k);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                guard.insert(key.to_string(), expires);
+                true
+            }
+        }
+    }
+}
+
+impl Default for NonceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for NonceCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NonceCache")
+            .field("shards", &NONCE_CACHE_SHARDS)
+            .field("cap", &self.cap)
+            .finish_non_exhaustive()
+    }
 }
 
 // --- credential registry ---------------------------------------------------
@@ -436,6 +828,10 @@ impl CredentialRegistry {
                     }
                     // JWT credentials resolve through jwt_consumer_index.
                     Credential::Jwt { .. } => continue,
+                    // HMAC credentials (DW-036) live in the composite's
+                    // hmac_keys map (raw key material, config-served
+                    // only), not this hash-keyed registry.
+                    Credential::Hmac { .. } => continue,
                 };
                 let entry = Arc::make_mut(map.entry(selector.clone()).or_default());
                 entry.push(KnownCredential {
@@ -1020,6 +1416,25 @@ pub struct CompositeAuthenticator {
     /// pepper" warning (#124): the clear log line fires once per
     /// authenticator build, not per request.
     pepper_missing_logged: AtomicBool,
+    /// HMAC signing keys (DW-036): key_id -> credential. Config-declared
+    /// only (the state store cannot hold raw MAC key material; see the
+    /// module docs) — built from `consumers[].credentials[type=hmac]`
+    /// regardless of whether the registry variant is store or config.
+    /// The map is present whenever any hmac credential resolved; the
+    /// PRESENCE of `X-Dwara-Signature` with an empty map is a 401 (a
+    /// presented credential the gateway cannot verify).
+    hmac_keys: HashMap<String, Arc<HmacCredential>>,
+    /// Gateway-wide HMAC verification policy (DW-036): the accepted
+    /// timestamp skew in seconds. Defaults to
+    /// [`DEFAULT_HMAC_CLOCK_SKEW_SECS`] when the config sets no
+    /// `hmac_auth` block; validation bounds the configured value.
+    hmac_skew_secs: u64,
+    /// Replay-nonce store (DW-036), SHARED ACROSS rebuilds: the dataplane
+    /// owns it and hands every generation the same Arc, so a config
+    /// reload never wipes remembered nonces (the jwks_caches precedent).
+    /// Per-instance by design in M2 (see the module docs' replay
+    /// boundary note).
+    nonce_cache: Arc<NonceCache>,
     /// Whether ANY credential family is active; when false the composite
     /// is a no-op (pass-through mode).
     enabled: bool,
@@ -1038,24 +1453,30 @@ impl CompositeAuthenticator {
             consumer_groups_index: HashMap::new(),
             pepper: None,
             pepper_missing_logged: AtomicBool::new(false),
+            hmac_keys: HashMap::new(),
+            hmac_skew_secs: DEFAULT_HMAC_CLOCK_SKEW_SECS,
+            nonce_cache: Arc::new(NonceCache::new()),
             enabled: false,
         }
     }
     /// Build from one config generation. `store` is the DWARA_STATE_DB
     /// store when deployed; without it credentials come from config,
     /// hashed in-memory. `jwks_caches` carries JWKS cache entries ACROSS
-    /// rebuilds (keyed by URL) so reloads keep rotation state. `pepper`
-    /// (#124) is the per-deployment credential pepper — an Arc CLONE of
-    /// the dataplane's Zeroizing holder (no byte copy; the bytes zeroize
-    /// when the last holder drops), resolved by the CALLER through the
-    /// SecretSource extension seam (this domain must not import
-    /// extensions) — or `None` for legacy-only mode.
+    /// rebuilds (keyed by URL) so reloads keep rotation state, and
+    /// `nonce_cache` carries the HMAC replay-nonce store across rebuilds
+    /// the same way (DW-036). `pepper` (#124) is the per-deployment
+    /// credential pepper — an Arc CLONE of the dataplane's Zeroizing
+    /// holder (no byte copy; the bytes zeroize when the last holder
+    /// drops), resolved by the CALLER through the SecretSource extension
+    /// seam (this domain must not import extensions) — or `None` for
+    /// legacy-only mode.
     pub fn build(
         gateway: &Gateway,
         store: Option<Arc<StateStore>>,
         jwks_caches: &mut HashMap<String, Arc<JwksCacheEntry>>,
         obs: Option<&Observability>,
         pepper: Option<&Arc<Zeroizing<Vec<u8>>>>,
+        nonce_cache: Arc<NonceCache>,
     ) -> Arc<Self> {
         let registry = match store {
             Some(store) => CredentialRegistry::Store(store),
@@ -1076,12 +1497,46 @@ impl CompositeAuthenticator {
         }
         let mut jwt_consumer_index = HashMap::new();
         let mut consumer_groups_index = HashMap::new();
+        // DW-036: HMAC keys are config-served ONLY (raw key bytes in
+        // memory; see the module docs), so they are collected here
+        // regardless of the registry variant. `${...}` secret references
+        // (DW-045) resolve HERE and the plaintext is dropped into the
+        // Zeroizing holder; validation already rejected unresolvable
+        // references for this generation, so an error here is the
+        // validate-vs-build microsecond race — fail CLOSED (skip the
+        // credential: that key stops authenticating) with a loud log,
+        // the same pattern as api keys.
+        let mut hmac_keys = HashMap::new();
         for consumer in &gateway.consumers {
             consumer_groups_index.insert(consumer.name.clone(), consumer.groups.clone());
             for credential in &consumer.credentials {
                 if let Credential::Jwt { issuer, audiences } = credential {
                     jwt_consumer_index
                         .insert(issuer.clone(), (consumer.name.clone(), audiences.clone()));
+                }
+                if let Credential::Hmac { key_id, secret } = credential {
+                    let secret = match crate::config::credentials::resolve_configured_secret(secret)
+                    {
+                        Ok(resolved) => resolved,
+                        Err(err) => {
+                            tracing::error!(
+                                code = "config_hmac_secret_unresolvable",
+                                consumer = %consumer.name,
+                                "skipping hmac credential (secret reference unresolvable \
+                                 at authenticator build): {err}"
+                            );
+                            continue;
+                        }
+                    };
+                    // Validation rejects duplicate key ids; a generation
+                    // tear that slips one through keeps the LAST entry.
+                    hmac_keys.insert(
+                        key_id.clone(),
+                        Arc::new(HmacCredential {
+                            consumer_name: consumer.name.clone(),
+                            secret: Arc::new(Zeroizing::new(secret.into_bytes())),
+                        }),
+                    );
                 }
             }
         }
@@ -1094,6 +1549,12 @@ impl CompositeAuthenticator {
             consumer_groups_index,
             pepper: pepper.cloned(),
             pepper_missing_logged: AtomicBool::new(false),
+            hmac_keys,
+            hmac_skew_secs: gateway
+                .hmac_auth
+                .as_ref()
+                .map_or(DEFAULT_HMAC_CLOCK_SKEW_SECS, |h| h.max_clock_skew_secs),
+            nonce_cache,
             enabled,
         })
     }
@@ -1172,6 +1633,7 @@ impl CompositeAuthenticator {
                     credential_kind: CredentialKind::ApiKey,
                     groups,
                     claims: BTreeMap::new(),
+                    body_digest: None,
                 }));
             }
         }
@@ -1207,6 +1669,7 @@ impl CompositeAuthenticator {
                     credential_kind: CredentialKind::Mtls,
                     groups,
                     claims: BTreeMap::new(),
+                    body_digest: None,
                 }));
             }
         }
@@ -1380,28 +1843,155 @@ impl CompositeAuthenticator {
             credential_kind: CredentialKind::Jwt,
             groups,
             claims: identity_claims,
+            body_digest: None,
         })
+    }
+
+    /// HMAC request-signature family (DW-036). Verification order and
+    /// the failure posture are documented in the module docs (parse ->
+    /// timestamp window -> constant-time MAC -> nonce burn); the
+    /// returned identity carries the signed body digest for the forward
+    /// path to enforce while streaming (`Identity::body_digest`).
+    async fn authenticate_hmac(
+        &self,
+        req: &AuthnRequest<'_>,
+    ) -> Result<Option<Identity>, AuthError> {
+        let header =
+            |name: &hyper::header::HeaderName| req.headers.get(name).and_then(|v| v.to_str().ok());
+        // All five headers are required; a partial set is a malformed
+        // presented credential (401), never a fall-through to anonymous.
+        let Some(key_id) = header(&X_DWARA_KEY_ID) else {
+            return Err(AuthError::Invalid("signed request lacks x-dwara-key-id"));
+        };
+        let Some(timestamp) = header(&X_DWARA_TIMESTAMP) else {
+            return Err(AuthError::Invalid("signed request lacks x-dwara-timestamp"));
+        };
+        let Some(nonce) = header(&X_DWARA_NONCE) else {
+            return Err(AuthError::Invalid("signed request lacks x-dwara-nonce"));
+        };
+        let Some(body_sha256) = header(&X_DWARA_BODY_SHA256) else {
+            return Err(AuthError::Invalid(
+                "signed request lacks x-dwara-body-sha256",
+            ));
+        };
+        let Some(signature) = header(&X_DWARA_SIGNATURE) else {
+            // Unreachable from the dispatcher (presence of this header is
+            // what engages the family) but keeps the family self-contained.
+            return Err(AuthError::Invalid("signed request lacks x-dwara-signature"));
+        };
+        // Format bounds: the canonical grammar is only unambiguous over
+        // these shapes (module docs). Checked before the timestamp so a
+        // hostile header never reaches the clock or the cache.
+        if !is_visible_ascii(key_id.as_bytes()) || key_id.len() > MAX_KEY_ID_BYTES {
+            return Err(AuthError::Invalid(
+                "key id is not 1..=128 visible ascii bytes",
+            ));
+        }
+        if !is_visible_ascii(nonce.as_bytes())
+            || !(MIN_NONCE_BYTES..=MAX_NONCE_BYTES).contains(&nonce.len())
+        {
+            return Err(AuthError::Invalid(
+                "nonce is not 16..=256 visible ascii bytes",
+            ));
+        }
+        let Some(presented_mac) = decode_hex32(signature) else {
+            return Err(AuthError::Invalid("signature is not 64 hex digits"));
+        };
+        let Some(body_digest) = decode_hex32(body_sha256) else {
+            return Err(AuthError::Invalid("body digest is not 64 hex digits"));
+        };
+        if !timestamp.bytes().all(|b| b.is_ascii_digit()) || timestamp.len() > 20 {
+            return Err(AuthError::Invalid("timestamp is not decimal unix seconds"));
+        }
+        // The shape check above does not bound the VALUE: 20 digits
+        // reach above u64::MAX (18446744073709551616 and friends), and
+        // `u64::from_str` rejects them. Parse fail-closed — a panic
+        // here would kill the connection task instead of answering
+        // the 401 envelope (remotely triggerable, unauthenticated).
+        let Ok(presented_ts) = timestamp.parse::<u64>() else {
+            return Err(AuthError::Invalid("timestamp is not decimal unix seconds"));
+        };
+        // Clock-skew window (§4.6): reject BEFORE any HMAC work. The
+        // window is symmetric (past and future) — signers' clocks may
+        // drift either way. u64 arithmetic end to end: no signed cast
+        // of a hostile 20-digit value can wrap the comparison.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let drift = presented_ts.abs_diff(now);
+        if drift > self.hmac_skew_secs {
+            return Err(AuthError::Invalid(
+                "signature timestamp is outside the clock-skew window",
+            ));
+        }
+        // Canonical string from the PRESENTED bytes (module docs): no
+        // normalization of path or query, the digest header value as
+        // sent. The signature header itself is deliberately NOT signed
+        // material (it cannot sign itself).
+        let canonical = canonical_string(
+            key_id,
+            req.method,
+            req.uri.path(),
+            req.uri.query(),
+            timestamp,
+            nonce,
+            body_sha256,
+        );
+        let Some(credential) = self.hmac_keys.get(key_id) else {
+            // Key-existence timing oracle: compute a dummy MAC over the
+            // same canonical string with a fixed zero key so "unknown
+            // key" and "wrong signature" spend the same work. The dummy
+            // is discarded; the answer is the same 401 either way.
+            let _ = request_mac(&[0u8; 32], &canonical);
+            return Err(AuthError::Invalid("unknown hmac credentials"));
+        };
+        let computed = request_mac(credential.secret.as_slice(), &canonical);
+        // Constant-time over the full 32-byte digests: no early return
+        // on a byte mismatch (DW-036 done-when).
+        if !bool::from(computed.ct_eq(&presented_mac)) {
+            return Err(AuthError::Invalid("request signature did not verify"));
+        }
+        // Replay window (module docs): burn the nonce only AFTER a
+        // successful MAC, scoped to the key (nonce collisions across
+        // consumers must not cross-burn). TTL is twice the skew window
+        // so a timestamp stays replay-guarded for its entire acceptance
+        // lifetime with margin.
+        let cache_key = format!("{key_id}\n{nonce}");
+        if !self
+            .nonce_cache
+            .check_and_insert(&cache_key, Duration::from_secs(self.hmac_skew_secs * 2))
+        {
+            return Err(AuthError::Invalid("nonce already used inside the window"));
+        }
+        let consumer_name = credential.consumer_name.clone();
+        let groups = self.consumer_groups_of(&consumer_name);
+        Ok(Some(Identity {
+            consumer_name,
+            credential_kind: CredentialKind::Hmac,
+            groups,
+            claims: BTreeMap::new(),
+            body_digest: Some(body_digest),
+        }))
     }
 }
 
 #[async_trait]
 impl Authenticator for CompositeAuthenticator {
-    async fn authenticate(
-        &self,
-        headers: &HeaderMap,
-        client_cert: Option<&ClientCertificate>,
-    ) -> Result<Option<Identity>, AuthError> {
+    async fn authenticate(&self, req: &AuthnRequest<'_>) -> Result<Option<Identity>, AuthError> {
         if !self.enabled {
             return Ok(None);
         }
+        let headers = req.headers;
         // Family precedence (documented): header-presented credentials
         // express explicit intent and win — X-API-Key over anything in
-        // `Authorization`, `Basic` over `Bearer` by scheme token — and
-        // the VERIFIED client certificate is the ambient,
+        // `Authorization`, `Basic` over `Bearer` by scheme token, the
+        // X-Dwara signature family after the Authorization schemes —
+        // and the VERIFIED client certificate is the ambient,
         // connection-level family consulted only when no header
         // credential was presented. A Bearer header with no configured
         // provider is NOT interpreted (pass-through), so it falls
-        // through to the certificate family rather than masking it.
+        // through to the remaining families rather than masking them.
         if let Some(key) = headers.get(&X_API_KEY).and_then(|v| v.to_str().ok()) {
             if key.is_empty() {
                 return Err(AuthError::Invalid("empty api key"));
@@ -1449,8 +2039,15 @@ impl Authenticator for CompositeAuthenticator {
                 }
             }
         }
+        // HMAC request-signature family (DW-036): engaged by the
+        // PRESENCE of the signature header — an explicit-intent header
+        // credential like the two above, so a signed request never
+        // falls through to the ambient certificate family.
+        if headers.contains_key(&X_DWARA_SIGNATURE) {
+            return self.authenticate_hmac(req).await;
+        }
         // Ambient family: the verified client certificate (#124).
-        if let Some(cert) = client_cert {
+        if let Some(cert) = req.client_cert {
             return self.authenticate_client_cert(cert).await;
         }
         Ok(None)
@@ -1468,6 +2065,9 @@ impl Authenticator for CompositeAuthenticator {
         }
         if !self.jwt.is_empty() {
             parts.push("Bearer".to_string());
+        }
+        if !self.hmac_keys.is_empty() {
+            parts.push(HMAC_CHALLENGE.to_string());
         }
         if parts.is_empty() {
             "Bearer".to_string()

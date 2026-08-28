@@ -44,6 +44,17 @@
         "type": "string"
       }
     },
+    "hmac_auth": {
+      "description": "HMAC request-signing verification policy (DW-036): the\ngateway-wide clock-skew window applied to the\n`X-Dwara-Timestamp` header of every signed request. Absent\n(the default) = [`DEFAULT_HMAC_CLOCK_SKEW_SECS`] (±5 minutes).\nSee the `security::authn` module docs for the full\nsigning contract (canonical string, headers, replay window).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HmacAuth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "jwt_providers": {
       "description": "JWT verification providers (DW-019): trusted token issuers whose\nkeys are fetched from a JWKS endpoint. Each provider independently\nverifies `Authorization: Bearer` tokens (alg allowlist, iss/aud,\nexp with leeway) and maps the token to a consumer — via the\nprovider's explicit `consumer` binding, or by matching a\nconsumer's `jwt` credential `issuer` against the token's `iss`\nclaim. Empty (the default): the gateway does not interpret Bearer\ntokens and forwards `Authorization` upstream untouched.",
       "type": "array",
@@ -473,7 +484,7 @@
       ]
     },
     "Credential": {
-      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, or mTLS client-certificate match.\n\n`Debug` is manual (DW-045): the api-key value is SECRET and a derived\nimpl would print it — this keeps the config tree safe to Debug-log as\na whole (`Gateway` and every holder derive `Debug` over this type).",
+      "description": "One authenticator bound to a consumer: API key, JWT issuer/audience\nbinding, mTLS client-certificate match, or HMAC signing key (DW-036).\n\n`Debug` is manual (DW-045): the api-key and hmac-secret values are\nSECRET and a derived impl would print them — this keeps the config\ntree safe to Debug-log as a whole (`Gateway` and every holder derive\n`Debug` over this type).",
       "oneOf": [
         {
           "type": "object",
@@ -491,6 +502,30 @@
           "required": [
             "type",
             "key"
+          ]
+        },
+        {
+          "description": "HMAC request-signing credential (DW-036): the consumer presents\nper-request signatures over the canonical string documented in\nthe `security::authn` module docs, carried in the\n`X-Dwara-Signature` header family. Unlike API keys the secret\ncannot be hash-at-rest stored — recomputing an HMAC needs the\nRAW key bytes — so this credential is config-declared only (the\nstate store's hashed rows cannot serve it) and the resolved\nbytes live solely in the authenticator's memory, zeroized on\ndrop. The pepper (#124) deliberately does NOT apply here: it\nguards stored hashes, and there is no stored hash to guard.",
+          "type": "object",
+          "properties": {
+            "key_id": {
+              "description": "Public key identifier: the `X-Dwara-Key-Id` header value the\nclient presents to SELECT this credential (the AWS\naccess-key-id shape — it names the key, it is not secret).\nNon-empty visible ASCII, at most 128 bytes; unique across\nevery consumer (validation rejects duplicates — an ambiguous\nselector cannot pick a consumer deterministically).",
+              "type": "string"
+            },
+            "secret": {
+              "description": "The HMAC-SHA256 signing secret. INLINE values are accepted\n(redacted in every config echo, like api keys) but\n`${ENV_NAME}` / `${file:/path/to/secret}` references are the\nrecommended shape; resolved at config-compile time and\nre-read on every reload. Must be non-empty; use at least 32\nbytes of entropy (shorter keys weaken the MAC construction\n— documented, not enforced, the same posture as the pepper).",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "hmac"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key_id",
+            "secret"
           ]
         },
         {
@@ -570,6 +605,20 @@
         "address",
         "port"
       ]
+    },
+    "HmacAuth": {
+      "description": "Gateway-wide HMAC request-signing policy (DW-036). The credential\nitself (key id + secret) lives on a consumer\n(`credentials: [{type: hmac, ...}]`); this block carries the\nVERIFICATION policy that applies to every signed request.",
+      "type": "object",
+      "properties": {
+        "max_clock_skew_secs": {
+          "description": "Maximum accepted absolute difference, in seconds, between the\nrequest's `X-Dwara-Timestamp` and the gateway clock. A timestamp\noutside the window is rejected 401 BEFORE any HMAC computation\n(an expired window is not a MAC problem). The window is also the\nreplay window: nonces are remembered for twice this duration.\nDefault 300 (±5 minutes, the §4.6 recommendation); validation\nenforces 1..=3600 (a sub-second window rejects every request\nwith any clock drift; an unbounded one pins nonce-cache memory\nforever).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "IpAcl": {
       "description": "IP access control on the effective client IP (DW-020, feature\nanalysis 4.15). Entries are IP addresses (e.g. `10.1.2.3`) or CIDRs\n(e.g. `10.0.0.0/8`); anything else fails config validation (the same\nparser as `gateway.trusted_proxies`). Evaluation order: the `deny`\nlist first (a match rejects with 403 regardless of the allow list),\nthen the `allow` list, then `default` for IPs matched by neither.\n\nA `/0` (all-addresses) entry such as `0.0.0.0/0` or `::/0` is\nREJECTED by validation in the `allow` list: an allow-all entry\nfilters nothing and is always a mistake — the intended shape is an\nempty allow list with `default: allow` (the ACL's default mode).\nA `/0` in the `deny` list is meaningful (deny-all) and is accepted.",

@@ -124,6 +124,7 @@ fn good_gateway() -> Gateway {
         jwt_providers: Vec::new(),
         admin: None,
         allow_empty_routes: false,
+        hmac_auth: None,
     }
 }
 

@@ -1,8 +1,8 @@
 # Authentication and authorization
 
 Source: `crates/dwara-core/src/security/{authn,authz}.rs` (DW-019,
-DW-020; pepper and mTLS hardening per #124). Tests: `authn`, `authz`
-(dwara-core).
+DW-020; pepper and mTLS hardening per #124; HMAC request signing per
+DW-036). Tests: `authn`, `authz`, `hmac_signing` (dwara-core).
 
 Authentication answers "who is this caller?"; authorization answers
 "is this caller allowed **here**?", evaluated only after authentication
@@ -10,9 +10,9 @@ Authentication answers "who is this caller?"; authorization answers
 never reach either chain; see the docs-site
 [request pipeline](../../docs-site/architecture/overview.md#request-pipeline)).
 
-## Authentication: four credential families, one trait
+## Authentication: five credential families, one trait
 
-All four live behind one `Authenticator` trait:
+All five live behind one `Authenticator` trait:
 
 ```mermaid
 flowchart LR
@@ -20,10 +20,12 @@ flowchart LR
     Kind -->|X-API-Key| APIKEY[API key\nselector: hex(sha256(key))]
     Kind -->|Authorization: Basic| BASIC[Basic\nselector: hex(sha256(user))]
     Kind -->|Authorization: Bearer| JWT[JWT\nverified against JWKS]
+    Kind -->|X-Dwara-Signature| HMAC[HMAC request signing\nkey_id -> secret]
     Kind -->|client cert on TLS conn| MTLS[mTLS\nsubject CN or fingerprint]
     APIKEY --> Verify[constant-time compare\nsha256: or hmac-sha256: hash]
     BASIC --> Verify
     JWT --> JWKSVerify[signature + iss/exp/nbf/aud]
+    HMAC --> HmacVerify[HMAC-SHA256 over\ncanonical string v1]
     MTLS --> RustlsVerify[verified during TLS handshake,\nnever reaches authn unverified]
 ```
 
@@ -77,6 +79,170 @@ handshake — an unverified certificate fails the handshake and never
 reaches authn at all. A credential maps the verified certificate to a
 consumer by subject CommonName (`by subject`) or SHA-256 fingerprint
 (`by fingerprint`).
+
+**HMAC request signing** (DW-036): a per-request signature over the
+request line, payload digest, timestamp, and nonce, presented in the
+`X-Dwara-*` header family — the full contract is the dedicated section
+below. Where a consumer with an API key proves knowledge of a static
+secret, a signer additionally proves this *exact* request (method,
+path, query, body) was constructed by the key holder after the
+timestamp — a captured request cannot be modified or (within the
+window) replayed.
+
+**Family dispatch order** (composite, on request shape): `X-API-Key`
+wins over `Authorization`; within `Authorization`, `Basic` and
+`Bearer` are distinguished by the scheme token; a presented
+`X-Dwara-Signature` engages the HMAC family after the
+`Authorization` schemes; the client certificate is the AMBIENT
+family, consulted only when no header credential was presented (a
+header expresses explicit intent; the certificate is connection-level
+context).
+
+## HMAC request signing (DW-036 / #37)
+
+The interop contract lives in the `security::authn` module docs
+(`crates/dwara-core/src/security/authn.rs`) and is pinned by
+`tests/hmac_signing.rs`, which re-implements the grammar from the
+documentation ALONE — an independent conformance signer — so the docs
+are the spec. The end-user material (how to configure a signer, a
+worked signing example) is at
+[docs-site: HMAC request signing](../../docs-site/guide/hmac-signing.md).
+
+A consumer declares the credential in config:
+
+```yaml
+consumers:
+  - name: signer
+    credentials:
+      - type: hmac
+        key_id: signer-key-1            # public selector (X-Dwara-Key-Id)
+        secret: ${file:/etc/dwara/secrets/signer.key}
+```
+
+The secret is inline or a `${...}` reference like an API key (DW-045;
+inline values are redacted in every config echo — see
+[Secrets](./secrets.md)), with one deliberate difference: it is never
+hashed. Recomputing an HMAC needs the raw key bytes, so the resolved
+secret lives only in the authenticator's in-memory key map
+(zeroized on drop) — the state store never sees an `hmac` row, and
+store-managed HMAC credentials are deliberately unsupported. The
+credential pepper (#124) does not apply: it guards stored hashes, and
+there is none.
+
+### Wire format
+
+Five request headers, all REQUIRED when `X-Dwara-Signature` is
+presented — any missing or malformed one is a 401, like any other
+presented-but-invalid credential (presenting the signature header is
+the opt-in; unsigned requests pass through the family untouched):
+
+| Header | Content |
+|---|---|
+| `X-Dwara-Key-Id` | the credential's `key_id` (public selector; 1..=128 visible-ASCII bytes) |
+| `X-Dwara-Timestamp` | decimal Unix epoch seconds of signing (digits only) |
+| `X-Dwara-Nonce` | opaque client string, 16..=256 visible-ASCII bytes, unique per request within the replay window (use >= 128 bits of entropy) |
+| `X-Dwara-Body-Sha256` | lowercase hex SHA-256 of the request body (the empty body signs `e3b0c4...b855`, SHA-256 of the empty string) |
+| `X-Dwara-Signature` | lowercase hex HMAC-SHA256(secret, canonical string) |
+
+The `X-Dwara-*` headers are forwarded upstream untouched (the
+`X-API-Key` precedent; only `X-Consumer-*` are stripped), and the
+resolved identity drives `X-Consumer-*` injection and policy
+evaluation exactly like the other families.
+
+### Canonical string (v1) — the interop contract
+
+A version line followed by the seven signed elements, each pair
+joined by exactly one `\n` byte (no trailing newline). No element may
+itself contain `\n` — the grammar guarantees it (visible ASCII
+excludes control characters, the timestamp is digits, the digest is
+hex, and hyper's parser rejects raw control bytes in a request
+target):
+
+```text
+dwara-hmac-v1
+<key id>            the X-Dwara-Key-Id value, exactly as presented
+<method>            the HTTP method, uppercased (GET, POST, ...)
+<path>              the request path EXACTLY as received: percent-encoding preserved, no normalization
+<query>             the raw query string as received (no leading '?'), or an EMPTY line when absent
+<timestamp>         the X-Dwara-Timestamp value, exactly as presented
+<nonce>             the X-Dwara-Nonce value, exactly as presented
+<body digest>       the X-Dwara-Body-Sha256 value, exactly as presented
+```
+
+Three load-bearing decisions:
+
+- **Path/query exactly as received.** The signer cannot know what
+  normalization a proxy chain might apply, so the only lossless
+  contract is the raw bytes the client put on the wire. Query ORDER
+  is signed: `?a=1&b=2` and `?b=2&a=1` are different canonical
+  strings.
+- **Body by digest, carried in a signed header.** The gateway
+  verifies the MAC over headers only, then enforces the digest while
+  STREAMING the body to the upstream — zero buffering, any body size.
+  A mismatch aborts the upstream send mid-stream and answers 401; a
+  tampered body never completes upstream. The route's
+  `max_body_bytes` (DW-027, see
+  [Edge policies](./edge-policies.md)) composes: the digesting
+  wrapper sits inside the route's limit wrapper, so an over-cap body
+  is still 413 first.
+- **No other headers in v1.** The signed set already binds identity,
+  the request line, the payload, freshness, and uniqueness; signing
+  arbitrary header lists drags in canonicalization ambiguity every
+  signer must replicate exactly. The `Host` header is NOT signed — it
+  is a routing input, so a header-tampering party between signer and
+  gateway (non-TLS listener or untrusted proxy hop) could retarget a
+  validly signed request to a different host-matched route; TLS
+  termination makes that party mostly hypothetical and the gateway
+  rebuilds Host from the upstream pick (no cross-host forwarding). The
+  versioned first line leaves room for a v2 with opt-in header
+  (including Host) coverage without breaking v1 signers.
+- **Redirect/Respond actions skip digest enforcement.** Digest
+  verification guards the forward path; a signed request that resolves
+  to a redirect or direct-response action forwards no body upstream,
+  so the streaming digest check never runs (nothing is proxied, so
+  there is no upstream integrity surface to protect).
+
+### Verification order and failure posture
+
+1. Header presence/format parse (401 on any malformed element).
+2. Timestamp inside `±max_clock_skew_secs` — checked BEFORE any HMAC
+   work; an expired window is not a MAC problem. Outside the window:
+   401.
+3. Key lookup, then `HMAC-SHA256(secret, canonical)` compared to the
+   presented signature with `subtle::ConstantTimeEq` over the full
+   32-byte digests — no early return on a byte mismatch. A key-miss
+   computes a dummy MAC first (fixed zero key) so the timing shape of
+   "unknown key" matches "wrong signature" and key existence is not
+   readable from latency; both answer the same 401 shape (envelope
+   code `unauthorized`, challenge `WWW-Authenticate:
+   Dwara-HMAC-SHA256 realm="dwara"`) as every other family.
+4. Nonce replay check, AFTER a successful MAC: the nonce is
+   remembered under `key_id + '\n' + nonce` for twice the skew
+   window, and a remembered nonce inside its TTL is a 401. Burned
+   only on VALID signatures — junk traffic cannot flood legitimate
+   nonces out of the cache.
+
+### Clock skew and the replay window
+
+The window is gateway-level config (`hmac_auth.max_clock_skew_secs`,
+default 300 — ±5 minutes; validated 1..=3600). It bounds both the
+accepted timestamp drift and the nonce TTL (2x the window): a
+timestamp stays acceptable for at most one full window after its
+request was first seen, so the doubled TTL covers the boundary with
+margin. Replay protection is therefore only as strong as the nonce
+cache's retention.
+
+The nonce cache is in-memory, sharded (16 shard locks, the GCRA
+store's pattern), TTL-expired, and capped at 4,096 entries per shard
+(`MAX_NONCE_CACHE_ENTRIES_PER_SHARD`) with soonest-expiry-first
+eviction: under a nonce flood the cache degrades fail-open to
+eviction — the documented GCRA trade (an availability DoS must not
+become a gateway outage). It is also PER-INSTANCE: dwara M2 is a
+single-process deployment, and a multi-instance fleet behind one VIP
+would let a replayed request hit a cold instance. A shared nonce
+store is the enterprise/Redis seam (DW-031's world); the boundary is
+documented here so operators do not mistake per-instance replay
+protection for fleet-wide.
 
 ## Authorization: precedence and 401 vs. 403
 

@@ -419,6 +419,12 @@ pub struct DataPlane {
     /// JWKS caches keyed by provider URL, carried ACROSS generation swaps
     /// so key rotation state survives reloads (DW-019).
     jwks_caches: std::sync::Mutex<HashMap<String, Arc<JwksCacheEntry>>>,
+    /// HMAC replay-nonce store (DW-036), carried ACROSS generation swaps
+    /// exactly like `jwks_caches`: a reload must never wipe remembered
+    /// nonces (that would re-open the replay window mid-flight). Built
+    /// once per dataplane (per-instance in M2 — see the authn module's
+    /// replay boundary note); the authenticator rebuild shares the Arc.
+    nonce_cache: Arc<crate::security::authn::NonceCache>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -499,6 +505,7 @@ impl DataPlane {
             state_store: std::sync::RwLock::new(None),
             credential_pepper: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
+            nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
             obs: Arc::new(Observability::from_env()),
             state,
         };
@@ -571,6 +578,7 @@ impl DataPlane {
             &mut caches,
             Some(&self.obs),
             pepper.as_ref(),
+            Arc::clone(&self.nonce_cache),
         );
         self.authn.store(authn);
     }
@@ -979,9 +987,18 @@ where
         .cloned();
     // The authn phase span (DW-021): instrumented onto the authenticate
     // future so the span covers exactly the phase (no guard is held
-    // across a poll boundary).
+    // across a poll boundary). The request target (method/path/query)
+    // rides along for the HMAC family (DW-036), which signs it; the
+    // body deliberately does not (authn never buffers — the HMAC body
+    // digest is enforced on the forward path below).
+    let authn_req = crate::security::authn::AuthnRequest {
+        method: req.method(),
+        uri: req.uri(),
+        headers: req.headers(),
+        client_cert: client_cert.as_deref(),
+    };
     let identity = match authn
-        .authenticate(req.headers(), client_cert.as_deref())
+        .authenticate(&authn_req)
         .instrument(tracing::info_span!("authn"))
         .await
     {
@@ -1244,26 +1261,55 @@ where
             // thin passthrough when the route sets no cap; the
             // declared-length half was rejected above) guards requests
             // of unknown length for the whole proxy path.
-            let req = req.map(|b| {
-                crate::dataplane::hardening::LimitedBody::new(
-                    b,
-                    route.limits.as_ref().and_then(|l| l.max_body_bytes),
+            //
+            // Signed-body digest enforcement (DW-036): an
+            // HMAC-authenticated request carries the digest its
+            // signature bound — the digesting wrapper folds every
+            // streamed frame into a SHA-256 (nothing buffered) and
+            // aborts the upstream send when the final hash disagrees.
+            // It sits INSIDE the route's limit wrapper, so an over-cap
+            // body is still rejected 413 first; every other request
+            // (no signed digest) streams through unchanged.
+            let signed_digest = identity.as_ref().and_then(|id| id.body_digest);
+            // Eager verdict for a signed body declaring EXACTLY zero
+            // bytes: hyper's h1 encoder never polls it (see
+            // DigestingBody's docs), so a digest mismatch there has
+            // no mid-stream abort to surface through — refuse with
+            // the family's 401 before the request is forwarded at
+            // all. A correct empty digest forwards normally; unsigned
+            // requests are unaffected.
+            let (parts, body) = req.into_parts();
+            let digesting = crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
+            if digesting.eager_digest_mismatch() {
+                tracing::warn!(
+                    code = "signature_body_mismatch",
+                    request_id = %rid,
+                    "signed empty request body did not match its digest; refused before forward"
+                );
+                unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
+            } else {
+                let req = Request::from_parts(
+                    parts,
+                    crate::dataplane::hardening::LimitedBody::new(
+                        digesting,
+                        route.limits.as_ref().and_then(|l| l.max_body_bytes),
+                    ),
+                );
+                proxy_request(
+                    &gen,
+                    peer,
+                    req,
+                    route,
+                    idx,
+                    &params,
+                    &mut global_permit,
+                    identity.as_ref(),
+                    rid,
+                    rec,
+                    &dp.obs,
                 )
-            });
-            proxy_request(
-                &gen,
-                peer,
-                req,
-                route,
-                idx,
-                &params,
-                &mut global_permit,
-                identity.as_ref(),
-                rid,
-                rec,
-                &dp.obs,
-            )
-            .await
+                .await
+            }
         }
         RouteAction::Redirect {
             scheme,
@@ -1952,6 +1998,23 @@ where
                 );
             }
             Err(err) => {
+                // Signed-body digest mismatch (DW-036): the CLIENT's
+                // request body did not match the digest its signature
+                // bound. Checked BEFORE the retry branch (a mismatch is
+                // deterministic — a retry re-sends the same tampered
+                // bytes and re-fails) and before breaker observation:
+                // the upstream never saw a complete request, so this
+                // says nothing about upstream health either. 401, the
+                // family's failure shape.
+                if signature_body_mismatch(&err) {
+                    tracing::warn!(
+                        code = "signature_body_mismatch",
+                        request_id = %rid,
+                        upstream = handle.name(),
+                        "signed request body did not match its digest; aborted mid-stream"
+                    );
+                    return unauthorized(crate::security::authn::HMAC_CHALLENGE, rid);
+                }
                 // Breaker observation: transport-class failures count.
                 // Client-side admission rejections (Saturated — no upstream
                 // contact) and configuration-class errors say nothing about
@@ -2099,6 +2162,47 @@ fn request_limit_exceeded(err: &UpstreamError) -> bool {
             })
         {
             return true;
+        }
+        src = s.source();
+    }
+    false
+}
+
+/// Whether an upstream send failed because the REQUEST body did not
+/// match the digest its HMAC signature bound (DW-036). The digesting
+/// wrapper (`hardening::DigestingBody`) sits INSIDE the route's limit
+/// wrapper, so the marker may hide under a `LimitedBodyError::Inner`
+/// box whose own `source()` chain is not wired — walk the generic
+/// source chain AND descend into that box explicitly. Like
+/// [`request_limit_exceeded`], the marker type is only ever produced
+/// by the gateway's own request-body wrapper, so it can never be
+/// confused with an upstream failure.
+fn signature_body_mismatch(err: &UpstreamError) -> bool {
+    use crate::dataplane::hardening::{LimitedBodyError, SignatureBodyError};
+    let UpstreamError::Client(e) = err else {
+        return false;
+    };
+    let is_mismatch = |e: &(dyn std::error::Error + 'static)| {
+        matches!(
+            e.downcast_ref::<SignatureBodyError>(),
+            Some(SignatureBodyError::DigestMismatch)
+        )
+    };
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(s) = src {
+        if is_mismatch(s) {
+            return true;
+        }
+        // Descend into the limit wrapper's Inner box (it does not
+        // expose the inner error through `source()`).
+        if let Some(LimitedBodyError::Inner(inner)) = s.downcast_ref::<LimitedBodyError>() {
+            let mut inner_src: Option<&(dyn std::error::Error + 'static)> = Some(inner.as_ref());
+            while let Some(i) = inner_src {
+                if is_mismatch(i) {
+                    return true;
+                }
+                inner_src = i.source();
+            }
         }
         src = s.source();
     }

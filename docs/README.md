@@ -33,7 +33,8 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [Route edge policies](./features/edge-policies.md) — CORS,
   response compression, per-route request limits (DW-027).
 - [Authentication and authorization](./features/authn-authz.md) — the
-  four credential families, the authz precedence chain, IP ACLs.
+  five credential families (API key, Basic, JWT, mTLS, HMAC request
+  signing), the authz precedence chain, IP ACLs.
 - [Secrets](./features/secrets.md) — `${...}` secret references in
   config, compile-time resolution, typed redaction of config echoes
   (DW-045).

@@ -232,6 +232,33 @@ the project follows semantic versioning once 1.0 is reached.
   `FileSecretSource` extension impl (re-reads per resolve, no caching;
   a missing file is a fail-closed error naming the path);
   `config-reference.json` regenerated.
+- HMAC request signing (#37): a fifth credential family. Consumers
+  declare `credentials: [{type: hmac, key_id, secret}]` (the secret
+  inline — redacted in every config echo like api keys — or a
+  `${...}` reference); a signed request carries five headers
+  (`X-Dwara-Key-Id/-Timestamp/-Nonce/-Body-Sha256/-Signature`) and the
+  gateway verifies HMAC-SHA256 over a canonical string of a version
+  tag plus seven signed elements
+  (key id, method, raw path, raw query, timestamp, nonce,
+  body digest — the grammar is pinned in the `security::authn` module
+  docs and re-implemented independently by the integration suite as
+  the interop contract). Timestamps outside a gateway-wide
+  clock-skew window (`hmac_auth.max_clock_skew_secs`, default 300s,
+  validated 1..=3600) are 401 before any MAC work; nonces are
+  remembered for twice the window in a sharded per-instance in-memory
+  cache (single-instance boundary documented; a shared store is the
+  enterprise seam) and a replay inside the window is 401; the MAC
+  compares in constant time over the full digest, with a dummy
+  computation on unknown key ids so key existence is not
+  timing-readable. The signed body digest is enforced while STREAMING:
+  nothing is buffered, any body size, the digesting wrapper sits inside
+  the route's body-limit wrapper (413 still wins), and a body that
+  does not match its signed digest aborts the upstream send mid-stream
+  and answers 401 — a tampered body never completes upstream. The
+  secret never becomes a stored hash (an HMAC needs the raw key bytes),
+  so the credential is config-served only, held zeroized in memory, and
+  the credential pepper deliberately does not apply;
+  `config-reference.json` regenerated.
 
 ### Fixed
 

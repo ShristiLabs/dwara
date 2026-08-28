@@ -2613,15 +2613,28 @@ async fn disabled_jwt_provider_fails_closed_on_bearer_tokens() {
     );
     let gateway = parse_gateway(&yaml).expect("parses: bundle loading is validation, not parse");
     let mut jwks_caches = std::collections::HashMap::new();
-    let authn = CompositeAuthenticator::build(&gateway, None, &mut jwks_caches, None, None);
+    let authn = CompositeAuthenticator::build(
+        &gateway,
+        None,
+        &mut jwks_caches,
+        None,
+        None,
+        std::sync::Arc::new(dwara_core::security::authn::NonceCache::new()),
+    );
 
     let mut headers = HeaderMap::new();
     headers.insert(
         hyper::header::AUTHORIZATION,
         "Bearer eyJhbGciOiJub25lIn0.e30.signature".parse().unwrap(),
     );
+    let request = dwara_core::security::authn::AuthnRequest {
+        method: &hyper::Method::GET,
+        uri: &"/".parse().unwrap(),
+        headers: &headers,
+        client_cert: None,
+    };
     let err = authn
-        .authenticate(&headers, None)
+        .authenticate(&request)
         .await
         .expect_err("a disabled provider must fail closed on a presented Bearer token");
     match err {
@@ -2658,11 +2671,24 @@ async fn disabled_jwt_provider_without_a_bearer_still_passes_through() {
     );
     let gateway = parse_gateway(&yaml).expect("parses: bundle loading is validation, not parse");
     let mut jwks_caches = std::collections::HashMap::new();
-    let authn = CompositeAuthenticator::build(&gateway, None, &mut jwks_caches, None, None);
+    let authn = CompositeAuthenticator::build(
+        &gateway,
+        None,
+        &mut jwks_caches,
+        None,
+        None,
+        std::sync::Arc::new(dwara_core::security::authn::NonceCache::new()),
+    );
 
     let headers = HeaderMap::new();
+    let request = dwara_core::security::authn::AuthnRequest {
+        method: &hyper::Method::GET,
+        uri: &"/".parse().unwrap(),
+        headers: &headers,
+        client_cert: None,
+    };
     let identity = authn
-        .authenticate(&headers, None)
+        .authenticate(&request)
         .await
         .expect("no presented credential must not fail");
     assert!(identity.is_none(), "anonymous pass-through, not an error");
