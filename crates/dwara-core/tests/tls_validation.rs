@@ -85,6 +85,7 @@ fn base_gateway(listener: Listener) -> Gateway {
                 headers: Default::default(),
                 query: vec![],
                 cookies: vec![],
+                accept: None,
             },
             action: RouteAction::Proxy { rewrite: None },
             policies: vec![],
@@ -94,6 +95,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             compression: None,
             limits: None,
             authorization: None,
+            deprecation: None,
         }],
         services: vec![Service {
             name: "svc".into(),

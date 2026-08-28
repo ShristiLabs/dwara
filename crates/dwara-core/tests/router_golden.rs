@@ -191,7 +191,7 @@ fn router_golden_suite() {
         let path_only = req.uri().path().to_string();
         let resolved = table.find_full(&path_only).and_then(|(idx, params)| {
             let route = &gateway.routes[idx];
-            if route_applies(&route.r#match, &req) {
+            if route_applies(&route.r#match, table.accept_media_type(idx), &req) {
                 Some((idx, params, route.name.clone()))
             } else {
                 None

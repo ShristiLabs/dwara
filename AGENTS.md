@@ -193,7 +193,9 @@ Rules for new code:
   (413/431) → CORS preflight short-circuit (204, pre-authn) → authn
   → authz → rate limit → gateway cap admission (priority-aware) →
   breaker → endpoint pick → pending cap → connect; responses then
-  gain route compression + CORS decoration (DW-027). Unrouted traffic
+  gain route compression (DW-027) → versioning stamps (Vary: Accept
+  fold + Deprecation/Sunset/Link, DW-048) → CORS decoration (DW-027)
+  → rate headers. Unrouted traffic
   stops at route resolution: listener- and global-attached policies
   rate-limit the request before the 404; authn/authz never run
   pre-route.
@@ -254,6 +256,14 @@ backlog flush + drain. `POST` to the admin API is live-published.
   `cargo fuzz`, python3 for `scripts/bench-baseline.py`.
 - The musl/aws-lc-rs build needs cmake + a C compiler; the release
   Dockerfiles carry these in their builder stages.
+- **Disk out of space:** this workspace's `target/` grows large (multiple
+  crates, LTO release builds, fuzz corpora). If a build/test/lint command
+  fails with a "No space left on device" (`ENOSPC`) error, run
+  `cargo clean` first (drops `target/`, forcing a full rebuild) and retry
+  before troubleshooting further. If space is still tight, `cargo clean -p
+  <crate>` targets just one crate's artifacts, and `du -sh target/*` finds
+  what's largest. Re-run the full verification gate after cleaning, since a
+  clean forces every check to rebuild from scratch.
 
 ## Test map
 

@@ -55,6 +55,7 @@ sequenceDiagram
     G->>U: action (proxy / redirect / respond)
     U-->>G: response
     G->>G: compression: negotiate, decide, wrap (streaming)
+    G->>G: versioning: Vary: Accept merge + Deprecation/Sunset stamps
     G->>G: CORS decoration: policy headers + Vary: Origin
     G-->>C: response
 ```
@@ -86,11 +87,14 @@ Interception points, in order (see `proxy::handle`):
 4. **Response side, after the action**: compression first
    (`compression::decide` + `wrap_response` — it rewrites the
    response's framing: drops `Content-Length`, sets
-   `Content-Encoding`, merges `Vary: Accept-Encoding`), then CORS
+   `Content-Encoding`, merges `Vary: Accept-Encoding`), then the
+   API-versioning stamps (`Vary: Accept` merge on accept-selected
+   routes + the Deprecation/Sunset headers — see
+   [API versioning](./versioning.md)), then CORS
    decoration (`cors::decorate_actual` — additive headers only),
    then the existing rate-limit response headers. Each stage appends
    only after the previous one's rewrites, so the client-facing
-   header set is the composition of all three.
+   header set is the composition of all of them.
 
 ## CORS
 

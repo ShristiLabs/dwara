@@ -32,6 +32,7 @@ fn good_gateway() -> Gateway {
                     headers: Default::default(),
                     query: vec![],
                     cookies: vec![],
+                    accept: None,
                 },
                 action: RouteAction::Proxy { rewrite: None },
                 policies: vec![],
@@ -41,6 +42,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                deprecation: None,
             },
             Route {
                 name: "static".into(),
@@ -55,6 +57,7 @@ fn good_gateway() -> Gateway {
                     headers: Default::default(),
                     query: vec![],
                     cookies: vec![],
+                    accept: None,
                 },
                 action: RouteAction::Proxy { rewrite: None },
                 policies: vec![],
@@ -64,6 +67,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                deprecation: None,
             },
             Route {
                 name: "legacy".into(),
@@ -78,6 +82,7 @@ fn good_gateway() -> Gateway {
                     headers: Default::default(),
                     query: vec![],
                     cookies: vec![],
+                    accept: None,
                 },
                 action: RouteAction::Proxy { rewrite: None },
                 policies: vec![],
@@ -87,6 +92,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                deprecation: None,
             },
         ],
         services: vec![Service {

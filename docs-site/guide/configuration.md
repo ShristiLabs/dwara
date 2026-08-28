@@ -80,9 +80,11 @@ declaration order or how specific a pattern looks:
 
 A route may add further criteria, all AND-ed together: `host` (exact,
 case-insensitive), `methods`, exact-value `headers`, `query`
-parameters, and `cookies`. If a path matches a route's path pattern but
-its other criteria miss, the request does **not** fall through to
-another candidate route — it is answered `404`.
+parameters, `cookies`, and `accept` (a media type the request's
+`Accept` header must name explicitly — see
+[API versioning](./api-versioning)). If a path matches a route's path
+pattern but its other criteria miss, the request does **not** fall
+through to another candidate route — it is answered `404`.
 
 ## Route actions
 
@@ -129,10 +131,11 @@ taking precedence (deny-anywhere-wins). See the architecture doc's
 each stage runs, and the [configuration schema](../reference/configuration-schema)
 for the exact policy fields.
 
-Cross-origin access (CORS), response compression, and per-route
-request limits are not policy attachments — each is a single optional
-block on the route itself. See
-[CORS, compression, and request limits](./edge-policies).
+Cross-origin access (CORS), response compression, per-route request
+limits, and the API deprecation-signal block are not policy
+attachments — each is a single optional block on the route itself. See
+[CORS, compression, and request limits](./edge-policies) and
+[API versioning](./api-versioning).
 
 ## Authentication and authorization
 

@@ -63,6 +63,10 @@ export default withMermaid(
                   text: "CORS, compression, limits",
                   link: "/guide/edge-policies",
                 },
+                {
+                  text: "API versioning",
+                  link: "/guide/api-versioning",
+                },
                 { text: "Secrets", link: "/guide/secrets" },
                 {
                   text: "HMAC signing",

@@ -32,6 +32,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
   windows, bounded key-space eviction.
 - [Route edge policies](./features/edge-policies.md) — CORS,
   response compression, per-route request limits (DW-027).
+- [API versioning](./features/versioning.md) — the version routing
+  patterns (path segment / header / query / Accept media type), the
+  `match.accept` criterion, Deprecation/Sunset header automation
+  (DW-048).
 - [Authentication and authorization](./features/authn-authz.md) — the
   five credential families (API key, Basic, JWT, mTLS, HMAC request
   signing), the authz precedence chain, IP ACLs.

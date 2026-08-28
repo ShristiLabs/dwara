@@ -500,6 +500,132 @@ fn validate_request_limits(
     }
 }
 
+/// Validate one `deprecation` block (DW-048): a block with no dates has
+/// no effect (omit it); dates must be IMF-fixdate HTTP-dates (the only
+/// form RFC 9110 generators may send — see `config::versioning`); a
+/// sunset already in the past advertises a removal that already happened
+/// (rejected: remove the route or extend the date — this also stops a
+/// long-lived deployment from silently re-publishing a stale sunset;
+/// a rejected hot reload keeps the running generation, so the operator
+/// must fix the date to publish ANY new config carrying it, which is the
+/// fail-closed intent); sunset must not precede since; and `uri`
+/// documents the `Deprecation` header, so it requires `since`. The
+/// past-sunset check reads the wall clock: it is a compile-time policy
+/// gate, not a per-request one.
+fn validate_deprecation(
+    name: &str,
+    dep: &crate::config::Deprecation,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let since = dep
+        .since
+        .as_deref()
+        .and_then(crate::config::versioning::parse_http_date);
+    let sunset = dep
+        .sunset
+        .as_deref()
+        .and_then(crate::config::versioning::parse_http_date);
+    // The no-dates check reads the RAW fields: a garbage `since` with no
+    // `sunset` is a date-format error, not an empty block (reporting it
+    // as both would be noise).
+    if dep.since.is_none() && dep.sunset.is_none() {
+        issues.push(issue(
+            "route",
+            name,
+            "deprecation",
+            "carries no dates (no since or sunset) and emits nothing: omit the \
+             deprecation block entirely",
+        ));
+    }
+    for (field, value) in [
+        ("deprecation.since", &dep.since),
+        ("deprecation.sunset", &dep.sunset),
+    ] {
+        if let Some(v) = value {
+            if crate::config::versioning::parse_http_date(v).is_none() {
+                issues.push(issue(
+                    "route",
+                    name,
+                    field,
+                    format!(
+                        "'{v}' is not a valid HTTP-date: use the IMF-fixdate form \
+                         (e.g. 'Sun, 06 Nov 1994 08:49:37 GMT')"
+                    ),
+                ));
+            }
+        }
+    }
+    if let Some(s) = since {
+        if s.unix_seconds() < 0 {
+            issues.push(issue(
+                "route",
+                name,
+                "deprecation.since",
+                "since must be 1970 or later (the RFC 9745 Deprecation header renders it \
+                 as a Unix-time structured date)",
+            ));
+        }
+    }
+    if let Some(s) = sunset {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if s.unix_seconds() < now {
+            issues.push(issue(
+                "route",
+                name,
+                "deprecation.sunset",
+                format!(
+                    "sunset date '{}' is in the past: the route should be removed or the \
+                     date extended, not advertise a removal that already happened",
+                    dep.sunset.as_deref().unwrap_or_default()
+                ),
+            ));
+        }
+        if let Some(since_date) = since {
+            if s.unix_seconds() < since_date.unix_seconds() {
+                issues.push(issue(
+                    "route",
+                    name,
+                    "deprecation.sunset",
+                    "sunset is before since (the route would be removed before it is \
+                     deprecated)",
+                ));
+            }
+        }
+    }
+    if let Some(uri) = &dep.uri {
+        if since.is_none() {
+            issues.push(issue(
+                "route",
+                name,
+                "deprecation.uri",
+                "uri requires since: the Link rel=\"deprecation\" it emits documents the \
+                 Deprecation header, which only since produces",
+            ));
+        }
+        // The Link header is built as `<uri>; rel="deprecation"` — the
+        // URI must parse AND carry no byte that breaks out of the angle
+        // brackets or the quoted param.
+        let parseable = match uri.parse::<hyper::Uri>() {
+            Ok(u) => matches!(u.scheme_str(), Some("http") | Some("https")) && u.host().is_some(),
+            Err(_) => false,
+        };
+        if !parseable || uri.bytes().any(|b| matches!(b, b'<' | b'>' | b'"')) {
+            issues.push(issue(
+                "route",
+                name,
+                "deprecation.uri",
+                format!(
+                    "'{uri}' must be an absolute http(s) URL with no '<', '>', or '\"' \
+                         (it is emitted inside a Link header)"
+                ),
+            ));
+        }
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -1111,6 +1237,26 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         }
         if let Some(limits) = &r.limits {
             validate_request_limits(&r.name, limits, &mut issues);
+        }
+        if let Some(dep) = &r.deprecation {
+            validate_deprecation(&r.name, dep, &mut issues);
+        }
+        // Media-type criterion (DW-048): the shared grammar in
+        // config::versioning is the whole check — a value that is not a
+        // bare type/subtype can never match and is an authoring error.
+        if let Some(accept) = &r.r#match.accept {
+            if crate::config::versioning::normalize_media_type(accept).is_none() {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "match.accept",
+                    format!(
+                        "'{accept}' is not a bare media type: use type/subtype like \
+                         'application/vnd.acme.v2+json' (parameters and wildcards are not \
+                         supported; wildcards never match a versioned route)"
+                    ),
+                ));
+            }
         }
         let m = &r.r#match.path;
         for (field, entries) in [
@@ -1943,6 +2089,20 @@ pub struct RouteTable {
     /// Precompiled compression content-type filter per route index
     /// (DW-027), mirroring `Route::compression` the same way.
     compression_types: Vec<Option<crate::config::CompiledContentTypeFilter>>,
+    /// Precompiled deprecation header values per route index (DW-048),
+    /// mirroring `Route::deprecation` the same way: HTTP-dates are
+    /// parsed once here, never per response.
+    deprecations: Vec<Option<crate::config::CompiledDeprecation>>,
+    /// Normalized `match.accept` media type per route index (DW-048),
+    /// mirroring `Route::r#match.accept` exactly (`None` = no
+    /// criterion). Normalizing here — trim + lowercase via the shared
+    /// `config::versioning` grammar — keeps the raw config string out
+    /// of the request path, so a padded or mixed-case spelling matches
+    /// exactly like its canonical form. Validation guarantees every
+    /// configured value normalizes; a `None` for a configured one is
+    /// the same unreachable-skip contract as the compilations above
+    /// (`compile` has already run validation by then).
+    accept_media_types: Vec<Option<String>>,
 }
 
 impl RouteTable {
@@ -1955,6 +2115,8 @@ impl RouteTable {
             rewrite_regexes: Vec::new(),
             cors_origins: Vec::new(),
             compression_types: Vec::new(),
+            deprecations: Vec::new(),
+            accept_media_types: Vec::new(),
         }
     }
 
@@ -2011,6 +2173,22 @@ impl RouteTable {
         idx: usize,
     ) -> Option<&crate::config::CompiledContentTypeFilter> {
         self.compression_types.get(idx).and_then(|t| t.as_ref())
+    }
+
+    /// The precompiled deprecation header values for route `idx` (`None`:
+    /// the route carries no `deprecation` block — exactly mirroring
+    /// `gateway().routes[idx].deprecation`).
+    pub fn deprecation(&self, idx: usize) -> Option<&crate::config::CompiledDeprecation> {
+        self.deprecations.get(idx).and_then(|d| d.as_ref())
+    }
+
+    /// The normalized `match.accept` media type for route `idx` (`None`:
+    /// the route carries no accept criterion — exactly mirroring
+    /// `gateway().routes[idx].r#match.accept`). This is the comparison
+    /// key the proxy's Accept criterion must use, never the raw config
+    /// string.
+    pub fn accept_media_type(&self, idx: usize) -> Option<&str> {
+        self.accept_media_types.get(idx).and_then(|a| a.as_deref())
     }
 }
 
@@ -2216,6 +2394,35 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 .map(crate::config::CompiledContentTypeFilter::compile)
         })
         .collect();
+    // DW-048: the deprecation header values, parsed from their config
+    // HTTP-dates once here (validation guarantees they parse; the
+    // filter_map fallback documents the same unreachable-skip contract
+    // as the CORS/compression compilations above).
+    let deprecations = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.deprecation
+                .as_ref()
+                .map(crate::config::CompiledDeprecation::compile)
+        })
+        .collect();
+    // DW-048: the accept criterion's comparison key, normalized once
+    // here instead of on every request — validation guarantees every
+    // configured value normalizes, so the None fallback is unreachable
+    // (the same skip contract as the compilations above). Without this
+    // the raw config string reached the hot path, and a padded
+    // `match.accept` published cleanly only to 404 every request.
+    let accept_media_types = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            r.r#match
+                .accept
+                .as_deref()
+                .and_then(crate::config::versioning::normalize_media_type)
+        })
+        .collect();
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -2227,6 +2434,8 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             rewrite_regexes,
             cors_origins,
             compression_types,
+            deprecations,
+            accept_media_types,
         }),
         content_hash,
     })

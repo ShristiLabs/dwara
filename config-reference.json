@@ -580,6 +580,34 @@
         }
       ]
     },
+    "Deprecation": {
+      "description": "Route-level API deprecation policy (DW-048): automates the RFC\ndeprecation signal headers on every response of the route.\n\nWhat the block emits (computed once at snapshot compile; see\n[`CompiledDeprecation`] and `dataplane::versioning`):\n\n- `since` (header emitted only when set): `Deprecation:\n  @<unix-seconds>` — the RFC 9745 structured-date form (RFC 9651\n  dates). RFC 9745 carries no URI inside the `Deprecation` field;\n  the human-readable notice travels in the `Link` below.\n- `sunset` (optional): `Sunset: <HTTP-date>` verbatim — RFC 8594\n  requires an HTTP-date, and validation accepts exactly the\n  IMF-fixdate form generators must send (see `config::versioning`).\n- `uri` (optional, requires `since`): `Link: <uri>;\n  rel=\"deprecation\"` appended — the RFC 9745 companion link to the\n  migration documentation.\n\nSemantics (frozen):\n\n- Headers are stamped on the route's ACTION responses (proxy,\n  redirect, respond) in the response decoration tail — after\n  compression wrapping (the codec only rewrites `Content-Length`,\n  `Content-Encoding`, and `Vary`, so these headers pass through\n  verbatim) and beside the CORS headers (independent families).\n  Gateway-generated short-circuits on the route (413/431 limit\n  rejections, CORS preflights, authn/authz/rate-limit rejections,\n  503 sheds) do NOT carry them: those responses describe the\n  gateway's opinion of the REQUEST, not the route's lifecycle.\n  (The eager HMAC body-digest 401 is an action-path response and\n  DOES carry them.) Unrouted traffic (404) never matches the route\n  at all.\n- The gateway is the source of truth for the headers it is configured\n  to emit: an upstream-sent `Deprecation`/`Sunset` on a route WITH a\n  `deprecation` block is replaced; on a route WITHOUT one, upstream\n  values pass through untouched. `Link` is appended (a list header —\n  upstream links survive).\n- Validation rejects: a block with neither `since` nor `sunset` (no\n  effect — omit it), dates that are not IMF-fixdate, a `sunset`\n  already in the past (advertising a removal that already happened;\n  remove the route or extend the date — this also stops a long-lived\n  generation from silently re-publishing a stale sunset), a `sunset`\n  before `since` (removed before deprecated), and a `uri` without\n  `since` (the link documents the `Deprecation` header).",
+      "type": "object",
+      "properties": {
+        "since": {
+          "description": "When this API version was (or will be) deprecated, as an\nIMF-fixdate HTTP-date (`Sun, 06 Nov 1994 08:49:37 GMT`). Emits\n`Deprecation: @<unix-seconds>` (RFC 9745). A past date is normal\n(the deprecation is in effect); a date before 1970 cannot form\nthe structured date and is rejected.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sunset": {
+          "description": "When this API version is expected to stop working, as an\nIMF-fixdate HTTP-date. Emits `Sunset` (RFC 8594) verbatim.\nValidation rejects a date already in the past and a date before\n`since`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uri": {
+          "description": "URI of the deprecation/migration notice (absolute `http(s)` URL).\nRequires `since` — the RFC 9745 `Link; rel=\"deprecation\"` it\nemits documents the `Deprecation` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "Endpoint": {
       "description": "One `address:port` inside an upstream.",
       "type": "object",
@@ -1317,6 +1345,17 @@
             }
           ]
         },
+        "deprecation": {
+          "description": "API deprecation policy (DW-048): emits the standard deprecation\nsignal headers on this route's responses. See [`Deprecation`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deprecation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "limits": {
           "description": "Route-scoped request size limits (DW-027, feature analysis 4.16):\nper-route body and header caps enforced after route resolution.\nOver-limit requests are rejected by the gateway with the JSON\nerror envelope (413 for bodies, 431 for headers) before any\nupstream contact when the size is declared up front\n(`Content-Length`); streaming bodies of unknown length are\naborted as soon as they cross the cap.",
           "anyOf": [
@@ -1468,6 +1507,13 @@
       "description": "Matching rules for incoming requests.",
       "type": "object",
       "properties": {
+        "accept": {
+          "description": "Media-type version selection (DW-048): a bare `type/subtype` the\nrequest's `Accept` header must name explicitly, e.g.\n`application/vnd.acme.v2+json`. A comma-separated Accept list\nmatches on ANY entry; parameters and q-values on the request side\nare ignored; wildcard entries (`*/*`, `type/*`) and a missing\nAccept header never match — version selection requires the client\nto NAME the version, so unconstrained clients fall through to the\nroute without this criterion (the unversioned default). Like every\nnon-path criterion this is AND-ed and applied AFTER path\nresolution: a miss does not fall through to another route (404),\nand two routes cannot share one path to offer multiple versions —\nversion families use distinct paths (`/v1/`, `/v2/`) or this\ncriterion on a versioned path. Validation rejects anything but a\nbare lowercase-able `type/subtype` (`config::versioning` owns the\ngrammar). Responses of a matched route carry `Vary: Accept`\n(merged), so shared caches key on the negotiated representation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cookies": {
           "description": "Cookie matches (parsed from the `Cookie` header); every entry must\nmatch (AND). Name-only entries match on presence; a `value` requires\nan exact match (no cookie-unquoting in v1).",
           "type": "array",

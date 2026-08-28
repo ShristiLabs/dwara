@@ -511,6 +511,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 headers: Default::default(),
                 query: vec![],
                 cookies: vec![],
+                accept: None,
             },
             action: RouteAction::Redirect {
                 scheme: None,
@@ -525,6 +526,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             compression: None,
             limits: None,
             authorization: None,
+            deprecation: None,
         }],
         services: vec![],
         upstreams: vec![Upstream {

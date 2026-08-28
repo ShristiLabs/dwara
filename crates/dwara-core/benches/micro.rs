@@ -53,6 +53,7 @@ fn bench_gateway() -> Gateway {
                     headers: BTreeMap::new(),
                     query: Vec::new(),
                     cookies: Vec::new(),
+                    accept: None,
                 },
                 action: RouteAction::Proxy { rewrite: None },
                 policies: Vec::new(),
@@ -62,6 +63,7 @@ fn bench_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                deprecation: None,
             });
         }
     }

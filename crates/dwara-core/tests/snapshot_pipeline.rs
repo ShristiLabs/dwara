@@ -45,6 +45,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
             headers: Default::default(),
             query: vec![],
             cookies: vec![],
+            accept: None,
         },
         action: RouteAction::Proxy { rewrite: None },
         policies: vec![],
@@ -54,6 +55,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         compression: None,
         limits: None,
         authorization: None,
+        deprecation: None,
     }
 }
 

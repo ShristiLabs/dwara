@@ -19,12 +19,15 @@
 //! serde shapes: [`credentials`] defines the credential selector/stored-hash
 //! formats every credential holder must agree on plus the `${...}`
 //! secret-reference grammar (DW-045), [`limits`] the numeric
-//! bounds validation enforces, and [`net`] the trusted-proxy IP/CIDR
-//! grammar shared by validation and the runtime matchers.
+//! bounds validation enforces, [`net`] the trusted-proxy IP/CIDR
+//! grammar shared by validation and the runtime matchers, and
+//! [`versioning`] the HTTP-date and media-type grammar of the API
+//! versioning aids (DW-048).
 
 pub mod credentials;
 pub mod limits;
 pub mod net;
+pub mod versioning;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -531,6 +534,133 @@ pub struct Route {
     /// gateway-level `authorization`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+    /// API deprecation policy (DW-048): emits the standard deprecation
+    /// signal headers on this route's responses. See [`Deprecation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation: Option<Deprecation>,
+}
+
+/// Route-level API deprecation policy (DW-048): automates the RFC
+/// deprecation signal headers on every response of the route.
+///
+/// What the block emits (computed once at snapshot compile; see
+/// [`CompiledDeprecation`] and `dataplane::versioning`):
+///
+/// - `since` (header emitted only when set): `Deprecation:
+///   @<unix-seconds>` — the RFC 9745 structured-date form (RFC 9651
+///   dates). RFC 9745 carries no URI inside the `Deprecation` field;
+///   the human-readable notice travels in the `Link` below.
+/// - `sunset` (optional): `Sunset: <HTTP-date>` verbatim — RFC 8594
+///   requires an HTTP-date, and validation accepts exactly the
+///   IMF-fixdate form generators must send (see `config::versioning`).
+/// - `uri` (optional, requires `since`): `Link: <uri>;
+///   rel="deprecation"` appended — the RFC 9745 companion link to the
+///   migration documentation.
+///
+/// Semantics (frozen):
+///
+/// - Headers are stamped on the route's ACTION responses (proxy,
+///   redirect, respond) in the response decoration tail — after
+///   compression wrapping (the codec only rewrites `Content-Length`,
+///   `Content-Encoding`, and `Vary`, so these headers pass through
+///   verbatim) and beside the CORS headers (independent families).
+///   Gateway-generated short-circuits on the route (413/431 limit
+///   rejections, CORS preflights, authn/authz/rate-limit rejections,
+///   503 sheds) do NOT carry them: those responses describe the
+///   gateway's opinion of the REQUEST, not the route's lifecycle.
+///   (The eager HMAC body-digest 401 is an action-path response and
+///   DOES carry them.) Unrouted traffic (404) never matches the route
+///   at all.
+/// - The gateway is the source of truth for the headers it is configured
+///   to emit: an upstream-sent `Deprecation`/`Sunset` on a route WITH a
+///   `deprecation` block is replaced; on a route WITHOUT one, upstream
+///   values pass through untouched. `Link` is appended (a list header —
+///   upstream links survive).
+/// - Validation rejects: a block with neither `since` nor `sunset` (no
+///   effect — omit it), dates that are not IMF-fixdate, a `sunset`
+///   already in the past (advertising a removal that already happened;
+///   remove the route or extend the date — this also stops a long-lived
+///   generation from silently re-publishing a stale sunset), a `sunset`
+///   before `since` (removed before deprecated), and a `uri` without
+///   `since` (the link documents the `Deprecation` header).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Deprecation {
+    /// When this API version was (or will be) deprecated, as an
+    /// IMF-fixdate HTTP-date (`Sun, 06 Nov 1994 08:49:37 GMT`). Emits
+    /// `Deprecation: @<unix-seconds>` (RFC 9745). A past date is normal
+    /// (the deprecation is in effect); a date before 1970 cannot form
+    /// the structured date and is rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// When this API version is expected to stop working, as an
+    /// IMF-fixdate HTTP-date. Emits `Sunset` (RFC 8594) verbatim.
+    /// Validation rejects a date already in the past and a date before
+    /// `since`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunset: Option<String>,
+    /// URI of the deprecation/migration notice (absolute `http(s)` URL).
+    /// Requires `since` — the RFC 9745 `Link; rel="deprecation"` it
+    /// emits documents the `Deprecation` header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+/// Snapshot-compiled form of a [`Deprecation`] block (DW-048): the
+/// emitted header VALUES, precomputed at snapshot-compile time — the
+/// HTTP-date strings are parsed once here (never per response) and the
+/// RFC 9745 structured date is rendered from the parsed seconds. Lives
+/// in `config` beside [`CompiledCorsOrigins`] for the same reason:
+/// `snapshot` builds it into the route table and `dataplane::versioning`
+/// consumes it. Validation has already rejected unparseable dates, so
+/// compilation drops nothing on any publishable config; entries that
+/// would fail are skipped exactly like the CORS matcher's fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledDeprecation {
+    deprecation: Option<String>,
+    sunset: Option<String>,
+    link: Option<String>,
+}
+
+impl CompiledDeprecation {
+    /// Compile a (validated) policy's header values.
+    pub fn compile(dep: &Deprecation) -> Self {
+        CompiledDeprecation {
+            deprecation: dep
+                .since
+                .as_deref()
+                .and_then(versioning::parse_http_date)
+                .filter(|d| d.unix_seconds() >= 0)
+                .map(|d| format!("@{}", d.unix_seconds())),
+            sunset: dep
+                .sunset
+                .as_deref()
+                .filter(|s| versioning::parse_http_date(s).is_some())
+                .map(str::to_string),
+            link: dep
+                .uri
+                .as_deref()
+                .map(|uri| format!("<{uri}>; rel=\"deprecation\"")),
+        }
+    }
+
+    /// The `Deprecation` header value (`@<unix-seconds>`), if the policy
+    /// sets `since`.
+    pub fn deprecation_header(&self) -> Option<&str> {
+        self.deprecation.as_deref()
+    }
+
+    /// The `Sunset` header value (the validated config string, verbatim),
+    /// if the policy sets `sunset`.
+    pub fn sunset_header(&self) -> Option<&str> {
+        self.sunset.as_deref()
+    }
+
+    /// The `Link` header value (`<uri>; rel="deprecation"`), if the
+    /// policy sets `uri`.
+    pub fn link_header(&self) -> Option<&str> {
+        self.link.as_deref()
+    }
 }
 
 /// Route-level authorization rules (DW-020, feature analysis 4.7).
@@ -997,6 +1127,24 @@ pub struct RouteMatch {
     /// an exact match (no cookie-unquoting in v1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cookies: Vec<NameValueMatch>,
+    /// Media-type version selection (DW-048): a bare `type/subtype` the
+    /// request's `Accept` header must name explicitly, e.g.
+    /// `application/vnd.acme.v2+json`. A comma-separated Accept list
+    /// matches on ANY entry; parameters and q-values on the request side
+    /// are ignored; wildcard entries (`*/*`, `type/*`) and a missing
+    /// Accept header never match — version selection requires the client
+    /// to NAME the version, so unconstrained clients fall through to the
+    /// route without this criterion (the unversioned default). Like every
+    /// non-path criterion this is AND-ed and applied AFTER path
+    /// resolution: a miss does not fall through to another route (404),
+    /// and two routes cannot share one path to offer multiple versions —
+    /// version families use distinct paths (`/v1/`, `/v2/`) or this
+    /// criterion on a versioned path. Validation rejects anything but a
+    /// bare lowercase-able `type/subtype` (`config::versioning` owns the
+    /// grammar). Responses of a matched route carry `Vary: Accept`
+    /// (merged), so shared caches key on the negotiated representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept: Option<String>,
 }
 
 /// One query-parameter or cookie criterion: the parameter/cookie must be

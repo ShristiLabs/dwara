@@ -451,6 +451,7 @@ async fn reserved_paths_shadow_configured_routes() {
                         headers: Default::default(),
                         query: vec![],
                         cookies: vec![],
+                        accept: None,
                     },
                     action: RouteAction::Respond {
                         status: 418,
@@ -464,6 +465,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     compression: None,
                     limits: None,
                     authorization: None,
+                    deprecation: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -478,6 +480,7 @@ async fn reserved_paths_shadow_configured_routes() {
                         headers: Default::default(),
                         query: vec![],
                         cookies: vec![],
+                        accept: None,
                     },
                     action: RouteAction::Respond {
                         status: 200,
@@ -491,6 +494,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     compression: None,
                     limits: None,
                     authorization: None,
+                    deprecation: None,
                 },
             ],
             services: vec![Service {

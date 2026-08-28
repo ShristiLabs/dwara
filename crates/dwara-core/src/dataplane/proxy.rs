@@ -906,7 +906,11 @@ where
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
     };
 
-    if !route_applies(&route.r#match, &req) {
+    if !route_applies(
+        &route.r#match,
+        gen.snapshot.route_table().accept_media_type(idx),
+        &req,
+    ) {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
     }
     rec.route = route.name.clone();
@@ -1371,6 +1375,25 @@ where
         }
     }
 
+    // API versioning aids (DW-048), both applied after the action (and
+    // after compression wrapping — the codec rewrites only
+    // Content-Length/Content-Encoding/Vary, so headers stamped here
+    // survive verbatim; Vary merges compose):
+    // - a route selected by `match.accept` varies with the request's
+    //   Accept, so shared caches must key on it (`Vary: Accept`, merged
+    //   with any CORS/compression Vary the response already carries);
+    // - the route's deprecation policy stamps Deprecation (RFC 9745),
+    //   Sunset (RFC 8594), and the Link;rel=deprecation companion on
+    //   every action response (not on gateway short-circuits — 413/431
+    //   limits, preflights, 401/403/429, sheds — those describe the
+    //   request, not the route's lifecycle).
+    if route.r#match.accept.is_some() {
+        crate::dataplane::hardening::merge_vary(resp.headers_mut(), "Accept");
+    }
+    if let Some(dep) = gen.snapshot.route_table().deprecation(idx) {
+        crate::dataplane::versioning::decorate(resp.headers_mut(), dep);
+    }
+
     // CORS actual-response decoration (DW-027): policy headers on every
     // response of a CORS route whose request origin is allowed.
     if let Some(cors) = &route.cors {
@@ -1488,10 +1511,13 @@ fn apply_rate_headers(headers: &mut HeaderMap, limit: u32, remaining: u32, reset
 /// method list = all methods; host matches the `Host` header
 /// (case-insensitive, with or without a port); headers must all be present
 /// with exact values; query and cookie entries match on presence, or on
-/// exact value when one is configured. Public so router golden-file tests
-/// (tests/router_golden.rs) can exercise the full resolution pipeline
-/// without a live upstream.
-pub fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
+/// exact value when one is configured. `accept` is the route's COMPILED
+/// `match.accept` media type (`RouteTable::accept_media_type`), never the
+/// raw config string — padding and case are normalized once at snapshot
+/// compile, so a padded spelling matches exactly like its trimmed form.
+/// Public so router golden-file tests (tests/router_golden.rs) can
+/// exercise the full resolution pipeline without a live upstream.
+pub fn route_applies<B>(m: &RouteMatch, accept: Option<&str>, req: &Request<B>) -> bool {
     if let Some(want) = &m.host {
         let Some(got) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
             return false;
@@ -1517,6 +1543,16 @@ pub fn route_applies<B>(m: &RouteMatch, req: &Request<B>) -> bool {
                 }
             }
             None => return false,
+        }
+    }
+    // Media-type version selection (DW-048): applied like every other
+    // criterion (AND-ed, after path resolution, no fallthrough) — see
+    // the versioning module docs for the shape and its limits. The
+    // comparison key is the compiled normalized form, not `m.accept`:
+    // the raw config string never reaches the hot path.
+    if let Some(want) = accept {
+        if !crate::dataplane::versioning::accept_matches(req.headers(), want) {
+            return false;
         }
     }
     let query = req.uri().query();

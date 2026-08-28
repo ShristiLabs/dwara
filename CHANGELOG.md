@@ -259,6 +259,34 @@ the project follows semantic versioning once 1.0 is reached.
   so the credential is config-served only, held zeroized in memory, and
   the credential pepper deliberately does not apply;
   `config-reference.json` regenerated.
+- API versioning aids (DW-048): a new `match.accept` route criterion
+  for media-type version selection — a bare `type/subtype` (e.g.
+  `application/vnd.acme.v2+json`) that the request's `Accept` header
+  must NAME explicitly (any list entry matches case-insensitively;
+  q-values/parameters ignored; wildcards and a missing header never
+  match, so unconstrained clients fall to the unversioned default
+  route; the configured spelling is normalized — padding and case —
+  once at snapshot compile, so padded values match exactly like
+  trimmed ones), and a per-route `deprecation` block automating the RFC
+  signal headers on every action response (proxy/redirect/respond):
+  `Deprecation: @<unix-seconds>` (the RFC 9745 structured-date form),
+  `Sunset: <HTTP-date>` verbatim (RFC 8594), and the RFC 9745
+  companion `Link: <uri>; rel="deprecation"` (appended beside upstream
+  links; configured `Deprecation`/`Sunset` replace upstream values,
+  unconfigured routes pass them through). Dates are validated as
+  IMF-fixdate HTTP-dates (the only generator form; the grammar lives
+  in `config::versioning` with no new dependencies), a `sunset` in the
+  past or before `since` is rejected, and accept-selected routes gain
+  `Vary: Accept` for cache correctness, folding with the CORS and
+  compression Vary tokens. Path-segment versioning (`/v1/`, `/v2/`,
+  rewrite) and exact header criteria (`X-API-Version`) were already
+  expressible via DW-010 and are documented in the module docs rather
+  than duplicated; same-path multi-version selection remains a
+  documented v1 limitation (criteria misses 404 — no candidate
+  fallthrough in the frozen router model). Headers are NOT stamped on
+  gateway short-circuits (413/431, preflights, authn/authz/rate-limit
+  rejections, sheds; the action-path HMAC digest 401 carries them);
+  `config-reference.json` regenerated.
 
 ### Fixed
 

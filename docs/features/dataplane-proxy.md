@@ -75,6 +75,11 @@ for how exact/regex/prefix routes are compiled; the cross-kind order
 declaration order specifically so that a config author can't
 accidentally reorder their way into a different route winning.
 
+The API-versioning patterns built on these primitives — path-segment
+versions with `replace_prefix`, exact header criteria, query criteria,
+and the DW-048 `match.accept` media-type criterion — are covered in
+[API versioning](./versioning.md).
+
 ## Path rewrite
 
 A `proxy` action carries at most one `rewrite` (no chaining — chained
