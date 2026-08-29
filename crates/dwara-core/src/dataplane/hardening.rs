@@ -412,6 +412,20 @@ pub struct PrefixedStream<S> {
     pos: usize,
 }
 
+impl<S> PrefixedStream<S> {
+    /// Wrap `inner`, replaying `prefix` first. Used by the smuggling
+    /// sniff (bytes read ahead of the parser) and the PROXY protocol
+    /// phase (bytes read past the header, DW-030 — a sender pipelining
+    /// TLS records or the HTTP head behind the PROXY line).
+    pub fn new(inner: S, prefix: Vec<u8>) -> Self {
+        PrefixedStream {
+            inner,
+            prefix,
+            pos: 0,
+        }
+    }
+}
+
 impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PrefixedStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,

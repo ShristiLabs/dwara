@@ -315,6 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tls: None,
                 policies: Vec::new(),
                 authorization: None,
+                proxy_protocol: false,
             }]
         }
         None => state.snapshot().gateway().listeners.clone(),

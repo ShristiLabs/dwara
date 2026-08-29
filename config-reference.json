@@ -946,6 +946,10 @@
           "$ref": "#/$defs/ListenerProtocol",
           "default": "http"
         },
+        "proxy_protocol": {
+          "description": "Accept a PROXY protocol v1 or v2 header as the FIRST bytes of\nevery connection on this listener (DW-030), replacing the peer\naddress the gateway uses everywhere the socket peer is used\ntoday: the authz IP ACL's effective-client-IP base, rate-limit\nkeying, `X-Forwarded-For` / `X-Real-IP` on the forwarded\nrequest. OPT-IN (default false): a plaintext listener that does\nnot expect a PROXY line must never interpret the first request\nbytes as one, and a client that spoofs a PROXY line on a listener\nwithout this flag is simply serving garbage to the HTTP parser.\nThe header is read BEFORE the TLS handshake (the L4 LB in front\nwraps the whole stream, TLS included) and a MALFORMED header\nfails closed: the connection is answered with a `400` error\nenvelope and closed, never handed to HTTP parsing. A v2 `LOCAL`\ncommand or a v1 `UNKNOWN` line keeps the real peer address (the\nspec's own fallback for connections the LB did not originate).\nValidation rejects the combination with `tls.mode passthrough`:\na passthrough listener splices raw bytes and never runs the\nHTTP pipeline that consumes the client address. Part of the\nrestart-only bind set (like address/port) — toggling it takes a\nrestart, not a reload.",
+          "type": "boolean"
+        },
         "tls": {
           "anyOf": [
             {
@@ -1721,6 +1725,13 @@
         "match": {
           "$ref": "#/$defs/RouteMatch"
         },
+        "methods": {
+          "description": "Per-route METHOD ALLOWLIST (DW-030): when non-empty, a request\nthat resolved this route but whose method is not in the list is\nanswered by the gateway with `405 Method Not Allowed` plus an\n`Allow` header listing the configured methods (RFC 9110 10.2.1).\nDistinct from `match.methods`, which gates ROUTE RESOLUTION (a\nmiss falls through to 404 / other routes); this list gates the\nALREADY-matched route. Placement (frozen): after route\nresolution and the maintenance 503, before the route limits and\nCORS preflight short-circuit and authentication — the allowlist\nis a statement about the route, not the request's shape (the\nDW-041 maintenance ordering argument), and a CORS PREFLIGHT\n(`OPTIONS` + preflight markers) is exempt exactly like the\nmaintenance 503 (the preflight asks about the GATEWAY's\ncross-origin policy, not the resource; failing it would hide the\nCORS answer from the browser). Matching is case-insensitive, the\nsame comparison `match.methods` uses. HEAD is NOT implicitly\ngranted by GET — a route supporting HEAD alongside GET lists\nboth (the allowlist is exhaustive by design; implicit grants\nwould leak methods the operator never named). Empty (the\ndefault) allows every method, exactly like pre-DW-030.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "name": {
           "type": "string"
         },
@@ -2115,6 +2126,15 @@
       "properties": {
         "connect_ms": {
           "description": "Connect timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "happy_eyeballs_ms": {
+          "description": "Happy-eyeballs inter-connection delay in milliseconds (DW-030,\nRFC 8305): when an endpoint's address resolves to multiple\naddresses, the first is dialed immediately and each subsequent\naddress — alternating address families after the resolver's\nfirst — is diailed this long after the previous START; the first\nsuccessful connection wins and cancels the losers. Absent: the\nRFC 8305 recommended 250 ms. `0` disables racing (addresses are\ntried strictly in resolver order, one at a time). The upstream's\n`connect_ms` remains the bound over the WHOLE dial: resolution\nplus every interleaved attempt plus, for TLS upstreams, the\nhandshake. Only the overall dial's single outcome reaches\nbreaker/passive-health accounting — the losing arms of one dial\nare never counted as endpoint failures. Validation bounds the\nvalue to at most 10 minutes.",
           "type": [
             "integer",
             "null"

@@ -14,6 +14,7 @@ mod hardening;
 mod health;
 mod migrations;
 mod observability;
+mod proxy_proto;
 mod rate_limiter;
 mod response_cache;
 mod retries;

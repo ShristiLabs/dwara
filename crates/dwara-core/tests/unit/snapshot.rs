@@ -1,8 +1,9 @@
 //! Unit tests for `snapshot` (relocated from src).
 
 use dwara_core::config::{
-    Endpoint, Gateway, Listener, ListenerProtocol, LoadBalancer, PathMatch, PathMatchKind,
-    PathRewrite, Route, RouteAction, RouteMatch, Service, Upstream, UpstreamProtocol,
+    Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer, PathMatch,
+    PathMatchKind, PathRewrite, Route, RouteAction, RouteMatch, Service, SniRoute, Timeouts,
+    TlsMode, Upstream, UpstreamProtocol,
 };
 use dwara_core::snapshot::*;
 
@@ -17,11 +18,13 @@ fn good_gateway() -> Gateway {
             tls: None,
             policies: vec![],
             authorization: None,
+            proxy_protocol: false,
         }],
         routes: vec![
             Route {
                 name: "users-get".into(),
                 cache: None,
+                methods: vec![],
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -52,6 +55,7 @@ fn good_gateway() -> Gateway {
             Route {
                 name: "static".into(),
                 cache: None,
+                methods: vec![],
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -82,6 +86,7 @@ fn good_gateway() -> Gateway {
             Route {
                 name: "legacy".into(),
                 cache: None,
+                methods: vec![],
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -167,6 +172,7 @@ fn validate_reports_all_semantic_issues() {
         tls: None,
         policies: vec![],
         authorization: None,
+        proxy_protocol: false,
     });
     let issues = validate(&gw);
     assert!(issues
@@ -360,4 +366,92 @@ fn publish_is_atomic_on_failure() {
     // Recovery: the next successful publish advances the generation.
     let info2 = state.compile_and_publish(&good_gateway()).unwrap();
     assert_eq!(info2.generation, 2);
+}
+
+// DW-030 validation: the PROXY-protocol/passthrough conflict, the route
+// method-allowlist grammar, and the happy-eyeballs bound.
+#[test]
+fn validate_rejects_proxy_protocol_with_tls_passthrough() {
+    let mut gw = good_gateway();
+    gw.listeners[0].protocol = ListenerProtocol::Https;
+    gw.listeners[0].tls = Some(ListenerTls {
+        mode: TlsMode::Passthrough,
+        cert_file: None,
+        key_file: None,
+        certificates: vec![],
+        sni_routes: vec![SniRoute {
+            server_names: vec!["example.com".into()],
+            upstream: "users-pool".into(),
+        }],
+        client_ca_file: None,
+    });
+    gw.listeners[0].proxy_protocol = true;
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.entity == "listener" && i.field == "proxy_protocol"),
+        "passthrough + proxy_protocol must be rejected: {issues:?}"
+    );
+    // The same listener WITHOUT the flag is fine on the passthrough side.
+    gw.listeners[0].proxy_protocol = false;
+    let issues = validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field == "proxy_protocol"),
+        "flag off clears the conflict: {issues:?}"
+    );
+}
+
+#[test]
+fn validate_rejects_bad_method_allowlist_entries() {
+    let mut gw = good_gateway();
+    gw.routes[0].methods = vec!["GET".into(), "N0T A TOKEN".into(), "get".into()];
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.entity == "route" && i.field == "methods[1]" && i.message.contains("token")),
+        "invalid token rejected: {issues:?}"
+    );
+    assert!(
+        issues.iter().any(|i| i.entity == "route"
+            && i.field == "methods[2]"
+            && i.message.contains("duplicate")),
+        "case-insensitive duplicate rejected: {issues:?}"
+    );
+}
+
+#[test]
+fn validate_bounds_happy_eyeballs_delay() {
+    let mut gw = good_gateway();
+    gw.allow_empty_routes = true;
+    gw.routes.clear();
+    gw.services.clear();
+    gw.upstreams[0].timeouts = Some(Timeouts {
+        connect_ms: None,
+        read_ms: None,
+        write_ms: None,
+        happy_eyeballs_ms: Some(600_001),
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.entity == "upstream" && i.field == "timeouts.happy_eyeballs_ms"),
+        "over-cap delay rejected: {issues:?}"
+    );
+    // 0 is legal (racing disabled) and the cap itself is legal.
+    gw.upstreams[0].timeouts = Some(Timeouts {
+        connect_ms: None,
+        read_ms: None,
+        write_ms: None,
+        happy_eyeballs_ms: Some(0),
+    });
+    let issues = validate(&gw);
+    assert!(
+        !issues
+            .iter()
+            .any(|i| i.field == "timeouts.happy_eyeballs_ms"),
+        "zero disables racing and is legal: {issues:?}"
+    );
 }

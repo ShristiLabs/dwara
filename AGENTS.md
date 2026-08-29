@@ -198,9 +198,10 @@ Rules for new code:
   consumer > route > service > listener > global (deny-anywhere-wins).
 - **Request-path order** (do not reorder casually): reserved paths
   (/healthz, /readyz, /metrics) → route resolution → route maintenance
-  (503 + Retry-After, preflight-exempt, DW-041) → route limits
-  (413/431) → CORS preflight short-circuit (204, pre-authn) → authn
-  → authz → rate limit → gateway cap admission (priority-aware) →
+  (503 + Retry-After, preflight-exempt, DW-041) → route method allowlist
+  (405 + Allow, preflight-exempt like maintenance, DW-030) → route
+  limits (413/431) → CORS preflight short-circuit (204, pre-authn) →
+  authn → authz → rate limit → gateway cap admission (priority-aware) →
   breaker → endpoint pick → pending cap → connect (request transforms
   run on the forward path inside the proxy action, DW-028: query ops
   after the DW-010 path rewrite, header ops after the trusted-header
@@ -306,6 +307,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Response field masking (DW-029) | dwara-core | `masking` (end to end), `tests/unit/transforms.rs` (union + miss-is-the-leak cases) |
 | Response caching (DW-037) + request coalescing (DW-038) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation; coalescing single-flight, fail-open fallbacks, saturation, SWR no-deadlock), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
+| Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |

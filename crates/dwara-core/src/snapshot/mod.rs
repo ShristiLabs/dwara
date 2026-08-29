@@ -1817,6 +1817,21 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 "tls mode passthrough ignores cert_file/key_file; remove them or use mode terminate",
                             ));
                         }
+                        // DW-030: PROXY acceptance needs the HTTP pipeline
+                        // that consumes the client address (ACL, rate
+                        // keys, XFF); a passthrough listener splices raw
+                        // bytes and would silently ignore the knob.
+                        if l.proxy_protocol {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "proxy_protocol",
+                                "proxy_protocol cannot be combined with tls mode passthrough: \
+                                 passthrough splices raw bytes and never runs the pipeline that \
+                                 consumes the PROXY client address (use protocol http, or https \
+                                 with mode terminate)",
+                            ));
+                        }
                         if !t.certificates.is_empty() {
                             issues.push(issue(
                                 "listener",
@@ -2071,6 +2086,38 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         // Response caching (DW-037).
         if let Some(cache) = &r.cache {
             validate_route_cache(&r.name, cache, &mut issues);
+        }
+        // Per-route method allowlist (DW-030): every entry must be a
+        // valid HTTP method token (the same grammar cors.allowed_methods
+        // checks) and the list must not repeat an entry case-insensitively
+        // — a duplicate would only ever be an authoring artifact, and the
+        // 405's Allow header echoes the list verbatim.
+        {
+            let mut seen_methods = std::collections::BTreeSet::new();
+            for (i, m) in r.methods.iter().enumerate() {
+                if m.trim().is_empty() {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("methods[{i}]"),
+                        "method is empty or only whitespace",
+                    ));
+                } else if hyper::Method::from_bytes(m.as_bytes()).is_err() {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("methods[{i}]"),
+                        format!("'{m}' is not a valid HTTP method token"),
+                    ));
+                } else if !seen_methods.insert(m.to_ascii_lowercase()) {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("methods[{i}]"),
+                        format!("duplicate method '{m}' (matching is case-insensitive)"),
+                    ));
+                }
+            }
         }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
@@ -2498,6 +2545,22 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                         "timeout must be > 0 milliseconds",
                     ));
                 }
+            }
+            // DW-030: 0 is LEGAL here (it disables happy-eyeballs racing
+            // instead of unbounding it — the house zero-disables pattern);
+            // only the upper bound applies.
+            if t.happy_eyeballs_ms
+                .is_some_and(|ms| ms > crate::config::limits::MAX_HAPPY_EYEBALLS_MS)
+            {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "timeouts.happy_eyeballs_ms",
+                    format!(
+                        "happy_eyeballs_ms must be at most {} (0 disables racing)",
+                        crate::config::limits::MAX_HAPPY_EYEBALLS_MS
+                    ),
+                ));
             }
         }
         if let Some(r) = &u.retries {

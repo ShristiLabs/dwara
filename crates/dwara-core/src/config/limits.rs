@@ -23,6 +23,12 @@ pub const MAX_RING_VNODES: u64 = 65_536;
 /// addresses permanently underweighted.
 pub const MAX_SLOW_START_MS: u64 = 600_000;
 
+/// Validation bound for `upstreams[].timeouts.happy_eyeballs_ms`
+/// (DW-030, 10 minutes — the slow-start bound's twin rationale: a racing
+/// delay past this no longer races anything, it serializes dials behind a
+/// sleeper). `0` is legal and disables racing instead.
+pub const MAX_HAPPY_EYEBALLS_MS: u64 = 600_000;
+
 /// Validation bound on `retries.attempts` (mirrored in `snapshot::validate`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 

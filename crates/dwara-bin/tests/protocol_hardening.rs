@@ -1696,3 +1696,437 @@ async fn h2_window_updates_gate_flow_beyond_the_initial_window() {
         "the full window-gated body reached the upstream: {requests:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DW-030: PROXY protocol acceptance. A listener with proxy_protocol: true
+// reads a v1/v2 header as the connection's first bytes and the header's
+// source address becomes the peer every consumer sees — pinned here via
+// the X-Forwarded-For the gateway stamps on the forwarded request (the
+// done-when's observable). Malformed headers fail closed with the 400
+// envelope. These tests need a CONFIG-declared listener (the DWARA_BIND
+// env listener is fixed proxy_protocol: false), so they spawn their own
+// server variant.
+// ---------------------------------------------------------------------------
+
+/// Backend that records the FULL head (request line + headers) so the
+/// forwarded X-Forwarded-For / X-Real-IP are observable.
+fn spawn_header_backend() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("backend bind");
+    let port = listener.local_addr().expect("backend addr").port();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&log);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let log = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(match stream.try_clone() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                });
+                let mut stream = stream;
+                loop {
+                    let mut head = String::new();
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => return,
+                            Ok(_) => {
+                                head.push_str(&line);
+                                if line == "\r\n" {
+                                    break;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                    log.lock().unwrap().push(head.clone());
+                    if stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, log)
+}
+
+/// Spawn the gateway with a CONFIG listener carrying
+/// `proxy_protocol: true` (DWARA_BIND's env listener is fixed OFF, so
+/// the flag must come from the declared listener set).
+fn start_proxy_protocol_server(tag: &str) -> (String, Arc<Mutex<Vec<String>>>, ServerGuard) {
+    let (backend_port, log) = spawn_header_backend();
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let config = std::env::temp_dir().join(format!(
+        "dwara-dw030-proxy-{}-{n}-{tag}.yaml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &config,
+        format!(
+            "listeners:\n\
+             \x20 - name: edge\n\
+             \x20   address: 127.0.0.1\n\
+             \x20   port: {port}\n\
+             \x20   proxy_protocol: true\n\
+             routes:\n\
+             \x20\x20 - name: all\n\
+             \x20\x20   service: svc\n\
+             \x20\x20   match:\n\
+             \x20\x20     path:\n\
+             \x20\x20       type: regex\n\
+             \x20\x20       value: /.*\n\
+             \x20\x20   action:\n\
+             \x20\x20     type: proxy\n\
+             services:\n\
+             \x20\x20 - name: svc\n\
+             \x20\x20   upstream: up\n\
+             upstreams:\n\
+             \x20\x20 - name: up\n\
+             \x20\x20   endpoints:\n\
+             \x20\x20     - address: 127.0.0.1\n\
+             \x20\x20       port: {backend_port}\n"
+        ),
+    )
+    .unwrap();
+    let stderr_log = std::env::temp_dir().join(format!(
+        "dwara-dw030-proxy-{}-{n}-{tag}.stderr",
+        std::process::id()
+    ));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_CONFIG", &config)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&stderr_log).expect("stderr log"));
+    let guard = ServerGuard(cmd.spawn().expect("failed to spawn dwara binary"));
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr} within 10s"
+    );
+    std::fs::remove_file(&config).ok();
+    eprintln!("dwara {tag} on {addr}, stderr: {}", stderr_log.display());
+    (addr, log, guard)
+}
+
+#[test]
+fn proxy_v1_header_client_ip_flows_to_the_forwarded_request() {
+    let (addr, log, _guard) = start_proxy_protocol_server("v1");
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    // v1 line claiming a documentation-range client, then the request
+    // pipelined behind it (one write exercises the replay prefix too).
+    stream
+        .write_all(
+            b"PROXY TCP4 203.0.113.7 10.0.0.1 55555 8080\r\n\
+              GET /via-proxy HTTP/1.1\r\nhost: example.com\r\nconnection: close\r\n\r\n",
+        )
+        .expect("write");
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    use std::io::Read as _;
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.starts_with("HTTP/1.1 200"), "proxied: {response}");
+    let heads = log.lock().unwrap().clone();
+    assert_eq!(heads.len(), 1, "exactly one upstream request");
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-forwarded-for: 203.0.113.7"),
+        "claimed client IP flows to XFF: {}",
+        heads[0]
+    );
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-real-ip: 203.0.113.7"),
+        "claimed client IP flows to X-Real-IP: {}",
+        heads[0]
+    );
+}
+
+#[test]
+fn proxy_v2_header_client_ip_flows_to_the_forwarded_request() {
+    let (addr, log, _guard) = start_proxy_protocol_server("v2");
+    // Hand-built v2 header: signature + 0x21 (v2|PROXY) + 0x11
+    // (AF_INET|STREAM) + length 12 + src 198.51.100.9:4711 +
+    // dst 10.0.0.1:8080 — the binary form an L4 LB sends.
+    let mut wire: Vec<u8> = vec![
+        0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+    ];
+    wire.extend_from_slice(&[0x21, 0x11, 0x00, 0x0c]);
+    wire.extend_from_slice(&[198, 51, 100, 9]);
+    wire.extend_from_slice(&[10, 0, 0, 1]);
+    wire.extend_from_slice(&4711u16.to_be_bytes());
+    wire.extend_from_slice(&8080u16.to_be_bytes());
+    wire.extend_from_slice(b"GET /v2 HTTP/1.1\r\nhost: example.com\r\nconnection: close\r\n\r\n");
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream.write_all(&wire).expect("write");
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    use std::io::Read as _;
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.starts_with("HTTP/1.1 200"), "proxied: {response}");
+    let heads = log.lock().unwrap().clone();
+    assert_eq!(heads.len(), 1, "exactly one upstream request");
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-forwarded-for: 198.51.100.9"),
+        "v2-claimed client IP flows to XFF: {}",
+        heads[0]
+    );
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-real-ip: 198.51.100.9"),
+        "v2-claimed client IP flows to X-Real-IP: {}",
+        heads[0]
+    );
+}
+
+#[test]
+fn malformed_proxy_header_is_answered_400_and_never_forwarded() {
+    let (addr, log, _guard) = start_proxy_protocol_server("malformed");
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    // Plausible-looking but structurally invalid v1 line (bad family
+    // token), pipelined with a request that must NEVER be served.
+    stream
+        .write_all(
+            b"PROXY TCPX 203.0.113.7 10.0.0.1 55555 8080\r\n\
+              GET /smuggled HTTP/1.1\r\nhost: example.com\r\n\r\n",
+        )
+        .expect("write");
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    use std::io::Read as _;
+    let _ = stream.read_to_string(&mut response);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "fail closed: {response}"
+    );
+    assert!(
+        response.contains("proxy_protocol_malformed"),
+        "the envelope names the code: {response}"
+    );
+    assert!(
+        response.contains("connection: close"),
+        "the connection is closed, not parsed: {response}"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "nothing reached the upstream"
+    );
+}
+
+#[test]
+fn proxy_protocol_off_listener_serves_the_header_bytes_as_http_garbage() {
+    // The opt-in boundary: a listener WITHOUT the flag never interprets
+    // first bytes as a PROXY line — the v1 line is HTTP-parse garbage
+    // and hyper answers 400/close, with NOTHING forwarded.
+    let (addr, log, _guard) = start_server("no-proxy-flag", &[]);
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream
+        .write_all(
+            b"PROXY TCP4 203.0.113.7 10.0.0.1 55555 8080\r\n\
+              GET / HTTP/1.1\r\nhost: example.com\r\n\r\n",
+        )
+        .expect("write");
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    use std::io::Read as _;
+    let _ = stream.read_to_string(&mut response);
+    assert!(!response.contains(" 200 "), "no proxying: {response}");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "nothing reached the upstream"
+    );
+}
+
+/// The TLS-terminate twin of [`start_proxy_protocol_server`]: same
+/// PROXY-accepting edge, but `protocol: https` in terminate mode, so the
+/// header must be consumed BEFORE rustls sees a byte. Returns the
+/// generated certificate's DER so the client can trust it exactly (no
+/// accept-any verifier: the handshake itself is part of the assertion).
+fn start_proxy_protocol_tls_server(
+    tag: &str,
+) -> (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    ServerGuard,
+    tokio_rustls::rustls::pki_types::CertificateDer<'static>,
+) {
+    use std::path::PathBuf;
+
+    let (backend_port, log) = spawn_header_backend();
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
+    static TLS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = TLS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base: PathBuf = std::env::temp_dir().join(format!(
+        "dwara-dw030-proxy-tls-{}-{n}-{tag}",
+        std::process::id()
+    ));
+    let cert_path = base.with_extension("crt.pem");
+    let key_path = base.with_extension("key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+    let config = base.with_extension("yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "listeners:\n\
+             \x20 - name: tls-edge\n\
+             \x20   address: 127.0.0.1\n\
+             \x20   port: {port}\n\
+             \x20   protocol: https\n\
+             \x20   proxy_protocol: true\n\
+             \x20   tls:\n\
+             \x20     mode: terminate\n\
+             \x20     cert_file: {}\n\
+             \x20     key_file: {}\n\
+             routes:\n\
+             \x20\x20 - name: all\n\
+             \x20\x20   service: svc\n\
+             \x20\x20   match:\n\
+             \x20\x20     path:\n\
+             \x20\x20       type: regex\n\
+             \x20\x20       value: /.*\n\
+             \x20\x20   action:\n\
+             \x20\x20     type: proxy\n\
+             services:\n\
+             \x20\x20 - name: svc\n\
+             \x20\x20   upstream: up\n\
+             upstreams:\n\
+             \x20\x20 - name: up\n\
+             \x20\x20   endpoints:\n\
+             \x20\x20     - address: 127.0.0.1\n\
+             \x20\x20       port: {backend_port}\n",
+            cert_path.display(),
+            key_path.display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_CONFIG", &config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let guard = ServerGuard(cmd.spawn().expect("failed to spawn dwara binary"));
+    assert!(
+        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        "dwara did not become ready on {addr} within 10s"
+    );
+    (addr, log, guard, cert.cert.der().clone())
+}
+
+#[tokio::test]
+async fn proxy_v2_header_precedes_the_tls_handshake_on_a_terminate_listener() {
+    // The DW-030 ordering claim on TLS edges, end to end: the PROXY
+    // header wraps the WHOLE stream (an L4 LB fronts the TLS listener),
+    // so the v2 header is written as PLAINTEXT first bytes and only then
+    // does the TLS handshake run over the same connection. The claimed
+    // client IP (198.51.100.23) must flow to the forwarded request, and
+    // the handshake itself must succeed — proving the gateway replayed
+    // any post-header bytes (here: none) and handed rustls a clean
+    // stream. The client trusts exactly the generated certificate (no
+    // accept-any verifier): a handed-on-garbage stream would fail the
+    // handshake, not the assertions.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::pki_types::ServerName;
+
+    let (addr, log, _guard, cert_der) = start_proxy_protocol_tls_server("v2");
+    let mut tcp = tokio::net::TcpStream::connect(&addr)
+        .await
+        .expect("connect");
+    // Hand-built v2 header: signature + 0x21 (v2|PROXY) + 0x11
+    // (AF_INET|STREAM) + length 12 + src 198.51.100.23:4711 +
+    // dst 10.0.0.1:8443.
+    let mut wire: Vec<u8> = vec![
+        0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+    ];
+    wire.extend_from_slice(&[0x21, 0x11, 0x00, 0x0c]);
+    wire.extend_from_slice(&[198, 51, 100, 23]);
+    wire.extend_from_slice(&[10, 0, 0, 1]);
+    wire.extend_from_slice(&4711u16.to_be_bytes());
+    wire.extend_from_slice(&8443u16.to_be_bytes());
+    tcp.write_all(&wire).await.expect("PROXY header write");
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.add(cert_der).expect("trust the generated cert");
+    let mut client = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[
+            &tokio_rustls::rustls::version::TLS13,
+            &tokio_rustls::rustls::version::TLS12,
+        ])
+        .expect("versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client));
+    let mut tls = connector
+        .connect(ServerName::try_from("localhost").expect("server name"), tcp)
+        .await
+        .expect("TLS handshake after the PROXY header");
+    tls.write_all(b"GET /tls-v2 HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
+        .await
+        .expect("request write");
+    let mut response = String::new();
+    let _ = tls.read_to_string(&mut response).await;
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "proxied over TLS: {response}"
+    );
+    let heads = log.lock().unwrap().clone();
+    assert_eq!(heads.len(), 1, "exactly one upstream request");
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-forwarded-for: 198.51.100.23"),
+        "v2-claimed client IP flows to XFF: {}",
+        heads[0]
+    );
+    assert!(
+        heads[0]
+            .to_ascii_lowercase()
+            .contains("x-real-ip: 198.51.100.23"),
+        "v2-claimed client IP flows to X-Real-IP: {}",
+        heads[0]
+    );
+}
+
+#[test]
+fn terminate_listener_without_a_proxy_header_fails_closed_before_tls() {
+    // The fail-closed half on TLS edges: a client that starts a TLS
+    // handshake without a PROXY header has its ClientHello's first bytes
+    // judged by the PROXY phase (0x16... is neither a v1 line nor the v2
+    // signature) and answered with the 400 envelope + close — rustls
+    // never sees the bytes, and nothing is forwarded.
+    let (addr, log, _guard, _cert) = start_proxy_protocol_tls_server("no-hdr");
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    // A ClientHello-shaped prefix: TLS record header (0x16, TLS 1.2)
+    // followed by handshake body bytes.
+    stream
+        .write_all(&[0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00])
+        .expect("write ClientHello prefix");
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    use std::io::Read as _;
+    let _ = stream.read_to_string(&mut response);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "fail closed before TLS: {response}"
+    );
+    assert!(
+        response.contains("proxy_protocol_malformed"),
+        "the envelope names the code: {response}"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "nothing reached the upstream"
+    );
+}

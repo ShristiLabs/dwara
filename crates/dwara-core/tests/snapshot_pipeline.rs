@@ -26,6 +26,7 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
         port,
         protocol: ListenerProtocol::Http,
         tls: None,
+        proxy_protocol: false,
         policies: vec![],
         authorization: None,
     }
@@ -35,6 +36,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
     Route {
         name: name.into(),
         cache: None,
+        methods: vec![],
         service: "svc".into(),
         r#match: RouteMatch {
             path: PathMatch {

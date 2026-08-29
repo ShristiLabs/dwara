@@ -1159,6 +1159,57 @@ where
         }
     }
 
+    // Per-route METHOD ALLOWLIST (DW-030): a non-empty `methods` list on
+    // the matched route answers 405 + Allow for every method not in it.
+    // Placement (frozen, mirrors the DW-041 maintenance argument): the
+    // allowlist is a statement about the ROUTE, not the request's shape,
+    // so it precedes the route limits (an oversized DELETE on a GET-only
+    // route is told "DELETE is not allowed" — fixing the body would
+    // still leave it refused) and authentication (an unauthenticated
+    // wrong-method request is not worth auth work). A CORS PREFLIGHT is
+    // exempt exactly like the maintenance 503: the preflight is a
+    // Fetch-protocol handshake about the GATEWAY's cross-origin policy,
+    // not a resource request, and failing it would surface in the
+    // browser as an opaque CORS error instead of the gateway's CORS
+    // answer. Matching is case-insensitive (the `match.methods`
+    // comparison); HEAD is never implicitly granted by GET.
+    if !route.methods.is_empty() {
+        let preflight_exempt = route.cors.is_some()
+            && crate::dataplane::cors::is_preflight(req.method(), req.headers());
+        let allowed = route
+            .methods
+            .iter()
+            .any(|m| req.method().as_str().eq_ignore_ascii_case(m.trim()));
+        if !allowed && !preflight_exempt {
+            tracing::warn!(
+                code = "method_not_allowed",
+                request_id = %rid,
+                route = route.name,
+                method = %req.method(),
+                "request method rejected by the route's allowlist"
+            );
+            let mut resp = method_not_allowed(&route.methods, rid);
+            // CORS actual-response decoration on CORS-configured routes
+            // (the maintenance-503 precedent): a browser must be able to
+            // READ the 405 envelope cross-origin, or the gateway's answer
+            // surfaces as an opaque CORS error instead.
+            if let (Some(cors), Some(origins)) = (
+                route.cors.as_ref(),
+                gen.snapshot.route_table().cors_origins(idx),
+            ) {
+                let origin = req.headers().get(&ORIGIN).cloned();
+                crate::dataplane::cors::decorate_actual(
+                    cors,
+                    origins,
+                    origin.as_ref(),
+                    resp.headers_mut(),
+                );
+            }
+            stamp_security_headers(&mut resp, route);
+            return resp;
+        }
+    }
+
     // Route-scoped request limits (DW-027): header caps and a declared
     // (`Content-Length`) body cap are enforced immediately after route
     // resolution — before CORS preflight handling, authentication, and
@@ -2009,6 +2060,30 @@ fn maintenance_response(
     // the edge policy stamps it like every other.
     stamp_security_headers(&mut resp, route);
     resp
+}
+
+/// The 405 response for a method outside the route's allowlist (DW-030):
+/// `Allow` carries the route's configured methods (RFC 9110 10.2.1 — the
+/// header's whole job is to name what the resource supports, so the
+/// configured order is preserved verbatim) plus the uniform JSON
+/// envelope.
+fn method_not_allowed(allowed: &[String], rid: &str) -> Response<ProxyBody> {
+    let allow = allowed
+        .iter()
+        .map(|m| m.trim())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = format!("method not allowed; the route allows {allow}");
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .header(hyper::header::ALLOW, allow)
+        .body(ProxyBody::Full(Full::new(observability::envelope_body(
+            "method_not_allowed",
+            &message,
+            rid,
+        ))))
+        .expect("static 405 response is valid")
 }
 
 /// The 403 response for a denied authorization (DW-020): deliberately a

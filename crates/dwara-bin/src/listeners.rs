@@ -19,6 +19,14 @@
 //! running). The supervisor itself lives in
 //! [`dwara_core::supervision`] and is shared with the admin accept loop
 //! (#130); only the listener budget and wiring live here.
+//!
+//! PROXY protocol (DW-030): a listener with `proxy_protocol: true` has
+//! a v1/v2 header read as the first bytes of every connection — before
+//! the TLS handshake in terminate mode (the L4 LB wraps the whole
+//! stream) — and the header's source address becomes the peer the whole
+//! pipeline sees (ACL, rate keys, XFF/X-Real-IP). Malformed headers fail
+//! closed with a 400 envelope; see [`proxy_phase`] and
+//! `dwara_core::dataplane::proxy_proto` for the frozen policy.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -55,6 +63,12 @@ pub(crate) struct BoundListener {
     pub(crate) name: String,
     pub(crate) addr: String,
     pub(crate) mode: ListenerMode,
+    /// PROXY protocol v1/v2 acceptance (DW-030): read a PROXY header as
+    /// the first bytes of every connection and use its source address as
+    /// the effective peer. Part of the restart-only bind set: the flag is
+    /// captured at bind time and is NOT hot-reloaded (toggling it takes a
+    /// restart, exactly like address/port).
+    pub(crate) proxy_protocol: bool,
 }
 
 /// Bind one configured listener into its runtime face. Fails startup on
@@ -82,6 +96,7 @@ pub(crate) async fn bind_listener(
             name: l.name.clone(),
             addr,
             mode,
+            proxy_protocol: l.proxy_protocol,
         },
     ))
 }
@@ -115,15 +130,43 @@ pub(crate) async fn run_listener(
             _ = shutdown.changed() => break,
         };
         match &bound.mode {
-            ListenerMode::Cleartext => serve_http_tls(
-                graceful.watcher(),
-                Arc::clone(&dp),
-                stream,
-                peer,
-                std::sync::Arc::from(bound.name.as_str()),
-                Arc::clone(&hardening),
-                None,
-            ),
+            ListenerMode::Cleartext => {
+                // DW-030: on a proxy_protocol listener the header phase
+                // runs BEFORE the smuggling sniff / HTTP parsing; the
+                // non-PROXY path stays byte-for-byte what it was.
+                if bound.proxy_protocol {
+                    let watcher = graceful.watcher();
+                    let dp = Arc::clone(&dp);
+                    let hardening_phase = Arc::clone(&hardening);
+                    let listener: std::sync::Arc<str> = std::sync::Arc::from(bound.name.as_str());
+                    let hardening = Arc::clone(&hardening);
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        let Some((peer, prefix)) = proxy_phase(
+                            &mut stream,
+                            peer,
+                            hardening_phase.http1_header_read_timeout,
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let stream =
+                            dwara_core::dataplane::hardening::PrefixedStream::new(stream, prefix);
+                        serve_http_tls(watcher, dp, stream, peer, listener, hardening, None);
+                    });
+                } else {
+                    serve_http_tls(
+                        graceful.watcher(),
+                        Arc::clone(&dp),
+                        stream,
+                        peer,
+                        std::sync::Arc::from(bound.name.as_str()),
+                        Arc::clone(&hardening),
+                        None,
+                    );
+                }
+            }
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
                 // Passthrough splices are not part of hyper graceful
@@ -180,9 +223,33 @@ pub(crate) async fn run_listener(
                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                 let watcher = graceful.watcher();
                 let dp = Arc::clone(&dp);
+                let hardening_phase = Arc::clone(&hardening);
                 let hardening = Arc::clone(&hardening);
                 let listener: std::sync::Arc<str> = std::sync::Arc::from(bound.name.as_str());
+                let proxy_protocol = bound.proxy_protocol;
                 tokio::spawn(async move {
+                    // DW-030: the PROXY header (when the listener expects
+                    // one) wraps the WHOLE stream — the L4 LB sits in
+                    // front of the TLS handshake, so the header is read
+                    // before rustls sees a byte. Bytes read past the
+                    // header are replayed in front of the TLS records.
+                    let mut stream = stream;
+                    let (peer, prefix) = if proxy_protocol {
+                        let Some(derived) = proxy_phase(
+                            &mut stream,
+                            peer,
+                            hardening_phase.http1_header_read_timeout,
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        derived
+                    } else {
+                        (peer, Vec::new())
+                    };
+                    let stream =
+                        dwara_core::dataplane::hardening::PrefixedStream::new(stream, prefix);
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
                             // #124 mTLS authn: when the listener carries a
@@ -244,23 +311,74 @@ pub(crate) async fn run_listener(
                         accepted += 1;
                         match &bound.mode {
                             ListenerMode::Passthrough => {}
-                            ListenerMode::Cleartext => serve_http_tls(
-                                graceful.watcher(),
-                                Arc::clone(&dp),
-                                stream,
-                                peer,
-                                std::sync::Arc::from(bound.name.as_str()),
-                                Arc::clone(&hardening),
-                                None,
-                            ),
+                            ListenerMode::Cleartext => {
+                                if bound.proxy_protocol {
+                                    let watcher = graceful.watcher();
+                                    let dp = Arc::clone(&dp);
+                                    let hardening_phase = Arc::clone(&hardening);
+                                    let hardening = Arc::clone(&hardening);
+                                    let listener: std::sync::Arc<str> =
+                                        std::sync::Arc::from(bound.name.as_str());
+                                    tokio::spawn(async move {
+                                        let mut stream = stream;
+                                        let Some((peer, prefix)) = proxy_phase(
+                                            &mut stream,
+                                            peer,
+                                            hardening_phase.http1_header_read_timeout,
+                                        )
+                                        .await
+                                        else {
+                                            return;
+                                        };
+                                        let stream =
+                                            dwara_core::dataplane::hardening::PrefixedStream::new(
+                                                stream, prefix,
+                                            );
+                                        serve_http_tls(
+                                            watcher, dp, stream, peer, listener, hardening, None,
+                                        );
+                                    });
+                                } else {
+                                    serve_http_tls(
+                                        graceful.watcher(),
+                                        Arc::clone(&dp),
+                                        stream,
+                                        peer,
+                                        std::sync::Arc::from(bound.name.as_str()),
+                                        Arc::clone(&hardening),
+                                        None,
+                                    );
+                                }
+                            }
                             ListenerMode::Terminate(term) => {
                                 let acceptor = tokio_rustls::TlsAcceptor::from(term.config());
                                 let watcher = graceful.watcher();
                                 let dp = Arc::clone(&dp);
+                                let hardening_phase = Arc::clone(&hardening);
                                 let hardening = Arc::clone(&hardening);
                                 let listener: std::sync::Arc<str> =
                                     std::sync::Arc::from(bound.name.as_str());
+                                let proxy_protocol = bound.proxy_protocol;
                                 tokio::spawn(async move {
+                                    let mut stream = stream;
+                                    let (peer, prefix) = if proxy_protocol {
+                                        let Some(derived) = proxy_phase(
+                                            &mut stream,
+                                            peer,
+                                            hardening_phase.http1_header_read_timeout,
+                                        )
+                                        .await
+                                        else {
+                                            return;
+                                        };
+                                        derived
+                                    } else {
+                                        (peer, Vec::new())
+                                    };
+                                    let stream =
+                                        dwara_core::dataplane::hardening::PrefixedStream::new(
+                                            stream, prefix,
+                                        );
                                     match acceptor.accept(stream).await {
                                         Ok(tls_stream) => {
                                             let client_cert = tls_stream
@@ -325,6 +443,47 @@ pub(crate) async fn run_listener(
 /// crash-looping listener stops after this many respawns instead of
 /// spinning forever).
 pub(crate) const MAX_LISTENER_RESPAWNS: u32 = 8;
+
+/// PROXY protocol phase for one accepted connection (DW-030). Reads the
+/// v1/v2 header (when the listener is a `proxy_protocol` listener) and
+/// returns the EFFECTIVE peer address plus any bytes read past the
+/// header (a sender pipelining TLS records / the HTTP head behind the
+/// PROXY line) for replay in front of the stream. Returns None when the
+/// connection was rejected and closed: a malformed header is answered
+/// with the 400 error envelope (fail closed — never handed to HTTP
+/// parsing), a stalled or dropped header read closes silently. The
+/// deadline is the DW-023 slowloris header timeout — the same attack
+/// class, one layer earlier (a partial PROXY line cannot be handed on,
+/// so this is a WHOLE-header bound, not per-read).
+async fn proxy_phase<S>(
+    stream: &mut S,
+    real: SocketAddr,
+    header_timeout: Duration,
+) -> Option<(SocketAddr, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match dwara_core::dataplane::proxy_proto::read_client_addr(stream, real, header_timeout).await {
+        Ok(h) => Some((h.client, h.prefix)),
+        Err(e @ dwara_core::dataplane::proxy_proto::ProxyProtoError::Malformed(_)) => {
+            tracing::warn!(
+                code = "proxy_protocol_malformed",
+                "closing connection with a malformed PROXY header: {e}"
+            );
+            let _ = dwara_core::dataplane::proxy_proto::reject_malformed(stream).await;
+            None
+        }
+        Err(e) => {
+            // Incomplete (deadline) or IO (EOF/reset) mid-header:
+            // nothing parseable to answer; close.
+            tracing::debug!(
+                code = "proxy_protocol_incomplete",
+                "closing connection whose PROXY header did not complete: {e}"
+            );
+            None
+        }
+    }
+}
 
 /// Bind the supervision of one listener's accept task (#120): every
 /// respawn reuses the same bound socket (shared `Arc`) and clones of

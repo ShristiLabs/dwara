@@ -31,9 +31,11 @@ watcher fails to start, `SIGHUP` reload still works.
 
 The route table and upstream connection pools hot-swap together in one
 atomic publish, so a new route table is never paired with stale pools.
-The listener bind set (addresses/ports) is fixed at startup — adding,
-removing, or moving listeners requires a restart; only route/policy
-content and certificate material reload live.
+The listener bind set (addresses/ports, and each listener's
+`proxy_protocol` flag) is fixed at startup — adding, removing, or
+moving listeners — or toggling PROXY protocol acceptance — requires a
+restart; only route/policy content and certificate material reload
+live.
 
 ## Certificate hot-reload
 

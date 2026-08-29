@@ -488,6 +488,28 @@ pub struct Listener {
     pub protocol: ListenerProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<ListenerTls>,
+    /// Accept a PROXY protocol v1 or v2 header as the FIRST bytes of
+    /// every connection on this listener (DW-030), replacing the peer
+    /// address the gateway uses everywhere the socket peer is used
+    /// today: the authz IP ACL's effective-client-IP base, rate-limit
+    /// keying, `X-Forwarded-For` / `X-Real-IP` on the forwarded
+    /// request. OPT-IN (default false): a plaintext listener that does
+    /// not expect a PROXY line must never interpret the first request
+    /// bytes as one, and a client that spoofs a PROXY line on a listener
+    /// without this flag is simply serving garbage to the HTTP parser.
+    /// The header is read BEFORE the TLS handshake (the L4 LB in front
+    /// wraps the whole stream, TLS included) and a MALFORMED header
+    /// fails closed: the connection is answered with a `400` error
+    /// envelope and closed, never handed to HTTP parsing. A v2 `LOCAL`
+    /// command or a v1 `UNKNOWN` line keeps the real peer address (the
+    /// spec's own fallback for connections the LB did not originate).
+    /// Validation rejects the combination with `tls.mode passthrough`:
+    /// a passthrough listener splices raw bytes and never runs the
+    /// HTTP pipeline that consumes the client address. Part of the
+    /// restart-only bind set (like address/port) — toggling it takes a
+    /// restart, not a reload.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_protocol: bool,
     /// Policies attached to this listener (#123): names from the
     /// gateway's `policies` list, applying to every request the listener
     /// accepts (the second-least specific link of the frozen chain
@@ -728,6 +750,28 @@ pub struct Route {
     /// [`RouteCache`] and `dataplane::response_cache`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<RouteCache>,
+    /// Per-route METHOD ALLOWLIST (DW-030): when non-empty, a request
+    /// that resolved this route but whose method is not in the list is
+    /// answered by the gateway with `405 Method Not Allowed` plus an
+    /// `Allow` header listing the configured methods (RFC 9110 10.2.1).
+    /// Distinct from `match.methods`, which gates ROUTE RESOLUTION (a
+    /// miss falls through to 404 / other routes); this list gates the
+    /// ALREADY-matched route. Placement (frozen): after route
+    /// resolution and the maintenance 503, before the route limits and
+    /// CORS preflight short-circuit and authentication — the allowlist
+    /// is a statement about the route, not the request's shape (the
+    /// DW-041 maintenance ordering argument), and a CORS PREFLIGHT
+    /// (`OPTIONS` + preflight markers) is exempt exactly like the
+    /// maintenance 503 (the preflight asks about the GATEWAY's
+    /// cross-origin policy, not the resource; failing it would hide the
+    /// CORS answer from the browser). Matching is case-insensitive, the
+    /// same comparison `match.methods` uses. HEAD is NOT implicitly
+    /// granted by GET — a route supporting HEAD alongside GET lists
+    /// both (the allowlist is exhaustive by design; implicit grants
+    /// would leak methods the operator never named). Empty (the
+    /// default) allows every method, exactly like pre-DW-030.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
 }
 
 /// Route maintenance mode (DW-041): a per-route availability state that
@@ -2033,6 +2077,22 @@ pub struct Timeouts {
     /// Write timeout in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_ms: Option<u64>,
+    /// Happy-eyeballs inter-connection delay in milliseconds (DW-030,
+    /// RFC 8305): when an endpoint's address resolves to multiple
+    /// addresses, the first is dialed immediately and each subsequent
+    /// address — alternating address families after the resolver's
+    /// first — is diailed this long after the previous START; the first
+    /// successful connection wins and cancels the losers. Absent: the
+    /// RFC 8305 recommended 250 ms. `0` disables racing (addresses are
+    /// tried strictly in resolver order, one at a time). The upstream's
+    /// `connect_ms` remains the bound over the WHOLE dial: resolution
+    /// plus every interleaved attempt plus, for TLS upstreams, the
+    /// handshake. Only the overall dial's single outcome reaches
+    /// breaker/passive-health accounting — the losing arms of one dial
+    /// are never counted as endpoint failures. Validation bounds the
+    /// value to at most 10 minutes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub happy_eyeballs_ms: Option<u64>,
 }
 
 /// Identity of an API caller (app/team/user); owns credentials, quotas, and

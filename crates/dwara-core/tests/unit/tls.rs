@@ -386,6 +386,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             tls: Some(tls.clone()),
             policies: vec![],
             authorization: None,
+            proxy_protocol: false,
         }],
         routes: vec![],
         services: vec![],

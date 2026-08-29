@@ -27,6 +27,9 @@ rustls-pki-types = { workspace = true }
 zeroize = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+# DW-030: PROXY protocol v1/v2 header parsing on opt-in listeners
+# (dataplane::proxy_proto owns the framing/bounds/fail-closed policy).
+ppp = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower-service = { workspace = true }

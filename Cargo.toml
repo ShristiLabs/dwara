@@ -22,6 +22,11 @@ hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 # a direct one. MIT OR Apache-2.0.
 http = "1"
 hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "server", "server-graceful", "http1", "http2", "server-auto"] }
+# PROXY protocol v1/v2 header parsing (DW-030): ppp is Apache-2.0 (a lone
+# license expression, allow-listed in deny.toml). Used strictly as a parser
+# over already-buffered bytes; the async framing read, bounds, and the
+# fail-closed policy live in dwara-core's dataplane::proxy_proto.
+ppp = "2.3"
 http-body-util = "0.1"
 bytes = "1"
 # hyper-util's legacy client is generic over tower Service connectors.

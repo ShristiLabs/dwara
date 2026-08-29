@@ -17,8 +17,8 @@
 //!   in-flight sessions keep the configuration they negotiated.
 //! - Documented v1 limitation: the LISTENER BIND SET is taken from the
 //!   startup snapshot; adding/removing listeners or changing
-//!   address/port takes effect on restart. Only route/config changes
-//!   and certificate material reload live.
+//!   address/port/proxy_protocol takes effect on restart. Only
+//!   route/config changes and certificate material reload live.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

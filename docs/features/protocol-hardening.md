@@ -9,6 +9,14 @@ route-scoped request limits and the `merge_vary` helper — those are
 per-route config, not env knobs, and are covered in
 [edge policies](./edge-policies.md).
 
+Pass 2 (DW-030) added three protocol-edge features that live in their
+own modules but share this page's posture: PROXY protocol acceptance
+([`dataplane::proxy_proto`](#proxy-protocol-acceptance-dw-030)), the
+per-route method allowlist
+([below](#per-route-method-allowlist-dw-030)), and RFC 8305
+happy-eyeballs dialing
+([below](#happy-eyeballs-dialing-dw-030)).
+
 The end-user-facing knob table already lives at
 [docs-site: Operations](../../docs-site/guide/operations.md#protocol-hardening)
 and is covered from the proxy's-eye view in
@@ -124,3 +132,105 @@ logged once at startup under the `protocol_hardening` code, so an
 operator debugging "why did this connection get closed" can always
 find out exactly what bound was actually in effect without having to
 cross-reference environment variables against documentation defaults.
+
+## PROXY protocol acceptance (DW-030)
+
+Source: `crates/dwara-core/src/dataplane/proxy_proto.rs`; wiring in
+`crates/dwara-bin/src/listeners.rs` (`proxy_phase`). Tests:
+`tests/unit/proxy_proto.rs` (header policy, all classify branches and
+bounds), `protocol_hardening` (real binary: v1/v2 address flow,
+malformed 400, opt-out no-sniffing, and the TLS-terminate ordering —
+header before handshake, and fail-closed before TLS when absent).
+
+A listener with `proxy_protocol: true` expects a PROXY protocol
+header (HAProxy specification; v1 text or v2 binary) as the FIRST
+bytes of every connection — before the TLS handshake in terminate
+mode, because the L4 load balancer in front wraps the whole stream.
+The header's source address then replaces the accepted socket peer
+for everything downstream that consumes it: the authz IP ACL's
+effective-client-IP base, rate-limit keying, and the
+`X-Forwarded-For`/`X-Real-IP` values stamped on the forwarded
+request. Bytes read past the header (a sender pipelining TLS records
+or the HTTP head behind it) are replayed via
+`hardening::PrefixedStream` — the same replay wrapper the smuggling
+sniff uses.
+
+The security posture, frozen with the design:
+
+- **Opt-in per listener.** No sniffing: a listener without the flag
+  serves PROXY bytes as ordinary HTTP input (they are parse garbage).
+  The spoofing boundary is exactly the config — the same trust model
+  as `gateway.trusted_proxies` for XFF.
+- **Fail closed.** A malformed header (bad signature, bad lengths,
+  Unix address family, datagram protocol on this stream listener,
+  over-ceiling) is answered with the 400 error envelope and the
+  connection is closed — the bytes are never handed to HTTP parsing.
+  A connection that stalls mid-header or drops is closed silently
+  (nothing parseable to answer), bounded by the DW-023 slowloris
+  header timeout — the same attack one layer earlier, as a
+  WHOLE-header bound (a partial PROXY line can never be handed on).
+- **Bounded.** v1 ≤ 107 bytes, v2 ≤ 16 + 65535; a prefix that
+  matches neither version signature is malformed immediately.
+  Parsing itself is delegated to the `ppp` crate (Apache-2.0,
+  allow-listed in `deny.toml`); this module owns the async framing
+  read, the deadline, the caps, and the fail-closed policy.
+- **Spec fallbacks honored.** A v2 `LOCAL` command (the LB's own
+  health check) and a v1 `UNKNOWN` line keep the REAL peer address.
+
+The flag is part of the restart-only bind set (toggling takes a
+restart, like address/port) and cannot combine with
+`tls.mode passthrough` — validation rejects it: a passthrough
+listener splices raw bytes and never runs the pipeline that consumes
+the address.
+
+## Per-route method allowlist (DW-030)
+
+Source: `crates/dwara-core/src/dataplane/proxy.rs` (the
+`method_not_allowed` arm). Tests: `method_allowlist` (dwara-core,
+end-to-end matrix).
+
+A non-empty `methods` list on a route answers `405` + `Allow` for
+every method not in it. Placement mirrors the DW-041 maintenance
+argument: the allowlist is a statement about the ROUTE, not the
+request's shape, so it runs after route resolution and the
+maintenance 503, before the route limits and authentication. A CORS
+preflight is exempt exactly like the maintenance 503 (the preflight
+is a Fetch-protocol handshake about the gateway's cross-origin
+policy; failing it would surface in the browser as an opaque CORS
+error) — and the 405 itself is CORS-decorated and security-stamped
+so a browser can read it. `Allow` echoes the configured methods
+verbatim in configured order (RFC 9110 10.2.1). Matching is
+case-insensitive; HEAD is NOT implicitly granted by GET (the
+allowlist is exhaustive by design — implicit grants would leak
+methods the operator never named). Validation enforces the HTTP
+method-token grammar and rejects case-insensitive duplicates.
+Distinct from `match.methods`, which gates ROUTE RESOLUTION (a miss
+falls through to other routes); this list gates the already-matched
+route.
+
+## Happy-eyeballs dialing (DW-030)
+
+Source: `crates/dwara-core/src/dataplane/upstream.rs`
+(`happy_dial`/`happy_race`/`interleave_order`). Tests:
+`tests/unit/upstream.rs` (ordering and race semantics, driven
+through the `#[doc(hidden)]` test seams — real dials cannot make
+"the first address hangs" deterministic on loopback),
+`upstream_client` (dual-stack end-to-end).
+
+`upstreams[].timeouts.happy_eyeballs_ms` (default 250 per RFC 8305,
+`0` disables racing, validated ≤ 10 minutes): when an endpoint's
+authority resolves to multiple addresses, the first is dialed
+immediately and each subsequent address — the other address family
+alternating in after the resolver's first — is dialed one delay
+after the previous START; RFC 8305 §5.2 failure fast-forward starts
+the next attempt immediately when an attempt fails with nothing else
+in flight; the first success wins and dropping the race's `JoinSet`
+cancels the losers. Two accounting rules are frozen: the upstream's
+`connect_ms` bounds the WHOLE dial (resolution + every interleaved
+attempt + the TLS handshake), and exactly ONE outcome per dial
+reaches breaker and passive-health accounting — a losing arm is
+never an endpoint failure. Active health probes dial through the
+same discipline (one dialing discipline per upstream). IPv6
+IP-literal authorities are stripped of their `Uri::host()` brackets
+before resolution and SNI (`[::1]` → `::1`) — the strip hyper-util's
+old resolver did internally, now ours because the dial is ours.

@@ -9,6 +9,49 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Protocol hardening pass 2 (DW-030), three features. **PROXY protocol
+  acceptance** (`listeners[].proxy_protocol`, opt-in, default false):
+  a listener behind an L4 load balancer reads a PROXY protocol v1 or
+  v2 header as the first bytes of every connection — before the TLS
+  handshake in terminate mode — and the header's source address
+  replaces the accepted socket peer everywhere it is consumed (authz
+  IP ACL base, rate-limit keying, `X-Forwarded-For`/`X-Real-IP`).
+  The spoofing boundary is the config: a listener without the flag
+  never interprets first bytes as a PROXY line. A malformed header
+  (bad signature, bad lengths, Unix family, datagram protocol,
+  over-ceiling) is answered with a 400 error envelope and closed —
+  never handed to HTTP parsing; a stalled or dropped header read
+  closes silently, bounded by the slowloris header timeout. A v2
+  `LOCAL` command, a v1 `UNKNOWN` line, and AF_UNSPEC keep the real
+  peer (the specification's fallbacks). Parsing is delegated to the
+  `ppp` crate (Apache-2.0); the framing read, bounds (107 B v1 /
+  16+65535 B v2), and fail-closed policy live in dwara-core. The
+  flag is part of the restart-only bind set and cannot combine with
+  `tls.mode passthrough` (validation rejects it). **Per-route method
+  allowlist** (`routes[].methods`): when non-empty, a request that
+  resolved the route with a method outside the list is answered
+  `405` with an `Allow` header echoing the configured methods
+  verbatim (RFC 9110 10.2.1). Placement mirrors the maintenance 503:
+  after route resolution, before route limits and authentication;
+  a CORS preflight is exempt (the preflight asks about the gateway's
+  cross-origin policy, not the resource — failing it would hide the
+  CORS answer from the browser), and the 405 itself is
+  CORS-decorated and security-stamped. Matching is case-insensitive;
+  HEAD is not implicitly granted by GET; entries are validated as
+  HTTP method tokens without case-insensitive duplicates. **Happy
+  eyeballs dialing** (`upstreams[].timeouts.happy_eyeballs_ms`,
+  default 250, `0` disables racing, bounded to 10 minutes): dials
+  race across a multi-address resolution per RFC 8305 — first
+  address immediately, each subsequent address one delay after the
+  previous start, address families alternating after the resolver's
+  first, failure fast-forward when nothing is in flight, first
+  success cancels the losers. The upstream's `connect_ms` still
+  bounds the whole dial (resolution, every interleaved attempt, and
+  the TLS handshake), and exactly one outcome per dial reaches
+  breaker and passive-health accounting — a losing arm is never
+  counted as an endpoint failure. Active health probes dial with
+  the same discipline. IP-literal IPv6 authorities are handled
+  correctly (`[::1]` brackets stripped before resolution and SNI).
 - Request coalescing for cache misses (DW-038): an optional
   `coalescing` block on a route's `cache` policy collapses concurrent
   identical cacheable GETs into one upstream call — the first miss

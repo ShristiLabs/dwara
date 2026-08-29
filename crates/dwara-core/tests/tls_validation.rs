@@ -26,6 +26,7 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
         port,
         protocol: ListenerProtocol::Https,
         tls: Some(tls),
+        proxy_protocol: false,
         policies: vec![],
         authorization: None,
     }
@@ -76,6 +77,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             name: "r".into(),
             service: "svc".into(),
             cache: None,
+            methods: vec![],
             r#match: RouteMatch {
                 path: PathMatch {
                     kind: PathMatchKind::Exact,

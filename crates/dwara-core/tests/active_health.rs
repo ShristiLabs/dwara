@@ -159,9 +159,31 @@ async fn http_probe_classifies_2xx_success_5xx_failure() {
     let port = serve_switchable(Arc::clone(&flag)).await;
     let t = Duration::from_secs(2);
 
-    assert!(probe_once(ProbeKind::Http, None, "127.0.0.1", port, "/healthz", t).await);
+    assert!(
+        probe_once(
+            ProbeKind::Http,
+            None,
+            "127.0.0.1",
+            port,
+            "/healthz",
+            t,
+            None
+        )
+        .await
+    );
     flag.store(false, Ordering::Relaxed);
-    assert!(!probe_once(ProbeKind::Http, None, "127.0.0.1", port, "/healthz", t).await);
+    assert!(
+        !probe_once(
+            ProbeKind::Http,
+            None,
+            "127.0.0.1",
+            port,
+            "/healthz",
+            t,
+            None
+        )
+        .await
+    );
     // Refused port: failure.
     assert!(
         !probe_once(
@@ -170,7 +192,8 @@ async fn http_probe_classifies_2xx_success_5xx_failure() {
             "127.0.0.1",
             dead_port(),
             "/healthz",
-            t
+            t,
+            None
         )
         .await
     );
@@ -183,7 +206,8 @@ async fn http_probe_classifies_2xx_success_5xx_failure() {
             "10.255.255.1",
             81,
             "/healthz",
-            Duration::from_millis(200)
+            Duration::from_millis(200),
+            None
         )
         .await
     );
@@ -201,7 +225,8 @@ async fn tcp_probe_classifies_connect_success_and_failure() {
             "127.0.0.1",
             port,
             "",
-            Duration::from_secs(2)
+            Duration::from_secs(2),
+            None
         )
         .await
     );
@@ -212,7 +237,8 @@ async fn tcp_probe_classifies_connect_success_and_failure() {
             "127.0.0.1",
             dead_port(),
             "",
-            Duration::from_secs(2)
+            Duration::from_secs(2),
+            None
         )
         .await
     );
@@ -445,6 +471,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 Route {
                     name: "steal-liveness".into(),
                     cache: None,
+                    methods: vec![],
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {
@@ -479,6 +506,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 Route {
                     name: "catch".into(),
                     cache: None,
+                    methods: vec![],
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {
@@ -858,7 +886,8 @@ async fn http_probe_times_out_against_stalling_server() {
             "127.0.0.1",
             port,
             "/healthz",
-            Duration::from_millis(100)
+            Duration::from_millis(100),
+            None
         )
         .await,
         "stalling server is a failed probe"
@@ -920,6 +949,7 @@ async fn http_probe_is_twoxx_only_and_ignores_bodies() {
             port,
             "/healthz",
             Duration::from_secs(2),
+            None,
         )
         .await;
         assert_eq!(got, *want, "case {i} classified wrong");
@@ -937,12 +967,23 @@ async fn tcp_probe_classifies_refused_close_and_hold() {
     let t = Duration::from_secs(2);
 
     // tcp kind: connect is the only criterion.
-    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", hold, "", t).await);
-    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", close, "", t).await);
-    assert!(!probe_once(ProbeKind::Tcp, None, "127.0.0.1", dead_port(), "", t).await);
+    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", hold, "", t, None).await);
+    assert!(probe_once(ProbeKind::Tcp, None, "127.0.0.1", close, "", t, None).await);
+    assert!(!probe_once(ProbeKind::Tcp, None, "127.0.0.1", dead_port(), "", t, None).await);
 
     // http kind: a connection that closes before a status line is a failure.
-    assert!(!probe_once(ProbeKind::Http, None, "127.0.0.1", close, "/healthz", t).await);
+    assert!(
+        !probe_once(
+            ProbeKind::Http,
+            None,
+            "127.0.0.1",
+            close,
+            "/healthz",
+            t,
+            None
+        )
+        .await
+    );
 }
 
 // --------------------------------------------------------- ejection done-when
@@ -1391,7 +1432,8 @@ async fn fragmented_status_line_succeeds_and_mid_line_close_fails() {
             "127.0.0.1",
             fragmented,
             "/healthz",
-            Duration::from_secs(2)
+            Duration::from_secs(2),
+            None
         )
         .await,
         "status line fragmented across writes must still classify as 2xx success"
@@ -1410,7 +1452,8 @@ async fn fragmented_status_line_succeeds_and_mid_line_close_fails() {
             "127.0.0.1",
             truncated,
             "/healthz",
-            Duration::from_secs(2)
+            Duration::from_secs(2),
+            None
         )
         .await,
         "peer closing mid-status-line must be a failed probe"

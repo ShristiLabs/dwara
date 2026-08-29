@@ -5,7 +5,27 @@
 //! pool's connector is tuned per upstream:
 //!
 //! - **Connect timeout**: `timeouts.connect_ms` (default 5 s) wraps the
-//!   whole dial: TCP connect plus, for TLS upstreams, the TLS handshake.
+//!   whole dial: resolution plus TCP connect plus, for TLS upstreams,
+//!   the TLS handshake.
+//! - **Happy-eyeballs dial** (DW-030, RFC 8305): an endpoint address
+//!   that resolves to multiple addresses — the dual-stack hostname
+//!   case — is dialed with interleaved address-family attempts
+//!   (`timeouts.happy_eyeballs_ms`, default 250 ms, `0` disables):
+//!   the resolver's first address defines the preferred family
+//!   (RFC 8305 leaves the preference to the resolver's order — the
+//!   system's RFC 6724 sort), the first attempt starts immediately,
+//!   each subsequent attempt starts one delay after the previous
+//!   START (or immediately when an attempt fails with nothing else in
+//!   flight), and the first success wins, cancelling the losers.
+//!   Exactly ONE outcome — the overall dial's — reaches the breaker
+//!   and passive-health accounting: the losing arms of one dial are
+//!   dial-internal retries, never endpoint failures. The dial (and
+//!   the [`happy_race`] primitive beneath it) is ours, not
+//!   hyper-util's implicit default: the RFC 8305 shape is now
+//!   documented, configurable, and observable in tests. DNS
+//!   resolution is `getaddrinfo` on the blocking pool
+//!   (`tokio::net::lookup_host`), the same resolver hyper-util's
+//!   `HttpConnector` used here before DW-030.
 //! - **Read timeout (per-attempt)**: `timeouts.read_ms` wraps each pooled
 //!   request/response-header exchange (DW-014) — from the moment the
 //!   request is handed to the pool (including any connection-cap queue
@@ -78,8 +98,9 @@
 //! [`crate::resilience::retries::RetryBudget`] for that loop, and every `send` call is
 //! one ATTEMPT (fresh load-balancer pick, fresh per-attempt deadlines).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -89,14 +110,13 @@ use std::time::Duration;
 use http_body_util::BodyExt as _;
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::{Request, Response, Uri, Version};
-use hyper_util::client::legacy::connect::{
-    Connected, Connection as HyperConnection, HttpConnector,
-};
+use hyper_util::client::legacy::connect::{Connected, Connection as HyperConnection};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tower_service::Service;
 
 use crate::config::limits::MAX_SLOW_START_MS;
@@ -479,12 +499,187 @@ impl HyperConnection for CappedStream {
     }
 }
 
-/// Per-upstream connector: happy-eyeballs TCP dial (via `HttpConnector`
-/// for DNS + address resolution), optional rustls TLS with baked-in ALPN,
-/// the connect timeout, and the connection-cap semaphore.
+/// Default happy-eyeballs inter-connection delay when
+/// `timeouts.happy_eyeballs_ms` is absent (the RFC 8305 recommended
+/// value; DW-030).
+pub const DEFAULT_HAPPY_EYEBALLS_MS: u64 = 250;
+
+/// `timeouts.happy_eyeballs_ms`, resolved to the effective racing delay:
+/// absent -> the RFC 8305 default; `0` -> None (racing disabled, strict
+/// resolver order); otherwise the configured value (clamped to the
+/// ceiling in `config::limits`; validation has already rejected
+/// over-cap values).
+fn effective_happy_eyeballs(u: &Upstream) -> Option<Duration> {
+    match u.timeouts.as_ref().and_then(|t| t.happy_eyeballs_ms) {
+        None => Some(Duration::from_millis(DEFAULT_HAPPY_EYEBALLS_MS)),
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(
+            ms.min(crate::config::limits::MAX_HAPPY_EYEBALLS_MS),
+        )),
+    }
+}
+
+/// RFC 8305 address ordering (DW-030): the resolver's FIRST address keeps
+/// its place and defines the preferred family; the remainder follow with
+/// the OTHER family second, alternating onward — so the gateway reaches
+/// the second family after one inter-connection delay no matter how long
+/// the preferred family's list is.
+///
+/// `#[doc(hidden)]` public for the unit tests in `tests/unit/upstream.rs`
+/// (pure ordering function; exercising it through real dials would need
+/// controllable DNS, which the test environment cannot provide).
+#[doc(hidden)]
+pub fn interleave_order(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    if addrs.len() < 2 {
+        return addrs.to_vec();
+    }
+    let preferred_v6 = addrs[0].is_ipv6();
+    let mut preferred: VecDeque<SocketAddr> = VecDeque::new();
+    let mut other: VecDeque<SocketAddr> = VecDeque::new();
+    for a in addrs {
+        if a.is_ipv6() == preferred_v6 {
+            preferred.push_back(*a);
+        } else {
+            other.push_back(*a);
+        }
+    }
+    let mut out = Vec::with_capacity(addrs.len());
+    while let (Some(a), maybe_b) = (preferred.pop_front(), other.front()) {
+        out.push(a);
+        if let Some(b) = maybe_b {
+            out.push(*b);
+            other.pop_front();
+        }
+    }
+    out
+}
+
+/// Race connection attempts across addresses, RFC 8305 shape (DW-030).
+///
+/// Starts an attempt on `seq`'s first address immediately; each further
+/// attempt starts `delay` after the previous START — or immediately when
+/// an attempt FAILS and nothing else is in flight (RFC 8305 5.2's
+/// failure fast-forward). The first success wins and cancelling the
+/// losers is dropping the [`JoinSet`]; an all-failed race surfaces the
+/// LAST error. Generic over the dial so the unit tests can drive it with
+/// controllable futures (real dials cannot make "the first address hangs"
+/// deterministic on loopback); `#[doc(hidden)]` for that test seam.
+#[doc(hidden)]
+pub async fn happy_race<F, Fut, T>(
+    seq: Vec<SocketAddr>,
+    delay: Option<Duration>,
+    dial: F,
+) -> std::io::Result<T>
+where
+    F: Fn(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    // Racing disabled (or a single address): strict order, one at a
+    // time — the pre-DW-030 dial semantics.
+    let Some(delay) = delay.filter(|d| !d.is_zero()) else {
+        let mut last = None;
+        for a in seq {
+            match dial(a).await {
+                Ok(t) => return Ok(t),
+                Err(e) => last = Some(e),
+            }
+        }
+        return Err(last.unwrap_or_else(no_addresses));
+    };
+    let mut set: JoinSet<std::io::Result<T>> = JoinSet::new();
+    let mut it = seq.into_iter().peekable();
+    let mut last_err: Option<std::io::Error> = None;
+    let Some(first) = it.next() else {
+        return Err(no_addresses());
+    };
+    set.spawn(dial(first));
+    let next_start = tokio::time::sleep(delay);
+    tokio::pin!(next_start);
+    loop {
+        tokio::select! {
+            joined = set.join_next() => {
+                match joined.expect("join_next polled on a non-empty JoinSet") {
+                    // First success wins; returning drops `set`, which
+                    // cancels every losing arm mid-connect.
+                    Ok(Ok(t)) => return Ok(t),
+                    Ok(Err(e)) => last_err = Some(e),
+                    // A panicking dial task is a bug, not an address
+                    // being unreachable — surface it loudly.
+                    Err(join_err) => {
+                        return Err(std::io::Error::other(format!("dial task failed: {join_err}")))
+                    }
+                }
+            }
+            _ = &mut next_start, if it.peek().is_some() => {
+                let a = it.next().expect("peek guaranteed an address");
+                set.spawn(dial(a));
+                next_start.as_mut().reset(tokio::time::Instant::now() + delay);
+            }
+        }
+        // RFC 8305 failure fast-forward: with nothing in flight, the
+        // next attempt starts NOW instead of waiting out the delay (the
+        // peer already refused; a delay would only add latency).
+        if set.is_empty() {
+            match it.next() {
+                Some(a) => {
+                    set.spawn(dial(a));
+                    next_start
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + delay);
+                }
+                None => {
+                    return Err(last_err.take().unwrap_or_else(no_addresses));
+                }
+            }
+        }
+    }
+}
+
+/// The empty-address-list error (both racing modes share it).
+fn no_addresses() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, "no addresses to dial")
+}
+
+/// Resolve one endpoint authority and dial it with the RFC 8305 racing
+/// (DW-030). IP-literal authorities skip DNS entirely (the resolver's
+/// short-circuit, the same path `getaddrinfo` takes); a multi-address
+/// resolution races per `delay`. One dial, one outcome: the caller's
+/// health/breaker accounting sees exactly this Result, never the losing
+/// arms' failures. Shared by the pooled connector and the active health
+/// probes (one dialing discipline per upstream).
+pub async fn happy_dial(
+    host: &str,
+    port: u16,
+    delay: Option<Duration>,
+) -> std::io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("'{host}:{port}' resolved to no addresses"),
+        ));
+    }
+    let seq = interleave_order(&addrs);
+    happy_race(seq, delay, |addr| async move {
+        let stream = TcpStream::connect(addr).await?;
+        // Preserve the pre-DW-030 hyper-util connector behavior: NODELAY
+        // on the proxy hop (latency over throughput on stream request/
+        // response exchanges).
+        let _ = stream.set_nodelay(true);
+        Ok(stream)
+    })
+    .await
+}
+
+/// Per-upstream connector: RFC 8305 resolve + dial (DW-030), optional
+/// rustls TLS with baked-in ALPN, the connect timeout, and the
+/// connection-cap semaphore.
 #[derive(Clone)]
 struct UpstreamConnector {
-    http: HttpConnector,
+    /// Happy-eyeballs inter-connection delay; None = racing disabled
+    /// (`timeouts.happy_eyeballs_ms: 0`, strict resolver order).
+    happy_eyeballs: Option<Duration>,
     /// TLS client config (ALPN already set) for https/http2 upstreams.
     tls: Option<Arc<rustls::ClientConfig>>,
     cap: Arc<Semaphore>,
@@ -503,14 +698,14 @@ impl Service<Uri> for UpstreamConnector {
     type Future =
         Pin<Box<dyn Future<Output = Result<CappedStream, UpstreamError>> + Send + 'static>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.http
-            .poll_ready(cx)
-            .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Resolution happens inside `call` (tokio's blocking-pool
+        // getaddrinfo needs no readiness gating).
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        let mut http = self.http.clone();
+        let happy_eyeballs = self.happy_eyeballs;
         let tls = self.tls.clone();
         let cap = Arc::clone(&self.cap);
         let pending_cap = self.pending_cap.clone();
@@ -544,26 +739,38 @@ impl Service<Uri> for UpstreamConnector {
             // permit here (before the dial) frees the pending slot for
             // the next request.
             drop(_pending);
-            let host = uri.host().unwrap_or_default().to_string();
+            // `Uri::host()` keeps IPv6 brackets ("[::1]"); the resolver
+            // and rustls `ServerName` want the bare address ("::1").
+            // hyper-util's GaiResolver stripped these internally — the
+            // DW-030 dial is ours, so the strip is ours too.
+            let uri_host = uri.host().unwrap_or_default();
+            let host = uri_host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(uri_host)
+                .to_string();
+            // The authority always carries the configured endpoint port
+            // (endpoint_authority); the defaults are the inert fallback
+            // for a hand-built URI.
+            let port = uri
+                .port_u16()
+                .unwrap_or(if tls.is_some() { 443 } else { 80 });
             let dial = async {
-                // HttpConnector (hyper-util 0.1.20) resolves + dials and
-                // hands back a TokioIo<TcpStream>.
-                let tcp = http
-                    .call(uri.clone())
+                let tcp = happy_dial(&host, port, happy_eyeballs)
                     .await
-                    .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
+                    .map_err(UpstreamError::Io)?;
                 let transport = match tls {
                     Some(config) => {
                         let name = ServerName::try_from(host.clone())
                             .map_err(|_| UpstreamError::InvalidHost(host.clone()))?;
                         let connector = tokio_rustls::TlsConnector::from(config);
                         let tls_stream = connector
-                            .connect(name, tcp.into_inner())
+                            .connect(name, tcp)
                             .await
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                         Transport::Tls(Box::new(TokioIo::new(tls_stream)))
                     }
-                    None => Transport::Plain(tcp),
+                    None => Transport::Plain(TokioIo::new(tcp)),
                 };
                 Ok::<Transport, UpstreamError>(transport)
             };
@@ -609,6 +816,10 @@ pub struct UpstreamHandle {
     /// Resolved breaker parameters; None disables the breaker (the proxy
     /// then never consults it — behavior identical to pre-DW-015).
     breaker_params: Option<BreakerParams>,
+    /// Resolved happy-eyeballs delay (DW-030); None = racing disabled.
+    /// Kept on the handle so the active health probes dial with the same
+    /// discipline as the pooled connector.
+    happy_eyeballs: Option<Duration>,
     stats: Arc<UpstreamStats>,
     client: Client<
         UpstreamConnector,
@@ -655,6 +866,11 @@ impl UpstreamHandle {
     /// Effective connect timeout (explicit or default).
     pub fn connect_timeout(&self) -> Duration {
         self.connect_timeout
+    }
+
+    /// Effective happy-eyeballs delay (DW-030); None = racing disabled.
+    pub fn happy_eyeballs(&self) -> Option<Duration> {
+        self.happy_eyeballs
     }
 
     /// Per-attempt read timeout (`timeouts.read_ms`), if configured.
@@ -967,11 +1183,9 @@ fn build_handle(
     // endpoint trackers' ejection/recovery events.
     let upstream_events = events.map(|em| em.for_upstream(&u.name));
 
-    let mut http = HttpConnector::new();
-    http.set_connect_timeout(None); // our timeout wraps dial + TLS handshake
-                                    // The connector itself handles the https scheme (TLS dial); without
-                                    // this HttpConnector rejects non-http URIs before we ever see them.
-    http.enforce_http(false);
+    // DW-030: the connector resolves + dials itself (RFC 8305 happy
+    // eyeballs, `timeouts.happy_eyeballs_ms`); there is no hyper-util
+    // HttpConnector to configure anymore.
 
     // `root_store` is the trust for THIS upstream (#121): the configured
     // trusted_ca_file bundle when set, else webpki (+ any programmatic
@@ -999,7 +1213,7 @@ fn build_handle(
         };
 
     let connector = UpstreamConnector {
-        http,
+        happy_eyeballs: effective_happy_eyeballs(u),
         tls,
         cap: Arc::new(Semaphore::new(cap as usize)),
         pending_cap: u
@@ -1071,6 +1285,7 @@ fn build_handle(
         max_pending: u.max_pending.unwrap_or(0),
         breaker,
         breaker_params: u.breaker.as_ref().map(BreakerParams::from_config),
+        happy_eyeballs: effective_happy_eyeballs(u),
         stats,
         client: builder.build(connector),
         lb,

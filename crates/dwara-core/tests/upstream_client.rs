@@ -6,9 +6,12 @@
 //! connect timeout during the TLS handshake, ALPN mismatch, expired
 //! server certificates, and schema validation for the new fields.
 
+mod support;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use support::*;
 
 use bytes::Bytes;
 use dwara_core::config::{
@@ -80,6 +83,7 @@ fn upstream(
         active_health: None,
         retries: None,
         timeouts: connect_ms.map(|connect_ms| Timeouts {
+            happy_eyeballs_ms: None,
             connect_ms: Some(connect_ms),
             read_ms: None,
             write_ms: None,
@@ -643,6 +647,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
         (
             "timeouts.connect_ms",
             Timeouts {
+                happy_eyeballs_ms: None,
                 connect_ms: Some(0),
                 read_ms: Some(50),
                 write_ms: Some(50),
@@ -651,6 +656,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
         (
             "timeouts.read_ms",
             Timeouts {
+                happy_eyeballs_ms: None,
                 connect_ms: Some(50),
                 read_ms: Some(0),
                 write_ms: Some(50),
@@ -659,6 +665,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
         (
             "timeouts.write_ms",
             Timeouts {
+                happy_eyeballs_ms: None,
                 connect_ms: Some(50),
                 read_ms: Some(50),
                 write_ms: Some(0),
@@ -731,6 +738,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             active_health: None,
             retries: None,
             timeouts: Some(Timeouts {
+                happy_eyeballs_ms: None,
                 connect_ms: Some(1),
                 read_ms: Some(1),
                 write_ms: Some(1),
@@ -773,4 +781,173 @@ async fn absent_fields_default_to_cap_64_and_connect_5000() {
         handle.connect_timeout(),
         Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS)
     );
+}
+
+// ---------------------------------------------------------------------------
+// DW-030: happy-eyeballs upstream dialing (RFC 8305). A dual-stack
+// hostname endpoint ("localhost" resolves to ::1 AND 127.0.0.1) must
+// reach a backend listening on ONE family: whichever arm of the
+// interleave finds it wins. The strict family-alternation order and the
+// delay/cancellation semantics are pinned deterministically by the
+// happy_race/interleave_order unit tests (tests/unit/upstream.rs); these
+// end-to-end cases pin that the dial composes with the pool, the connect
+// timeout, and real getaddrinfo resolution.
+// ---------------------------------------------------------------------------
+
+async fn happy_yaml(endpoint_address: &str, backend_port: u16, happy: Option<&str>) -> String {
+    let timeouts = match happy {
+        Some(ms) => format!("  timeouts:\n    happy_eyeballs_ms: {ms}\n"),
+        None => String::new(),
+    };
+    format!(
+        "routes:\n\
+         - name: all\n\
+         \x20 service: svc\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /api\n\
+         \x20 action:\n\
+         \x20   type: proxy\n\
+         services:\n\
+         - name: svc\n\
+         \x20 upstream: up\n\
+         upstreams:\n\
+         - name: up\n\
+         \x20 endpoints:\n\
+         \x20   - address: {endpoint_address}\n\
+         \x20     port: {backend_port}\n{timeouts}"
+    )
+}
+
+#[tokio::test]
+async fn dual_stack_hostname_reaches_a_v4_only_backend_under_racing() {
+    // ::1 is attempted first on hosts that prefer v6 (macOS default) and
+    // refused fast; the interleaved v4 arm wins. On v4-first hosts the
+    // first arm simply wins. Either way: ONE success, one upstream hit.
+    let (port, count) = support_like_backend().await;
+    let dp = dwara_core::proxy::DataPlane::new(state_from(
+        &happy_yaml("localhost", port, Some("250")).await,
+    ));
+    let gw = spawn_gateway(dp).await;
+    let resp = h1_client()
+        .request(
+            Request::get(uri(gw, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _) = body_of(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dual_stack_hostname_reaches_a_v4_only_backend_with_racing_disabled() {
+    // happy_eyeballs_ms: 0 = strict resolver order: the refused ::1
+    // fails fast and the sequential v4 arm still connects.
+    let (port, count) = support_like_backend().await;
+    let dp = dwara_core::proxy::DataPlane::new(state_from(
+        &happy_yaml("localhost", port, Some("0")).await,
+    ));
+    let gw = spawn_gateway(dp).await;
+    let resp = h1_client()
+        .request(
+            Request::get(uri(gw, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _) = body_of(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn v6_loopback_backend_is_reached_by_the_dual_stack_hostname() {
+    // The v6 arm can win too: a backend on [::1] is reached through the
+    // same hostname endpoint (on v4-first hosts the refused v4 arm fails
+    // fast and v6 wins; on v6-first hosts the first arm wins).
+    let listener = tokio::net::TcpListener::bind("[::1]:0")
+        .await
+        .expect("::1 bind");
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        hyper::service::service_fn(move |_req: Request<Incoming>| {
+                            let counter = Arc::clone(&counter);
+                            async move {
+                                counter.fetch_add(1, Ordering::SeqCst);
+                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                    Bytes::new(),
+                                )))
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    let dp =
+        dwara_core::proxy::DataPlane::new(state_from(&happy_yaml("localhost", port, None).await));
+    let gw = spawn_gateway(dp).await;
+    let resp = h1_client()
+        .request(
+            Request::get(uri(gw, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _) = body_of(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// Plain counting HTTP backend (the support module's shape, local to
+/// this suite because the shared one binds v4 only by design).
+async fn support_like_backend() -> (u16, Arc<AtomicU64>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        hyper::service::service_fn(move |_req: Request<Incoming>| {
+                            let counter = Arc::clone(&counter);
+                            async move {
+                                counter.fetch_add(1, Ordering::SeqCst);
+                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                    Bytes::new(),
+                                )))
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    (port, count)
 }

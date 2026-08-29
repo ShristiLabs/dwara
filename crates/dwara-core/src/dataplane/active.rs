@@ -194,8 +194,11 @@ where
 /// Some for `https`/`http2` upstreams (built from the SAME root store as
 /// the pooled connector — webpki by default, the upstream's
 /// `trusted_ca_file` bundle when configured, #121 — with HTTP/1.1 ALPN),
-/// None for plaintext `http1` upstreams. Returns whether the endpoint
-/// answered healthy.
+/// None for plaintext `http1` upstreams. `happy` is the upstream's
+/// resolved happy-eyeballs delay (DW-030): probes dial through the same
+/// RFC 8305 racing as the pooled connector, so a dual-stack endpoint's
+/// probe does not silently behave differently from its traffic.
+/// Returns whether the endpoint answered healthy.
 pub async fn probe_once(
     kind: ProbeKind,
     tls: Option<&Arc<rustls::ClientConfig>>,
@@ -203,16 +206,18 @@ pub async fn probe_once(
     port: u16,
     path: &str,
     timeout: Duration,
+    happy: Option<Duration>,
 ) -> bool {
     match kind {
-        ProbeKind::Tcp => {
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect((address, port)))
-                .await
-                .is_ok_and(|r| r.is_ok())
-        }
+        ProbeKind::Tcp => tokio::time::timeout(
+            timeout,
+            crate::dataplane::upstream::happy_dial(address, port, happy),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok()),
         ProbeKind::Http => {
             let attempt = async {
-                let tcp = tokio::net::TcpStream::connect((address, port)).await?;
+                let tcp = crate::dataplane::upstream::happy_dial(address, port, happy).await?;
                 match tls {
                     None => {
                         let mut io = tcp;
@@ -302,6 +307,8 @@ pub fn catch_unwind_future<F: Future>(
 /// the loop continues after a backoff of one `interval`. After
 /// [`MAX_CONSECUTIVE_PANICS`] consecutive panics the loop gives up
 /// (logged) and the endpoint stays passive-only until the next respawn.
+// Fixed probe plumbing; DW-030 added the happy-eyeballs delay.
+#[allow(clippy::too_many_arguments)]
 async fn probe_loop(
     lb: Arc<UpstreamLb>,
     address: String,
@@ -310,6 +317,7 @@ async fn probe_loop(
     active: ActiveParams,
     passive: HealthParams,
     tls: Option<Arc<rustls::ClientConfig>>,
+    happy: Option<Duration>,
 ) {
     let report = report_params(&active, &passive);
     let mut success_streak: u32 = 0;
@@ -326,6 +334,7 @@ async fn probe_loop(
                 port,
                 &active.path,
                 active.timeout,
+                happy,
             )
             .await;
             let now = lb.now_ms();
@@ -427,6 +436,7 @@ impl ActiveProbes {
                     active.clone(),
                     passive,
                     tls.clone(),
+                    handle.happy_eyeballs(),
                 ));
             }
         }

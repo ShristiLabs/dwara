@@ -47,6 +47,7 @@ fn bench_gateway() -> Gateway {
                 name: format!("route-{i}-{j}"),
                 service: format!("service-{i}"),
                 cache: None,
+                methods: Vec::new(),
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,

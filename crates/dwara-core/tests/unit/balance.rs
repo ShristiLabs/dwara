@@ -382,6 +382,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
             connect_ms: Some(60000),
             read_ms: None,
             write_ms: None,
+            happy_eyeballs_ms: None,
         }),
         slow_start_ms: None,
         health: None,

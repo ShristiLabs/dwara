@@ -413,6 +413,7 @@ fn weight_zero_and_large_timeouts_parse() {
             connect_ms: Some(0),
             read_ms: Some(0),
             write_ms: Some(0),
+            happy_eyeballs_ms: None,
         })
     );
 }
@@ -495,12 +496,14 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 certificates: vec![],
                 sni_routes: vec![],
             }),
+            proxy_protocol: false,
             policies: vec![],
             authorization: None,
         }],
         routes: vec![Route {
             name: "r".into(),
             cache: None,
+            methods: vec![],
             service: "s".into(),
             r#match: RouteMatch {
                 path: PathMatch {
