@@ -3,7 +3,7 @@
 ## One-command TLS demo
 
 `quickstart/` in the repository is an end-to-end demo: a docker-compose
-stack with dwara terminating TLS in front of an nginx demo upstream.
+stack with Dwara terminating TLS in front of an nginx demo upstream.
 
 ```sh
 cd quickstart
@@ -12,7 +12,7 @@ docker compose up       # builds the gateway image
 curl --cacert certs/server.crt https://localhost:8443/
 ```
 
-The `curl` prints the demo page: the client negotiated TLS with dwara,
+The `curl` prints the demo page: the client negotiated TLS with Dwara,
 which routed `/` to the nginx upstream and proxied the response back.
 See `quickstart/README.md` in the repository for teardown and details.
 Linux hosts need `sudo chown -R 65532:65532 certs` before `docker compose up`
@@ -35,7 +35,7 @@ A listener can terminate TLS (including multi-SNI, one certificate per
 `server_name`) or pass a TLS connection straight through to the upstream
 based on the ClientHello's SNI, without decrypting it. Passthrough is
 useful when the upstream itself must see the original TLS session (its
-own certificate, mTLS to the client, etc.) — dwara only reads the SNI
+own certificate, mTLS to the client, etc.) — Dwara only reads the SNI
 from the ClientHello to pick an upstream, then splices bytes.
 
 ```yaml
@@ -72,7 +72,7 @@ The machine-readable JSON Schema of the gateway config lives at
 dwara-cli schema > config-reference.json
 ```
 
-If you maintain your own tooling against dwara's config shape (editors,
+If you maintain your own tooling against Dwara's config shape (editors,
 linters, generators), this is the schema to consume — CI fails a pull
 request whose committed schema drifts from what the current code
 generates, so it never goes stale.

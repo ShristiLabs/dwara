@@ -1,6 +1,6 @@
 # Architecture overview
 
-This page is a high-level map of how dwara handles a request and how it
+This page is a high-level map of how Dwara handles a request and how it
 manages its own state, for anyone deploying or operating the gateway.
 For internals aimed at contributors (crate/module layout, dependency
 rules, implementation rationale), see the
@@ -129,7 +129,7 @@ flowchart LR
 ```
 
 Terminate mode supports multiple certificates keyed by SNI on one
-listener. Passthrough mode never decrypts the connection — dwara peeks
+listener. Passthrough mode never decrypts the connection — Dwara peeks
 the ClientHello's SNI (reassembling it across fragmented TLS records if
 needed) to pick an upstream, then splices bytes; the upstream sees the
 original, untouched TLS session.

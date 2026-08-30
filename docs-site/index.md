@@ -2,9 +2,12 @@
 layout: home
 
 hero:
-  name: dwara
+  name: Dwara
   text: API gateway
   tagline: A high-performance reverse-proxy API gateway written in Rust.
+  image:
+    src: /mark-color.svg
+    alt: Dwara mark
   actions:
     - theme: brand
       text: Get started

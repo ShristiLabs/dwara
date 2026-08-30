@@ -1,156 +1,141 @@
-# dwara
+# Dwara
 
-A high-performance API gateway written in Rust.
+<p align="center">
+  <img src="./branding/png/logo-horizontal.png" alt="Dwara" width="360">
+</p>
 
-Status: pre-alpha. The core reverse-proxy dataplane works — routing,
-streaming proxying, TLS termination/passthrough, upstream load
-balancing, hot config reload, request authentication (API keys, Basic,
-JWT Bearer), local rate limiting, per-consumer request budgets
-(quotas), and observability (structured JSON
-logs, request IDs, Prometheus `/metrics`, uniform error envelope) —
-with more traffic policy still to come in M1.
+A high-performance, streaming reverse-proxy API gateway written in Rust.
+Built for operators who need predictable latency, defense-in-depth traffic
+policy, and a single declarative YAML config to run an edge for internal and
+external APIs.
+
+Dwara is Apache-2.0 licensed and developed in the open at
+[shristilabs/dwara](https://github.com/shristilabs/dwara).
+
+> **Status:** milestone M1 ("It proxies") is complete. The gateway is
+> production-shaped but pre-1.0: the config schema is still additive-only and
+> may churn before the first stable release. See the
+> [changelog](./CHANGELOG.md) for what shipped.
+
+## Documentation
+
+The complete operator documentation is published at
+**<https://shristilabs.github.io/dwara/>** and covers every feature in depth.
+This README is a quick orientation; treat the docs site as the source of truth.
+
+| Where to look | Link |
+| --- | --- |
+| Getting started guide | <https://shristilabs.github.io/dwara/guide/getting-started> |
+| Configuration | <https://shristilabs.github.io/dwara/guide/configuration> |
+| Deployment (TLS, Docker, systemd) | <https://shristilabs.github.io/dwara/guide/deployment> |
+| Operations | <https://shristilabs.github.io/dwara/guide/operations> |
+| Observability | <https://shristilabs.github.io/dwara/guide/observability> |
+| Admin API | <https://shristilabs.github.io/dwara/guide/admin-api> |
+| CLI reference | <https://shristilabs.github.io/dwara/guide/cli> |
+| Environment variables | <https://shristilabs.github.io/dwara/reference/environment-variables> |
+| Configuration schema (JSON Schema) | <https://shristilabs.github.io/dwara/reference/configuration-schema> |
+| Architecture overview | <https://shristilabs.github.io/dwara/architecture/overview> |
+
+Contributors and integrators should also read [`AGENTS.md`](./AGENTS.md)
+(practical build/test/conventions) and the developer docs in
+[`docs/`](./docs) (internals, rationale, diagrams).
+
+## Capabilities
+
+A single Dwara process fronts many upstreams with a layered traffic policy.
+Each capability is documented in its own guide page on the docs site.
+
+**Dataplane**
+- Streaming HTTP/1.1 and HTTP/2 proxying (no buffering by default; SSE and
+  large bodies pass through with frame-based backpressure).
+- TLS termination with multi-SNI certificate selection, plus SNI passthrough.
+- Routing: `exact` (with path parameters), `regex`, and `prefix` matching with
+  a fixed precedence (exact > regex > prefix); non-path criteria (host,
+  methods, headers, query, cookies).
+- Path rewrites (`strip_prefix`, `replace_prefix`, `regex`) and `redirect` /
+  `respond` direct actions.
+- Load balancing: `round_robin`, `least_requests`, `random`, `ip_hash`, with
+  slow start.
+- gRPC over H2 and managed WebSocket tunnels (origin allowlist, frame-rate
+  policing).
+
+**Resilience**
+- Passive and active health checks, endpoint ejection.
+- Retries with bounded attempts and timeout budgets.
+- Circuit breaking and per-upstream capacity limits.
+- Load shedding with priority-aware admission (`max_concurrent_requests`).
+- Local rate limiting (GCRA, stacked windows) at global, listener, service,
+  route, or consumer scope.
+- Per-consumer request budgets (quotas) over durable state-store counters.
+
+**Security**
+- Authentication: API key, Basic, JWT via JWKS, mTLS client certificates, and
+  HMAC request signing.
+- Authorization and IP ACLs with deny-anywhere-wins precedence
+  (consumer > route > service > listener > global).
+- Request/response transforms, security headers, and fail-closed response
+  field masking (per-consumer-group redaction).
+- mTLS-only admin API for live config inspection and patching.
+- Secret references (`${...}`) resolved at compile time with exhaustive
+  redaction; secrets are never logged or included in Debug output.
+
+**Operability**
+- Hot config reload (file change, debounced, or SIGHUP) with atomic
+  publish-and-swap; a rejected reload keeps the previous generation serving.
+- Structured JSON logs, request IDs, Prometheus `/metrics`, and a uniform
+  JSON error envelope.
+- Embedded analytics store with rollups and a real-time analytics stream.
+- Alert and event webhooks off an in-process event bus.
+- API versioning (path / header / query / Accept media type) with
+  Deprecation/Sunset/Link automation.
+- Response caching, CORS, and per-route compression.
+
+**Packaging**
+- Fully static musl binary (bundled SQLite, aws-lc-rs compiled in).
+- Scratch (17.6 MB) and distroless (65.2 MB) images; multi-arch GHCR images
+  built from verified, checksummed release artifacts.
+- Hardened systemd unit.
 
 ## Quickstart
 
-Requires Rust 1.94 (pinned in `rust-toolchain.toml`).
+Requires Rust 1.94+ (pinned in `rust-toolchain.toml`) or a released binary
+(see [Installation](https://shristilabs.github.io/dwara/guide/installation)).
 
-The gateway proxies: the sample config forwards everything under `/v1`
-to an upstream at `127.0.0.1:9000`. Start any HTTP server there, then
-run the gateway from the repo root with the sample config:
+Start any HTTP server to proxy to, then run the gateway with the sample
+config that forwards everything under `/v1` to `127.0.0.1:9000`:
 
 ```sh
 python3 -m http.server 9000
 DWARA_CONFIG=crates/dwara-bin/dwara.yaml cargo run -p dwara-bin
 ```
 
-Then request through the gateway (the listener binds
-`http://127.0.0.1:8080`):
+Send a request through the gateway (it binds `http://127.0.0.1:8080`):
 
 ```sh
 curl http://127.0.0.1:8080/v1/
 ```
 
-The request is streamed to the backend unbuffered and the response
-streams back the same way. A path with no matching route gets `404`; a
-dead backend gets `502` (or `504` on connect timeout). Stop with Ctrl-C.
+The request streams to the backend unbuffered and the response streams back
+the same way. A path with no matching route returns `404`; a dead backend
+returns `502` (or `504` on connect timeout). Stop with `Ctrl-C` — the gateway
+drains in-flight requests before exiting.
 
-For the full path — TLS termination, Docker, and a demo upstream — see
-the one-command TLS demo in `quickstart/` (below, under Deployment).
+An invalid or missing config makes the process exit with code 1, printing
+every validation issue at once (not just the first).
 
-The binary exits with code 1, printing every validation issue, if the
-config is missing or invalid.
-
-Environment variables (all optional):
-
-- `DWARA_CONFIG`: path to the gateway YAML config, default `./dwara.yaml`.
-- `DWARA_BIND`: when set, overrides the config listeners with a single
-  cleartext HTTP listener on that address (test/dev escape hatch;
-  default unset = bind every configured listener). The synthetic
-  listener is not one of the configured listeners, so listener-level
-  `policies` and `authorization` attachments cannot apply to it —
-  those require configured listeners.
-- `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on
-  SIGTERM/SIGINT, default 10.
-- `DWARA_STATE_DB`: path to a SQLite state store (default unset = no
-  store). See "State store" under Operations.
-- `DWARA_CREDENTIAL_PEPPER`: per-deployment SECRET that peppers stored
-  credential hashes (`hmac-sha256:<hex>`), so a state-DB leak alone
-  cannot verify guesses. Default unset = legacy-only mode (legacy
-  `sha256:` entries keep verifying). Never logged. See "Authentication".
-- `DWARA_LOG`: log filter in `RUST_LOG` syntax, default `dwara=info`.
-- `DWARA_ACCESS_LOG_SAMPLE`: fraction of non-error access-log lines
-  emitted, 0.0-1.0, default 1.0. See "Observability".
-- `DWARA_OTLP_ENDPOINT`: base OTLP collector endpoint, `http://` only
-  (e.g. `http://collector:4318`; `/v1/traces` is appended) for trace
-  export. Requires building the gateway with the default-off `otlp`
-  cargo feature; in the default build this variable is reserved but
-  inert (see "Observability").
-- `DWARA_ADMIN_DEV`: `"1"` serves the admin API as plaintext on the
-  configured admin bind, which must be loopback — DEV ONLY, see
-  "Admin API". Default unset = mTLS only.
-
-## Deployment
-
-### Quickstart: one-command TLS demo
-
-`quickstart/` is the end-to-end demo — a docker-compose stack with the
-gateway terminating TLS in front of an nginx demo upstream:
-
-```sh
-cd quickstart
-./gen-certs.sh          # self-signed localhost certificate into ./certs
-docker compose up       # builds the gateway image (Dockerfile.scratch)
-curl --cacert certs/server.crt https://localhost:8443/
-```
-
-The curl prints the demo page: the client negotiated TLS with the
-gateway, which routed `/` to the nginx upstream and proxied the
-response back. Details and teardown: `quickstart/README.md`.
-
-### Docker images
-
-Two image variants ship at the repo root, both built from the same
-static musl binary:
-
-| Image | Size | When to use |
-| --- | --- | --- |
-| `Dockerfile.scratch` | 17.6 MB (aarch64) | absolute minimum; the orchestrator must inject an unprivileged user (`--user`, compose `user:`, k8s `runAsNonRoot`) — scratch has no user database |
-| `Dockerfile.distroless` | 65.2 MB | baked-in UID 65532 (`nonroot`) plus tzdata and a CA bundle; use when you cannot inject a user |
-
-The binary is fully static (musl, bundled SQLite, aws-lc-rs compiled
-in), so the scratch image carries no libc and no base layer. Upstream
-TLS verification defaults to the Mozilla webpki root set compiled into
-the binary, so no CA bundle is shipped; private-CA upstreams (and JWKS
-endpoints) are trusted per entity via `trusted_ca_file`, a bundle the
-deployment itself provides. Rationale, size notes, and the musl-vs-gnu
-tradeoff: `packaging/README.md`.
-
-### systemd
-
-A hardened unit with install instructions in its header comment ships
-at `packaging/systemd/dwara.service`. Sketch:
-
-```sh
-install -Dm755 target/*/release/dwara /usr/local/bin/dwara
-install -Dm644 quickstart/dwara.yaml /etc/dwara/dwara.yaml   # or your own
-install -Dm644 packaging/systemd/dwara.service /etc/systemd/system/dwara.service
-useradd --system --home /var/lib/dwara --shell /usr/sbin/nologin dwara
-systemctl daemon-reload && systemctl enable --now dwara
-```
-
-`systemctl reload dwara` sends SIGHUP (config hot-reload); stop drains
-gracefully within `DWARA_SHUTDOWN_TIMEOUT_SECS`.
-
-### Config reference
-
-`config-reference.json` at the repo root is the machine-readable JSON
-Schema of the gateway config, generated by:
-
-```sh
-cargo run -q -p dwara-cli -- schema > config-reference.json
-```
-
-CI gates freshness: a pull request whose committed
-`config-reference.json` differs from what `dwara-cli schema` emits
-fails, so the reference never drifts from the code.
-
-### Release artifacts
-
-The release workflow (`.github/workflows/release-artifacts.yml`) runs
-ONLY on `v*` tag push — nothing builds on PRs or pushes to `main`. A
-tag cross-builds amd64 and arm64 musl binaries, enforces a 25 MB
-stripped-binary size bar per arch, and publishes multi-arch images to
-GHCR assembled from those verified binaries: the images job downloads
-the checksummed artifacts, re-verifies the sha256s, and COPYs them in,
-so a published image is byte-identical to the published tarball binary
-— nothing is compiled twice (#127). There is no gnu build (see
-`packaging/README.md`).
+For the full path with TLS, Docker, and a demo upstream, see the
+[one-command TLS demo](https://shristilabs.github.io/dwara/guide/deployment).
 
 ## Configuration
 
-Gateway configuration is a YAML file parsed strictly by `dwara-core`
-(`parse_gateway`): unknown fields are rejected, and errors carry the
-path of the offending node. A minimal valid configuration:
+Dwara is configured from a single YAML file, parsed strictly (unknown fields
+are rejected; errors carry the path of the offending node). Config passes
+through a fixed pipeline before the gateway serves it: **parse** (strict) ->
+**validate** (semantic, all issues at once) -> **compile** (route lookup
+structures) -> **publish** (atomic; a failure anywhere keeps the previous
+generation serving).
+
+A minimal valid configuration:
 
 ```yaml
 listeners:
@@ -176,1874 +161,105 @@ upstreams:
         port: 9000
 ```
 
-More examples live in `crates/dwara-core/tests/fixtures/` (minimal and
-full). The machine-readable JSON Schema of the config is committed at
-`config-reference.json` and regenerated with
-`dwara-cli schema` (see "Config reference" under Deployment); CI keeps
-it fresh. The schema still churns during M1.
+The machine-readable JSON Schema of the full config is committed at
+[`config-reference.json`](./config-reference.json) and regenerated with:
 
-Config passes through a fixed pipeline before the gateway serves it:
-
-- **Parse** (strict): unknown fields rejected, errors carry the path of
-  the offending node.
-- **Validate** (semantic): duplicate names, unknown upstream/service/
-  policy references, listener address+port conflicts, empty or invalid
-  credentials and endpoint weights are checked, an empty `routes` list
-  is rejected unless `allow_empty_routes: true` is set (see "Global
-  settings"), and every issue is reported at once rather than one per
-  attempt.
-- **Compile**: route paths are built into lookup structures. This is
-  where schema-valid config can still fail (an invalid regex or
-  conflicting path template names the route and pattern at fault).
-- **Publish** (atomic): a config that fails anywhere above never
-  replaces the running one; the gateway keeps serving the previous
-  snapshot, and each successful publish gets a new generation id.
-
-Route paths match one of three ways: `exact` (a full template, path
-parameters like `/users/{id}` supported), `regex`, or `prefix`. A
-request path resolves to at most ONE route, chosen in this order:
-
-1. **Exact** — the matchit radix template; static segments beat
-   parameters (`/users/active` before `/users/{id}`), and conflicting
-   templates are rejected at config-compile time.
-2. **Regex** — when several `regex` routes match, the FIRST-declared
-   one in config order wins.
-3. **Prefix** — the LONGEST matching prefix wins (byte prefix, no
-   segment boundary: `/v1` also matches `/v1anything`); equal-length
-   ties go to the first-declared route.
-
-Cross-kind order is fixed: exact beats regex beats prefix, regardless
-of declaration order or how specific a regex/prefix looks. A route can
-also require non-path criteria: a `host` (matched case-insensitively
-against the `Host` header, with or without a port — exact only, no
-wildcards), a list of `methods` (empty = all methods), exact-value
-`headers`, `query` parameters, and `cookies`:
-
-```yaml
-match:
-  path: { type: prefix, value: /api }
-  query:
-    - name: apikey            # present is enough
-    - name: version           # exact value required
-      value: "2"
-  cookies:
-    - name: session
-      value: abc123
+```sh
+cargo run -q -p dwara-cli -- schema > config-reference.json
 ```
 
-Every criterion is AND-ed. Query and cookie matching is over the RAW
-bytes the client sent: no percent-decoding for query values and no
-cookie-unquoting in v1 — configure the value exactly as it appears on
-the wire. A path that resolves to a route whose criteria miss does NOT
-fall through to the next candidate route; the request is answered
-`404`.
-
-### Route actions
-
-A matched route does one of three things:
-
-- `proxy`: forward to the route's service (and its upstream). An
-  optional `rewrite` (at most one per action, no chaining) rewrites the
-  path before it is sent upstream — see below.
-- `redirect`: answer with a 3xx whose `Location` is built from the
-  optional `scheme`, `host`, and `path`; when no `path` is configured
-  the inbound path and query are preserved verbatim. `status` is
-  required (e.g. 301, 302).
-- `respond`: answer directly with the configured `status`, optional
-  plain-text `body`, and optional extra `headers` (a name-to-value map,
-  emitted verbatim; invalid header names/values are rejected by
-  validation).
-
-```yaml
-routes:
-  - name: old
-    service: echo
-    match:
-      path: { type: prefix, value: /old }
-    action:
-      type: redirect
-      scheme: https
-      host: api.example.com
-      status: 301
-  - name: health
-    service: echo
-    match:
-      path: { type: exact, value: /ping }
-    action:
-      type: respond
-      status: 200
-      body: ok
-```
-
-Requests that match no route (path or criteria miss) get a `404` in
-the uniform JSON error envelope (see "Observability"), after any
-listener/global rate limits apply (see "Rate limiting"). A route may
-also carry a `priority` (0-10, default 5) — see "Load shedding and
-priority" under Global settings.
-
-### Path rewrite (proxy)
-
-A `proxy` action may carry one `rewrite`, applied to the path component
-only — the query string is always re-attached verbatim. Three kinds:
-
-- `strip_prefix`: strip the route's matched prefix (the `match.path`
-  value with trailing slashes trimmed). If nothing remains, the result
-  is `/`.
-- `replace_prefix`: when the request path starts with `prefix`, replace
-  that prefix with `replacement` (must start with `/` or be empty);
-  otherwise the path is forwarded unchanged.
-- `regex`: replace the FIRST match of `pattern` with `substitution`.
-  The substitution may reference numbered capture groups (`$1`,
-  `${2}`, ...) and named groups of the pattern, falling back to the
-  route's `{param}` path-template captures; unknown references expand
-  to the empty string. The pattern must compile; this is checked at
-  config-compile time, never at request time.
-
-```yaml
-routes:
-  - name: api-strip
-    service: echo
-    match:
-      path: { type: prefix, value: /v1/ }
-    action:
-      type: proxy
-      rewrite: { type: strip_prefix }
-  - name: api-relabel
-    service: echo
-    match:
-      path: { type: regex, value: "^/api/(.*)$" }
-    action:
-      type: proxy
-      rewrite:
-        type: regex
-        pattern: "^/api/(.*)$"
-        substitution: "/internal/$1"
-```
-
-### Proxying semantics
-
-Proxying streams end to end: neither request nor response bodies are
-buffered by the gateway — SSE and large bodies pass through with
-hyper's natural frame-based backpressure. Hop-by-hop headers
-(`Connection` and everything it names, `Keep-Alive`, `TE`, `Trailer`,
-`Transfer-Encoding`, `Proxy-*`, plus `Upgrade` on non-upgrade
-requests) are stripped in both directions. The outbound `Host` is set
-to the upstream authority (`address:port` of the endpoint), not the
-inbound host.
-
-Protocol upgrades tunnel generically: an HTTP/1.1 request with an
-`Upgrade` header whose upstream answers `101` (e.g. WebSocket) has
-both connections upgraded and spliced byte-for-byte until either side
-closes. An `Upgrade` request received over HTTP/2 or h2c is answered
-`501 Not Implemented`.
-
-Upstream failures are classified, and details are logged server-side
-only: connect timeout or per-attempt read timeout (`timeouts.read_ms`)
--> `504`; endpoint refused, pool failure, or no endpoints -> `502`;
-upstream TLS configuration errors -> `500`.
-
-### Global settings
-
-- `max_concurrent_requests` (top-level, DW-015): the maximum number of
-  requests admitted concurrently across the WHOLE gateway. Absent (the
-  default) is unlimited. A request over the cap is rejected immediately
-  (no queueing) with 503 "gateway saturated". A slot is reserved at
-  admission and held until the response BODY completes or the client
-  connection drops — a streaming response holds its slot for the whole
-  stream. The reserved `/healthz` and `/readyz` paths bypass the cap, so
-  liveness/readiness probes still answer under saturation. An explicit
-  `0` is rejected by validation (omit the field for unlimited). A reload
-  builds a new cap; requests already admitted keep their slots.
-
-```yaml
-max_concurrent_requests: 4096
-```
-
-- `allow_empty_routes` (top-level, #129): deliberate opt-in to running
-  a gateway with ZERO routes. Default `false`: validation rejects a
-  config whose `routes` list is empty. The guard exists because an
-  empty route set is schema-valid (every collection defaults empty),
-  and so is a truncated or torn config write (truncate-then-save,
-  common in naive editors) — publishing it would silently drop ALL
-  routing mid-run while the file "looks fine" (every request 404s).
-  The rejection applies to cold start (exit 1), hot reload, and admin
-  `PATCH /config` alike; a rejected reload or PATCH keeps the previous
-  generation serving. Set it to `true` only for deliberate route-less
-  shapes — a gateway whose sole job is the admin API, or an
-  SNI-passthrough-only gateway routing entirely via `sni_routes`
-  (see "TLS"). With the flag set, unrouted requests answer 404 after
-  listener/global policy checks, per the documented request-path
-  order.
-
-```yaml
-allow_empty_routes: true
-```
-
-- `webhooks` (top-level, DW-044): alert/event webhook targets. See
-  "Alert and event webhooks" below.
-
-```yaml
-webhooks:
-  - url: https://hooks.example.com/alerts
-    events: [breaker_opened, endpoint_ejected, config_rejected]
-```
-
-### Load shedding and priority
-
-Routes and consumers carry an optional `priority` — an integer 0
-(lowest) to 10 (highest), default 5 when omitted; validation rejects
-anything above 10. Priority shapes how the gateway concurrency cap
-(`max_concurrent_requests`) behaves under saturation:
-
-- Route resolution happens BEFORE cap admission, so the request's
-  priority class is known when the shed decision is made. A side
-  effect: requests that match no route (plain `404`) never consume a
-  cap slot, and neither do the reserved `/healthz` and `/readyz`
-  paths.
-- When ANY route or consumer is configured at priority >= 8
-  ("high"), 10% of the cap (minimum 1) is carved out as a reserved
-  sub-allowance that only high-priority requests may draw from once
-  the general allowance is full. Under overload, normal traffic is
-  shed first — 503 "gateway saturated" as soon as the general
-  allowance fills — while high-priority traffic survives until the
-  reserved bucket fills too.
-- This is reserved capacity, NOT preemption: requests already in
-  flight keep their slots until they complete; the gateway cannot
-  displace a running normal request to make room for a high-priority
-  one.
-- Consequence of the minimum-1 carve: a cap of 1 with any high
-  priority configured reserves the entire cap — the general allowance
-  becomes 0 and ONLY high-priority requests are ever admitted. Use a
-  cap of 1 only for high-priority-only traffic.
-- With no route or consumer at priority >= 8, nothing is carved and
-  every request draws from the full cap exactly as before —
-  priority-free configs behave identically to the plain cap.
-- A shed is a 503, not a 429 (429 is reserved for rate limiting),
-  carries no `Retry-After` (immediate re-dispatch against a saturated
-  gateway is not advisable), and no marker header — the response is a
-  plain 503 with "gateway saturated" as the envelope message.
-
-```yaml
-routes:
-  - name: critical
-    service: billing
-    priority: 9          # survives overload; shed last
-    match:
-      path: { type: prefix, value: /billing }
-    action:
-      type: proxy
-```
-
-Consumers also accept a `priority`; it takes effect once request
-authentication (see "Authentication") identifies the consumer — until
-then, shedding priority comes from the matched route. When known, the
-consumer's priority overrides the route's.
-
-### Forwarded headers and trusted proxies
-
-Gateway-level `trusted_proxies` (a list of IP addresses or CIDR
-ranges, e.g. `10.1.2.3` or `10.0.0.0/8`) controls
-`X-Forwarded-For` handling; anything else in the list fails
-validation:
-
-```yaml
-trusted_proxies:
-  - 10.0.0.0/8
-```
-
-- `X-Forwarded-For`: if the direct connection peer is inside
-  `trusted_proxies`, the inbound XFF chain is preserved and the peer
-  appended (`"<inbound>, <peer>"`). Otherwise — including the empty
-  default, which trusts nobody — the inbound XFF is discarded and
-  replaced with exactly the peer, so a spoofed chain from an
-  untrusted client never reaches the upstream.
-- `X-Real-IP`: always the direct connection peer, no configuration.
-
-### Upstreams
-
-Each upstream is a load-balanced pool of endpoints with its own
-connection pool. Fields:
-
-- `load_balancer`: the pick algorithm, one of `round_robin` (default),
-  `least_requests`, `random`, or `ip_hash` — see below.
-- `protocol`: `http1` (plaintext, default), `https` (TLS, ALPN
-  `http/1.1`), or `http2` (TLS, ALPN `h2`, HTTP/2 only).
-- `trusted_ca_file`: path to a PEM CA bundle this upstream's TLS
-  connections verify against INSTEAD of the public root set. See below.
-- `connection_cap`: maximum concurrent outbound connections to the
-  upstream (active plus pooled idle). Excess connection attempts wait
-  for a slot rather than fail. Defaults to 64.
-- `timeouts.connect_ms`: connect timeout in milliseconds, covering the
-  TCP connect plus, for TLS upstreams, the handshake. Defaults to 5000.
-- `timeouts.read_ms`: per-attempt deadline in milliseconds covering the
-  whole exchange up to the response HEADERS: connection-cap queue wait,
-  connect, request write, and header read. When the deadline expires
-  before headers resolve, the attempt fails `504` (and is
-  retryable as a transport failure when retries are on). The response
-  BODY is not covered by `read_ms`. Absent = unbounded.
-- `timeouts.write_ms`: response-body INACTIVITY timeout in milliseconds
-  — the maximum gap between two consecutive body frames, not a total
-  streaming budget (a body that keeps trickling frames never trips it).
-  A longer stall terminates the stream (frames already forwarded to the
-  client end abruptly; no synthesized tail) and is reported as a
-  passive-health failure for the endpoint. Absent = unbounded.
-- `retries`: upstream retries block; absent (default) disables retries
-  entirely. See below.
-- `breaker`: per-upstream circuit breaker block; absent (default)
-  disables the breaker entirely. See "Circuit breaking and capacity
-  limits" below.
-- `max_pending`: cap on requests WAITING for an outbound connection
-  slot; absent (default) queues without bound (the `connection_cap`
-  behavior). See "Circuit breaking and capacity limits" below.
-- `slow_start_ms`: slow-start window in milliseconds; absent or 0
-  (default) disables the ramp. See below.
-- `health`: passive health / outlier detection block; absent (default)
-  disables it entirely. All keys inside the block default. See below.
-- `active_health`: active health probing block; absent (default)
-  disables probing. Requires a `health` block (validation rejects the
-  pairing otherwise). All keys inside the block default. See below.
-
-Each endpoint carries a `weight` (default 1, must be > 0). For
-`https`/`http2` upstreams, server certificates are verified against the
-Mozilla (webpki) public CA root set; an upstream with `trusted_ca_file`
-set verifies against that PEM bundle INSTEAD — the bundle's roots
-REPLACE the public roots for that upstream's connections (and its https
-active-health probes), they are not added to them, so a private-CA
-upstream never keeps implicit public-root trust. The bundle may carry
-several certificates (a typical CA chain); every certificate in it
-becomes a trust anchor. Validation rejects the field on `http1`
-upstreams and for a bundle that is missing, unreadable, or not parseable
-as PEM holding at least one CERTIFICATE; a bundle that goes bad after
-publish is rejected the same way at reload, and the old generation keeps
-serving. Should a bundle break between validation and snapshot build (a
-microsecond race), the upstream fails CLOSED — every TLS dial to the
-upstream is refused, with an ERROR log — never a silent fallback to the
-public roots. Bundle paths are not file-watched (only the config file
-and terminate cert/key files are); rotating a bundle on disk requires
-SIGHUP or a config change to take effect. Zero values for
-`connection_cap` and the timeout fields are rejected by validation.
-
-```yaml
-upstreams:
-  - name: echo-upstream
-    load_balancer: round_robin
-    protocol: https
-    connection_cap: 32
-    slow_start_ms: 30000
-    timeouts:
-      connect_ms: 2000
-    endpoints:
-      - address: 10.0.0.5
-        port: 8443
-        weight: 3
-      - address: 10.0.0.6
-        port: 8443
-```
-
-Load-balancing algorithms:
-
-- `round_robin` — smooth weighted round-robin (the nginx algorithm)
-  over per-endpoint weights: picks interleave deterministically in
-  proportion to weight, and over any full period (sum of weights) each
-  endpoint is picked exactly its weight many times.
-- `least_requests` — the endpoint with the fewest in-flight requests
-  wins; ties break to the first-declared endpoint. In-flight is counted
-  from dispatch until response headers resolve (long streaming bodies
-  count as one request).
-- `random` — power of two choices: two distinct endpoints are drawn at
-  random and the one with fewer in-flight requests wins.
-- `ip_hash` — consistent hashing (ketama) on the client's connection
-  IP: the same client IP maps to the same endpoint (sticky), vnode
-  count is proportional to endpoint weight, and adding or removing an
-  endpoint remaps only about 1/(n+1) of keys. On the TLS-passthrough
-  path there is no per-request IP key, so `ip_hash` degrades to smooth
-  weighted round-robin there.
-
-Slow start (`slow_start_ms`, at most 600000): an endpoint entering the
-set ramps its effective weight from a floor of 1 up to its configured
-weight over the window, measured from when it entered the set. The ramp
-applies to `round_robin`; `least_requests` needs no ramp (it already
-balances on observed load) and `ip_hash` ring weights stay fixed to
-preserve key stability.
-
-Hot swap: a config reload swaps the endpoint set, weights, and
-algorithm without a restart. Endpoints whose `address:port` is unchanged
-keep their in-flight counters, round-robin phase, and slow-start clock;
-new addresses start fresh. Removed endpoints drop their state —
-re-adding one later is a fresh entry.
-
-Passive health (`health` block, DW-012): ejection driven by real traffic
-outcomes — no synthetic probes are sent to endpoints in rotation. A
-failure is a transport error (connect timeout, refusal, reset) or an
-HTTP response status >= 500; 1xx-4xx count as successes (429 and 408
-describe the caller, not endpoint health). An endpoint is ejected from
-all load-balancing algorithms when EITHER it accumulates
-`consecutive_failures` (default 5) failures in a row, OR its failure
-share within the rolling `window_ms` (default 60000) is >=
-`failure_ratio` (default 0.5) with at least `failure_min_volume`
-(default 20) observations in the window — the volume gate keeps a brief
-blip from ejecting on a trickle of traffic. After `eject_ms` (default
-30000) the endpoint goes half-open: the next `half_open_probes` (default
-1) requests are trial probes; a successful probe restores it to healthy
-with a clean history, a failed probe re-ejects for another `eject_ms`.
-If EVERY endpoint of an upstream is ejected, the balancer fails open —
-picks fall back to the full endpoint set rather than blackholing traffic
-(so a fully degraded pool degrades, it does not become a guaranteed
-503). Health state is keyed by `address:port` and survives config
-reloads alongside in-flight counters; new health parameters apply to new
-observations.
-
-```yaml
-upstreams:
-  - name: echo-upstream
-    health:
-      window_ms: 60000          # rolling observation window
-      consecutive_failures: 5   # eject after N failures in a row
-      failure_ratio: 0.5        # or >= this failure share in-window
-      failure_min_volume: 20    # ... with at least this many observations
-      eject_ms: 30000           # time out of rotation before probing
-      half_open_probes: 1       # trial requests per recovery attempt
-```
-
-A `health:` block with no keys enables ejection with the defaults above.
-
-Active health checks (`active_health` block, DW-013): dwara PROBES each
-endpoint on its own schedule, in addition to watching real traffic.
-Requires the passive `health` block (the probe results report into the
-same per-endpoint ejection machinery, which owns the eject and half-open
-windows). One probe loop per endpoint sleeps `interval_ms` plus a
-uniform random `0..jitter_ms` (full jitter) and then probes the endpoint
-DIRECTLY — bypassing load balancing and the connection pool, since a
-probe must examine one specific endpoint. An `http` probe issues
-`GET {path}` over HTTP/1.1 on its own connection (TLS toward
-`https`/`http2` upstreams, verifying against the SAME trust as the
-pooled connector — the webpki public roots, or the upstream's
-`trusted_ca_file` bundle when configured, so https probes work against
-private-CA upstreams) and counts a 2xx status as success; anything
-else — 3xx included, redirects are not followed — 4xx, 5xx,
-truncation, timeout, or transport error is a failure. A `tcp`
-probe succeeds when the TCP connect completes within `timeout_ms`; use
-it for `http2` upstreams whose servers refuse HTTP/1.1 on a separate
-connection.
-
-Fields (all default; zero values for the millisecond and threshold
-fields are rejected, `interval_ms` must be >= `timeout_ms` and >=
-`jitter_ms`, and `jitter_ms: 0` disables jitter):
-
-- `kind`: `http` (default) or `tcp`.
-- `path`: path probed by `http` checks, default `/healthz`. Ignored by
-  `tcp`.
-- `interval_ms`: time between probe attempts, default 5000.
-- `timeout_ms`: per-probe timeout (connect plus response for `http`),
-  default 2000.
-- `success_threshold`: consecutive probe successes required to (re)admit
-  an ejected endpoint, default 2.
-- `failure_threshold`: consecutive probe failures required to eject,
-  default 3.
-- `jitter_ms`: full-jitter bound, default 500.
-
-Interplay with passive ejection: probe results feed the SAME ejection
-tracker as traffic outcomes, and the two share the per-endpoint
-consecutive-failure streak — either signal can eject, on its own
-threshold (passive `consecutive_failures` or active
-`failure_threshold`). Probe outcomes never enter the passive
-failure-ratio/volume window, so synthetic probes do not pollute
-real-traffic ratios. Ejected endpoints stay out of rotation for
-`health.eject_ms`, and probe failures while ejected cannot extend that
-window. Recovery is probe-driven: `success_threshold` consecutive
-successful probes re-admit the endpoint outright — even before
-`eject_ms` expires, and even for endpoints carrying no traffic (which
-passive health alone can never recover). Probe loops are restarted on
-every config reload, but the shared tracker (keyed by `address:port`)
-survives the swap, so an ejection streak outlives the restart.
-
-```yaml
-upstreams:
-  - name: echo-upstream
-    health: {}                    # required: owns eject/half-open windows
-    active_health:
-      kind: http
-      path: /healthz
-      interval_ms: 5000
-      timeout_ms: 2000
-      success_threshold: 2
-      failure_threshold: 3
-      jitter_ms: 500
-```
-
-An `active_health:` block with no keys enables HTTP probes with the
-defaults above.
-
-Retries (`retries` block, DW-014): a failing proxied request is re-sent
-to the upstream, up to `attempts` additional times with exponential
-backoff and full jitter. All knobs live on the upstream (there is no
-per-route retry configuration). Absent — or `attempts` left at its
-default 0 — disables retries entirely: every request gets exactly one
-attempt and the proxy path keeps its zero-copy streaming body.
-
-Fields (all default; `attempts` is capped at 10, `backoff_base_ms`
-must be > 0, `backoff_cap_ms` >= `backoff_base_ms`, `budget_percent`
-must be in (0, 100], and every `retry_statuses` entry must be a valid
-4xx/5xx status — all rejected by validation):
-
-- `attempts`: maximum retries beyond the first attempt, default 0 (off).
-- `retry_post`: retry non-idempotent POST requests, default false. POST
-  is never retried unless explicitly opted in — a retried POST may
-  replay a body the upstream already partially processed.
-- `backoff_base_ms` / `backoff_cap_ms`: the nominal delay before retry
-  n is `min(base * 2^(n-1), cap)`; the actual sleep is a uniform random
-  duration in `[0, nominal]` (full jitter), avoiding thundering-herd
-  synchronization. Defaults 25 / 250.
-- `retry_statuses`: response statuses that trigger a retry, default
-  `[502, 503, 504]`. An empty list disables status-based retries.
-- `retry_transport`: retry on transport-class failures (connect or
-  per-attempt read timeout, refusal, reset, framing), default true.
-  Configuration errors (no endpoints, invalid TLS host) are never
-  retried — they would fail identically on every attempt.
-- `budget_percent`: maximum share of requests to this upstream, in a
-  rolling 10-second window, that may be retries, default 10. The retry
-  is charged before it runs, so a fresh window with little volume
-  grants few or no retries; when the budget is exhausted, failing
-  requests fail through to the client instead of retrying. Budget
-  state survives config reloads.
-- `buffer_max_bytes`: request-body buffering cap in bytes, default 0
-  (no buffering). A body is replayable on retries only when it was
-  fully buffered within this cap; a body that exceeds the cap streams
-  (the already-buffered prefix plus the remainder, in order) with
-  exactly one attempt — over-cap requests are never retried, they do
-  not error.
-
-Rules:
-
-- Idempotency: GET, HEAD, OPTIONS, TRACE, and PUT are retry-eligible by
-  method; POST only with `retry_post: true`.
-- Headers-final: retries happen strictly before response headers arrive
-  on the final attempt. A response body that dies mid-stream (transport
-  error or `write_ms` stall) is NEVER retried — the attempt was final
-  once its headers resolved — and the abort is reported as a
-  passive-health failure for the endpoint instead.
-- Protocol upgrade requests (`Upgrade` header) are never retried.
-- Each retry re-picks the endpoint through the load balancer, so health
-  ejection and weights apply per attempt.
-
-```yaml
-upstreams:
-  - name: echo-upstream
-    retries:
-      attempts: 2
-      retry_post: false
-      backoff_base_ms: 25
-      backoff_cap_ms: 250
-      retry_statuses: [502, 503, 504]
-      retry_transport: true
-      budget_percent: 10
-      buffer_max_bytes: 1048576
-```
-
-A `retries:` block with no keys is equivalent to retries off.
-
-### Circuit breaking and capacity limits
-
-Circuit breaking (`breaker` block, DW-015) gates an ENTIRE upstream —
-all endpoints — when the upstream is failing as a whole. It is a
-different layer from per-endpoint ejection (the `health` block above):
-ejection removes individual endpoints from rotation, the breaker stops
-sending ANY traffic to the upstream for a cooling-off period. The two
-never consume each other's state — a breaker-open period ejects nothing
-(passive health sees no traffic, hence no failures), and ejections never
-open the breaker. Even when every endpoint is ejected and the balancer
-fails open, that pick still flows THROUGH the breaker.
-
-The breaker OPENS when either trips:
-
-- the consecutive-failure streak reaches `consecutive_failures`
-  (default 5), or
-- the rolling 60-second window holds at least `error_volume` (default
-  20) observations AND failures/observations >= `error_ratio` (default
-  0.5) — the volume gate keeps a brief blip from tripping on a trickle
-  of traffic.
-
-Failure classification is identical to passive health: a transport
-error or an HTTP status >= 500, observed when an attempt's response
-HEADERS resolve. Every retry attempt reports too. A mid-BODY abort
-after headers resolved does not trip the breaker (it is still reported
-to endpoint health). While OPEN, every request fails fast with 503
-"upstream circuit open" and a `Retry-After` header carrying the seconds
-until half-open (rounded up, minimum 1) — no endpoint pick, no
-retries. Requests already in flight when the breaker opened complete
-normally. After `open_ms` (default 30000) the breaker goes half-open:
-the next `half_open_probes` (default 1) requests are admitted as trial
-probes; a successful probe CLOSES the breaker with all counters and the
-window reset, a failed probe re-OPENS it for another `open_ms`. While
-all probes are in flight, further requests fail fast with
-`Retry-After: 1`.
-
-Breaker state (state, streak, window) survives config reloads keyed by
-upstream name, like balancer state and the retry budget; breaker
-parameters apply from the new config. Fields (all default; zero values
-and an `error_ratio` outside (0, 1] are rejected by validation):
-
-- `consecutive_failures`: consecutive failures that open the breaker,
-  default 5.
-- `error_ratio`: in-window failure share that opens the breaker once
-  the volume gate is met, default 0.5.
-- `error_volume`: minimum observations in the 60 s window before the
-  ratio is evaluated, default 20.
-- `open_ms`: cooling-off period before a half-open probe is admitted,
-  default 30000.
-- `half_open_probes`: concurrent trial requests admitted in half-open,
-  default 1.
-
-```yaml
-upstreams:
-  - name: echo-upstream
-    breaker:
-      consecutive_failures: 5
-      error_ratio: 0.5
-      error_volume: 20
-      open_ms: 30000
-      half_open_probes: 1
-```
-
-A `breaker:` block with no keys enables the breaker with the defaults
-above.
-
-Pending cap (`max_pending`, DW-015): bounds how many requests may WAIT
-for an outbound `connection_cap` slot to this upstream. Absent (the
-default) queues without bound; a positive value rejects excess requests
-IMMEDIATELY with 503 "upstream saturated" instead of letting them wait.
-A pending slot is held only while the request is waiting; the moment a
-connection slot is acquired (the request is connecting, no longer
-pending) the pending slot frees for the next request. `max_pending: 0`
-is rejected by validation (omit the field for unbounded). The 503 is
-not retried — the upstream is saturated by definition; a retry would
-add load.
-
-Local rate limiting (DW-017) runs BEFORE every layer below — after
-route resolution and authentication but before the gateway concurrency
-cap — so a rejected request is the cheapest thing the gateway can do
-with a request and never holds a cap slot. See "Rate limiting" below.
-Consumer request budgets (DW-033, "Request budgets" below) sit one
-step later — after rate limiting, still before the cap — for
-authenticated quota-configured consumers.
-
-The admission layers stack in a fixed order, outermost first:
-
-1. authentication (see Authentication) — invalid credential or missing
-   on an `auth_required` route: 401 + `WWW-Authenticate`;
-2. authorization (`authorization`, see "Authorization and IP access
-   control") — forbidden caller or IP: 403 (401 when identity rules hit
-   an anonymous request);
-3. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
-   429 + `Retry-After`;
-4. request budgets (`consumers[].quotas`, see Request budgets) —
-   over-budget: 429 + `Retry-After` (to the window boundary);
-5. gateway concurrency cap (`max_concurrent_requests`, see Global
-   settings) — over-cap: 503 "gateway saturated";
-6. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
-   circuit open" + `Retry-After`;
-7. per-endpoint ejection (the `health` block) — an ejected endpoint is
-   skipped by the balancer;
-8. per-upstream pending cap (`max_pending`) — queue full: 503
-   "upstream saturated";
-9. connect (`connection_cap`, `timeouts.connect_ms`).
-
-### Rate limiting
-
-Local, in-gateway rate limiting (DW-017) is configured on **policies**
-(top-level `policies` list) and applies to requests on the entities
-that reference the policy by name. Every link of the chain has an
-attachment point: `consumers[].policies`, `routes[].policies`,
-`services[].policies`, `listeners[].policies`, and the gateway-level
-`global_policies` (so named because the top-level `policies` field is
-the policy REGISTRY). Precedence follows the frozen chain consumer >
-route > service > listener > global, but limiting does NOT pick one
-winner: rules from every applicable policy ALL apply and are AND-ed —
-a request denied by any rule is denied. A policy attached at several
-levels is evaluated once per request — its most specific attachment
-is the position that binds the `X-RateLimit-*` headers when it
-denies. The resolution order matters only for the 429 headers: when
-several rules deny, the FIRST denying rule in the chain (the most
-specific level) supplies `X-RateLimit-Limit`/`-Remaining`/`-Reset`,
-and `Retry-After` is the maximum wait across every denying rule. A
-request none of whose links reference a policy with rate rules is not
-limited and carries no rate headers.
-
-**Unrouted traffic.** A request whose path matches no route is still
-rate-limited by the LISTENER- and GLOBAL-attached policies before its
-`404` is answered — a 404 flood cannot bypass the limiter. Only those
-two links apply: the consumer, route, and service links are unknowable
-before routing, and authentication does not run pre-route. The
-selectors degrade accordingly: `credential` falls back to the client
-IP (anonymous), and `route` keys one bucket shared by every unrouted
-request. A denied request answers `429` with the same headers as
-routed traffic; an admitted one answers `404` carrying `X-RateLimit-*`
-when a policy with rate rules actually matched. The reserved paths
-(`/healthz`, `/readyz`, `/metrics`) stay exempt.
-
-A policy carries a list of rules under `rate_limits`; each rule has
-these fields:
-
-- `name`: optional label, documentation only.
-- `selector`: the key components the limit is counted over — one or
-  more of `ip` (the direct connection peer, the same IP used for
-  `X-Real-IP`), `credential` (the authenticated consumer), and `route`
-  (the matched route's name). Order does not matter.
-- `requests_per`: the sustained rate — any combination of `s`
-  (per second), `minute`, and `hour`. At least one must be set and each
-  set value must be > 0 (validation rejects otherwise).
-- `burst`: bucket size, defaulting to the window's request count.
-  Must be >= 1 when present.
-
-```yaml
-policies:
-  - name: api-limits
-    rate_limits:
-      - name: per-client-burst
-        selector: [ip, route]
-        requests_per: { s: 10, minute: 600 }
-        burst: 20
-      - name: route-wide
-        selector: [route]
-        requests_per: { hour: 100000 }
-routes:
-  - name: api
-    service: echo
-    policies: [api-limits]
-    match:
-      path: { type: prefix, value: /api }
-    action:
-      type: proxy
-```
-
-**Selector semantics.** All listed selectors are joined into ONE
-counter key, which decides whether buckets are shared or independent:
-
-- `selector: [ip]` — one bucket per client IP. Attached at a service,
-  this is a per-client budget shared across every route of the service.
-- `selector: [route]` — ONE bucket for the whole route: every client
-  draws from the same budget (a global cap on the route).
-- `selector: [ip, route]` — one bucket per (client IP, route) pair:
-  each client gets an independent budget per route.
-- `credential` is the authenticated consumer's name (see
-  "Authentication"); it falls back to the client IP for anonymous
-  traffic, so unauthenticated requests limit per client rather than
-  sharing one global "anonymous" bucket. `selector: [credential,
-  route]` is per-(consumer, route) — per-(client, route) when
-  anonymous.
-
-**Burst and sustained rate.** Windows are GCRA buckets: `requests_per`
-is the sustained replenishment rate and `burst` is the bucket size. A
-window of `s: 10` with `burst: 20` admits 20 rapid requests up front
-(the burst), then sustains 10 r/s; traffic above the sustained rate
-starts drawing 429s once the bucket empties. With the default burst
-(= the window's request count) the very first window can admit up to
-`burst + replenished` requests, the standard GCRA shape.
-
-**Stacked windows.** Setting several windows in one rule (`s` AND
-`minute` AND `hour`) stacks them: a request is admitted only if EVERY
-window allows it — 10 r/s AND 600 r/min means a client can spend the
-minute budget no faster than 10 r/s. Windows are evaluated
-shortest-first and evaluation stops at the first denial, so a request
-rejected by the hourly window has still spent its second-window token
-— slightly stricter than an atomic all-windows check, never more
-permissive, and the waste replenishes with the fastest window.
-
-**429 contract.** A request over the limit is answered `429` whose error
-envelope message is `rate limit exceeded`, with these headers from the
-BINDING constraint
-(the window that denied; on success, the window with the least
-remaining budget):
-
-- `Retry-After`: whole seconds until the next conforming retry,
-  rounded up, minimum 1.
-- `X-RateLimit-Limit`: the binding window's burst size.
-- `X-RateLimit-Remaining`: budget left in the binding window
-  (`0` on a 429).
-- `X-RateLimit-Reset`: Unix epoch seconds of the binding window's
-  estimated full replenishment.
-
-Admitted requests under a matched policy carry the same three
-`X-RateLimit-*` headers on their response (including streaming proxy
-responses and `respond`/`redirect` actions); requests no policy
-matched carry none.
-
-**Reload caveat.** Rate-limit state lives inside the config
-generation: every config reload rebuilds the engine and RESETS all
-buckets — a reload is a fresh budget for everyone.
-
-**Key-state bound.** Per-key buckets are size-capped per window (16
-shards of 4,096 keys — 65,536 at worst): keys idle past one full
-bucket refill are evicted first (dropping them changes no decision),
-and under a sustained spray of fresh keys a full shard evicts its
-idlest half, resetting those keys' buckets — a fresh budget for the
-evicted keys is the fail-open trade that keeps memory bounded for the
-process lifetime.
-
-**Legacy field.** A policy's older `rate_limit` field
-(`{requests, window_seconds}`) still applies and compiles to one rule
-with `selector: [route]`, a single window of `requests` per
-`window_seconds`, and `burst = requests`. Both fields may be set on
-one policy; both apply. Use `rate_limits` for new configs.
-
-### Request budgets (quotas)
-
-Quotas (DW-033) are per-consumer request BUDGETS, a mechanism distinct
-from rate limiting: a rate limit replenishes inside seconds or minutes,
-a budget caps total volume across a fixed UTC calendar window and never
-replenishes mid-window. Both apply when both are configured.
-
-Budgets are configured on consumers — `quotas` with `daily_requests`
-(midnight-to-midnight UTC) and/or `monthly_requests` (the UTC calendar
-month), each > 0, at least one present:
-
-```yaml
-consumers:
-  - name: acme
-    credentials:
-      - type: api_key
-        key: ${ACME_KEY}
-    quotas:
-      daily_requests: 50000
-      monthly_requests: 1000000
-```
-
-Enforcement requires the state store (`DWARA_STATE_DB`): counters are
-durable state-store rows, so budgets survive restarts (a reopened store
-resumes at the exact cap) and reloads apply live. Without a store the
-block is inert — warned once, traffic passes. Store-managed consumers
-have no config record and therefore no budgets; a distributed
-shared-counter variant is the Ent follow-up.
-
-**429 contract.** An over-budget request is answered `429` (envelope
-message `rate limit exceeded`) with `Retry-After` (whole seconds to the
-window boundary — day-scale for a daily budget, month-scale for a
-monthly one) and the binding budget's `X-RateLimit-Limit` /
-`-Remaining` / `-Reset` (epoch seconds of the window boundary). When
-both budgets are exhausted, `Retry-After` reports the LATER wall.
-Budget headers appear on denials only — on admitted responses the
-`X-RateLimit-*` family belongs to the rate limiter when it applies.
-
-**Metering.** Usage is visible four ways: `GET /quotas/usage` on the
-admin API (per-consumer current-window used/limit/reset, optional
-`?consumer=` filter), the `dwara_quota_denied_total{consumer,budget}`
-counter plus `dwara_quota_used` / `dwara_quota_limit` scrape-time
-gauges on `/metrics`, the analytics store's per-consumer axis (a
-refused request completes with its consumer name and the
-rate-limited flag), and the `quota_near_limit` webhook event — fired
-once per budget per window at 80% of the cap.
-
-**Cost note.** Each request of a quota-configured consumer performs
-one or two synchronous SQLite writes on the single state-store
-connection (an fsync per commit at the store's default
-`synchronous=FULL`). That is the accepted OSS per-instance shape;
-fleet-wide quota consistency is the Ent follow-up.
-
-### Authentication
-
-Request authentication (DW-019) runs after route resolution, before
-rate limiting and cap admission (the rate-limit `credential` selector
-and the shedding priority class both consume the identity). It accepts
-four credential families:
-
-- **API key**: `X-API-Key: <key>`. Config declares these under
-  `consumers[].credentials` (`type: api_key`, a `key` value).
-- **Basic**: `Authorization: Basic base64(user:pass)`. The username is
-  the lookup selector and the password is verified against the stored
-  hash through the same path as API keys (see the hashing model below);
-  Basic credentials therefore live in the state store, not the config.
-  A resolved Basic identity is reported with the API-key kind.
-- **JWT Bearer**: `Authorization: Bearer <token>`, verified per
-  `jwt_providers` config (below).
-- **mTLS client certificate**: on a terminate listener with
-  `client_ca_file` set, the connection's VERIFIED client certificate is
-  matched against consumers' `mtls` credentials (see "mTLS client
-  certificates" below).
-
-`X-API-Key` wins over `Authorization`; within `Authorization`, the
-`Basic`/`Bearer` scheme token decides. The client certificate is the
-ambient, connection-level family, consulted only when no header
-credential was presented (see "mTLS client certificates" below). A
-gateway with NO consumers and
-NO JWT providers has authentication disabled: the authenticator
-resolves anonymous for everything and `Authorization` is forwarded
-upstream untouched (pass-through mode). Once any credential is
-configured the gateway INTERPRETS `Authorization` — except that `Bearer`
-stays pass-through unless a JWT provider exists, so a gateway fronting
-an OAuth-protected upstream without its own JWT config keeps forwarding
-tokens.
-
-```yaml
-consumers:
-  - name: acme
-    credentials:
-      - type: api_key
-        key: sekrit            # hashed at startup; never stored or logged
-routes:
-  - name: private
-    service: echo
-    auth_required: true        # anonymous requests get 401
-    match:
-      path: { type: prefix, value: /private }
-    action:
-      type: proxy
-```
-
-**Route enforcement (`auth_required`).** Routes take a boolean
-`auth_required` (default `false`). Two distinct rules:
-
-- A request that PRESENTS an invalid credential is rejected `401` with
-  body `unauthorized` and a `WWW-Authenticate` challenge, on every
-  route, regardless of `auth_required`.
-- An anonymous request (no credential family applied) is rejected 401
-  only on routes with `auth_required: true`.
-
-A gateway-side authentication failure (e.g. the JWKS endpoint is down)
-answers `500` — the gateway cannot vouch for the caller either way. The
-challenge lists the schemes actually configured (`Basic realm="dwara"`
-when credential records exist, plus `Bearer` when JWT providers do).
-
-**Hashing model.** The gateway never indexes or stores plaintext key
-material. The lookup selector is `hex(sha256(secret))` and the stored
-hash is `sha256:<hex(sha256(secret))>` — or, when a credential pepper
-is configured (below), `hmac-sha256:<hex(HMAC-SHA256(pepper, secret))>`
-— verified with a constant-time comparison either way. Config-declared
-API keys are hashed at startup (or at state store seed time); the
-plaintext value is then dropped. A credential whose stored hash is a
-PHC argon2id string (`$argon2id$...`, supplied through the state store)
-is verified with argon2id instead — opt-in per credential: an argon2
-verify is memory-hard and far too slow for the per-request hot path, so
-config-declared keys always take the fast path (sha256, or the peppered
-HMAC when a pepper is configured).
-
-**Credential pepper.** Set `DWARA_CREDENTIAL_PEPPER` (a per-deployment
-secret, resolved at startup through the SecretSource extension seam)
-and every NEW stored credential hash takes the peppered
-`hmac-sha256:<hex>` format, so a state-DB leak alone cannot verify
-guesses: the search also needs the pepper, held outside the DB. The
-lookup selector stays `hex(sha256(secret))` in both modes — it must be
-computable from the presented material alone, and it leaks nothing
-about the secret. The transition is lazy and transparent: legacy
-`sha256:<hex>` entries keep verifying, and on successful verification
-the store row is re-hashed to the peppered format in place — no
-credential re-issue needed. Unset (the default) is legacy-only mode:
-legacy entries keep verifying, while peppered entries fail closed (401)
-with an ERROR log naming the condition; a set-but-unreadable value
-refuses startup. The pepper itself is never logged. Rotating the pepper
-invalidates existing peppered credentials until they are re-issued.
-Use at least 32 bytes of entropy; argon2id PHC credentials are
-pepper-independent (unchanged).
-
-**JWT providers.** Top-level `jwt_providers` lists trusted token
-issuers whose keys are fetched from a JWKS endpoint:
-
-```yaml
-jwt_providers:
-  - name: auth0
-    jwks_url: https://auth.example.com/.well-known/jwks.json
-    issuer: https://auth.example.com/
-    audience: my-api
-    algorithms: [RS256]        # default [RS256, ES256]
-    refresh_secs: 300          # JWKS cache staleness bound, default 300
-    leeway_secs: 30            # exp/nbf clock-skew tolerance, default 30
-    consumer: acme             # optional explicit consumer binding
-```
-
-Verification per provider: `iss` when configured; `aud` ONLY when
-configured — a provider with no `audience` accepts tokens that carry
-any (or no) `aud` claim; `exp` and `nbf` with `leeway_secs` skew; and
-the algorithm allowlist enforced
-before any signature work — `none` and HMAC (`HS*`) are never allowed
-(asymmetric verification only; the gateway holds no shared secrets with
-issuers). A token is verified against each provider whose allowlist
-contains the token's algorithm until one succeeds.
-
-The consumer a token maps to: the provider's explicit `consumer`
-binding, when set; otherwise the token's `iss` claim is matched against
-consumers' `jwt` credentials (`type: jwt`, an `issuer` and optional
-`audiences` — the token's audience must be contained in the list when
-it is non-empty).
-
-JWKS fetching is lazy (first Bearer request), cached per provider URL,
-and refreshed two ways: after `refresh_secs`, and on an unknown `kid` —
-a fresh key id appearing mid-flight (key rotation) triggers a re-fetch
-and the token then verifies, with no restart and no failed requests.
-Concurrent refreshes coalesce into one fetch. JWKS caches survive config
-reloads (keyed by URL), so rotation state outlives a reload. A JWKS
-fetch has a 5-second connect timeout and a 1 MiB body cap; a failed
-fetch is a 500 (gateway-side failure), not a 401.
-
-An `https` JWKS endpoint served by a private CA is reached through the
-provider's `trusted_ca_file` — the same field upstreams take: a PEM CA
-bundle whose roots REPLACE the public roots for that provider's JWKS
-fetches. Validation rejects it on an `http://` jwks_url and for a
-bundle that is missing, unreadable, or not parseable as PEM holding at
-least one CERTIFICATE — so a bundle that goes bad after publish is
-rejected at reload and the old generation keeps authenticating. Only if
-a bundle breaks between validation and build (the microsecond race) is
-the provider disabled (ERROR logged) rather than failing every fetch;
-in that state a presented `Bearer` token fails closed (500
-`authentication_unavailable`) instead of proxying unverified — with no
-JWT provider configured at all, `Bearer` remains deliberate
-pass-through.
-Bundle paths are not file-watched; rotating one requires SIGHUP or a
-config change, as with upstream bundles.
-
-**mTLS client certificates.** A terminate listener can verify client
-certificates: set `client_ca_file` (a PEM CA bundle) in the listener's
-`tls` block. A presented certificate is verified against that bundle
-during the handshake — an UNVERIFIED certificate fails the handshake
-and never reaches authentication — while a connection without one is
-still accepted (the other credential families, or anonymous, apply). A
-verified certificate is mapped to a consumer via its `mtls` credential:
-either by subject CommonName (`subject`, case-sensitive exact match —
-survives certificate re-issue under the same CN) or by the
-certificate's SHA-256 fingerprint (lowercase hex over the DER,
-`fingerprint` — pins one exact certificate); exactly one of the two
-must be set. A verified certificate matching no credential is a
-presented-but-rejected credential: 401, exactly like an unknown API
-key. Header credentials (API key, Basic, Bearer) take precedence over
-the certificate — it is the ambient family, consulted only when no
-header credential was presented, and a pass-through `Bearer` (no JWT
-provider configured) falls through to it. TLS-level client auth has no
-`WWW-Authenticate` representation, so the certificate family never
-joins the challenge. `client_ca_file` is rejected in passthrough mode
-(the TLS layer is not terminated, so client certificates cannot be
-verified) and must exist and be readable at config compile time;
-cleartext listeners never see certificates.
-
-```yaml
-listeners:
-  - name: edge
-    address: 0.0.0.0
-    port: 443
-    protocol: https
-    tls:
-      mode: terminate
-      cert_file: /etc/dwara/certs/edge.crt.pem
-      key_file: /etc/dwara/certs/edge.key.pem
-      client_ca_file: /etc/dwara/ca/client-ca.crt.pem
-consumers:
-  - name: service-a
-    credentials:
-      - type: mtls
-        subject: service-a.internal   # match by subject CN
-```
-
-**X-Consumer hygiene.** The gateway strips every client-supplied
-`X-Consumer-*` header from proxied requests (a client must never reach
-the upstream claiming a consumer identity) and injects its own trusted
-`X-Consumer-Name` when authentication resolved a consumer — absent for
-anonymous traffic. Strip and inject, never pass-through.
-
-The authenticated consumer also drives behavior elsewhere: its
-`policies` join rate limiting with consumer precedence (see "Rate
-limiting"), its `authorization` is the most specific link of the
-authorization chain (see "Authorization and IP access control"), and
-its `priority` overrides the route's for load shedding (see "Load
-shedding and priority").
-
-### Authorization and IP access control
-
-Authorization (DW-020) runs after authentication and before rate
-limiting: authentication answers "who is this caller?", authorization
-answers "is this caller allowed here?". The same `authorization` block
-attaches at every link of the chain — `consumers[].authorization`,
-`routes[].authorization`, `services[].authorization`,
-`listeners[].authorization`, and the gateway-level `authorization`
-(the route link shown here):
-
-```yaml
-consumers:
-  - name: acme
-    groups: [gold]            # group memberships for group rules
-routes:
-  - name: admin
-    service: echo
-    match:
-      path: { type: prefix, value: /admin }
-    action:
-      type: proxy
-    authorization:
-      allowed_groups: [gold]
-      denied_consumers: [blocked-co]
-      required_scopes: [read, write]
-      required_claims:
-        tenant: acme          # exact stringified-value match
-      ip_acl:
-        allow: [10.0.0.0/8]
-        deny: [10.0.0.99]
-        default: deny         # only allow-listed IPs pass
-```
-
-All fields are optional; an absent block imposes nothing. Within one
-block the rules evaluate in a fixed order — IP gate, consumers, groups,
-scopes, claims — and every rule must pass.
-
-**Deny wins.** Within one rule set, `denied_consumers`/`denied_groups`
-beat `allowed_*`: a consumer both allowed and denied is denied, and in
-the IP ACL the deny list is checked before the allow list. An empty
-rule set allows — `allowed_consumers: []` is "any authenticated
-consumer", and `allowed_groups: []` imposes no group constraint. A
-rule-free `authorization: {}` block never reaches evaluation:
-validation rejects it at every attachment level — "carries no rules
-(no consumers, groups, scopes, claims, or ip_acl) and is always a
-mistake: omit the authorization block entirely" — so the no-op is an
-absent block, never an empty one.
-
-**Consumers and groups.** `allowed_consumers`, when non-empty, is a
-closed set: the authenticated consumer must be listed. Groups come from
-the consumer's `groups` field — the config record for config consumers,
-the state store's `consumers.groups` for store-managed consumers
-(`DWARA_STATE_DB`, schema v3) — so group rules apply to both alike. A
-consumer with no groups never satisfies an `allowed_groups` rule.
-
-**Scopes and claims** apply to JWT identities. Every `required_scopes`
-entry must appear in the token's `scope` claim, which may be a
-space-separated string (`"read write"`, the OAuth convention) or a JSON
-array of strings (flattened to the same form). `required_claims` is
-exact string equality on the stringified claim value — a listed claim
-absent from the token fails. API-key, Basic, and mTLS identities carry
-no claims and never satisfy scope or claim rules.
-
-**IP ACL** matches against the EFFECTIVE client IP: when the direct
-connection peer is inside `trusted_proxies`, the `X-Forwarded-For`
-chain is walked right-to-left and the rightmost address that is not
-itself a trusted proxy is the client (the DW-009 chain, the same
-resolution as XFF handling — see "Forwarded headers and trusted
-proxies"); otherwise the effective IP is the direct peer, so a spoofed
-XFF from an untrusted client never influences the decision. Entries are
-IP addresses or CIDRs. `default` (`allow`, the default, or `deny`)
-decides IPs matched by neither list: with `default: allow` the lists are
-exceptions; with `default: deny` the gate is closed and only the allow
-list passes.
-
-**403 vs 401.** A denied AUTHENTICATED request — or a denied anonymous
-request whose IP failed the ACL — is answered `403` `forbidden` with no
-rule detail (which list matched is server-side information only). An
-anonymous request on a route whose authorization carries any identity
-rule (consumer, group, scope, or claim) is answered `401` with the
-authenticator's `WWW-Authenticate` challenge: identity rules imply
-authentication. `auth_required: true` on the route still independently
-forces authentication.
-
-**The one anonymous-permitting shape.** An `ip_acl`-ONLY authorization
-block (no identity rules) can admit anonymous callers from allowed IPs —
-an operator writing just an IP gate wants a gate, not a login wall.
-Combined with `default: allow` and `allow: [0.0.0.0/0]` this would open
-the route to the entire internet without any credential; never do that —
-an IP gate with an allow-everything list is no gate at all.
-
-**Precedence.** Authorization levels stack with the frozen gateway
-chain consumer > route > service > listener > global, and every link
-has a config attachment: `consumers[].authorization` (applies once
-authentication identifies the consumer), `routes[].authorization`,
-`services[].authorization`, `listeners[].authorization` (the accepting
-listener), and the gateway-level `authorization`. A deny at ANY
-level wins absolutely (a consumer-level deny beats a route-level allow
-and vice versa); otherwise the most specific level WITH rules governs
-and less-specific levels are not consulted. Validation applies the
-same shape checks at every level (unknown consumer/group references,
-unparseable ACL entries). Authorization runs after route resolution,
-so unrouted 404s never reach the chain.
-
-### TLS
-
-Listeners are `http` (cleartext) or `https` (TLS). An `https` listener
-requires a `tls` block with one of two modes.
-
-**Terminate** (default): dwara ends TLS at the edge (rustls, aws-lc-rs
-provider; TLS 1.2 and 1.3 with rustls's default cipher policy). ALPN
-advertises `h2` and `http/1.1`, so both HTTP/2 and HTTP/1.1 work over
-one listener. Multiple certificates are selected by SNI: entries in
-`certificates` are matched (exact, case-insensitive) against the
-client's server name; the single `cert_file`/`key_file` pair is the
-fallback for unmatched or absent SNI, and with no single pair the first
-`certificates` entry is the fallback. A single pair alone (no
-`certificates`) is the simplest form; a `certificates`-only config is
-also valid. An optional `client_ca_file` (a PEM CA bundle) requests and
-verifies client certificates — see "mTLS client certificates" under
-Authentication.
-
-```yaml
-listeners:
-  - name: edge
-    address: 0.0.0.0
-    port: 443
-    protocol: https
-    tls:
-      mode: terminate
-      cert_file: /etc/dwara/certs/default.crt.pem   # fallback pair
-      key_file: /etc/dwara/certs/default.key.pem
-      certificates:
-        - server_names: [a.example.com]
-          cert_file: /etc/dwara/certs/a.crt.pem
-          key_file: /etc/dwara/certs/a.key.pem
-        - server_names: [b.example.com]
-          cert_file: /etc/dwara/certs/b.crt.pem
-          key_file: /etc/dwara/certs/b.key.pem
-```
-
-**Passthrough**: dwara never decrypts. The ClientHello is peeked (not
-consumed), the SNI server name is matched exactly (case-insensitive)
-against `sni_routes`, and the raw TLS bytes are spliced bidirectionally
-to the upstream. A non-TLS client, a ClientHello with no SNI, or an
-unmatched name has its connection closed. A ClientHello fragmented
-across TLS records (larger than one 16 KiB record) is waited for and
-reassembled, bounded at 64 KiB, rather than closed as no-SNI.
-Certificate fields are rejected in this mode; `sni_routes` are rejected
-in terminate mode. A passthrough-only gateway (routing entirely via
-`sni_routes`, the HTTP route table empty by design) is a zero-route
-config: it must set `allow_empty_routes: true` (see "Global
-settings").
-
-```yaml
-allow_empty_routes: true    # passthrough-only: no HTTP routes by design
-listeners:
-  - name: edge
-    address: 0.0.0.0
-    port: 443
-    protocol: https
-    tls:
-      mode: passthrough
-      sni_routes:
-        - server_names: [back.example.com]
-          upstream: backends
-upstreams:
-  - name: backends
-    endpoints:
-      - address: 10.0.0.5
-        port: 8443
-      - address: 10.0.0.6
-        port: 8443
-```
-
-A passthrough route's connection is forwarded to an endpoint of its
-upstream chosen by that upstream's load balancer (for `ip_hash`, the
-smooth round-robin fallback — a byte splice has no per-connection IP
-key); picks follow config reloads live.
-
-Cleartext `http` listeners accept HTTP/1.1 and h2c (HTTP/2 prior
-knowledge) — the connection preface is sniffed, no upgrade or ALPN
-needed.
-
-### Alert and event webhooks
-
-`gateway.webhooks` (DW-044) POSTs gateway state changes to HTTP
-endpoints: circuit-breaker transitions (`breaker_opened`,
-`breaker_half_open`, `breaker_closed`), endpoint ejection/recovery
-(`endpoint_ejected`, `endpoint_recovered`), and config lifecycle
-(`config_published`, `config_rejected`). Each delivery is one JSON
-envelope (`id`, `kind`, RFC 3339 `timestamp`, `gateway` instance id,
-`payload`) with bounded retries under ONE total `timeout_ms` budget
-(honoring seconds-form `Retry-After`); events are emitted onto a
-bounded in-process queue with drop-and-count overflow, so a slow, hung,
-or dead webhook target can never affect the dataplane. Header values
-may be `${...}` secret references (resolved at config-compile time,
-redacted in config echoes). See the
-[webhooks guide](./docs-site/guide/webhooks.md) for the full
-contract.
-
-## Operations
-
-Reload: the config file is watched (the file's directory, so atomic
-write-temp-plus-rename replacement is observed; events are debounced)
-and `SIGHUP` also triggers a reload. A reload re-reads the file,
-validates, and publishes a new generation atomically; the route table
-and the upstream connection pools hot-swap together, so a new route
-never runs against old pools; upstream endpoint sets, weights, and
-load-balancer settings swap in the same atomic publish. In-flight requests keep the generation
-they started with until they complete. A file-watch reload of
-UNCHANGED content is a no-op (the generation only moves when the
-content changes; editors and the admin API's atomic rename re-deliver
-events for already-current content), while SIGHUP always re-publishes
-(forced reload). A rejected
-reload (unreadable, parse, or validation failure) logs every issue and
-keeps serving the running generation — the process never exits on a
-bad reload. If the file watch cannot start, SIGHUP reload still works.
-
-Certificates hot-reload on terminate listeners: the cert/key files are
-watched (same directory-watch pattern as the config), and a change
-rebuilds the TLS configuration and swaps it in live — no connections
-are dropped. New handshakes use the new material; handshakes and
-sessions already in flight keep what they negotiated. A config reload
-also refreshes TLS material. A failed TLS reload (e.g. an unreadable
-PEM) is logged and keeps the previous certificates. Limitations: the
-listener bind set (listeners, addresses, ports) is fixed at startup —
-adding or removing listeners or changing address/port takes effect on
-restart; only route/config changes and certificate material reload
-live. Passthrough splices are also not drained on graceful shutdown;
-they run until the process exits.
-
-Health endpoints: dwara reserves `/healthz`, `/readyz`, and `/metrics`
-and serves
-them on every terminate and cleartext listener BEFORE route resolution.
-`/healthz` answers 200 whenever the process is up (liveness);
-`/readyz` answers 200 once a config generation has been published
-successfully and 503 before that (readiness — it tracks the gateway's
-own state, not upstream health); `/metrics` serves Prometheus text
-format (see "Observability"). Caveat: these paths are not routable —
-a configured route matching `/healthz`, `/readyz`, or `/metrics`
-(exact, regex, or
-prefix) is permanently shadowed by the reserved handlers; this is
-accepted v1 behavior, not a validation error. TLS-passthrough listeners
-never serve them (they do not speak HTTP).
-
-Shutdown: `SIGTERM`/`SIGINT` stop accepting, drain live connections
-(including ones still in the kernel accept backlog) within
-`DWARA_SHUTDOWN_TIMEOUT_SECS`, then exit 0. Connections still draining
-past the budget are force-closed.
-
-Accept-loop supervision: every serving surface's accept loop — the
-data-plane listeners and the admin listener — runs under a shared panic
-supervisor. A panicked accept incarnation is respawned on the same
-bound socket (no re-bind, no port loss) up to 8 times per surface for
-the process lifetime, with a warning log per respawn; once the budget
-is spent the surface is given up on with an ERROR log and stays down —
-loudly — while the process and the other surfaces keep serving.
-
-### Protocol hardening
-
-Every serving surface — all data-plane listeners AND the admin listener —
-applies one protocol-hardening posture (DW-023): parser and amplification
-bounds on hyper's connection builders, plus a request-body inactivity
-timeout. The knobs are environment variables, read once at startup
-(an invalid value falls back to the default) and process-wide, not
-per-listener: hardening is a property of the parser, not of the route.
-The resolved values are logged at startup under the
-`protocol_hardening` code.
-
-| Knob (env) | Default | Attack it bounds |
+CI gates freshness: a pull request whose committed `config-reference.json`
+differs from what `dwara-cli schema` emits fails, so the reference never
+drifts from the code.
+
+For the complete configuration model (routing precedence, rewrites, upstreams,
+TLS, policies, authn/authz, transforms, masking, caching, versioning,
+webhooks, analytics), see the
+[Configuration guide](https://shristilabs.github.io/dwara/guide/configuration)
+and the topic-specific guide pages.
+
+## Environment variables
+
+Operational knobs are environment variables (`DWARA_*`); topology is YAML.
+The full list with defaults is in the
+[Environment variables reference](https://shristilabs.github.io/dwara/reference/environment-variables).
+The most common ones:
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `DWARA_HTTP1_MAX_HEADERS` | 100 | header-count bombs (N header lines per request) |
-| `DWARA_HTTP1_MAX_BUF_KIB` | 64 | single-header/line size bombs (hyper's HTTP/1 read-buffer cap in KiB; a header line that does not fit is a 431-class parse failure) |
-| `DWARA_HTTP1_HEADER_TIMEOUT_MS` | 10000 | SLOWLORIS: a connection whose headers take longer than this to arrive is closed before the request ever reaches a route |
-| `DWARA_H2_MAX_CONCURRENT_STREAMS` | 128 | HTTP/2 stream floods over one connection (also advertised to the peer in SETTINGS) |
-| `DWARA_H2_STREAM_WINDOW_KIB` | 1024 (1 MiB) | per-stream receive buffering a malicious h2 peer can force |
-| `DWARA_H2_CONNECTION_WINDOW_KIB` | 4096 (4 MiB) | connection-wide h2 receive buffering |
-| `DWARA_H2_MAX_SEND_BUF_KIB` | 1024 (1 MiB) | outbound h2 send buffer per connection (write amplification / memory pinning by a peer that never reads) |
-
-**CL+TE request smuggling.** A request head carrying BOTH
-`Content-Length` and `Transfer-Encoding` (either order, names matched
-case-insensitively) is rejected before parsing with a bare
-`400 Bad Request` and the connection is closed — it never reaches a
-route or an upstream. The check inspects only the FIRST request head
-on a connection: later keep-alive requests rely on hyper's own
-framing, which cannot desync behind this gateway because every
-forwarded request is rebuilt from hyper-parsed parts — there is no
-raw-passthrough path. h2c connections (the `PRI` preface) are exempt:
-Transfer-Encoding is illegal in HTTP/2 framing and hyper rejects it
-there.
-
-**Slow-body defense.** `DWARA_REQUEST_BODY_TIMEOUT_MS` (default 30000,
-`0` disables) bounds the INACTIVITY GAP between two frames of an
-inbound request body — not the total streaming time. A legitimate
-slow upload that keeps making progress (a large file over a slow
-link, trickling a frame every few seconds) never trips it; a client
-that sends headers and then stalls for longer than the gap is cut
-off, the in-flight upstream attempt fails
-as a transport error (the client sees a classified 5xx), and the
-request's concurrency slot is released. The semantics mirror the
-response-side `timeouts.write_ms` on upstreams; this is the
-request-side mirror.
-
-## Admin API
-
-The admin API (DW-022) is a separate, small operator surface served by
-the `dwara-admin` crate. It is DEFAULT-OFF: no `admin` block in the
-config means no admin listener is started at all — the gateway is
-admin-silent until an operator configures one.
-
-```yaml
-admin:
-  bind: 127.0.0.1:2019     # default; loopback-only out of the box
-  tls:
-    cert_file: /etc/dwara/admin.crt.pem
-    key_file: /etc/dwara/admin.key.pem
-    client_ca_file: /etc/dwara/admin-clients.ca.pem
-```
-
-**Authentication is the TLS layer.** The admin listener always
-terminates TLS and REQUIRES a client certificate chaining to
-`client_ca_file`; there is no token layer in v1 — possession of a valid
-client certificate IS the authorization. All three TLS files are
-mandatory; validation rejects an `admin` block missing `client_ca_file`
-rather than silently serving no-auth TLS. Override `bind` only to place
-the admin API on a dedicated management interface, and rely on mTLS for
-access control. The admin bind set is fixed at startup — changes to
-`admin.bind` take effect on restart. A sketch of the certificate setup:
-
-```sh
-# CA for admin clients
-openssl req -x509 -newkey rsa:2048 -nodes -keyout admin-clients.ca.key \
-  -out admin-clients.ca.pem -days 3650 -subj "/CN=dwara-admin-clients"
-# server certificate the admin listener presents
-openssl req -x509 -newkey rsa:2048 -nodes -keyout admin.key.pem \
-  -out admin.crt.pem -days 365 -subj "/CN=dwara-admin"
-# one client certificate per operator
-openssl req -newkey rsa:2048 -nodes -keyout operator.key \
-  -out operator.csr -subj "/CN=operator"
-openssl x509 -req -in operator.csr -CA admin-clients.ca.pem \
-  -CAkey admin-clients.ca.key -CAcreateserial -out operator.crt -days 365
-```
-
-Then call the API with the client certificate, e.g.
-`curl --cert operator.crt --key operator.key \
-https://127.0.0.1:2019/config`. A connection without a client
-certificate (or one from the wrong CA) fails the TLS handshake.
-
-### Endpoints
-
-- `GET /config` — the CURRENT published gateway config as normalized
-  YAML, with secret values redacted: inline `api_key` values are
-  served as `${redacted:sha256:<8 hex>}` fingerprints and `${...}`
-  secret references echo verbatim (no secret value is ever returned).
-  The `x-dwara-config-generation` and `x-dwara-config-hash`
-  headers identify the generation.
-- `PATCH /config` — FULL-document YAML replacement: the body must be
-  the complete config (v1 has no partial merge — silent merging of
-  unknown subtrees is a footgun). The body is parsed, validated, and
-  compiled as a dry run FIRST; on any issue the response is 400
-  carrying EVERY problem, in the same JSON error envelope as the
-  dataplane. On success the new config is written ATOMICALLY to the
-  config file (temp file + rename in the same directory, so a crash
-  leaves either the old or the new document, never a torn one, and
-  restarts observe exactly what was published) and then published to
-  the running dataplane. Consequences: the config watcher also
-  observes the rename but its reload of identical content is a no-op
-  (the generation does not advance again), and the response
-  carries the new generation, content hash, and route count. A body
-  over 4 MiB is rejected 413; concurrent PATCHes are serialized.
-- `GET /health` — readiness (at least one published generation), the
-  current config generation, and per-upstream per-endpoint health
-  labels from the live balancer state (`healthy`/`ejected`/...).
-- `GET /stats` — cheap live state only: the state store's schema
-  version (null when no store is attached), per-upstream breaker
-  states (`closed`/`open`/`half_open`, or `disabled` when the upstream
-  configures no breaker), the `active_requests` gauge, and the config
-  generation. Anything more expensive belongs on `/metrics`.
-
-Errors use the dataplane's error envelope shape
-(`{"error":{"code","message","request_id"}}`), including 405 for a
-known path with the wrong method and 404 for unknown admin paths, so
-operators can grep one shape across both surfaces. The admin listener
-drains gracefully on shutdown alongside the gateway.
-
-### Dev fallback (never in production)
-
-`DWARA_ADMIN_DEV=1` serves the admin API as PLAINTEXT, refusing to
-start unless the admin bind is loopback. It exists purely for
-developer machines (curl without certificates) and removes the admin
-surface's only authentication — never set it in production or on a
-shared host.
-
-## CLI
-
-`dwara-cli` is the operator command line. Subcommands:
-
-- `dwara-cli run [ARGS]...` — run the gateway server. The CLI does not
-  embed the server: it spawns the `dwara` binary (which must be on
-  PATH) with the given arguments passed verbatim, the environment
-  passes through (`DWARA_CONFIG`, ...), and the binary's exit status is
-  propagated.
-- `dwara-cli validate <file>` — parse + validate + compile dry-run,
-  the same pipeline the gateway runs at startup and reload. Prints
-  every issue (validation reports all problems at once, never
-  fail-fast). Exit codes: 0 on success (printing the route count), 1
-  on ANY parse/validation/compile issue.
-- `dwara-cli fmt <file>` — normalize the config file in place: parse,
-  then re-serialize with stable field order and defaulted-empty
-  collections omitted. Round-trip guarantee: the output parses back to
-  the same typed value. Prints nothing on success; exit 1 on failure.
-- `dwara-cli diff <a> <b>` — compile both configs and print
-  route/upstream/consumer deltas as `+ kind name` (added) /
-  `- kind name` (removed) / `~ kind name` (same name, different
-  content, e.g. changed endpoints or timeouts — compared by per-entity
-  hash of the normalized serialization, so source key order never
-  shows up as a change) lines (or "no route/upstream/consumer
-  differences"). Exit 1 if either side is invalid.
-- `dwara-cli lint <file>` — advisory rules BEYOND validation: findings
-  about config that compiles and routes traffic but likely does not do
-  what the author meant. Rules: `prefix-duplicate` (two prefix routes
-  with the identical pattern; the earlier-declared one wins
-  equal-length ties, so the later can never match),
-  `regex-shadowed-by-exact` (an exact route fully matching a regex
-  route's pattern shadows those paths),
-  `consumer-unused` (referenced by no authorization rule at any level
-  and bound to no JWT provider — advisory, runtime credential use is
-  not statically visible), `policy-unused` (attached to no consumer,
-  route, service, listener, or the gateway's `global_policies`),
-  `upstream-unreferenced` (no service targets it). Exit
-  codes: 0 = clean, 2 = warnings found, 1 = the file could not be
-  parsed/validated at all (fix that first — linting an invalid config
-  would report noise). The distinct 2 keeps "your config is wrong" and
-  "your config compiles but smells" separable in scripts.
-- `dwara-cli schema` — print the JSON Schema of the gateway config to
-  stdout (deterministic for a given build). The committed
-  `config-reference.json` is generated by this subcommand; see
-  "Config reference" under Deployment.
-
-## Observability
-
-Logs, request IDs, metrics, and error bodies (DW-021) share one goal:
-an operator can correlate any client complaint to exactly one gateway
-request.
-
-### Logs
-
-The binary emits structured JSON on STDOUT via `tracing`, filtered by
-`DWARA_LOG` (`RUST_LOG` syntax, default `dwara=info`). One access-log
-line per completed request (target `dwara::access`) carries: timestamp,
-`request_id`, `method`, `path`, `status`, `duration_ms`, `route`,
-`consumer`, `upstream`, `endpoint`, `attempts`, and the
-`rate_limited`/`broken`/`shed` flags. `route` is `unrouted` for 404s
-and reserved paths; `consumer` is `anonymous` without authentication.
-
-Access-log sampling: `DWARA_ACCESS_LOG_SAMPLE` (0.0-1.0, default 1.0)
-sets the fraction of non-error lines emitted; responses with status
->= 500 are ALWAYS logged regardless of sampling, and a malformed value
-falls back to 1.0 (a broken knob must never silence logs). Request
-phases (authn, authz, ratelimit, admission, upstream pick/attempts)
-open `tracing` spans under the root `request` span, all carrying the
-request ID.
-
-Redaction guarantees: paths are logged WITHOUT query strings (query
-strings carry tokens), and no credential material — `Authorization`,
-`Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-API-Key` values,
-keys, or JWKS bodies — is ever logged.
-
-### Request IDs
-
-An inbound `X-Request-Id` is respected when it is printable ASCII of
-at most 128 bytes (anything else — control bytes, multibyte UTF-8,
-overlong — is replaced, so a hostile ID cannot smuggle control
-characters into logs); otherwise the gateway generates one
-(`req-<hex nanoseconds>-<counter>`). The resolved ID is echoed on
-every response as `X-Request-Id` and appears in every span, access
-line, and error body.
-
-### Metrics
-
-`/metrics` serves the Prometheus text format, reserved on every
-terminate and cleartext listener exactly like `/healthz`. Metric
-families:
-
-- `requests_total{route,listener,status_class}` — counter
-- `request_duration_seconds{route}` — histogram (route resolution to
-  response headers; buckets 5 ms to 10 s)
-- `upstream_attempts_total{upstream,endpoint,status_class}` — counter
-- `retries_total{upstream}` — counter
-- `rate_limited_total{route}` — counter (429 denials)
-- `shed_total{priority}` — counter (gateway-cap 503s by priority class)
-- `breaker_state{upstream}` — gauge: 0 closed, 1 open, 2 half-open
-- `endpoint_health{upstream,endpoint}` — gauge: 1 available, 0 ejected
-- `upstream_fail_open_picks{upstream}` — gauge (scrape-time snapshot
-  of the balancer's fail-open counter)
-- `active_requests` — gauge (requests between entry and header
-  completion)
-- `config_generation` — gauge (currently published generation)
-- `jwks_refresh_total{provider}` — counter (JWKS fetch attempts)
-- `dwara_rate_limiter_evictions_total` — gauge (scrape-time snapshot
-  of the rate-limit engine's eviction counter, aggregated over every
-  compiled rule; resets when a reload rebuilds the engine)
-- `dwara_rate_limiter_live_keys` — gauge (live per-key rate-limiter
-  cells across every compiled rule; aggregate and unlabeled —
-  cardinality is never per key)
-- `dwara_webhook_events_total{kind,outcome}` — counter (webhook
-  deliveries by event kind and outcome: `delivered`, `failed`, or
-  `dropped`; both labels closed sets — DW-044)
-- `dwara_events_dropped_total` / `dwara_events_emitted_total` — gauges
-  (scrape-time snapshots of the event bus's counters: events dropped at
-  emit time — full queue or no deliverer — and events queued — DW-044)
-- `dwara_slo_burn_rate{route,objective,window}` — gauge (error-budget
-  consumption per route SLO objective, DW-052: the bad-request fraction
-  over a 5m or 1h process-local sliding window divided by the allowed
-  fraction; 1.0 consumes the budget at exactly the allowed rate, 14.4
-  over 1h is the classic fast-burn page. `objective` is `availability`
-  (bad = gateway-answered 5xx) or `latency` (bad = over the configured
-  threshold); only routes with an `slo` block export series)
-- `dwara_slo_target{route,objective}` — gauge (the configured target as
-  a fraction, DW-052)
-
-Breaker, endpoint-health, fail-open, and rate-limiter series are
-refreshed at scrape time from live state; series for
-upstreams/endpoints removed by a reload linger until process restart
-(a Prometheus caveat, not a leak in the gateway's own state).
-
-A starter Grafana dashboard (`grafana/dwara-overview.json`, metric
-names matching the list above) ships in the repo: in Grafana, import
-the JSON file via Dashboards -> New -> Import and point the dashboard's
-datasource at a Prometheus instance scraping the gateway's `/metrics`.
-
-### Error envelope
-
-Every gateway-generated non-success body — including reserved
-`/healthz`/`/readyz` responses, which use the same shape — is:
-
-```json
-{"error":{"code":"no_route","message":"no route","request_id":"req-..."}}
-```
-
-`code` is a stable machine token, `message` a human string that never
-leaks upstream internals (classification strings only), and
-`request_id` ties the response to the trace and access log.
-
-### OTLP (feature-gated)
-
-Trace export over OTLP lives behind the default-off `otlp` cargo
-feature (dependency weight against the binary size budget — the reason
-it was deferred in v1). In the default build `DWARA_OTLP_ENDPOINT` is
-reserved but inert. Build the gateway with the feature:
-
-```sh
-cargo build -p dwara-bin --features otlp
-```
-
-Set `DWARA_OTLP_ENDPOINT` to a collector base endpoint (e.g.
-`http://collector:4318`; `/v1/traces` is appended, a full
-`.../v1/traces` URL is accepted as-is) and the gateway exports the
-request span tree documented above — root `request` span and phase
-spans, unchanged — over OTLP http/protobuf, so any collector with an
-OTLP http/protobuf receiver works (Jaeger, otelcol, SigNoz, ...). The
-built-in exporter speaks plain `http://` only: an `https://` endpoint
-fails fast at startup with one ERROR log and the gateway serves
-without trace export; the feature enabled with the endpoint unset is a
-no-op (one INFO line). Spans are batched and flushed (bounded by the
-graceful-drain budget) on the SIGTERM/SIGINT path. Transient collector
-answers (429/502/503/504) and transport failures are retried inside
-one export — up to three attempts with exponential backoff honoring a
-seconds-form `Retry-After`, all sharing the export's one total
-deadline — so a briefly unavailable collector no longer drops the
-batch (delivery is at-least-once: a retry after a lost response may
-duplicate spans).
-
-## State store
-
-Set `DWARA_STATE_DB=/path/to/db` to enable the SQLite state store
-(WAL mode). At startup the gateway opens (or creates) the database,
-applies any pending schema migrations automatically, and idempotently
-seeds consumers and credentials from the config — re-syncing creates
-nothing new; an existing consumer only has its priority and groups
-updated.
-Consumers, credential records, and quota counters persist across
-restarts.
-
-Schema migrations are forward-only and automatic. Before migrating an
-existing database the store writes a consistent snapshot
-(`<db>.bak-<old-version>-<unix-seconds>-<millis>`, via SQLite `VACUUM INTO`)
-next to the database file; if the backup cannot be written, startup
-aborts and no migration runs. There are no downgrades: a binary
-presented a database at a newer schema version than it supports exits
-1. To return to an older version, stop the gateway, replace the
-database file with the matching `.bak-*` snapshot, and restart — or,
-since schema-v1 content is fully re-derivable, recreate the file and
-let config seeding repopulate it.
-
-Credential hashing is real: seeded API-key rows carry the same hash
-the authenticator verifies (`sha256:<hex(sha256(key))>`, or
-`hmac-sha256:<hex(HMAC-SHA256(pepper, key))>` when
-`DWARA_CREDENTIAL_PEPPER` is set; selector `hex(sha256(key))` in both
-modes — never the plaintext key). With `DWARA_STATE_DB`
-set, the dataplane authenticates against the store's hot-cached
-records; without it, config credentials are hashed in-memory at
-startup. JWT and mTLS config credentials are bindings, not secrets
-(tokens are verified cryptographically, client certificates matched by
-subject CN or fingerprint), so their rows keep binding-marker hashes.
-Store-managed consumers carry their own groups (`consumers.groups`,
-schema v3) — group-based authorization applies to them exactly as to
-config consumers.
-
-The store keeps an in-memory hot cache: credential lookups by selector
-avoid disk after their first lookup (unknown selectors are cached as
-empty). The cache is coherent for writes made through the same process
-only — a second process writing the same file is not seen until
-restart. Unset (the default), the gateway runs purely from config. A
-startup failure (unwritable path, newer schema version) exits 1.
-
-## Benchmarks
-
-Two harnesses cover performance work (DW-024). Absolute numbers are
-machine- and run-dependent and are deliberately NOT recorded here —
-consult the CI artifacts for reference output.
-
-### Micro benchmarks
-
-Criterion benches in `crates/dwara-core/benches/micro.rs` (route
-resolution, config validate/compile, hop-by-hop header filtering,
-balancer picks, GCRA rate-limit checks, API-key verification):
-
-```sh
-cargo bench --workspace --bench micro
-```
-
-A checked-in baseline (`crates/dwara-core/benches/baseline.json`) plus a
-regression gate (`scripts/bench-baseline.py`, tolerance 25%) fail the
-run when any benchmark slows by more than 25% relative to the baseline:
-
-```sh
-cargo bench --workspace --bench micro -- --output-format bencher \
-  | scripts/bench-baseline.py --baseline crates/dwara-core/benches/baseline.json
-```
-
-Refresh the baseline when benchmarked code changes shape or the
-reference machine changes, and note the machine in the commit trail:
-
-```sh
-cargo bench --workspace --bench micro -- --output-format bencher \
-  | scripts/bench-baseline.py --write crates/dwara-core/benches/baseline.json
-```
-
-The checked-in baseline is a dev-machine reference; the CI gate fails
-open until a CI-captured baseline exists, so bootstrap it once after
-first merge with `gh workflow run bench.yml --ref main -f
-job=baseline-refresh` (re-run the same command to re-capture later).
-
-### Macro load testing
-
-`scripts/bench-macro.sh [DURATION_SECS] [CONNS...]` builds the release
-binaries, boots the gateway against an in-process echo upstream
-(`dwara-loadgen --echo-only`), and drives it at each connection count,
-printing a requests/RPS/errors/percentiles table. Defaults: 10 s at 10 /
-100 / 1000 connections; exit is nonzero if any request errors. Ports
-default to 18080 (gateway) and 18081 (echo), overridable via
-`BENCH_GATEWAY_PORT` / `BENCH_ECHO_PORT`.
-
-The load generator itself is `dwara-loadgen` (in `dwara-cli`):
-
-```sh
-dwara-loadgen --url http://127.0.0.1:18080/ \
-  --connections 100 --duration 10 --rate 0
-```
-
-`--rate 0` (default) is unbounded — each connection issues back-to-back
-requests; a positive value paces a global requests-per-second target.
-Pacing dispenses permits in 50 ms slices and caps catch-up at what
-workers have consumed plus one slice, so a rig that falls behind never
-discharges the accumulated backlog as one burst (#127).
-`--echo PORT` also serves a minimal echo upstream in the same process
-(`--echo-only` serves just the upstream; `--echo-body` sets the response
-size, default 128 bytes). Output includes a machine-parseable `RESULT:`
-line; the exit code is 1 if any request failed.
-
-**File-descriptor limits.** The OS caps open sockets long before the
-gateway does. macOS defaults are low (often 2560) — keep local runs at
-10k connections or fewer. The 100k-connection test needs
-`ulimit -n 1048576` on a tuned Linux host (two sockets per connection
-pair, client and server side, plus kernel headroom:
-`net.ipv4.ip_local_port_range`, `somaxconn`).
-
-### CI posture
-
-Benchmarks never run on pull requests. The `bench` workflow
-(`.github/workflows/bench.yml`) is scheduled weekly (Mondays, 03:17 UTC)
-and manually dispatchable: the micro job runs the criterion gate against
-the checked-in baseline and compile-checks the default-off `otlp` cargo
-feature (its only CI coverage — the feature is never built per-push);
-the macro job runs load profiles (errors must
-be 0) and a best-effort 100k-connection test on the standard runner
-(deliberately best-effort, #127). A `job` dispatch input selects
-one-off runs: `gate` (default; micro+macro), `baseline-refresh`
-(bootstrap the CI-captured regression baseline), or `soak` (a 24h soak,
-e.g. ahead of a release — never started as a side effect of other
-dispatches).
-
-## Fuzzing and concurrency testing
-
-Coverage-guaranteed robustness work (DW-025) lives in the `fuzz/` crate
-and two dedicated test binaries in `dwara-core`.
-
-### Fuzz targets
-
-Six libFuzzer targets exercise the parser-heavy hot paths with the real
-production code (the crate depends on `dwara-core` by path):
-
-| Target | Coverage |
+| `DWARA_CONFIG` | `./dwara.yaml` | config file path (watched for changes) |
+| `DWARA_BIND` | unset | override with a single cleartext listener (dev escape hatch) |
+| `DWARA_STATE_DB` | unset | path to the SQLite state store (unset = no store) |
+| `DWARA_CREDENTIAL_PEPPER` | unset | per-deployment secret peppering stored credential hashes |
+| `DWARA_LOG` | `dwara=info` | log filter in `RUST_LOG` syntax |
+| `DWARA_ACCESS_LOG_SAMPLE` | `1.0` | fraction of non-error access-log lines emitted |
+| `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful-drain budget on SIGTERM/SIGINT |
+| `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin API (DEV ONLY) |
+| `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export (`http://` endpoint; `otlp` feature build only) |
+
+Reload: file change (debounced) or SIGHUP. Shutdown: SIGTERM/SIGINT with
+backlog flush and drain. A `POST`/`PATCH` to the admin API is live-published.
+
+## Repository layout
+
+| Path | Contents |
 | --- | --- |
-| `fuzz_headers` | header parsing / hop-by-hop filtering |
-| `fuzz_config_yaml` | strict gateway YAML config parsing |
-| `fuzz_jwt` | JWT pre-verification header parse path |
-| `fuzz_sni` | TLS ClientHello SNI parser (passthrough) |
-| `fuzz_cookies_query` | raw cookie and query matching |
-| `fuzz_cidr` | CIDR / IP parsing for `trusted_proxies` and IP ACLs |
-
-Fuzzing needs nightly and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
-(`cargo install cargo-fuzz`). Run a target against the seed corpus in
-`fuzz/corpus/<target>/`:
-
-```sh
-cargo +nightly fuzz run fuzz_headers fuzz/corpus/fuzz_headers
-```
-
-Bound a run with `-max_total_time` (CI uses 120 s per target); crash
-artifacts land in `fuzz/artifacts/<target>/`. Add interesting inputs you
-find to the seed corpus so they are replayed forever.
-
-### Loom model checks
-
-Concurrency internals are model-checked with
-[loom](https://github.com/tokio-rs/loom) behind the `loom` cargo
-feature, which swaps sync primitives for loom equivalents across the
-crate — so ONLY the loom test binary is meaningful under it:
-
-```sh
-cargo test -p dwara-core --features loom --test loom
-```
-
-Known limitation: arc-swap 1.9.x has no loom support, so the
-snapshot/load-balancer swap paths are covered by real-thread stress
-tests instead (`crates/dwara-core/tests/swap_stress.rs`), which run as
-part of the regular `cargo test --workspace`:
-
-```sh
-cargo test -p dwara-core --test swap_stress -- --nocapture
-```
-
-### CI posture
-
-Fuzzing never runs on pull requests. The `fuzz` workflow
-(`.github/workflows/fuzz.yml`) is scheduled weekly (Thursdays, 04:23 UTC
-— offset from the bench workflow so the two never contend for runners)
-and manually dispatchable: each target runs bounded at 120 s over the
-seed corpus, with crash artifacts uploaded on failure; the loom job runs
-the model checks and the swap-stress tests.
-
-## Crates
-
-| Crate | Role |
-| --- | --- |
-| `dwara-core` | Config model, routing types, swappable trait definitions |
-| `dwara-bin` | Gateway server binary |
-| `dwara-admin` | Admin / management-plane API |
-| `dwara-cli` | Operator command-line client |
+| `crates/dwara-core` | The library: config, snapshot pipeline, extensions, observability, events, state, analytics, security, resilience, dataplane |
+| `crates/dwara-bin` | The `dwara` gateway binary: entry/shutdown, listeners, reload, OTLP export |
+| `crates/dwara-admin` | mTLS-only admin API (config, health, stats) |
+| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); load-generator rig |
+| `fuzz/` | cargo-fuzz targets (separate workspace) |
+| `quickstart/` | One-command docker-compose TLS demo |
+| `packaging/` | systemd unit and packaging notes |
+| `grafana/` | Starter dashboard for the `/metrics` families |
+| `scripts/` | Macro bench rig, baseline gate, dependency-direction guard |
+| `config-reference.json` | Generated JSON Schema of the config (freshness-gated in CI) |
+| `docs/` | Developer-facing documentation (internals, rationale, diagrams) |
+| `docs-site/` | Published end-user (operator) documentation site (VitePress) |
 
 ## Extension points
 
-State-holding subsystems are defined as swappable traits in
+State-holding subsystems are defined as swappable, dyn-compatible traits in
 `dwara-core::extensions`: `RateLimiter`, `ConfigSource`, `CacheStore`,
-`AnalyticsSink`, and `SecretSource`. Each trait's rustdoc states its
-contract (purpose, semantics, failure model). Local in-memory, file, and
-environment-variable implementations ship today; alternative backends
-plug in by implementing the same traits.
+`AnalyticsSink`, and `SecretSource`. Each trait's rustdoc states its contract
+(purpose, semantics, failure model). Local in-memory, file, and
+environment-variable implementations ship in-tree; alternative backends plug
+in by implementing the same traits without touching call sites. See the
+[Extension points](./docs/features/extension-points.md) developer doc.
 
 ## Development
 
-CI runs on pushes and pull requests to `main` (when Rust sources,
-manifests, toolchain files, or the workflow itself change). Blocking
-gates: `cargo fmt --check`, clippy with `-D warnings`, build, tests,
-and [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) checks
-(advisories, licenses, bans — policy in `deny.toml`). A CycloneDX SBOM
-is generated and uploaded as an artifact on each run. Every `uses:`
-reference in the workflows is pinned to a full commit SHA; Dependabot
-opens weekly PRs to keep the pins fresh.
-
-Run the same checks locally:
+Requires Rust via rustup (the pinned toolchain installs automatically on
+first cargo invocation). Optional: Docker, `actionlint` (brew) for workflow
+linting, a nightly toolchain for `cargo fuzz`, python3 for bench scripts.
 
 ```sh
+cargo build --workspace
+cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check
+cargo deny check advisories licenses bans
+cargo doc --no-deps --workspace   # must be zero-warning
 ```
+
+CI runs on pushes and pull requests to `main`. Blocking gates: `cargo fmt
+--check`, clippy with `-D warnings`, build, tests, and cargo-deny checks
+(advisories, licenses, bans; policy in `deny.toml`). A CycloneDX SBOM is
+generated and uploaded as an artifact on each run. Every `uses:` reference in
+the workflows is pinned to a full commit SHA; Dependabot keeps the pins fresh.
+
+See [`AGENTS.md`](./AGENTS.md) for the full contributor guide (code
+organization, conventions, the verification gate, the test map).
+
+## Branding
+
+The Dwara logo, mark, and favicon set live in [`./branding`](./branding)
+(`svg/`, `png/`, `favicon/`). They share the ShristiLabs identity DNA — an
+indigo base with a teal `#12B5A5` accent and a torana-arch symbol evoking a
+gateway (द्वार). The docs site consumes the favicons and logos from
+[`./docs-site/public`](./docs-site/public); see
+[`branding/README.md`](./branding/README.md) for the asset inventory and
+usage notes.
 
 ## License
 

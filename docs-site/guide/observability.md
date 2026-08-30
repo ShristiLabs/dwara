@@ -26,7 +26,7 @@ JWKS bodies) is ever logged.
 ## Request IDs
 
 An inbound `X-Request-Id` is respected when it's printable ASCII of at
-most 128 bytes; otherwise dwara generates one
+most 128 bytes; otherwise Dwara generates one
 (`req-<hex nanoseconds>-<counter>`). The resolved ID is echoed on every
 response as `X-Request-Id` and appears in every log line, span, and
 error body — use it as the single correlation key across client

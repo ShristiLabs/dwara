@@ -1,6 +1,6 @@
 # Response field masking
 
-dwara can redact named fields from a route's responses before anything
+Dwara can redact named fields from a route's responses before anything
 else touches the body: every [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)
 pointer you list is replaced with the fixed string `"***"`, per
 consumer group. A field named here never reaches the client, whatever
@@ -50,30 +50,30 @@ security policy.
 ## Fail closed, always
 
 A skipped masking pass would be exactly the leak the policy exists to
-prevent, so every condition dwara cannot handle is a REFUSAL, not a
+prevent, so every condition Dwara cannot handle is a REFUSAL, not a
 passthrough. A route with `masking` pins its proxied responses to the
 contract "identity-encoded JSON within `max_bytes`, with every
 configured pointer present":
 
 | Upstream response | Client receives |
 | --- | --- |
-| carries `Content-Encoding` (dwara does not decode) | `502` |
+| carries `Content-Encoding` (Dwara does not decode) | `502` |
 | not JSON (`application/json` / `application/*+json` only) | `502` |
 | larger than `max_bytes` (declared or streamed) | `502` |
 | JSON-typed but not valid JSON | `502` |
 | a configured pointer is missing from the document | `502` |
-| dies mid-body while dwara buffers | `502` (a clean envelope, not a torn stream) |
+| dies mid-body while Dwara buffers | `502` (a clean envelope, not a torn stream) |
 
 The `502` envelope is generic on the client side; the reason is named
 only in the server-side log. Two things pass because they carry
 nothing to leak: bodiless statuses (`204`, `304`, `1xx`, `101`) and
 empty bodies (a proxied `HEAD`, among others). Masking also applies
-only to proxied responses — bodies dwara itself authors (`respond` /
+only to proxied responses — bodies Dwara itself authors (`respond` /
 `redirect` actions) are your config bytes, not upstream data.
 
 `max_bytes` must be at least 1 and has no upper bound — it is the
 route's memory budget, like a [body transform](./transforms) cap.
-dwara's own [compression](./edge-policies) runs AFTER masking, so a
+Dwara's own [compression](./edge-policies) runs AFTER masking, so a
 masked response still compresses; only responses that arrive from the
 upstream already encoded are refused. The forwarded `Content-Length`
 is rewritten to the masked length.
@@ -89,7 +89,7 @@ and counts only — masked values never appear in logs. See
 
 ## Ordering
 
-Masking runs FIRST in dwara's response pipeline — before [body
+Masking runs FIRST in Dwara's response pipeline — before [body
 transforms](./transforms), before [compression](./edge-policies),
 before [versioning stamps](./api-versioning) and CORS decoration.
 Once a field is masked the original value exists nowhere in the

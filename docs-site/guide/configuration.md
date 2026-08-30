@@ -1,6 +1,6 @@
 # Configuration
 
-dwara is configured from a single strict YAML file: unknown fields are
+Dwara is configured from a single strict YAML file: unknown fields are
 rejected, and every error names the path of the offending node. This
 page covers the concepts; the exhaustive field list is the generated
 [configuration schema](../reference/configuration-schema).

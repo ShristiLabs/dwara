@@ -1,4 +1,4 @@
-# dwara docs-site
+# Dwara docs-site
 
 The published end-user documentation site (OSS + enterprise operators),
 built with [VitePress](https://vitepress.dev) and
@@ -6,7 +6,7 @@ built with [VitePress](https://vitepress.dev) and
 GitHub Pages by `.github/workflows/docs-site.yml`.
 
 This is distinct from [`/docs`](../docs), which is internals-focused
-documentation for dwara contributors. If you're writing about how a
+documentation for Dwara contributors. If you're writing about how a
 feature works from the operator's point of view (how to configure it,
 what it does at the wire level, what to watch in metrics/logs), it
 belongs here. If you're writing about why it's implemented the way it
@@ -34,6 +34,9 @@ docs-site/
   architecture/                high-level diagrams (mermaid)
   reference/                   generated/exhaustive reference material
   versions/                    frozen snapshots of past releases (see below)
+  public/                      static assets served at the site base:
+                               Dwara favicons, web manifest, and SVG logos
+                               (copied from ../branding; see Branding below)
   .vitepress/
     config.mts                 site + versioning + sidebar config
     sidebars/versioned/        one sidebar JSON per frozen version
@@ -65,6 +68,25 @@ evolving as `unstable` for the next release.
 
 The version switcher in the site nav lists `unstable` plus every frozen
 version under `versions/`.
+
+## Branding
+
+The Dwara favicons, web app manifest, and SVG logos are served from
+`public/` (copied from the repo-root [`../branding`](../branding) directory).
+`.vitepress/config.mts` wires them up:
+
+- `head` — favicon `<link>`s and the manifest, all prefixed with the
+  `/dwara/` site base (VitePress does not rewrite `head` hrefs, so the base
+  is explicit; the dev server also serves under base, so the same paths
+  work locally).
+- `themeConfig.logo` — the nav-bar mark (`/mark-icon.svg`, rewritten with
+  `withBase`).
+- `index.md` home hero `image` — the gradient mark (`/mark-color.svg`).
+
+When branding assets change in `../branding`, re-copy the updated files
+into `public/` and rebuild. The `site.webmanifest` in `public/` uses
+relative icon paths so they resolve against the manifest's own URL under
+the site base.
 
 ## Publishing
 

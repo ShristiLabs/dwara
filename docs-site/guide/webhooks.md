@@ -1,6 +1,6 @@
 # Alert and event webhooks
 
-dwara can POST a small JSON notification to your HTTP endpoints when
+Dwara can POST a small JSON notification to your HTTP endpoints when
 gateway state changes: circuit breakers trip, endpoints leave and
 re-enter rotation, and config generations publish or get rejected.
 Point one at your incident tool, a chat relay, or your own collector.

@@ -1,9 +1,9 @@
 # Response caching
 
-dwara can cache a route's GET responses locally and replay them for
+Dwara can cache a route's GET responses locally and replay them for
 identical requests, cutting upstream load and tail latency. Caching is
 off by default: a route opts in with a `cache` block, and only requests
-dwara can key safely are ever cached.
+Dwara can key safely are ever cached.
 
 ```yaml
 routes:

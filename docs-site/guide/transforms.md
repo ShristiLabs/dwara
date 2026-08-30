@@ -1,6 +1,6 @@
 # Transforms and security headers
 
-dwara can rewrite the headers, query string, and JSON bodies crossing
+Dwara can rewrite the headers, query string, and JSON bodies crossing
 a route, and stamp standard security headers on every response it
 emits — configured as two optional blocks on the route. Both are
 off by default: a route without them forwards traffic untouched.
@@ -47,7 +47,7 @@ routes:
 
 ## Streaming is preserved
 
-dwara proxies end-to-end without buffering. Header, query, and
+Dwara proxies end-to-end without buffering. Header, query, and
 security-header operations never touch a body: Server-Sent Events,
 WebSocket upgrades, and large downloads pass through a transformed
 route exactly as through an untransformed one. The single exception is
@@ -65,21 +65,21 @@ in one fixed order regardless of how you order them in YAML:
 3. `rename` — move every value of the key onto the new name
 4. `remove` — drop every value of the header
 
-On the request side the operations run after dwara adds its own
+On the request side the operations run after Dwara adds its own
 `X-Forwarded-*` and consumer-identity headers, so you can `remove` or
 `rename` those — useful when an upstream must not see consumer
 identity. Some names are never yours to set: framing and hop-by-hop
 headers (`content-length`, `transfer-encoding`, `connection`,
 `keep-alive`, `te`, `trailer`, `upgrade`, `proxy-connection`,
 `proxy-authenticate`, `proxy-authorization`) are rejected by
-validation in both directions, plus `host` on requests (dwara names
+validation in both directions, plus `host` on requests (Dwara names
 the origin it dials) and `content-encoding` on responses (the
 [compression pipeline](./edge-policies) owns it). This is a
 request-smuggling guard, not a convenience: a config that forced a
 framing header disagreeing with the actual body would corrupt the hop.
 
 Response header operations apply to upstream answers (and `respond` /
-`redirect` actions), not to dwara's own error responses — those are
+`redirect` actions), not to Dwara's own error responses — those are
 covered by security headers below.
 
 ## Query operations
@@ -134,7 +134,7 @@ pointer server-side; the client error stays generic.
 ## Security headers
 
 The `security_headers` block stamps standard hardening headers on
-EVERY response the route emits — including dwara's own 401/403/413/
+EVERY response the route emits — including Dwara's own 401/403/413/
 429/503 answers and CORS preflights, not just upstream responses —
 replacing any value the upstream sent: at its edge, the gateway is the
 source of truth. (The two responses emitted before a route is matched

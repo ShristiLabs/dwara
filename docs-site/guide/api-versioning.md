@@ -1,6 +1,6 @@
 # API versioning
 
-dwara has no version knob: API versions are expressed with routing,
+Dwara has no version knob: API versions are expressed with routing,
 and the gateway adds two aids on top — a `match.accept` criterion that
 selects a route by media type, and a per-route `deprecation` block
 that announces the retirement of an API version with the standard

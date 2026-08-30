@@ -1,7 +1,7 @@
 import defineVersionedConfig from "vitepress-versioning-plugin";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
-// dwara end-user documentation site.
+// Dwara end-user documentation site.
 //
 // Versioning model (vitepress-versioning-plugin): the root of this project
 // (guide/, architecture/, reference/, index.md) is always the "unstable"
@@ -18,7 +18,7 @@ import { withMermaid } from "vitepress-plugin-mermaid";
 export default withMermaid(
   defineVersionedConfig(
     {
-      title: "dwara",
+      title: "Dwara",
       description: "API gateway documentation",
       lastUpdated: true,
       cleanUrls: true,
@@ -27,6 +27,30 @@ export default withMermaid(
       // asset/link must be rooted at /dwara/ or the CSS/JS 404 under the
       // real path while looking fine in local dev (which serves from /).
       base: "/dwara/",
+
+      // Favicons and PWA manifest live in docs-site/public/ and are served
+      // from the site base (/dwara/). <head> link hrefs are NOT rewritten by
+      // VitePress, so they carry the /dwara/ prefix explicitly to match the
+      // published path (and the dev server, which also serves under base).
+      // The themeConfig.logo below IS rewritten with withBase, so it uses a
+      // base-relative /mark-icon.svg.
+      head: [
+        ["link", { rel: "icon", href: "/dwara/favicon.ico", sizes: "any" }],
+        [
+          "link",
+          { rel: "icon", type: "image/png", sizes: "32x32", href: "/dwara/favicon-32x32.png" },
+        ],
+        [
+          "link",
+          { rel: "icon", type: "image/png", sizes: "16x16", href: "/dwara/favicon-16x16.png" },
+        ],
+        [
+          "link",
+          { rel: "apple-touch-icon", sizes: "180x180", href: "/dwara/apple-touch-icon.png" },
+        ],
+        ["link", { rel: "manifest", href: "/dwara/site.webmanifest" }],
+        ["meta", { name: "theme-color", content: "#1B1650" }],
+      ],
       // README.md is this project's own (GitHub-rendered) contributor
       // README, not a page of the published site.
       srcExclude: ["README.md"],
@@ -36,7 +60,10 @@ export default withMermaid(
       },
 
       themeConfig: {
-        logo: undefined,
+        // The nav logo is the Dwara mark on its indigo squircle (an app
+        // icon), served from docs-site/public/. VitePress rewrites this
+        // with withBase, so it resolves to /dwara/mark-icon.svg in prod.
+        logo: "/mark-icon.svg",
         nav: [
           { text: "Guide", link: "/guide/getting-started" },
           { text: "Architecture", link: "/architecture/overview" },

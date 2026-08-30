@@ -1,13 +1,13 @@
 # Getting started
 
-dwara is a reverse-proxy API gateway configured from a single YAML file.
+Dwara is a reverse-proxy API gateway configured from a single YAML file.
 This page gets a gateway running locally in under a minute; see
 [Installation](./installation) for binaries/Docker/build-from-source, and
 [Deployment](./deployment) for a full TLS demo.
 
 ## Requirements
 
-- A dwara binary (see [Installation](./installation)), or Rust 1.94+ if
+- A Dwara binary (see [Installation](./installation)), or Rust 1.94+ if
   building from source.
 
 ## 1. Start something to proxy to
@@ -18,7 +18,7 @@ Any HTTP server will do. For a quick demo:
 python3 -m http.server 9000
 ```
 
-## 2. Point dwara at a config
+## 2. Point Dwara at a config
 
 The repository ships a sample config that forwards everything under `/v1`
 to `127.0.0.1:9000`. If you're running from a source checkout:
@@ -54,7 +54,7 @@ curl http://127.0.0.1:8080/v1/
 ```
 
 The request is streamed to the backend unbuffered, and the response
-streams back the same way — dwara does not buffer request or response
+streams back the same way — Dwara does not buffer request or response
 bodies by default. A path with no matching route returns `404`; a dead
 backend returns `502` (or `504` on connect timeout). Stop the gateway
 with `Ctrl-C` — it drains in-flight requests before exiting (see
@@ -62,7 +62,7 @@ with `Ctrl-C` — it drains in-flight requests before exiting (see
 
 ## What just happened
 
-- dwara parsed and validated `dwara.yaml` at startup. An invalid config
+- Dwara parsed and validated `dwara.yaml` at startup. An invalid config
   makes the process exit with code 1, printing **every** validation issue
   at once (not just the first).
 - It bound the `http` listener and started routing traffic per the

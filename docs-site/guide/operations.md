@@ -48,7 +48,7 @@ previous certificates keep serving.
 
 ## Health endpoints
 
-dwara reserves `/healthz`, `/readyz`, and `/metrics` on every terminate
+Dwara reserves `/healthz`, `/readyz`, and `/metrics` on every terminate
 and cleartext listener, served **before** route resolution:
 
 | Path | Meaning |

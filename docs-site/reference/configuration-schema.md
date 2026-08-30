@@ -17,6 +17,6 @@ truth for field names, types, and constraints, and this site's
 explanation of the concepts behind it.
 
 If you're building editor tooling, linters, or config generators
-against dwara, point them at `config-reference.json` for the given
+against Dwara, point them at `config-reference.json` for the given
 release (or the `unstable` build's copy, for the in-development
 schema) rather than re-deriving the shape by hand.
