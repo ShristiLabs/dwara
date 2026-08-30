@@ -29,6 +29,14 @@ bytes = { workspace = true }
 # Already a workspace dependency (dwara-core/observability uses it); no
 # new external crate enters the tree.
 serde_json = { workspace = true }
+# `import openapi` subcommand (DW-047): parse OpenAPI specs (YAML or
+# JSON). Already a workspace dependency (dwara-core config parsing); no
+# new external crate enters the tree.
+serde_yaml_ng = { workspace = true }
+# `import openapi` subcommand: derive Deserialize on the minimal
+# OpenAPI struct. Already a workspace dependency; no new external
+# crate enters the tree.
+serde = { workspace = true }
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]

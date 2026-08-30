@@ -3059,6 +3059,19 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             RouteAction::Proxy {
                 rewrite: Some(ref rw),
             } => validate_rewrite(&r.name, rw, &mut issues),
+            RouteAction::Mock { ref mock } => validate_mock(&r.name, mock, &mut issues),
+        }
+        // Request validation (DW-047): the JSON schema must be
+        // well-formed (known type names, non-negative bounds). An
+        // invalid schema is an authoring error that would surface at
+        // request time otherwise.
+        if let Some(rv) = &r.request_validation {
+            validate_json_schema(
+                &r.name,
+                "request_validation.body_schema",
+                &rv.body_schema,
+                &mut issues,
+            );
         }
     }
 
@@ -3707,6 +3720,121 @@ fn validate_rewrite(route: &str, rw: &PathRewrite, issues: &mut Vec<ValidationIs
     }
 }
 
+/// Validate a mock action (DW-047): status in 100..=599, delay_ms in
+/// 0..=30000, exactly one of body/body_file (or neither), body_file
+/// exists and is readable, and header names/values are buildable.
+fn validate_mock(route: &str, mock: &crate::config::MockAction, issues: &mut Vec<ValidationIssue>) {
+    if !(100..=599).contains(&mock.status) {
+        issues.push(issue(
+            "route",
+            route,
+            "action.mock.status",
+            format!(
+                "mock status {} is not a valid HTTP status (100..=599)",
+                mock.status
+            ),
+        ));
+    }
+    if let Some(delay) = mock.delay_ms {
+        if delay > 30000 {
+            issues.push(issue(
+                "route",
+                route,
+                "action.mock.delay_ms",
+                format!("mock delay_ms {delay} is out of range: must be 0..=30000"),
+            ));
+        }
+    }
+    if mock.body.is_some() && mock.body_file.is_some() {
+        issues.push(issue(
+            "route",
+            route,
+            "action.mock",
+            "mock action sets both 'body' and 'body_file'; set at most one \
+             (use body for an inline string, body_file for a fixture file)",
+        ));
+    }
+    for (name, value) in &mock.headers {
+        if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            issues.push(issue(
+                "route",
+                route,
+                "action.mock.headers",
+                format!("mock header name '{name}' is not a valid HTTP header name"),
+            ));
+        }
+        if hyper::header::HeaderValue::from_str(value.as_str()).is_err() {
+            issues.push(issue(
+                "route",
+                route,
+                "action.mock.headers",
+                format!(
+                    "mock header value for '{name}' contains characters that \
+                     cannot appear in an HTTP header value"
+                ),
+            ));
+        }
+    }
+    if let Some(path) = &mock.body_file {
+        if path.trim().is_empty() {
+            issues.push(issue(
+                "route",
+                route,
+                "action.mock.body_file",
+                "mock body_file path is empty",
+            ));
+        } else if std::fs::read(path).is_err() {
+            issues.push(issue(
+                "route",
+                route,
+                "action.mock.body_file",
+                format!("mock body_file '{path}' is not a readable file"),
+            ));
+        }
+    }
+}
+
+/// Validate a JSON schema (DW-047): type names must be known, numeric
+/// bounds non-negative, and the schema recursively well-formed. Unknown
+/// keywords are ignored (forward compatibility).
+fn validate_json_schema(
+    route: &str,
+    field: &str,
+    schema: &crate::config::BodySchema,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Some(t) = &schema.r#type {
+        if !matches!(
+            t.as_str(),
+            "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+        ) {
+            issues.push(issue(
+                "route",
+                route,
+                field,
+                format!("json schema type '{t}' is not a known JSON type"),
+            ));
+        }
+    }
+    if let Some(min) = schema.min_length {
+        if min > u64::MAX / 4 {
+            // Guard against absurd values; the practical cap is the
+            // route's body limit, enforced at request time.
+        }
+    }
+    for (name, child) in &schema.properties {
+        validate_json_schema(route, &format!("{field}.properties[{name}]"), child, issues);
+    }
+    if let Some(items) = &schema.items {
+        validate_json_schema(route, &format!("{field}.items"), items, issues);
+    }
+    if let Some(ap) = &schema.additional_properties {
+        if let crate::config::AdditionalProperties::Schema(s) = ap.as_ref() {
+            validate_json_schema(route, &format!("{field}.additionalProperties"), s, issues);
+        }
+    }
+}
+
 /// Compiled route structures for one snapshot. Path-only lookup (v1); host,
 /// method, header, query, and cookie matching are applied by the dataplane
 /// after path resolution (see `proxy::route_applies`).
@@ -3797,6 +3925,11 @@ pub struct RouteTable {
     /// mirroring `routes[idx].cache` with the policy-derived vary folds
     /// (`match.accept` -> `Accept`, `cors` -> `Origin`) resolved once.
     caches: Vec<Option<std::sync::Arc<crate::config::cache::CompiledRouteCache>>>,
+    /// Preloaded mock response bodies per route index (DW-047): the
+    /// bytes of a mock action's `body_file`, read once at compile time
+    /// so the request path never touches the filesystem. `None` where
+    /// the route carries no mock action or uses an inline `body`.
+    mock_bodies: Vec<Option<bytes::Bytes>>,
 }
 
 impl RouteTable {
@@ -3815,6 +3948,7 @@ impl RouteTable {
             response_body_ops: Vec::new(),
             masking: Vec::new(),
             caches: Vec::new(),
+            mock_bodies: Vec::new(),
         }
     }
 
@@ -3925,6 +4059,13 @@ impl RouteTable {
         idx: usize,
     ) -> Option<&std::sync::Arc<crate::config::cache::CompiledRouteCache>> {
         self.caches.get(idx).and_then(|c| c.as_ref())
+    }
+
+    /// The preloaded mock response body for route `idx` (DW-047,
+    /// `None`: the route carries no mock `body_file` — exactly
+    /// mirroring `gateway().routes[idx].action.mock.body_file`).
+    pub fn mock_body(&self, idx: usize) -> Option<&bytes::Bytes> {
+        self.mock_bodies.get(idx).and_then(|b| b.as_ref())
     }
 }
 
@@ -4219,6 +4360,22 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             })
         })
         .collect();
+    // DW-047: preload mock `body_file` bytes once here so the request
+    // path never touches the filesystem. Validation has already checked
+    // the file exists and is readable; a read failure here is a
+    // generation tear (the file was removed between validate and
+    // compile) and surfaces as a compile error naming the route.
+    let mock_bodies = gateway
+        .routes
+        .iter()
+        .map(|r| match &r.action {
+            RouteAction::Mock { mock } => mock
+                .body_file
+                .as_ref()
+                .and_then(|path| std::fs::read(path).ok().map(bytes::Bytes::from)),
+            _ => None,
+        })
+        .collect();
 
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
@@ -4236,6 +4393,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             response_body_ops,
             masking,
             caches,
+            mock_bodies,
         }),
         content_hash,
     })

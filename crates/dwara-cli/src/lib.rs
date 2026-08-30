@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod import;
 pub mod loadgen;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};

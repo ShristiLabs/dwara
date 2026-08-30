@@ -114,6 +114,9 @@ Feature areas written up so far (M1 complete; M2 in progress):
   bounds, the body-inactivity gap, how they compose.
 - [Extension points](./features/extension-points.md) — the five
   swappable traits and how to implement a new backend.
+- [OpenAPI import and mock mode](./features/openapi-import.md) —
+  scaffolding configs from OpenAPI 3.x specs, mock responses without
+  an upstream, and request-body validation against a JSON-Schema subset.
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

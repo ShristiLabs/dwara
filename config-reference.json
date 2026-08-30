@@ -222,6 +222,19 @@
       },
       "additionalProperties": false
     },
+    "AdditionalProperties": {
+      "description": "The `additionalProperties` keyword accepts either a boolean or a\nnested schema; this union models both.",
+      "anyOf": [
+        {
+          "description": "A boolean: `true` allows any extra property, `false` rejects\nany property not listed in `properties`.",
+          "type": "boolean"
+        },
+        {
+          "description": "A schema every extra property must satisfy.",
+          "$ref": "#/$defs/BodySchema"
+        }
+      ]
+    },
     "AdminConfig": {
       "description": "Admin listener configuration (DW-022).",
       "type": "object",
@@ -634,6 +647,94 @@
         }
       },
       "additionalProperties": false
+    },
+    "BodySchema": {
+      "description": "A minimal JSON-Schema subset (DW-047) for request-body validation.\n\nSupports the keywords sufficient for typical OpenAPI-derived body\nschemas: `type`, `required`, `properties`, `items`, `enum`,\n`minimum`, `maximum`, `minLength`, `maxLength`, and\n`additionalProperties`. Nested objects and arrays compose\nrecursively. Unknown keywords are IGNORED (forward compatibility\nwith richer specs) EXCEPT at the root `RequestValidation.body_schema`\nwhere `deny_unknown_fields` on the surrounding config struct already\nrejects typos in the wrapper; this struct itself is permissive so a\nreal-world schema carrying `description`, `example`, or `$schema`\ndoes not fail to parse.",
+      "type": "object",
+      "properties": {
+        "additionalProperties": {
+          "description": "For `object`: `true` (default, allows extra properties), `false`\n(rejects any property not in `properties`), or a schema every\nextra property must satisfy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdditionalProperties"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enum": {
+          "description": "An enum of allowed values (compared by JSON equality).",
+          "type": "array",
+          "items": true
+        },
+        "items": {
+          "description": "For `array`: the schema every element must satisfy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodySchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxLength": {
+          "description": "Maximum string length (for `string`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maximum": {
+          "description": "Inclusive numeric maximum (for `number`/`integer`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "minLength": {
+          "description": "Minimum string length (for `string`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "minimum": {
+          "description": "Inclusive numeric minimum (for `number`/`integer`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "properties": {
+          "description": "For `object`: named property schemas.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BodySchema"
+          }
+        },
+        "required": {
+          "description": "For `object`: the required property names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "description": "The JSON type: `object`, `array`, `string`, `number`,\n`integer`, `boolean`, or `null`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "BodyTransform": {
       "description": "A body transform (DW-028). The `json` variant is the whole of v1:\nany other body transform family (templating, XML) would be a new\nvariant here — the wrapper exists so adding one does not reshape\nthe config surface.",
@@ -1554,6 +1655,46 @@
         "name"
       ]
     },
+    "OpenApiMeta": {
+      "description": "OpenAPI import metadata attached to a route (DW-047). No runtime\neffect; purely for traceability from the generated config back to\nthe source spec operation.",
+      "type": "object",
+      "properties": {
+        "method": {
+          "description": "The HTTP method of the source operation (uppercased).",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "The `operationId` from the source OpenAPI operation (may be\nabsent if the operation had none — the route name is then a\npath+method fallback).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path template from the source OpenAPI spec (e.g.\n`/pets/{id}`).",
+          "type": "string"
+        },
+        "summary": {
+          "description": "The `summary` from the source OpenAPI operation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "description": "The `tags` from the source OpenAPI operation.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path"
+      ]
+    },
     "PassiveHealth": {
       "description": "Passive health / outlier detection knobs (DW-012). All fields default;\na `health:` block with no keys enables ejection with the defaults.\n\nFailure classification: transport errors (connect timeout, refusal,\nreset) and HTTP statuses >= 500 are failures; 1xx-4xx are successes.\n429/408 are deliberately successes in v1 (they describe the caller or\nqueueing, not endpoint health).",
       "type": "object",
@@ -1977,6 +2118,20 @@
       },
       "additionalProperties": false
     },
+    "RequestValidation": {
+      "description": "Route-scoped request-body validation (DW-047,\n`routes[].request_validation`).\n\nA minimal JSON-Schema subset the gateway validates the request body\nagainst before the route action runs. A mismatch answers 400\n`validation_failed` (the JSON error envelope carries the offending\ninstance paths); a match proceeds normally. The schema is compiled\nat config publish time (an invalid schema fails validation); the\nbody is buffered up to the route's `limits.max_body_bytes` (or a\n1 MiB default when no limit is set) for validation, then replayed\nto the action. See [`JsonSchema`] for the supported keywords.",
+      "type": "object",
+      "properties": {
+        "body_schema": {
+          "description": "The JSON Schema the request body must satisfy. A minimal subset\nof JSON Schema Draft 2020-12 is supported: `type`, `required`,\n`properties`, `items`, `enum`, `minimum`, `maximum`,\n`minLength`, `maxLength`, and `additionalProperties` (bool or a\nschema). `$ref` is NOT supported (inline your schemas). An\ninvalid schema fails config validation at publish time.",
+          "$ref": "#/$defs/BodySchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "body_schema"
+      ]
+    },
     "ResponseTransforms": {
       "description": "Response-side transforms (DW-028), applied to the route's action\nresponses (proxy, redirect, respond) — not to gateway\nshort-circuits (limits, authn/authz, rate limits, maintenance,\nsheds), which describe the request, not the upstream's output.",
       "type": "object",
@@ -2183,6 +2338,17 @@
         "name": {
           "type": "string"
         },
+        "openapi": {
+          "description": "OpenAPI import metadata (DW-047): when this route was generated\nby `dwara import openapi`, this block records the source\noperation's `operationId`, `summary`, and `tags` for\ntraceability. It has no runtime effect — the gateway ignores it\n— but it survives round-trips so the operator can audit which\nspec operation a route came from. Absent for hand-authored\nroutes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenApiMeta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "policies": {
           "description": "Attached policy names. All applicable levels' rules AND together\n(see the rate-limiter module docs); the resolution order is\nconsumer > route > service > listener > global.",
           "type": "array",
@@ -2199,6 +2365,17 @@
           "format": "uint8",
           "maximum": 255,
           "minimum": 0
+        },
+        "request_validation": {
+          "description": "Request validation (DW-047): an optional JSON-schema block the\ngateway validates the request body against before the route\naction runs. A mismatch answers 400 `validation_failed` with the\noffending paths in the JSON error envelope; a match proceeds to\nthe action (proxy, mock, ...). This is a SIMPLER surface than\nfull OpenAPI parameter/header/query validation — it covers the\nbody only, the common case for write endpoints. The schema is a\nminimal JSON-Schema subset (type, required, properties, items,\nenum, minimum, maximum, minLength, maxLength); `$ref` is not\nsupported. See [`RequestValidation`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "security_headers": {
           "description": "Security-header injection (DW-028, feature analysis 5-Security):\nHSTS, `X-Content-Type-Options: nosniff`,\n`Content-Security-Policy`, and `X-Frame-Options`, stamped on\nEVERY response the route emits (action responses and gateway\nshort-circuits alike), replacing any upstream-sent values — the\ngateway is the source of truth at its edge. See\n[`SecurityHeaders`].",
@@ -2358,6 +2535,58 @@
             "type": {
               "type": "string",
               "const": "respond"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "status"
+          ]
+        },
+        {
+          "description": "Serve a canned response without contacting any upstream (DW-047\nmock mode). The route's `service` is still required by the\nschema (the frozen vocabulary), but a mock route never dials\nit — the whole point is serving without a backend. Pair with\n`request_validation` to mock a write endpoint that still\nrejects malformed bodies. See [`MockAction`].",
+          "type": "object",
+          "properties": {
+            "body": {
+              "description": "Inline response body. Mutually exclusive with `body_file`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body_file": {
+              "description": "Path to a file whose contents are served as the body, read at\nconfig publish time (the bytes are held in the snapshot). The\npath is relative to the config file directory. Mutually\nexclusive with `body`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "delay_ms": {
+              "description": "Simulated latency in milliseconds (0..=30000). The response is\ndelayed by this long before the status/headers/body are sent.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "headers": {
+              "description": "Extra response headers (name -> value), emitted verbatim. When\n`content-type` is not set here, the gateway defaults it to\n`application/json` if the body parses as JSON, else `text/plain`.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "status": {
+              "description": "HTTP status code (100..=599).",
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "mock"
             }
           },
           "additionalProperties": false,

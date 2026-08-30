@@ -507,6 +507,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             slo: None,
             websocket: None,
             waf: None,
+            request_validation: None,
+            openapi: None,
             service: "s".into(),
             r#match: RouteMatch {
                 path: PathMatch {

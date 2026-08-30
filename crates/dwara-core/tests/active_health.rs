@@ -483,6 +483,8 @@ async fn reserved_paths_shadow_configured_routes() {
                     slo: None,
                     websocket: None,
                     waf: None,
+                    request_validation: None,
+                    openapi: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {
@@ -521,6 +523,8 @@ async fn reserved_paths_shadow_configured_routes() {
                     slo: None,
                     websocket: None,
                     waf: None,
+                    request_validation: None,
+                    openapi: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {

@@ -1287,6 +1287,139 @@ pub struct Route {
     /// [`RouteWaf`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waf: Option<RouteWaf>,
+    /// Request validation (DW-047): an optional JSON-schema block the
+    /// gateway validates the request body against before the route
+    /// action runs. A mismatch answers 400 `validation_failed` with the
+    /// offending paths in the JSON error envelope; a match proceeds to
+    /// the action (proxy, mock, ...). This is a SIMPLER surface than
+    /// full OpenAPI parameter/header/query validation — it covers the
+    /// body only, the common case for write endpoints. The schema is a
+    /// minimal JSON-Schema subset (type, required, properties, items,
+    /// enum, minimum, maximum, minLength, maxLength); `$ref` is not
+    /// supported. See [`RequestValidation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_validation: Option<RequestValidation>,
+    /// OpenAPI import metadata (DW-047): when this route was generated
+    /// by `dwara import openapi`, this block records the source
+    /// operation's `operationId`, `summary`, and `tags` for
+    /// traceability. It has no runtime effect — the gateway ignores it
+    /// — but it survives round-trips so the operator can audit which
+    /// spec operation a route came from. Absent for hand-authored
+    /// routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi: Option<OpenApiMeta>,
+}
+
+/// OpenAPI import metadata attached to a route (DW-047). No runtime
+/// effect; purely for traceability from the generated config back to
+/// the source spec operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenApiMeta {
+    /// The `operationId` from the source OpenAPI operation (may be
+    /// absent if the operation had none — the route name is then a
+    /// path+method fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// The `summary` from the source OpenAPI operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The `tags` from the source OpenAPI operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The HTTP method of the source operation (uppercased).
+    pub method: String,
+    /// The path template from the source OpenAPI spec (e.g.
+    /// `/pets/{id}`).
+    pub path: String,
+}
+
+/// Route-scoped request-body validation (DW-047,
+/// `routes[].request_validation`).
+///
+/// A minimal JSON-Schema subset the gateway validates the request body
+/// against before the route action runs. A mismatch answers 400
+/// `validation_failed` (the JSON error envelope carries the offending
+/// instance paths); a match proceeds normally. The schema is compiled
+/// at config publish time (an invalid schema fails validation); the
+/// body is buffered up to the route's `limits.max_body_bytes` (or a
+/// 1 MiB default when no limit is set) for validation, then replayed
+/// to the action. See [`JsonSchema`] for the supported keywords.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestValidation {
+    /// The JSON Schema the request body must satisfy. A minimal subset
+    /// of JSON Schema Draft 2020-12 is supported: `type`, `required`,
+    /// `properties`, `items`, `enum`, `minimum`, `maximum`,
+    /// `minLength`, `maxLength`, and `additionalProperties` (bool or a
+    /// schema). `$ref` is NOT supported (inline your schemas). An
+    /// invalid schema fails config validation at publish time.
+    pub body_schema: BodySchema,
+}
+
+/// A minimal JSON-Schema subset (DW-047) for request-body validation.
+///
+/// Supports the keywords sufficient for typical OpenAPI-derived body
+/// schemas: `type`, `required`, `properties`, `items`, `enum`,
+/// `minimum`, `maximum`, `minLength`, `maxLength`, and
+/// `additionalProperties`. Nested objects and arrays compose
+/// recursively. Unknown keywords are IGNORED (forward compatibility
+/// with richer specs) EXCEPT at the root `RequestValidation.body_schema`
+/// where `deny_unknown_fields` on the surrounding config struct already
+/// rejects typos in the wrapper; this struct itself is permissive so a
+/// real-world schema carrying `description`, `example`, or `$schema`
+/// does not fail to parse.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BodySchema {
+    /// The JSON type: `object`, `array`, `string`, `number`,
+    /// `integer`, `boolean`, or `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    /// For `object`: the required property names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+    /// For `object`: named property schemas.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub properties: std::collections::BTreeMap<String, BodySchema>,
+    /// For `object`: `true` (default, allows extra properties), `false`
+    /// (rejects any property not in `properties`), or a schema every
+    /// extra property must satisfy.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "additionalProperties"
+    )]
+    pub additional_properties: Option<Box<AdditionalProperties>>,
+    /// For `array`: the schema every element must satisfy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<BodySchema>>,
+    /// An enum of allowed values (compared by JSON equality).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub r#enum: Vec<serde_json::Value>,
+    /// Inclusive numeric minimum (for `number`/`integer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    /// Inclusive numeric maximum (for `number`/`integer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
+    /// Minimum string length (for `string`).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "minLength")]
+    pub min_length: Option<u64>,
+    /// Maximum string length (for `string`).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxLength")]
+    pub max_length: Option<u64>,
+}
+
+/// The `additionalProperties` keyword accepts either a boolean or a
+/// nested schema; this union models both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AdditionalProperties {
+    /// A boolean: `true` allows any extra property, `false` rejects
+    /// any property not listed in `properties`.
+    Bool(bool),
+    /// A schema every extra property must satisfy.
+    Schema(BodySchema),
 }
 
 /// Route-scoped WAF-lite config (DW-051, `routes[].waf`).
@@ -2169,6 +2302,49 @@ pub enum RouteAction {
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         headers: std::collections::BTreeMap<String, String>,
     },
+    /// Serve a canned response without contacting any upstream (DW-047
+    /// mock mode). The route's `service` is still required by the
+    /// schema (the frozen vocabulary), but a mock route never dials
+    /// it — the whole point is serving without a backend. Pair with
+    /// `request_validation` to mock a write endpoint that still
+    /// rejects malformed bodies. See [`MockAction`].
+    Mock {
+        #[serde(flatten)]
+        mock: MockAction,
+    },
+}
+
+/// A canned response served without any upstream contact (DW-047,
+/// `routes[].action.mock`). The body comes from either `body` (an
+/// inline string) or `body_file` (a path relative to the config file
+/// directory); exactly one of the two may be set, or neither for an
+/// empty body. `delay_ms` simulates latency (useful for testing
+/// timeouts and retries against a mock). Validation rejects a status
+/// outside 100..=599, a `delay_ms` above 30000, and setting both
+/// `body` and `body_file`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MockAction {
+    /// HTTP status code (100..=599).
+    pub status: u16,
+    /// Extra response headers (name -> value), emitted verbatim. When
+    /// `content-type` is not set here, the gateway defaults it to
+    /// `application/json` if the body parses as JSON, else `text/plain`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Inline response body. Mutually exclusive with `body_file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Path to a file whose contents are served as the body, read at
+    /// config publish time (the bytes are held in the snapshot). The
+    /// path is relative to the config file directory. Mutually
+    /// exclusive with `body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
+    /// Simulated latency in milliseconds (0..=30000). The response is
+    /// delayed by this long before the status/headers/body are sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u32>,
 }
 
 /// Path rewrite applied before proxying (DW-010). Exactly one variant per

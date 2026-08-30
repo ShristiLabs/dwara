@@ -2691,151 +2691,133 @@ where
         None
     };
 
+    // Request validation (DW-047): when a route carries a
+    // `request_validation.body_schema`, the request body is buffered
+    // and validated against the minimal JSON-Schema subset BEFORE the
+    // action runs. A mismatch answers 400 `validation_failed` with the
+    // offending instance paths in the JSON error envelope. This runs
+    // after every policy phase (authn, authz, rate limit, admission)
+    // and before the action — a malformed body from an authenticated,
+    // authorized caller is still rejected, and no upstream is
+    // contacted on a mismatch (the whole point for mock mode). The
+    // buffered bytes are replayed to the action below (proxy or mock
+    // alike). A cache HIT skips validation (the cached response was
+    // already validated when it was first fetched).
     let mut resp = if let Some(resp) = replayed {
         resp
     } else {
-        let mut resp = match &route.action {
-            RouteAction::Proxy { .. } => {
-                // Streaming body limit (DW-027): the counting wrapper (a
-                // thin passthrough when the route sets no cap; the
-                // declared-length half was rejected above) guards requests
-                // of unknown length for the whole proxy path.
-                //
-                // Signed-body digest enforcement (DW-036): an
-                // HMAC-authenticated request carries the digest its
-                // signature bound — the digesting wrapper folds every
-                // streamed frame into a SHA-256 (nothing buffered) and
-                // aborts the upstream send when the final hash disagrees.
-                // It sits INSIDE the route's limit wrapper, so an over-cap
-                // body is still rejected 413 first; every other request
-                // (no signed digest) streams through unchanged.
-                let signed_digest = identity.as_ref().and_then(|id| id.body_digest);
-                // Eager verdict for a signed body declaring EXACTLY zero
-                // bytes: hyper's h1 encoder never polls it (see
-                // DigestingBody's docs), so a digest mismatch there has
-                // no mid-stream abort to surface through — refuse with
-                // the family's 401 before the request is forwarded at
-                // all. A correct empty digest forwards normally; unsigned
-                // requests are unaffected.
-                let (parts, body) = req.into_parts();
-                let digesting =
-                    crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
-                if digesting.eager_digest_mismatch() {
-                    tracing::warn!(
-                        code = "signature_body_mismatch",
-                        request_id = %rid,
-                        "signed empty request body did not match its digest; refused before forward"
-                    );
-                    unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
-                } else {
-                    let req = Request::from_parts(
-                        parts,
-                        crate::dataplane::hardening::LimitedBody::new(
-                            digesting,
-                            // A dry-run limits block (DW-041) leaves the
-                            // streaming guard unarmed: the cap is monitor
-                            // mode, so a body that would have been aborted
-                            // mid-stream flows through.
-                            route
-                                .limits
-                                .as_ref()
-                                .filter(|l| !l.dry_run)
-                                .and_then(|l| l.max_body_bytes),
-                        ),
-                    );
-                    proxy_request(
-                        &gen,
-                        peer,
-                        req,
+        // Validate the request body before dispatching the action. On
+        // success, the body is replaced with the buffered bytes (a
+        // `Full<Bytes>` body) so the action sees the full body. On
+        // failure, a 400 is returned immediately.
+        if let Some(rv) = &route.request_validation {
+            match validate_and_replay_body(req, &rv.body_schema).await {
+                Ok(validated_req) => {
+                    dispatch_action(
+                        validated_req,
                         route,
+                        &gen,
                         idx,
                         &params,
-                        &mut global_permit,
+                        peer,
                         identity.as_ref(),
                         rid,
                         rec,
-                        &dp.observability_arc(),
+                        &mut global_permit,
+                        dp,
                     )
                     .await
                 }
+                Err(violation) => {
+                    tracing::warn!(
+                        code = "validation_failed",
+                        request_id = %rid,
+                        route = %route.name,
+                        path = %violation,
+                        "request body failed validation"
+                    );
+                    let mut resp = simple(
+                        StatusCode::BAD_REQUEST,
+                        "validation_failed",
+                        &format!("request body does not match the expected schema: {violation}"),
+                        rid,
+                    );
+                    stamp_security_headers(&mut resp, route);
+                    return resp;
+                }
             }
-            RouteAction::Redirect {
-                scheme,
-                host,
-                path: redirect_path,
-                status,
-            } => redirect(
-                &req,
-                scheme.as_deref(),
-                host.as_deref(),
-                redirect_path.as_deref(),
-                *status,
+        } else {
+            dispatch_action(
+                req,
+                route,
+                &gen,
+                idx,
+                &params,
+                peer,
+                identity.as_ref(),
                 rid,
-            ),
-            RouteAction::Respond {
-                status,
-                body,
-                headers,
-            } => respond(*status, body.as_deref(), headers),
-        };
-
-        // Response field masking (DW-029), the decoration tail's FIRST
-        // stage and the security floor of the response path: the effective
-        // pointer set (route floor + the consumer's groups, the union
-        // rule) is replaced with the fixed sentinel BEFORE anything else
-        // can read the body — once masked, the original bytes exist
-        // nowhere in the gateway, so no later stage (operator transforms,
-        // the DW-027 compression codec) can resurrect them; the gateway's
-        // own compression runs later and never trips the encoding gate.
-        // Every gate here FAILS CLOSED (502): masking guards the UPSTREAM's
-        // output, so it applies to PROXY action responses only —
-        // gateway-authored bodies (redirect, respond) carry no upstream
-        // data, and bodiless statuses carry nothing at all.
-        if matches!(&route.action, RouteAction::Proxy { .. }) {
-            if let Some(masking) = gen.snapshot.route_table().masking(idx) {
-                resp = crate::dataplane::transforms::mask_response_body(
-                    resp,
-                    masking,
-                    identity
-                        .as_ref()
-                        .map(|id| id.groups.as_slice())
-                        .unwrap_or(&[]),
-                    &route.name,
-                    identity.as_ref().map(|id| id.consumer_name.as_str()),
-                    rid,
-                )
-                .await;
-            }
+                rec,
+                &mut global_permit,
+                dp,
+            )
+            .await
         }
-
-        // Response body transforms (DW-028), the tail's stage after
-        // masking: buffers only when the route configured a JSON body
-        // transform AND the response declares a JSON body within the cap —
-        // every other response (SSE, streamed downloads, other content
-        // types, already-encoded) passes untouched, the streaming
-        // guarantee. Before compression so the codec encodes the
-        // TRANSFORMED bytes and the eligibility check below sees the
-        // final Content-Type (header ops may have rewritten it).
-        if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
-            resp = crate::dataplane::transforms::transform_response_body(resp, compiled, rid).await;
-        }
-
-        // Response header transforms (DW-028): the operator's final shape
-        // of the upstream's headers, before the gateway's own policy
-        // stamps (compression's Vary/Content-Encoding, versioning, CORS,
-        // security headers, rate headers — each owns headers validation
-        // keeps the ops out of, so no stage here can be undone by an op).
-        if let Some(ops) = route
-            .transforms
-            .as_ref()
-            .and_then(|t| t.response.as_ref())
-            .and_then(|resp_t| resp_t.headers.as_ref())
-        {
-            crate::dataplane::transforms::apply_header_ops(resp.headers_mut(), ops);
-        }
-
-        resp
     };
+
+    // Response field masking (DW-029), the decoration tail's FIRST
+    // stage and the security floor of the response path: the effective
+    // pointer set (route floor + the consumer's groups, the union
+    // rule) is replaced with the fixed sentinel BEFORE anything else
+    // can read the body — once masked, the original bytes exist
+    // nowhere in the gateway, so no later stage (operator transforms,
+    // the DW-027 compression codec) can resurrect them; the gateway's
+    // own compression runs later and never trips the encoding gate.
+    // Every gate here FAILS CLOSED (502): masking guards the UPSTREAM's
+    // output, so it applies to PROXY action responses only —
+    // gateway-authored bodies (redirect, respond) carry no upstream
+    // data, and bodiless statuses carry nothing at all.
+    if matches!(&route.action, RouteAction::Proxy { .. }) {
+        if let Some(masking) = gen.snapshot.route_table().masking(idx) {
+            resp = crate::dataplane::transforms::mask_response_body(
+                resp,
+                masking,
+                identity
+                    .as_ref()
+                    .map(|id| id.groups.as_slice())
+                    .unwrap_or(&[]),
+                &route.name,
+                identity.as_ref().map(|id| id.consumer_name.as_str()),
+                rid,
+            )
+            .await;
+        }
+    }
+
+    // Response body transforms (DW-028), the tail's stage after
+    // masking: buffers only when the route configured a JSON body
+    // transform AND the response declares a JSON body within the cap —
+    // every other response (SSE, streamed downloads, other content
+    // types, already-encoded) passes untouched, the streaming
+    // guarantee. Before compression so the codec encodes the
+    // TRANSFORMED bytes and the eligibility check below sees the
+    // final Content-Type (header ops may have rewritten it).
+    if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
+        resp = crate::dataplane::transforms::transform_response_body(resp, compiled, rid).await;
+    }
+
+    // Response header transforms (DW-028): the operator's final shape
+    // of the upstream's headers, before the gateway's own policy
+    // stamps (compression's Vary/Content-Encoding, versioning, CORS,
+    // security headers, rate headers — each owns headers validation
+    // keeps the ops out of, so no stage here can be undone by an op).
+    if let Some(ops) = route
+        .transforms
+        .as_ref()
+        .and_then(|t| t.response.as_ref())
+        .and_then(|resp_t| resp_t.headers.as_ref())
+    {
+        crate::dataplane::transforms::apply_header_ops(resp.headers_mut(), ops);
+    }
 
     // Cache store stage (DW-037): the tail's LAST hands on the bytes
     // before the gateway's own decoration. Stores happen only on the
@@ -4468,6 +4450,330 @@ fn redirect<B>(
         .header(LOCATION, location)
         .body(ProxyBody::Full(Full::new(Bytes::new())))
         .expect("static redirect response is valid")
+}
+
+/// Dispatch the route action (DW-047 extraction point): the proxy/
+/// redirect/respond/mock action, generic over the body type so it
+/// accepts both the original streaming body `B` and the `Full<Bytes>`
+/// body produced by request validation. This is the action half of
+/// `handle_routed`; the response decoration tail (masking, transforms,
+/// compression, ...) runs in `handle_routed` after this returns.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_action<B>(
+    req: Request<B>,
+    route: &Route,
+    gen: &Arc<Generation>,
+    idx: usize,
+    params: &[(String, String)],
+    peer: IpAddr,
+    identity: Option<&crate::security::authn::Identity>,
+    rid: &str,
+    rec: &mut AccessRecord,
+    global_permit: &mut Option<OwnedSemaphorePermit>,
+    dp: &Arc<DataPlane>,
+) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match &route.action {
+        RouteAction::Mock { mock } => {
+            serve_mock(mock, gen.snapshot.route_table().mock_body(idx), rid).await
+        }
+        RouteAction::Proxy { .. } => {
+            // Streaming body limit (DW-027): the counting wrapper (a
+            // thin passthrough when the route sets no cap; the
+            // declared-length half was rejected above) guards requests
+            // of unknown length for the whole proxy path.
+            //
+            // Signed-body digest enforcement (DW-036): an
+            // HMAC-authenticated request carries the digest its
+            // signature bound — the digesting wrapper folds every
+            // streamed frame into a SHA-256 (nothing buffered) and
+            // aborts the upstream send when the final hash disagrees.
+            // It sits INSIDE the route's limit wrapper, so an over-cap
+            // body is still rejected 413 first; every other request
+            // (no signed digest) streams through unchanged.
+            let signed_digest = identity.and_then(|id| id.body_digest);
+            // Eager verdict for a signed body declaring EXACTLY zero
+            // bytes: hyper's h1 encoder never polls it (see
+            // DigestingBody's docs), so a digest mismatch there has
+            // no mid-stream abort to surface through — refuse with
+            // the family's 401 before the request is forwarded at
+            // all. A correct empty digest forwards normally; unsigned
+            // requests are unaffected.
+            let (parts, body) = req.into_parts();
+            let digesting = crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
+            if digesting.eager_digest_mismatch() {
+                tracing::warn!(
+                    code = "signature_body_mismatch",
+                    request_id = %rid,
+                    "signed empty request body did not match its digest; refused before forward"
+                );
+                unauthorized(crate::security::authn::HMAC_CHALLENGE, rid)
+            } else {
+                let req = Request::from_parts(
+                    parts,
+                    crate::dataplane::hardening::LimitedBody::new(
+                        digesting,
+                        // A dry-run limits block (DW-041) leaves the
+                        // streaming guard unarmed: the cap is monitor
+                        // mode, so a body that would have been aborted
+                        // mid-stream flows through.
+                        route
+                            .limits
+                            .as_ref()
+                            .filter(|l| !l.dry_run)
+                            .and_then(|l| l.max_body_bytes),
+                    ),
+                );
+                proxy_request(
+                    gen,
+                    peer,
+                    req,
+                    route,
+                    idx,
+                    params,
+                    global_permit,
+                    identity,
+                    rid,
+                    rec,
+                    &dp.observability_arc(),
+                )
+                .await
+            }
+        }
+        RouteAction::Redirect {
+            scheme,
+            host,
+            path: redirect_path,
+            status,
+        } => redirect(
+            &req,
+            scheme.as_deref(),
+            host.as_deref(),
+            redirect_path.as_deref(),
+            *status,
+            rid,
+        ),
+        RouteAction::Respond {
+            status,
+            body,
+            headers,
+        } => respond(*status, body.as_deref(), headers),
+    }
+}
+
+/// Serve a mock response (DW-047): no upstream contact, just the
+/// canned status/headers/body. `body_file_bytes` is the preloaded file
+/// content from the RouteTable (None when the mock uses an inline
+/// `body` or an empty body). `delay_ms` simulates latency before the
+/// response is sent.
+async fn serve_mock(
+    mock: &crate::config::MockAction,
+    body_file_bytes: Option<&Bytes>,
+    _rid: &str,
+) -> Response<ProxyBody> {
+    if let Some(delay) = mock.delay_ms {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+        }
+    }
+    let body_bytes: Bytes = if let Some(file_bytes) = body_file_bytes {
+        file_bytes.clone()
+    } else if let Some(body) = &mock.body {
+        Bytes::from(body.clone())
+    } else {
+        Bytes::new()
+    };
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(mock.status).unwrap_or(StatusCode::OK));
+    // Default content-type: application/json if the body parses as
+    // JSON, else text/plain — but only when the operator did not set
+    // one explicitly (an explicit header always wins).
+    let has_content_type = mock
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("content-type"));
+    if !has_content_type {
+        let is_json = serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok();
+        builder = builder.header(
+            hyper::header::CONTENT_TYPE,
+            if is_json {
+                "application/json"
+            } else {
+                "text/plain"
+            },
+        );
+    }
+    for (name, value) in &mock.headers {
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            builder = builder.header(n, v);
+        }
+    }
+    builder
+        .body(ProxyBody::Full(Full::new(body_bytes)))
+        .expect("static mock body is valid")
+}
+
+/// Validate the request body against a JSON schema (DW-047). Buffers
+/// the body fully (the route's body limit was already enforced above),
+/// parses it as JSON, and walks the schema. On success, returns the
+/// request with the body replaced by the buffered bytes (a `Full<Bytes>`
+/// body) so the action below sees the full body. On failure, returns
+/// `Err(violation_path)`. A non-JSON body with a schema that expects an
+/// object/array is a validation failure; a schema with no `type` is
+/// permissive (only `required`/`enum`/bounds are checked).
+async fn validate_and_replay_body<B>(
+    req: Request<B>,
+    schema: &crate::config::BodySchema,
+) -> Result<Request<Full<Bytes>>, String>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use http_body_util::BodyExt as _;
+    let (parts, body) = req.into_parts();
+    let collected = body
+        .collect()
+        .await
+        .map_err(|_| "request body could not be read".to_string())?;
+    let bytes = collected.to_bytes();
+    // An empty body: if the schema requires fields, that is a mismatch;
+    // otherwise (no required, no type, or type=null) it passes.
+    if bytes.is_empty() {
+        if !schema.required.is_empty() {
+            return Err(format!(
+                "missing required field(s): {}",
+                schema.required.join(", ")
+            ));
+        }
+        return Ok(Request::from_parts(parts, Full::new(bytes)));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "body is not valid JSON".to_string())?;
+    if let Some(violation) = validate_json_instance(&value, schema, "") {
+        return Err(violation);
+    }
+    Ok(Request::from_parts(parts, Full::new(bytes)))
+}
+
+/// Walk a JSON instance against the minimal schema subset (DW-047).
+/// Returns `Some(path)` on the first violation, `None` on success. The
+/// `path` is a JSON-pointer-style string (e.g. `/name` or `/items/0`).
+fn validate_json_instance(
+    value: &serde_json::Value,
+    schema: &crate::config::BodySchema,
+    path: &str,
+) -> Option<String> {
+    // type check
+    if let Some(t) = &schema.r#type {
+        let ok = match t.as_str() {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => {
+                value.is_i64()
+                    || value.is_u64()
+                    || (value.is_f64() && value.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false))
+            }
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => true, // unknown type: permissive (validation caught it)
+        };
+        if !ok {
+            return Some(format!("{path}: expected type {t}"));
+        }
+    }
+    // enum check
+    if !schema.r#enum.is_empty() && !schema.r#enum.iter().any(|e| e == value) {
+        return Some(format!("{path}: value not in enum"));
+    }
+    // string checks
+    if let Some(s) = value.as_str() {
+        if let Some(min) = schema.min_length {
+            if (s.chars().count() as u64) < min {
+                return Some(format!("{path}: string shorter than minLength {min}"));
+            }
+        }
+        if let Some(max) = schema.max_length {
+            if (s.chars().count() as u64) > max {
+                return Some(format!("{path}: string longer than maxLength {max}"));
+            }
+        }
+    }
+    // numeric checks
+    if let Some(n) = value.as_f64() {
+        if let Some(min) = schema.minimum {
+            if n < min {
+                return Some(format!("{path}: number below minimum {min}"));
+            }
+        }
+        if let Some(max) = schema.maximum {
+            if n > max {
+                return Some(format!("{path}: number above maximum {max}"));
+            }
+        }
+    }
+    // object checks
+    if let Some(obj) = value.as_object() {
+        for req in &schema.required {
+            if !obj.contains_key(req) {
+                return Some(format!("{}/{}: missing required field", path, req));
+            }
+        }
+        for (key, child_schema) in &schema.properties {
+            if let Some(child) = obj.get(key) {
+                if let Some(v) =
+                    validate_json_instance(child, child_schema, &format!("{path}/{key}"))
+                {
+                    return Some(v);
+                }
+            }
+        }
+        // additionalProperties
+        if let Some(ap) = &schema.additional_properties {
+            match ap.as_ref() {
+                crate::config::AdditionalProperties::Bool(false) => {
+                    for key in obj.keys() {
+                        if !schema.properties.contains_key(key) {
+                            return Some(format!("{path}/{key}: additional property not allowed"));
+                        }
+                    }
+                }
+                crate::config::AdditionalProperties::Schema(s) => {
+                    for key in obj.keys() {
+                        if !schema.properties.contains_key(key) {
+                            if let Some(child) = obj.get(key) {
+                                if let Some(v) =
+                                    validate_json_instance(child, s, &format!("{path}/{key}"))
+                                {
+                                    return Some(v);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // array checks
+    if let Some(arr) = value.as_array() {
+        if let Some(items_schema) = &schema.items {
+            for (i, elem) in arr.iter().enumerate() {
+                if let Some(v) = validate_json_instance(elem, items_schema, &format!("{path}/{i}"))
+                {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn respond(

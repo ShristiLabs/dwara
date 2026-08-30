@@ -51,6 +51,8 @@ fn bench_gateway() -> Gateway {
                 slo: None,
                 websocket: None,
                 waf: None,
+                request_validation: None,
+                openapi: None,
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,

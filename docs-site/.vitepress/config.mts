@@ -145,6 +145,7 @@ export default withMermaid(
                 { text: "Observability", link: "/guide/observability" },
                 { text: "Admin API", link: "/guide/admin-api" },
                 { text: "CLI", link: "/guide/cli" },
+                { text: "OpenAPI import and mock mode", link: "/guide/openapi-import" },
               ],
             },
           ],
