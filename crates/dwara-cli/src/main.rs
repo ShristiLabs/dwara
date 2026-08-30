@@ -24,6 +24,11 @@
 //! - `import openapi <spec> [--output dwara.yaml]` — read an OpenAPI
 //!   3.x spec (YAML or JSON) and generate a Dwara config with routes
 //!   derived from the spec's paths and methods (DW-047).
+//! - `upgrade [--pid <N> | --pid-file <path>]` — send SIGUSR2 to a
+//!   running gateway to trigger a zero-downtime binary upgrade (DW-049).
+//!   The PID is read from `--pid` or from the PID file (`--pid-file` or
+//!   the `DWARA_PID_FILE` env var). The gateway must have been started
+//!   with `DWARA_PID_FILE` set (or the PID supplied explicitly).
 
 use clap::{Parser, Subcommand};
 
@@ -71,6 +76,16 @@ enum Command {
     Import {
         #[command(subcommand)]
         kind: ImportKind,
+    },
+    /// Trigger a zero-downtime binary upgrade (sends SIGUSR2).
+    Upgrade {
+        /// PID of the running gateway to signal. If omitted, the PID is
+        /// read from `--pid-file` (or the `DWARA_PID_FILE` env var).
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Path to the gateway's PID file. Defaults to `DWARA_PID_FILE`.
+        #[arg(long)]
+        pid_file: Option<String>,
     },
 }
 
@@ -247,6 +262,7 @@ fn main() {
                 }
             },
         },
+        Command::Upgrade { pid, pid_file } => run_upgrade(pid, pid_file),
     };
     std::process::exit(code);
 }
@@ -263,5 +279,59 @@ fn run_server(args: &[String]) -> i32 {
             eprintln!("cannot spawn the dwara binary: {e} (is it installed and on PATH?)");
             1
         }
+    }
+}
+
+/// DW-049: send SIGUSR2 to a running gateway to trigger a zero-downtime
+/// binary upgrade. The PID is resolved from `--pid`, else the PID file
+/// (`--pid-file` or `DWARA_PID_FILE`). The gateway spawns a new copy of
+/// itself (SO_REUSEPORT hand-off), drains, and exits; the new process
+/// takes over with no refused connections. This command only DELIVERS the
+/// signal — the hand-off is asynchronous; watch the gateway logs or the
+/// PID file to confirm the new process is live.
+fn run_upgrade(pid: Option<u32>, pid_file: Option<String>) -> i32 {
+    let pid = match pid {
+        Some(p) => p,
+        None => {
+            let path = pid_file
+                .or_else(|| std::env::var("DWARA_PID_FILE").ok())
+                .filter(|s| !s.is_empty());
+            let Some(path) = path else {
+                eprintln!(
+                    "upgrade: no PID given. Pass --pid <N> or --pid-file <path>, \
+                     or start the gateway with DWARA_PID_FILE set."
+                );
+                return 1;
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("upgrade: cannot read PID file {path}: {e}");
+                    return 1;
+                }
+            };
+            match text.trim().parse::<u32>() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("upgrade: PID file {path} does not contain a valid PID");
+                    return 1;
+                }
+            }
+        }
+    };
+    // libc::kill is the portable Unix primitive (no shell-out to `kill`).
+    // SIGUSR2 (12) is the upgrade trigger the gateway's signal handler
+    // listens for alongside SIGHUP/SIGTERM/SIGINT.
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGUSR2) };
+    if rc == 0 {
+        println!(
+            "upgrade: SIGUSR2 sent to PID {pid}; the gateway will spawn a new \
+             process, drain, and exit. Watch the logs to confirm the hand-off."
+        );
+        0
+    } else {
+        let err = std::io::Error::last_os_error();
+        eprintln!("upgrade: failed to signal PID {pid}: {err}");
+        1
     }
 }

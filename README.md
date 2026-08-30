@@ -84,6 +84,8 @@ Each capability is documented in its own guide page on the docs site.
 **Operability**
 - Hot config reload (file change, debounced, or SIGHUP) with atomic
   publish-and-swap; a rejected reload keeps the previous generation serving.
+- Zero-downtime binary upgrade (SIGUSR2 / `dwara upgrade`): SO_REUSEPORT
+  hand-off with zero failed requests and zero reset connections.
 - Structured JSON logs, request IDs, Prometheus `/metrics`, and a uniform
   JSON error envelope.
 - Embedded analytics store with rollups and a real-time analytics stream.
@@ -198,18 +200,23 @@ The most common ones:
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful-drain budget on SIGTERM/SIGINT |
 | `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin API (DEV ONLY) |
 | `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export (`http://` endpoint; `otlp` feature build only) |
+| `DWARA_PID_FILE` | unset | write the process PID here (read by `dwara upgrade`) |
+| `DWARA_UPGRADE_BINARY` | current exe | new binary path for a `SIGUSR2` upgrade |
+| `DWARA_UPGRADE_READY_TIMEOUT_SECS` | `30` | wait budget for the new process to signal READY |
 
 Reload: file change (debounced) or SIGHUP. Shutdown: SIGTERM/SIGINT with
-backlog flush and drain. A `POST`/`PATCH` to the admin API is live-published.
+backlog flush and drain. Upgrade: SIGUSR2 (zero-downtime SO_REUSEPORT
+hand-off; see the [upgrade guide](https://shristilabs.github.io/dwara/guide/zero-downtime-upgrade)).
+A `POST`/`PATCH` to the admin API is live-published.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `crates/dwara-core` | The library: config, snapshot pipeline, extensions, observability, events, state, analytics, security, resilience, dataplane |
-| `crates/dwara-bin` | The `dwara` gateway binary: entry/shutdown, listeners, reload, OTLP export |
+| `crates/dwara-bin` | The `dwara` gateway binary: entry/shutdown, listeners, reload, upgrade, OTLP export |
 | `crates/dwara-admin` | mTLS-only admin API (config, health, stats) |
-| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); load-generator rig |
+| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`/`upgrade`); load-generator rig |
 | `fuzz/` | cargo-fuzz targets (separate workspace) |
 | `quickstart/` | One-command docker-compose TLS demo |
 | `packaging/` | systemd unit and packaging notes |

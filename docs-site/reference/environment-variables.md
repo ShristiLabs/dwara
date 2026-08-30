@@ -13,7 +13,10 @@ policy is YAML config (see [Configuration](../guide/configuration)).
 | `DWARA_LOG` | `dwara=info` | Log filter, `RUST_LOG` syntax. |
 | `DWARA_ACCESS_LOG_SAMPLE` | `1.0` | Fraction (0.0-1.0) of non-error access-log lines emitted; errors (5xx) always log. |
 | `DWARA_OTLP_ENDPOINT` | unset | Base OTLP collector endpoint (`http://` only). Only live in an `otlp`-feature build; reserved-but-inert otherwise. |
-| `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | Graceful-drain budget on `SIGTERM`/`SIGINT`. |
+| `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | Graceful-drain budget on `SIGTERM`/`SIGINT` (and the drain phase of a `SIGUSR2` upgrade). |
+| `DWARA_PID_FILE` | unset | Write the process PID here on startup. Read by `dwara-cli upgrade` to find the process to signal. The new process overwrites it after signaling READY. |
+| `DWARA_UPGRADE_BINARY` | current executable | Path to the new binary for a `SIGUSR2` zero-downtime upgrade. |
+| `DWARA_UPGRADE_READY_TIMEOUT_SECS` | `30` | How long the old process waits for the new process to signal READY before giving up (and keeping the old process running). |
 | `DWARA_HTTP1_MAX_HEADERS` | `100` | HTTP/1 max header count. |
 | `DWARA_HTTP1_MAX_BUF_KIB` | `64` | HTTP/1 read-buffer cap (KiB). |
 | `DWARA_HTTP1_HEADER_TIMEOUT_MS` | `10000` | HTTP/1 slowloris header-arrival timeout. |

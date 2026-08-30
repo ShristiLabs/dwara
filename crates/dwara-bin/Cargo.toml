@@ -40,6 +40,11 @@ bytes = { workspace = true, optional = true }
 # never pull it in; enabled via the `ent` feature. Same workspace dep
 # as dwara-core (BSD-3-Clause, allow-listed in deny.toml).
 redis = { workspace = true, optional = true }
+# DW-049 zero-downtime binary upgrade: socket2 sets SO_REUSEPORT on the
+# listening sockets so a new process can bind the same port during the
+# SIGUSR2 hand-off window. Already in the tree transitively; this only
+# makes it a direct one. MIT OR Apache-2.0.
+socket2 = { workspace = true }
 
 [features]
 # #126: OTLP trace export (http/protobuf) of the existing root/phase

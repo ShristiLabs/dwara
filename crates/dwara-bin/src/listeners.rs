@@ -74,11 +74,18 @@ pub(crate) struct BoundListener {
 /// Bind one configured listener into its runtime face. Fails startup on
 /// bind errors or unusable TLS material (a gateway must not boot serving
 /// the wrong certificates).
+///
+/// The socket is bound with `SO_REUSEPORT` (DW-049) so a new process can
+/// bind the same port during a zero-downtime upgrade hand-off. The bind
+/// helper lives in `upgrade::bind_with_reuse_port`.
 pub(crate) async fn bind_listener(
     l: &Listener,
 ) -> Result<(TcpListener, BoundListener), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", l.address, l.port);
-    let listener = TcpListener::bind(&addr).await?;
+    let parsed: SocketAddr = addr
+        .parse()
+        .map_err(|err| format!("invalid listener address {addr}: {err}"))?;
+    let listener = crate::upgrade::bind_with_reuse_port(parsed)?;
     let mode = match l.protocol {
         ListenerProtocol::Http => ListenerMode::Cleartext,
         ListenerProtocol::Https => match &l.tls.as_ref().map(|t| (t.mode, t)).map(|(m, _)| m) {

@@ -37,6 +37,11 @@ serde_yaml_ng = { workspace = true }
 # OpenAPI struct. Already a workspace dependency; no new external
 # crate enters the tree.
 serde = { workspace = true }
+# DW-049 `upgrade` subcommand: sends SIGUSR2 to a running gateway (by
+# PID file or --pid) to trigger a zero-downtime binary upgrade. libc is
+# already in the tree transitively; this only makes it a direct one.
+# MIT OR Apache-2.0.
+libc = { workspace = true }
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]

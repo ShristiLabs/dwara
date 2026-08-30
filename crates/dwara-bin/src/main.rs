@@ -80,9 +80,23 @@
 //! whatever remains at the deadline is force-closed by process exit.
 //! With the `otlp` feature, the exporter flush is the LAST bounded step
 //! before exit (see the DWARA_OTLP_ENDPOINT bullet).
+//!
+//! Zero-downtime upgrade (DW-049): SIGUSR2 spawns a new copy of the
+//! binary. Both the old and new processes bind the same ports with
+//! `SO_REUSEPORT` (the kernel load-balances accepts); the new process
+//! signals READY over a Unix domain socket once it is accepting, the old
+//! process then runs the SAME drain sequence as SIGTERM and exits. The
+//! hand-off has no refused connections and no reset connections (the new
+//! process is already accepting before the old stops). A failed upgrade
+//! (spawn error or READY timeout) logs and keeps the old process running.
+//! Operator trigger: `dwara upgrade` (CLI) sends SIGUSR2 to the PID in
+//! the PID file. Relevant env vars: `DWARA_PID_FILE` (PID file path),
+//! `DWARA_UPGRADE_BINARY` (new binary path; default current exe),
+//! `DWARA_UPGRADE_READY_TIMEOUT_SECS` (READY wait budget, default 30).
 
 mod listeners;
 mod reload;
+mod upgrade;
 
 // #126: OTLP trace export lives behind the default-off `otlp` cargo
 // feature (musl size budget; see the module docs). Feature OFF = the
@@ -410,6 +424,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sighup = signal(SignalKind::hangup())?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    // DW-049: SIGUSR2 initiates a zero-downtime binary upgrade (the old
+    // process spawns a new copy bound with SO_REUSEPORT, waits for the
+    // new process to signal READY, then drains and exits — see
+    // `upgrade`). The handler is its own task so the long READY wait
+    // never blocks the SIGTERM/SIGINT drain path.
+    let mut sigusr2 = signal(SignalKind::user_defined2())?;
 
     // Reload driver: config file events (debounced) and SIGHUP. Owns the
     // active-probe task set (DW-013): initial spawn against the startup
@@ -732,6 +752,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = signal_shutdown_tx.send(());
     });
 
+    // DW-049: SIGUSR2 upgrade handler. On SIGUSR2 the old process spawns
+    // a new binary (SO_REUSEPORT lets it bind alongside), waits for the
+    // new process to signal READY, then triggers the SAME drain path as
+    // SIGTERM — the new process is already accepting, so the drain has
+    // zero refused connections and zero resets. A failed upgrade (timeout
+    // or spawn error) logs and keeps the old process running.
+    let upgrade_shutdown_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        sigusr2.recv().await;
+        match upgrade::initiate_upgrade(std::process::id()).await {
+            Ok((_ready_listener, socket_path)) => {
+                // The new process is accepting; clean up the ready socket
+                // and trigger the drain. The ready listener is dropped
+                // here (its socket file is removed below).
+                let _ = std::fs::remove_file(&socket_path);
+                let _ = upgrade_shutdown_tx.send(());
+            }
+            Err(_) => {
+                // initiate_upgrade already logged the error; the old
+                // process keeps running. Stay armed for a retry.
+            }
+        }
+    });
+
     // One accept task per listener; each runs its own backlog flush.
     let timeout = shutdown_timeout();
     // Protocol hardening (DW-023): read once, shared by every serving
@@ -770,6 +814,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             timeout,
             hardening,
         )));
+    }
+
+    // DW-049: PID file + upgrade readiness. If this process is an upgrade
+    // CHILD (DWARA_UPGRADE_READY_SOCKET set), it signals READY to the old
+    // process AFTER it is accepting — the old process then drains and
+    // exits. The PID file is written (or overwritten) AFTER the ready
+    // signal so it always names the live acceptor: a normal start writes
+    // it immediately (signal_ready is a no-op when the env is unset); an
+    // upgrade child writes it once the hand-off is confirmed.
+    upgrade::signal_ready().await;
+    let pid = std::process::id();
+    if let Ok(pid_file) = std::env::var("DWARA_PID_FILE") {
+        if !pid_file.is_empty() {
+            let path = PathBuf::from(&pid_file);
+            if let Err(err) = upgrade::write_pid_file(&path, pid) {
+                tracing::warn!(
+                    code = "pid_file_write_failed",
+                    path = %path.display(),
+                    "cannot write PID file: {err}"
+                );
+            }
+        }
     }
 
     // Wait for the shutdown signal, then the per-listener backlog flushes.

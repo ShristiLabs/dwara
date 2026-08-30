@@ -145,6 +145,10 @@ export default withMermaid(
                 { text: "Observability", link: "/guide/observability" },
                 { text: "Admin API", link: "/guide/admin-api" },
                 { text: "CLI", link: "/guide/cli" },
+                {
+                  text: "Zero-downtime upgrade",
+                  link: "/guide/zero-downtime-upgrade",
+                },
                 { text: "OpenAPI import and mock mode", link: "/guide/openapi-import" },
                 {
                   text: "OAuth2 and mTLS",

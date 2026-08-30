@@ -35,7 +35,7 @@
 //! each reload): all previous tasks are aborted and new ones spawned for
 //! the new generation's upstreams. Dropping [`DiscoveryTasks`] (or
 //! calling [`DiscoveryTasks::abort_all`]) aborts every task — the
-//! graceful-shutdown path. This mirrors [`ActiveProbes`] (DW-013), the
+//! graceful-shutdown path. This mirrors [`crate::dataplane::active::ActiveProbes`] (DW-013), the
 //! closest precedent for a long-running dataplane task.
 //!
 //! Consul watch and Kubernetes EndpointSlice watch are DEFERRED to a
@@ -334,7 +334,7 @@ async fn discovery_loop(
 
 /// Owns every DNS discovery task for the running generation. Call
 /// [`DiscoveryTasks::respawn`] on startup and after every snapshot swap;
-/// dropping it (or shutdown) aborts all tasks. Mirrors [`ActiveProbes`]
+/// dropping it (or shutdown) aborts all tasks. Mirrors [`crate::dataplane::active::ActiveProbes`]
 /// (DW-013), the closest precedent for a long-running dataplane task.
 #[derive(Default)]
 pub struct DiscoveryTasks {

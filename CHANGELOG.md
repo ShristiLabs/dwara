@@ -9,6 +9,21 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Zero-downtime binary upgrade (DW-049): the gateway can swap its binary
+  under load with zero failed requests and zero reset connections. Every
+  listening socket is bound with `SO_REUSEPORT` so a new process can
+  bind the same port during the hand-off. `SIGUSR2` triggers the
+  upgrade: the old process spawns a new copy of the binary, the new
+  process binds alongside (SO_REUSEPORT), starts accepting, and signals
+  `READY` over a Unix domain socket; the old process then runs the same
+  drain sequence as `SIGTERM` and exits 0. A failed upgrade (spawn error
+  or READY timeout) logs and keeps the old process running. Operator
+  trigger: `dwara-cli upgrade` (reads the PID from `DWARA_PID_FILE` or
+  `--pid`). New env vars: `DWARA_PID_FILE` (PID file path),
+  `DWARA_UPGRADE_BINARY` (new binary path; default current exe),
+  `DWARA_UPGRADE_READY_TIMEOUT_SECS` (READY wait budget, default 30).
+  The `socket2` and `libc` crates are now direct dependencies (both
+  already in the tree transitively; MIT/Apache-2.0).
 - DNS-based dynamic upstream discovery (DW-042): an upstream may now
   configure a `dns_discovery` block to resolve its endpoint set from
   DNS (A or SRV records) with TTL-aware background refresh. A

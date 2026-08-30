@@ -188,6 +188,16 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["to
 # discovery tests (no external DNS dependency). MIT OR Apache-2.0.
 # Dev/bench-only — never ships in the gateway binary or library.
 hickory-server = { version = "0.24", default-features = false }
+# DW-049 zero-downtime binary upgrade: socket2 sets SO_REUSEPORT on the
+# listening sockets so a new process can bind the same port during the
+# hand-off window (the kernel load-balances accepts across both). Already
+# in the tree transitively via hyper-util/tokio; this only makes it a
+# direct one. MIT OR Apache-2.0 (both allow-listed in deny.toml).
+socket2 = "0.6"
+# DW-049: libc sends SIGUSR2 to a running gateway from the `dwara upgrade`
+# CLI subcommand (the operator-facing upgrade trigger). Already in the
+# tree transitively; this only makes it a direct one. MIT OR Apache-2.0.
+libc = "0.2"
 
 [profile.release]
 lto = true

@@ -19,7 +19,7 @@
 //!
 //! # The Lua script
 //!
-//! The script ([`GCRA_LUA`]) takes the rate-limit key and four
+//! The script (`GCRA_LUA`) takes the rate-limit key and four
 //! arguments (emission interval, burst tolerance, cost, current time
 //! in Unix nanoseconds) and returns `{allowed, remaining,
 //! retry_after_ms}`. It atomically:
@@ -172,7 +172,7 @@ impl RedisRateLimiter {
         })
     }
 
-    /// New limiter from a [`RedisRateLimiterConfig`] (the config block
+    /// New limiter from a [`crate::config::RedisRateLimiterConfig`] (the config block
     /// on `Gateway`). Convenience wrapper around [`Self::new`] that
     /// extracts the config fields.
     pub fn from_config(
