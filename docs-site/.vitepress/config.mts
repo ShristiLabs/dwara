@@ -115,6 +115,10 @@ export default withMermaid(
                   link: "/guide/admission-queue",
                 },
                 {
+                  text: "WAF-lite filtering",
+                  link: "/guide/waf-lite",
+                },
+                {
                   text: "Traffic splitting",
                   link: "/guide/traffic-splitting",
                 },

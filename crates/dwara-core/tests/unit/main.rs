@@ -31,5 +31,6 @@ mod tls;
 mod transforms;
 mod upstream;
 mod versioning;
+mod waf;
 mod webhooks;
 mod websocket;

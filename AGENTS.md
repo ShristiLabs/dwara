@@ -207,8 +207,11 @@ Rules for new code:
 - **Request-path order** (do not reorder casually): reserved paths
   (/healthz, /readyz, /metrics) → route resolution → route maintenance
   (503 + Retry-After, preflight-exempt, DW-041) → route method allowlist
-  (405 + Allow, preflight-exempt like maintenance, DW-030) → route
-  limits (413/431) → CORS preflight short-circuit (204, pre-authn) →
+  (405 + Allow, preflight-exempt like maintenance, DW-030) → WAF-lite
+  heuristic filtering (DW-051: pattern matching for SQLi/XSS/path-traversal
+  on the path, query, selected headers, and body; 403 `waf_blocked` or
+  dry-run logged, per-route opt-in) → route limits (413/431) → CORS
+  preflight short-circuit (204, pre-authn) →
   WebSocket origin gate (DW-039: a websocket upgrade on a route with a
   non-empty `websocket.origins` list is denied 403 at the proxy action,
   before any upstream contact) →

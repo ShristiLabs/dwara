@@ -28,4 +28,5 @@ pub mod split;
 pub mod transforms;
 pub mod upstream;
 pub mod versioning;
+pub mod waf;
 pub mod websocket;

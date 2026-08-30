@@ -80,6 +80,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             methods: vec![],
             slo: None,
             websocket: None,
+            waf: None,
             r#match: RouteMatch {
                 path: PathMatch {
                     kind: PathMatchKind::Exact,

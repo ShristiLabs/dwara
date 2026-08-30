@@ -2871,6 +2871,52 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        // WAF-lite (DW-051): when enabled, the filter list must be
+        // either absent (defaults to all three) or a non-empty list of
+        // known category names, the body inspection cap must be 0 or
+        // within 1..=1048576, and every custom pattern must compile as
+        // a valid regex (an invalid regex is an authoring error that
+        // would panic at request time if it reached the runtime).
+        if let Some(waf) = &r.waf {
+            if waf.enabled {
+                for (i, f) in waf.filters.iter().enumerate() {
+                    if !matches!(f.as_str(), "sqli" | "xss" | "path_traversal") {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            &format!("waf.filters[{i}]"),
+                            format!(
+                                "unknown filter category '{f}': must be one of \
+                                 sqli, xss, path_traversal (or omit the list for \
+                                 all three)"
+                            ),
+                        ));
+                    }
+                }
+            }
+            if waf.max_body_inspect_bytes > 1_048_576 {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "waf.max_body_inspect_bytes",
+                    format!(
+                        "max_body_inspect_bytes {} is out of range: must be 0 \
+                         (no body inspection) or 1..=1048576 (1 MiB)",
+                        waf.max_body_inspect_bytes
+                    ),
+                ));
+            }
+            for (i, pat) in waf.custom_patterns.iter().enumerate() {
+                if regex::Regex::new(pat).is_err() {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("waf.custom_patterns[{i}]"),
+                        format!("invalid regex pattern: '{pat}'"),
+                    ));
+                }
+            }
+        }
         let m = &r.r#match.path;
         for (field, entries) in [
             ("match.query", &r.r#match.query),

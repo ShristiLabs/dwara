@@ -50,6 +50,7 @@ fn bench_gateway() -> Gateway {
                 methods: Vec::new(),
                 slo: None,
                 websocket: None,
+                waf: None,
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,

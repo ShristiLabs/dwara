@@ -1275,6 +1275,78 @@ pub struct Route {
     /// [`RouteWebsocket`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket: Option<RouteWebsocket>,
+    /// WAF-lite heuristic filtering (DW-051): pattern-matching
+    /// inspection of the request path, query string, selected
+    /// headers, and body (when JSON or form-urlencoded) for common
+    /// SQL-injection, XSS, and path-traversal signatures. Absent (the
+    /// default): no inspection. When `enabled` is true, the WAF runs
+    /// after the route method allowlist and before the route limits —
+    /// a content filter that rejects malicious requests before any
+    /// resource is spent on auth or rate limiting. `dry_run` evaluates
+    /// and logs matches without blocking (audit-log-only mode). See
+    /// [`RouteWaf`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waf: Option<RouteWaf>,
+}
+
+/// Route-scoped WAF-lite config (DW-051, `routes[].waf`).
+///
+/// A lightweight, heuristic-based web application filter: regex pattern
+/// matching for SQL injection, XSS, and path traversal signatures across
+/// the request path, query string, selected headers (User-Agent, Referer,
+/// Cookie, X-Forwarded-For), and body (when the content type is JSON or
+/// form-urlencoded, up to `max_body_inspect_bytes`). This is NOT a full
+/// WAF — it is a first-line traffic filter that rejects obvious attack
+/// signatures before authentication or rate limiting. Per-route opt-in;
+/// routes without a `waf` block are never inspected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteWaf {
+    /// Master switch. Default false: the WAF block is inert even when
+    /// present (allows staged rollout). When true, the configured
+    /// filter categories run on every request the route matches.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Audit-log-only mode (dry-run synergy, DW-041): when true, the
+    /// WAF evaluates every filter and LOGS matches (a `dwara::policy`
+    /// warn event + the `dwara_waf_total{outcome="logged"}` counter)
+    /// but does NOT block — the request continues to the upstream.
+    /// Lets an operator observe what the WAF would catch before
+    /// enforcing it. Default false: matches are blocked with 403.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Which filter categories to run. An empty or absent list
+    /// defaults to all three (`sqli`, `xss`, `path_traversal`).
+    /// Validation rejects an enabled WAF with an explicit non-empty
+    /// list containing an unknown category name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<String>,
+    /// Maximum number of body bytes to inspect (0 = do not inspect
+    /// the body at all; 1..=1048576 = inspect up to this many bytes).
+    /// Default 131072 (128 KiB). Bodies larger than this limit are
+    /// inspected only up to the limit (a malicious payload beyond the
+    /// limit is not caught — the trade-off for a bounded inspection
+    /// cost). Validation rejects values > 1048576 (1 MiB).
+    #[serde(
+        default = "default_waf_max_body_inspect_bytes",
+        skip_serializing_if = "is_default_waf_max_body_inspect_bytes"
+    )]
+    pub max_body_inspect_bytes: u64,
+    /// Optional custom regex pattern overrides (additional patterns
+    /// appended to the built-in signatures for each filter category).
+    /// Each entry is a regex string compiled at config publish time;
+    /// an invalid regex fails validation. When absent, only the
+    /// built-in signatures are used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_patterns: Vec<String>,
+}
+
+fn default_waf_max_body_inspect_bytes() -> u64 {
+    131_072
+}
+
+fn is_default_waf_max_body_inspect_bytes(v: &u64) -> bool {
+    *v == 131_072
 }
 
 /// Route-scoped WebSocket policy (DW-039, `routes[].websocket`).

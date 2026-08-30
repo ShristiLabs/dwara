@@ -448,6 +448,13 @@ pub struct Observability {
     /// the dataplane (the hot path stays free of registry coupling,
     /// the same model as the coalescing-waiters gauge).
     admission_queue_depth: IntGauge,
+    /// DW-051: WAF-lite inspection outcomes — a CLOSED label set
+    /// (`blocked`, `logged`, `passed`) over the route and filter label
+    /// spaces (both config-bounded). `blocked` = a match was found and
+    /// the request was rejected with 403; `logged` = a dry-run match
+    /// (the request was allowed); `passed` = no match (counted once per
+    /// inspected request, filter label `all`).
+    waf_total: IntCounterVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -802,6 +809,18 @@ impl Observability {
              concurrency permit (DW-053).",
         )
         .expect("valid metric definition");
+        let waf_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_waf_total",
+                "WAF-lite inspection outcomes (DW-051), by route and filter. \
+                 outcome: blocked (a match was found and the request was \
+                 rejected with 403), logged (a dry-run match; the request \
+                 was allowed), passed (no match; counted once per inspected \
+                 request with filter label 'all').",
+            ),
+            &["route", "filter", "outcome"],
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -844,6 +863,7 @@ impl Observability {
             Box::new(SloCollectorHandle(std::sync::Arc::clone(&slo))),
             Box::new(admission_queued_total.clone()),
             Box::new(admission_queue_depth.clone()),
+            Box::new(waf_total.clone()),
         ] {
             registry
                 .register(m)
@@ -890,6 +910,7 @@ impl Observability {
             slo,
             admission_queued_total,
             admission_queue_depth,
+            waf_total,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -995,6 +1016,19 @@ impl Observability {
     /// coalescing-waiters gauge).
     pub fn set_admission_queue_depth(&self, depth: i64) {
         self.admission_queue_depth.set(depth);
+    }
+
+    /// Count one WAF-lite inspection outcome (DW-051). `route` is the
+    /// matched route name; `filter` is the filter category that matched
+    /// (`sqli`, `xss`, `path_traversal`) or `all` for the `passed`
+    /// outcome (no match); `outcome` is `blocked` (403 returned),
+    /// `logged` (dry-run match, request allowed), or `passed` (no
+    /// match). All three labels are config-bounded (route names and the
+    /// closed filter/outcome sets).
+    pub fn record_waf(&self, route: &str, filter: &str, outcome: &str) {
+        self.waf_total
+            .with_label_values(&[route, filter, outcome])
+            .inc();
     }
 
     /// Count one dry-run (monitor) would-have-rejected observation

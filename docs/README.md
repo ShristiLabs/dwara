@@ -31,6 +31,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
   degrade gracefully (latency rises before shedding begins) instead
   of the DW-016 cliff; per-priority queue splitting, queue-timeout
   and queue-full sheds with Retry-After (DW-053).
+- [WAF-lite heuristic filtering](./features/waf-lite.md) — per-route
+  pattern matching for SQLi/XSS/path-traversal signatures on the path,
+  query, headers, and body; dry-run (audit-log-only) mode; the
+  request-path position and false-positive posture (DW-051).
 - [Traffic splitting and sticky sessions](./features/canary-split.md)
   — service-level weighted splits across upstreams (canary releases,
   blue-green switches) with a stateless weighted-hash pick, and the

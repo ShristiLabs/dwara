@@ -2237,6 +2237,17 @@
             }
           ]
         },
+        "waf": {
+          "description": "WAF-lite heuristic filtering (DW-051): pattern-matching\ninspection of the request path, query string, selected\nheaders, and body (when JSON or form-urlencoded) for common\nSQL-injection, XSS, and path-traversal signatures. Absent (the\ndefault): no inspection. When `enabled` is true, the WAF runs\nafter the route method allowlist and before the route limits —\na content filter that rejects malicious requests before any\nresource is spent on auth or rate limiting. `dry_run` evaluates\nand logs matches without blocking (audit-log-only mode). See\n[`RouteWaf`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteWaf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "websocket": {
           "description": "WebSocket policy (DW-039, feature analysis 4.13): origin\nallowlisting before an upgrade is offered and post-upgrade\nframe-rate policing on the tunneled connection. Absent (the\ndefault): upgrades are transparent — any origin, unlimited\nframe rate, the generic 101 tunnel unchanged. See\n[`RouteWebsocket`].",
           "anyOf": [
@@ -2504,6 +2515,41 @@
       "required": [
         "availability"
       ]
+    },
+    "RouteWaf": {
+      "description": "Route-scoped WAF-lite config (DW-051, `routes[].waf`).\n\nA lightweight, heuristic-based web application filter: regex pattern\nmatching for SQL injection, XSS, and path traversal signatures across\nthe request path, query string, selected headers (User-Agent, Referer,\nCookie, X-Forwarded-For), and body (when the content type is JSON or\nform-urlencoded, up to `max_body_inspect_bytes`). This is NOT a full\nWAF — it is a first-line traffic filter that rejects obvious attack\nsignatures before authentication or rate limiting. Per-route opt-in;\nroutes without a `waf` block are never inspected.",
+      "type": "object",
+      "properties": {
+        "custom_patterns": {
+          "description": "Optional custom regex pattern overrides (additional patterns\nappended to the built-in signatures for each filter category).\nEach entry is a regex string compiled at config publish time;\nan invalid regex fails validation. When absent, only the\nbuilt-in signatures are used.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dry_run": {
+          "description": "Audit-log-only mode (dry-run synergy, DW-041): when true, the\nWAF evaluates every filter and LOGS matches (a `dwara::policy`\nwarn event + the `dwara_waf_total{outcome=\"logged\"}` counter)\nbut does NOT block — the request continues to the upstream.\nLets an operator observe what the WAF would catch before\nenforcing it. Default false: matches are blocked with 403.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Master switch. Default false: the WAF block is inert even when\npresent (allows staged rollout). When true, the configured\nfilter categories run on every request the route matches.",
+          "type": "boolean"
+        },
+        "filters": {
+          "description": "Which filter categories to run. An empty or absent list\ndefaults to all three (`sqli`, `xss`, `path_traversal`).\nValidation rejects an enabled WAF with an explicit non-empty\nlist containing an unknown category name.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_body_inspect_bytes": {
+          "description": "Maximum number of body bytes to inspect (0 = do not inspect\nthe body at all; 1..=1048576 = inspect up to this many bytes).\nDefault 131072 (128 KiB). Bodies larger than this limit are\ninspected only up to the limit (a malicious payload beyond the\nlimit is not caught — the trade-off for a bounded inspection\ncost). Validation rejects values > 1048576 (1 MiB).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "RouteWebsocket": {
       "description": "Route-scoped WebSocket policy (DW-039, `routes[].websocket`).\n\nBoth knobs are opt-in and independent: an `origins` list gates the\nupgrade handshake (403 before any upstream contact), and\n`max_frames_per_sec` polices the ESTABLISHED tunnel (a client\nsending data frames faster than the allowance is closed with a\n1008 policy-violation close frame and disconnected). The policing\nworks on the client-to-upstream direction only — the gateway\nprotects upstreams from abusive clients, not the reverse (an\nabusive upstream is the operator's backend problem).",

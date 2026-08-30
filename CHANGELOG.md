@@ -31,6 +31,27 @@ the project follows semantic versioning once 1.0 is reached.
   metrics: `dwara_admission_queued_total{outcome}` (admitted, timeout,
   queue_full) and `dwara_admission_queue_depth` (gauge).
 
+- WAF-lite heuristic filtering (DW-051): per-route opt-in pattern
+  matching for SQL injection, XSS, and path traversal signatures on
+  the request path, query string, selected headers (User-Agent,
+  Referer, Cookie, X-Forwarded-For), and body (JSON, form-urlencoded,
+  or text/plain, up to `max_body_inspect_bytes`, default 128 KiB). A
+  match returns 403 `waf_blocked`; dry-run mode (`dry_run: true`)
+  evaluates and logs matches without blocking (the same DW-041
+  monitor-mode pattern as route limits, authz, rate limits, and load
+  shedding). Filter selection via `filters: [sqli, xss,
+  path_traversal]` (default: all three); custom regex patterns via
+  `custom_patterns`. The WAF runs after the route method allowlist and
+  before the route limits — a content filter that rejects malicious
+  requests before any resource is spent on auth or rate limiting, on
+  the ORIGINAL request (before path rewrite / transforms). Body
+  inspection buffers up to `max_body_inspect_bytes` (the one explicitly
+  buffering piece the WAF introduces, bounded by the cap) and replays
+  the buffered prefix plus the remaining stream to the rest of the
+  request path. New metric: `dwara_waf_total{route,filter,outcome}`
+  (blocked, logged, passed). Zero new dependencies (regex is already a
+  dependency).
+
 - Traffic splitting and sticky sessions (DW-040): a service can
   dispatch across several upstreams by a weighted split
   (`services[].split.targets`, 2..=8 targets naming existing

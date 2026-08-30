@@ -1645,7 +1645,7 @@ where
 async fn handle_inner<B>(
     dp: &Arc<DataPlane>,
     peer: IpAddr,
-    mut req: Request<B>,
+    req: Request<B>,
     rid: &str,
     rec: &mut AccessRecord,
     root: &tracing::Span,
@@ -1805,6 +1805,145 @@ where
         }
     }
 
+    // WAF-lite heuristic filtering (DW-051): inspects the request path,
+    // query string, selected headers, and body (when JSON or
+    // form-urlencoded) for common SQLi/XSS/path-traversal signatures.
+    // Placement: after the route method allowlist, before the route
+    // limits — a content filter that rejects malicious requests before
+    // any resource is spent on auth or rate limiting. Dry-run mode
+    // (DW-041 synergy) evaluates and logs matches without blocking.
+    if let Some(waf_cfg) = &route.waf {
+        if let Some(waf_gen) = crate::dataplane::waf::WafGeneration::from_config(waf_cfg) {
+            // Head inspection (path, query, headers) — synchronous.
+            let head_match =
+                waf_gen.inspect_head(req.uri().path(), req.uri().query(), req.headers());
+            if let Some(m) = &head_match {
+                let filter_str = m.filter.as_str();
+                if waf_gen.dry_run() {
+                    dp.obs.record_waf(&route.name, filter_str, "logged");
+                    tracing::warn!(
+                        code = "waf_logged",
+                        request_id = %rid,
+                        route = %route.name,
+                        filter = filter_str,
+                        target = m.target.as_str(),
+                        pattern = %m.pattern,
+                        "WAF dry-run match (request allowed)"
+                    );
+                } else {
+                    dp.obs.record_waf(&route.name, filter_str, "blocked");
+                    tracing::warn!(
+                        code = "waf_blocked",
+                        request_id = %rid,
+                        route = %route.name,
+                        filter = filter_str,
+                        target = m.target.as_str(),
+                        "request blocked by WAF"
+                    );
+                    let mut resp = simple(
+                        StatusCode::FORBIDDEN,
+                        "waf_blocked",
+                        "request blocked by security filter",
+                        rid,
+                    );
+                    stamp_security_headers(&mut resp, route);
+                    return resp;
+                }
+            }
+            // Body inspection: when the content type is JSON or
+            // form-urlencoded and the body cap is > 0, buffer up to
+            // max_body_inspect_bytes and inspect. The reconstructed
+            // body (buffered prefix + any remaining stream) is forwarded
+            // to the rest of the request path via handle_routed.
+            if waf_gen.max_body_inspect_bytes() > 0
+                && crate::dataplane::waf::should_inspect_body(req.headers())
+            {
+                let (parts, body) = req.into_parts();
+                let result = crate::dataplane::waf::inspect_body(body, &waf_gen).await;
+                if let Some(m) = &result.match_found {
+                    let filter_str = m.filter.as_str();
+                    if waf_gen.dry_run() {
+                        dp.obs.record_waf(&route.name, filter_str, "logged");
+                        tracing::warn!(
+                            code = "waf_logged",
+                            request_id = %rid,
+                            route = %route.name,
+                            filter = filter_str,
+                            target = m.target.as_str(),
+                            pattern = %m.pattern,
+                            "WAF dry-run body match (request allowed)"
+                        );
+                    } else {
+                        dp.obs.record_waf(&route.name, filter_str, "blocked");
+                        tracing::warn!(
+                            code = "waf_blocked",
+                            request_id = %rid,
+                            route = %route.name,
+                            filter = filter_str,
+                            target = m.target.as_str(),
+                            "request blocked by WAF (body)"
+                        );
+                        let mut resp = simple(
+                            StatusCode::FORBIDDEN,
+                            "waf_blocked",
+                            "request blocked by security filter",
+                            rid,
+                        );
+                        stamp_security_headers(&mut resp, route);
+                        return resp;
+                    }
+                }
+                if head_match.is_none() && result.match_found.is_none() {
+                    dp.obs.record_waf(&route.name, "all", "passed");
+                }
+                let req = Request::from_parts(parts, result.body);
+                return handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await;
+            }
+            if head_match.is_none() {
+                dp.obs.record_waf(&route.name, "all", "passed");
+            }
+        }
+    }
+
+    handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await
+}
+
+/// The post-WAF request path (DW-051 split point): everything from the
+/// route limits onward — route limits, CORS preflight, authn, authz,
+/// rate limiting, cap admission, the proxy/redirect/respond action, and
+/// the response decoration tail (masking, transforms, compression,
+/// versioning, CORS, security headers, rate headers). Generic over the
+/// body type so it accepts both the original request body `B` and the
+/// WAF-reconstructed [`crate::dataplane::waf::WafBody`] (body inspection
+/// may buffer and replay the body — the only dataplane buffering the WAF
+/// introduces, bounded by `max_body_inspect_bytes`).
+#[allow(clippy::too_many_arguments)]
+async fn handle_routed<B>(
+    dp: &Arc<DataPlane>,
+    peer: IpAddr,
+    req: Request<B>,
+    rid: &str,
+    rec: &mut AccessRecord,
+    root: &tracing::Span,
+    gen: Arc<Generation>,
+    idx: usize,
+    params: Vec<(String, String)>,
+) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let gateway = gen.snapshot.gateway();
+    let listener_cfg = req.extensions().get::<ListenerLabel>().and_then(|l| {
+        gateway
+            .listeners
+            .iter()
+            .find(|li| li.name.as_str() == &*l.0)
+    });
+    let Some(route) = gateway.routes.get(idx) else {
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
+    };
+    let mut req = req;
     // Route-scoped request limits (DW-027): header caps and a declared
     // (`Content-Length`) body cap are enforced immediately after route
     // resolution — before CORS preflight handling, authentication, and
