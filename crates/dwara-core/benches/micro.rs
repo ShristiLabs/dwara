@@ -78,7 +78,9 @@ fn bench_gateway() -> Gateway {
     let services = (0..10)
         .map(|i| Service {
             name: format!("service-{i}"),
-            upstream: format!("upstream-{}", i % 5),
+            upstream: Some(format!("upstream-{}", i % 5)),
+            split: None,
+            sticky: None,
             base_path: None,
             version: None,
             policies: Vec::new(),

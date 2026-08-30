@@ -26,6 +26,12 @@ Feature areas written up so far (M1 complete; M2 in progress):
   matching precedence, rewrites, streaming proxy semantics.
 - [Load balancing](./features/load-balancing.md) — the four
   algorithms, lock-free picks, slow start.
+- [Traffic splitting and sticky sessions](./features/canary-split.md)
+  — service-level weighted splits across upstreams (canary releases,
+  blue-green switches) with a stateless weighted-hash pick, and the
+  gateway-set sticky cookie that pins a session to its branch (and to
+  one endpoint when the branch runs ip_hash), layered over the
+  per-upstream balancer (DW-040).
 - [Resilience](./features/resilience.md) — passive/active health,
   retries, circuit breaking, load shedding, and how the layers compose.
 - [Rate limiting](./features/rate-limiting.md) — GCRA, stacked

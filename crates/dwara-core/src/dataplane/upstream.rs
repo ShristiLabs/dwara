@@ -1330,9 +1330,13 @@ fn build_handle(
 /// Registry of per-upstream pooled clients, built from one published
 /// snapshot. Rebuild (and drop the old registry) on snapshot swap; in-flight
 /// requests keep their old pools until their handles are dropped.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct UpstreamRegistry {
     handles: BTreeMap<String, Arc<UpstreamHandle>>,
+    /// Compiled service splits (DW-040), keyed by service name. Empty
+    /// unless a service carries a `split` block; single-target
+    /// services resolve through `handles` as ever.
+    splits: BTreeMap<String, Arc<crate::dataplane::split::ServiceSplit>>,
 }
 
 impl UpstreamRegistry {
@@ -1426,7 +1430,7 @@ impl UpstreamRegistry {
                 .add(c.clone())
                 .map_err(|e| UpstreamError::InvalidRootCertificate(e.to_string()))?;
         }
-        let handles = snapshot
+        let handles: BTreeMap<String, Arc<UpstreamHandle>> = snapshot
             .gateway()
             .upstreams
             .iter()
@@ -1454,7 +1458,47 @@ impl UpstreamRegistry {
                 (u.name.clone(), build_handle(u, roots, prev, events))
             })
             .collect();
-        Ok(UpstreamRegistry { handles })
+        // DW-040: compile each split service's weighted targets.
+        // Validation guarantees every named upstream exists and the
+        // total weight is positive; a handle miss here (impossible
+        // through validation) skips the split loudly — the service
+        // answers 502 unknown_upstream rather than dispatching by a
+        // half-built split.
+        let mut splits = BTreeMap::new();
+        for service in &snapshot.gateway().services {
+            let Some(split_cfg) = &service.split else {
+                continue;
+            };
+            let mut targets = Vec::with_capacity(split_cfg.targets.len());
+            let mut ok = true;
+            for t in &split_cfg.targets {
+                match handles.get(&t.upstream) {
+                    Some(handle) => targets.push((Arc::clone(handle), u64::from(t.weight))),
+                    None => {
+                        tracing::error!(
+                            code = "service_split_target_missing",
+                            service = %service.name,
+                            upstream = %t.upstream,
+                            "split target has no compiled upstream; split skipped (fail closed)"
+                        );
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                splits.insert(
+                    service.name.clone(),
+                    Arc::new(crate::dataplane::split::ServiceSplit::new(&targets)),
+                );
+            }
+        }
+        Ok(UpstreamRegistry { handles, splits })
+    }
+
+    /// The compiled split for a service (DW-040), when it has one.
+    pub fn split_for(&self, service: &str) -> Option<Arc<crate::dataplane::split::ServiceSplit>> {
+        self.splits.get(service).cloned()
     }
 
     /// Handle for the named upstream, or None if the snapshot has no such

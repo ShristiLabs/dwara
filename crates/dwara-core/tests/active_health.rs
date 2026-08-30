@@ -551,7 +551,9 @@ async fn reserved_paths_shadow_configured_routes() {
             ],
             services: vec![Service {
                 name: "svc".into(),
-                upstream: "up".into(),
+                upstream: Some("up".into()),
+                split: None,
+                sticky: None,
                 base_path: None,
                 version: None,
                 policies: vec![],

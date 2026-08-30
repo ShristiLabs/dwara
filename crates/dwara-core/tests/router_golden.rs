@@ -128,7 +128,9 @@ fn inject_default_services(gateway: &mut Gateway) {
     for name in added {
         gateway.services.push(Service {
             name,
-            upstream: "pool".into(),
+            upstream: Some("pool".into()),
+            split: None,
+            sticky: None,
             base_path: None,
             version: None,
             policies: vec![],

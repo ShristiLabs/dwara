@@ -23,6 +23,7 @@ mod response_cache;
 mod retries;
 mod secrets;
 mod snapshot;
+mod split;
 mod store_public;
 mod stream;
 mod tls;

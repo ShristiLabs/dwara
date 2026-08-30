@@ -123,7 +123,9 @@ fn good_gateway() -> Gateway {
         ],
         services: vec![Service {
             name: "users-api".into(),
-            upstream: "users-pool".into(),
+            upstream: Some("users-pool".into()),
+            split: None,
+            sticky: None,
             base_path: None,
             version: None,
             policies: vec![],
@@ -171,7 +173,7 @@ fn validate_reports_all_semantic_issues() {
     // Duplicate service name, dangling upstream ref, unknown policy,
     // duplicate listener port.
     gw.services.push(gw.services[0].clone());
-    gw.services[0].upstream = "missing-pool".into();
+    gw.services[0].upstream = Some("missing-pool".into());
     gw.routes[0].policies.push("nope".into());
     gw.listeners.push(Listener {
         name: "dupe".into(),

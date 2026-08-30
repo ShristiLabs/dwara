@@ -2079,13 +2079,43 @@ pub enum PathRewrite {
 }
 
 /// The logical API being exposed: base path, version, default policies;
-/// targets exactly one upstream.
+/// targets exactly one upstream, or a weighted split of upstreams
+/// since DW-040 (canary / blue-green).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub name: String,
-    /// Name of the upstream this service targets.
-    pub upstream: String,
+    /// Name of the upstream this service targets. Exactly one of
+    /// `upstream` and [`Service::split`] must be set: a single-target
+    /// service names its pool here; a canary/blue-green service uses
+    /// `split` instead and leaves this unset. Optional since DW-040
+    /// (it was the only shape before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    /// Weighted traffic split across upstreams (DW-040, canary and
+    /// blue-green): requests for this service are dispatched to one of
+    /// the named upstreams by a deterministic weighted pick (the
+    /// sticky cookie's value when [`Service::sticky`] is configured
+    /// and the request carries one — sessions stay on their branch;
+    /// otherwise the request id — per-request distribution whose
+    /// ratios converge on the weights statistically). A weight of 0
+    /// parks an upstream in the split without serving traffic (the
+    /// blue-green switch: flip the weights and re-publish — the next
+    /// request dispatches by the new generation, no restart). Ramp
+    /// rule: change weights by RE-BALANCING (keep the total constant,
+    /// e.g. 95/5 -> 90/10) — growing one side alone changes the pick's
+    /// modulus and reshuffles every session's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<ServiceSplit>,
+    /// Cookie affinity (DW-040): when set, the gateway sets a cookie
+    /// on responses for this service whose VALUE consistently selects
+    /// the split branch (and, when the branch upstream runs the
+    /// `ip_hash` balancer, the endpoint — the cookie value becomes the
+    /// ring key, reusing the consistent-hash machinery). The value is
+    /// an opaque affinity handle: not a secret, carrying no identity,
+    /// and never trusted as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky: Option<StickyAffinity>,
     /// Base path prefix the API is served under (e.g. `/v1`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_path: Option<String>,
@@ -2101,6 +2131,71 @@ pub struct Service {
     /// route-level authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+}
+
+/// Weighted traffic split across upstreams (DW-040,
+/// `services[].split`): canary releases and blue-green switches at the
+/// SERVICE level — each target is a full upstream (its own endpoints,
+/// protocol, health, and balancer), so a canary pool is isolated from
+/// the stable one by construction. The pick is a deterministic
+/// weighted hash (see [`Service::split`]): ratios hold statistically
+/// per request and exactly per session when sticky affinity is on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSplit {
+    /// The weighted targets. Validation enforces 2..=8 entries (one
+    /// target is what `services[].upstream` expresses), existing
+    /// upstream names, no duplicates, and a positive total weight (a
+    /// total of 0 would route nowhere; individual zeros are the
+    /// parked side of a blue-green pair).
+    pub targets: Vec<SplitTarget>,
+}
+
+/// One weighted target of a service split (DW-040).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SplitTarget {
+    /// Name of an upstream in this config.
+    pub upstream: String,
+    /// Relative share of requests (default 1). `0` parks the target
+    /// (compiled, validated, serving nothing — the blue-green
+    /// shape); validation caps the sum at a sane bound.
+    #[serde(
+        default = "default_split_weight",
+        skip_serializing_if = "is_default_split_weight"
+    )]
+    pub weight: u32,
+}
+
+fn default_split_weight() -> u32 {
+    1
+}
+fn is_default_split_weight(w: &u32) -> bool {
+    *w == 1
+}
+
+/// Cookie affinity for a service (DW-040, `services[].sticky`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StickyAffinity {
+    /// The cookie name the gateway reads and sets. Must be a valid
+    /// cookie-name token (RFC 6265: the RFC 2616 `token` grammar);
+    /// validation rejects anything else.
+    pub cookie: String,
+    /// `Max-Age` of the set cookie, in seconds (default 3600 — one
+    /// hour; validated to 1..=2_592_000, 30 days).
+    #[serde(
+        default = "default_sticky_ttl_s",
+        skip_serializing_if = "is_default_sticky_ttl_s"
+    )]
+    pub ttl_s: u64,
+}
+
+fn default_sticky_ttl_s() -> u64 {
+    3_600
+}
+fn is_default_sticky_ttl_s(t: &u64) -> bool {
+    *t == 3_600
 }
 
 /// Load-balancing pool: algorithm, protocol, endpoints.

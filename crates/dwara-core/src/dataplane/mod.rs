@@ -24,6 +24,7 @@ pub mod hardening;
 pub mod proxy;
 pub mod proxy_proto;
 pub mod response_cache;
+pub mod split;
 pub mod transforms;
 pub mod upstream;
 pub mod versioning;

@@ -108,7 +108,9 @@ fn base_gateway(listener: Listener) -> Gateway {
         }],
         services: vec![Service {
             name: "svc".into(),
-            upstream: "pool".into(),
+            upstream: Some("pool".into()),
+            split: None,
+            sticky: None,
             base_path: None,
             version: None,
             policies: vec![],

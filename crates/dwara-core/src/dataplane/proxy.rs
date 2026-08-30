@@ -270,6 +270,7 @@ use crate::config::net::peer_is_trusted;
 use crate::config::{
     Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
+use crate::dataplane::split::{mint_affinity_id, read_cookie};
 use crate::dataplane::upstream::{
     refresh_observation_gauges, UpstreamBody, UpstreamError, UpstreamRegistry,
 };
@@ -3116,14 +3117,62 @@ where
             rid,
         );
     };
-    let Some(handle) = gen.registry.get(&service.upstream) else {
-        return simple(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unknown_upstream",
-            "unknown upstream",
-            rid,
-        );
-    };
+    // DW-040: resolve the dispatch target. A split service picks a
+    // branch upstream by the deterministic weighted hash (the sticky
+    // cookie's value when configured and presented, else the request
+    // id — see `dataplane::split`); a single-target service resolves
+    // its one upstream as ever. The sticky value doubles as the
+    // dispatch HASH KEY below, so an `ip_hash` branch upstream pins
+    // the session to one endpoint through the same ketama ring that
+    // pins client IPs.
+    let mut sticky_set_cookie: Option<String> = None;
+    let sticky_key: Option<String> = service.sticky.as_ref().map(|sticky| {
+        match read_cookie(req.headers(), &sticky.cookie) {
+            Some(value) => value,
+            None => {
+                // First request of the session: mint the affinity
+                // handle NOW so the branch picked below is exactly the
+                // branch the cookie pins — stickiness holds from the
+                // very first response. Opaque, not a secret (see the
+                // split module docs); recorded so the response can
+                // carry it.
+                let value = mint_affinity_id();
+                sticky_set_cookie = Some(format!(
+                    "{}={}; Path=/; Max-Age={}",
+                    sticky.cookie, value, sticky.ttl_s
+                ));
+                value
+            }
+        }
+    });
+    let dispatch_key: String = sticky_key.clone().unwrap_or_else(|| rid.to_string());
+    let handle: Arc<crate::dataplane::upstream::UpstreamHandle> =
+        if let Some(split) = gen.registry.split_for(&service.name) {
+            let picked = Arc::clone(split.pick(&dispatch_key));
+            obs.record_split_pick(&service.name, picked.name());
+            picked
+        } else {
+            let Some(name) = &service.upstream else {
+                // Validation requires exactly one of upstream/split, and a
+                // split service resolved to None only when its compile
+                // failed loudly (registry logs it); classified, no panic.
+                return simple(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unknown_upstream",
+                    "unknown upstream",
+                    rid,
+                );
+            };
+            let Some(handle) = gen.registry.get(name) else {
+                return simple(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unknown_upstream",
+                    "unknown upstream",
+                    rid,
+                );
+            };
+            handle
+        };
     rec.upstream = Some(handle.name().to_string());
 
     let wants_upgrade = req.headers().contains_key(UPGRADE);
@@ -3474,12 +3523,22 @@ where
         );
         let mut picked: Option<String> = None;
         let peer_key = peer.to_string();
+        // DW-040: sticky sessions hash the ENDPOINT pick by the same
+        // key that picked the branch (the affinity cookie), so an
+        // ip_hash branch pins the session to one endpoint; split
+        // services without sticky hash per request id. Everything
+        // else keeps the client-IP key (the ip_hash contract).
+        let dispatch_hash_key: &str = if sticky_key.is_some() || service.split.is_some() {
+            dispatch_key.as_str()
+        } else {
+            peer_key.as_str()
+        };
         // gRPC deadline (DW-039): the RPC's total budget bounds every
         // attempt's forward — the remaining slice, so a retry that
         // cannot fit before the deadline is cut by the timeout, not
         // started in vain. Non-gRPC requests are unwrapped (zero cost).
         let send = handle
-            .send_with_hash_key_observed(out_req, Some(&peer_key), &mut picked)
+            .send_with_hash_key_observed(out_req, Some(dispatch_hash_key), &mut picked)
             .instrument(attempt_span);
         let result = match grpc_deadline {
             Some(deadline) => match tokio::time::timeout(
@@ -3574,7 +3633,7 @@ where
                     .await;
                     continue;
                 }
-                return finish_proxy_response(
+                let mut resp = finish_proxy_response(
                     resp,
                     wants_upgrade,
                     on_client_upgrade,
@@ -3584,6 +3643,16 @@ where
                     grpc_deadline,
                     rid,
                 );
+                // DW-040: the first request of a sticky session carries
+                // its affinity handle back (appended, never replacing
+                // an upstream's own cookies).
+                if let Some(cookie) = sticky_set_cookie.take() {
+                    if let Ok(v) = HeaderValue::from_str(&cookie) {
+                        resp.headers_mut().append(hyper::header::SET_COOKIE, v);
+                    }
+                    obs.record_sticky_session();
+                }
+                return resp;
             }
             Err(err) => {
                 // Signed-body digest mismatch (DW-036): the CLIENT's

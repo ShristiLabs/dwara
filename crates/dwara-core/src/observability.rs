@@ -370,6 +370,14 @@ pub struct Observability {
     /// (config-bounded, the same cardinality class as
     /// `requests_total`).
     websocket_policy_total: IntCounterVec,
+    /// DW-040: split-service dispatch decisions — the `service` and
+    /// `upstream` labels are both config-declared names (bounded by
+    /// the split configuration), so canary share is directly
+    /// readable as `upstream` share within a `service`.
+    split_picks_total: IntCounterVec,
+    /// DW-040: sticky sessions minted (affinity cookies set on first
+    /// response). Plain counter — no label space.
+    sticky_sessions_total: IntCounter,
     /// DW-037: response-cache lookup outcomes — a CLOSED label set
     /// (`hit`, `stale`, `miss`, `bypass`), one increment per request on
     /// a cache-configured route, decided at lookup.
@@ -621,6 +629,23 @@ impl Observability {
              never-block posture's honest loss counter.",
         )
         .expect("valid metric definition");
+        let split_picks_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_split_picks_total",
+                "Service-split dispatch decisions (DW-040): one per request \
+                 dispatched through a weighted split, by service and the \
+                 target upstream chosen. The canary share is the upstream's \
+                 share of the service's total.",
+            ),
+            &["service", "upstream"],
+        )
+        .expect("valid metric definition");
+        let sticky_sessions_total = IntCounter::new(
+            "dwara_sticky_sessions_total",
+            "Sticky sessions minted (DW-040): affinity cookies set on a first \
+             response.",
+        )
+        .expect("valid metric definition");
         let websocket_policy_total = IntCounterVec::new(
             Opts::new(
                 "dwara_websocket_policy_total",
@@ -768,6 +793,8 @@ impl Observability {
             Box::new(access_records_offered.clone()),
             Box::new(access_records_dropped.clone()),
             Box::new(websocket_policy_total.clone()),
+            Box::new(split_picks_total.clone()),
+            Box::new(sticky_sessions_total.clone()),
             Box::new(cache_lookups_total.clone()),
             Box::new(cache_stores_total.clone()),
             Box::new(cache_revalidated_total.clone()),
@@ -810,6 +837,8 @@ impl Observability {
             access_records_offered,
             access_records_dropped,
             websocket_policy_total,
+            split_picks_total,
+            sticky_sessions_total,
             cache_lookups_total,
             cache_stores_total,
             cache_revalidated_total,
@@ -1119,6 +1148,20 @@ impl Observability {
     /// [`Self::set_access_records_offered`].
     pub fn set_access_records_dropped(&self, dropped: i64) {
         self.access_records_dropped.set(dropped);
+    }
+
+    /// Count one split dispatch decision (DW-040) in
+    /// `dwara_split_picks_total{service,upstream}`. Both labels are
+    /// config-declared names; the caller is the dispatch path.
+    pub fn record_split_pick(&self, service: &str, upstream: &str) {
+        self.split_picks_total
+            .with_label_values(&[service, upstream])
+            .inc();
+    }
+
+    /// Count one minted sticky session (DW-040).
+    pub fn record_sticky_session(&self) {
+        self.sticky_sessions_total.inc();
     }
 
     /// Count one WebSocket policy decision (DW-039) in

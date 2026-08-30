@@ -84,6 +84,10 @@ export default withMermaid(
                   link: "/guide/maintenance",
                 },
                 {
+                  text: "Traffic splitting",
+                  link: "/guide/traffic-splitting",
+                },
+                {
                   text: "gRPC and WebSockets",
                   link: "/guide/grpc-websockets",
                 },

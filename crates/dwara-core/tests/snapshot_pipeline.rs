@@ -71,7 +71,9 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
 fn service(name: &str, upstream: &str) -> Service {
     Service {
         name: name.into(),
-        upstream: upstream.into(),
+        upstream: Some(upstream.into()),
+        split: None,
+        sticky: None,
         base_path: None,
         version: None,
         policies: vec![],
@@ -243,7 +245,7 @@ fn validation_rejects_dangling_route_service_reference() {
 #[test]
 fn validation_rejects_dangling_service_upstream_reference() {
     let mut gw = base_gateway();
-    gw.services[0].upstream = "ghost".into();
+    gw.services[0].upstream = Some("ghost".into());
     assert_single_issue(&gw, "service", "svc", "upstream");
 }
 
@@ -427,7 +429,7 @@ fn validation_rejects_dangling_consumer_policy_reference() {
 fn validation_accumulates_multiple_distinct_issues() {
     let mut gw = base_gateway();
     gw.routes[0].service = "ghost-svc".into(); // dangling route ref
-    gw.services[0].upstream = "ghost-pool".into(); // dangling service ref
+    gw.services[0].upstream = Some("ghost-pool".into()); // dangling service ref
     gw.upstreams[0].endpoints.clear(); // empty upstream
     gw.routes[0].r#match.path.value = "bad".into(); // path without /
     let issues = validate(&gw);
@@ -658,7 +660,7 @@ fn publish_concurrent_mixed_configs_final_generation_equals_successes() {
                 g
             } else {
                 let mut g = base_gateway();
-                g.services[0].upstream = "ghost".into(); // invalid
+                g.services[0].upstream = Some("ghost".into()); // invalid
                 g
             };
             state

@@ -2532,7 +2532,7 @@
       "additionalProperties": false
     },
     "Service": {
-      "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream.",
+      "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream, or a weighted split of upstreams\nsince DW-040 (canary / blue-green).",
       "type": "object",
       "properties": {
         "authorization": {
@@ -2562,9 +2562,34 @@
             "type": "string"
           }
         },
+        "split": {
+          "description": "Weighted traffic split across upstreams (DW-040, canary and\nblue-green): requests for this service are dispatched to one of\nthe named upstreams by a deterministic weighted pick (the\nsticky cookie's value when [`Service::sticky`] is configured\nand the request carries one — sessions stay on their branch;\notherwise the request id — per-request distribution whose\nratios converge on the weights statistically). A weight of 0\nparks an upstream in the split without serving traffic (the\nblue-green switch: flip the weights and re-publish — the next\nrequest dispatches by the new generation, no restart). Ramp\nrule: change weights by RE-BALANCING (keep the total constant,\ne.g. 95/5 -> 90/10) — growing one side alone changes the pick's\nmodulus and reshuffles every session's branch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceSplit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sticky": {
+          "description": "Cookie affinity (DW-040): when set, the gateway sets a cookie\non responses for this service whose VALUE consistently selects\nthe split branch (and, when the branch upstream runs the\n`ip_hash` balancer, the endpoint — the cookie value becomes the\nring key, reusing the consistent-hash machinery). The value is\nan opaque affinity handle: not a secret, carrying no identity,\nand never trusted as one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StickyAffinity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "upstream": {
-          "description": "Name of the upstream this service targets.",
-          "type": "string"
+          "description": "Name of the upstream this service targets. Exactly one of\n`upstream` and [`Service::split`] must be set: a single-target\nservice names its pool here; a canary/blue-green service uses\n`split` instead and leaves this unset. Optional since DW-040\n(it was the only shape before).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "version": {
           "type": [
@@ -2575,8 +2600,24 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "upstream"
+        "name"
+      ]
+    },
+    "ServiceSplit": {
+      "description": "Weighted traffic split across upstreams (DW-040,\n`services[].split`): canary releases and blue-green switches at the\nSERVICE level — each target is a full upstream (its own endpoints,\nprotocol, health, and balancer), so a canary pool is isolated from\nthe stable one by construction. The pick is a deterministic\nweighted hash (see [`Service::split`]): ratios hold statistically\nper request and exactly per session when sticky affinity is on.",
+      "type": "object",
+      "properties": {
+        "targets": {
+          "description": "The weighted targets. Validation enforces 2..=8 entries (one\ntarget is what `services[].upstream` expresses), existing\nupstream names, no duplicates, and a positive total weight (a\ntotal of 0 would route nowhere; individual zeros are the\nparked side of a blue-green pair).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SplitTarget"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "targets"
       ]
     },
     "SniRoute": {
@@ -2599,6 +2640,46 @@
       "required": [
         "server_names",
         "upstream"
+      ]
+    },
+    "SplitTarget": {
+      "description": "One weighted target of a service split (DW-040).",
+      "type": "object",
+      "properties": {
+        "upstream": {
+          "description": "Name of an upstream in this config.",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Relative share of requests (default 1). `0` parks the target\n(compiled, validated, serving nothing — the blue-green\nshape); validation caps the sum at a sane bound.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "upstream"
+      ]
+    },
+    "StickyAffinity": {
+      "description": "Cookie affinity for a service (DW-040, `services[].sticky`).",
+      "type": "object",
+      "properties": {
+        "cookie": {
+          "description": "The cookie name the gateway reads and sets. Must be a valid\ncookie-name token (RFC 6265: the RFC 2616 `token` grammar);\nvalidation rejects anything else.",
+          "type": "string"
+        },
+        "ttl_s": {
+          "description": "`Max-Age` of the set cookie, in seconds (default 3600 — one\nhour; validated to 1..=2_592_000, 30 days).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cookie"
       ]
     },
     "Timeouts": {

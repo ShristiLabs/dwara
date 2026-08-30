@@ -9,6 +9,41 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Traffic splitting and sticky sessions (DW-040): a service can
+  dispatch across several upstreams by a weighted split
+  (`services[].split.targets`, 2..=8 targets naming existing
+  upstreams, no duplicates, positive total at most 100000) instead of
+  a single `upstream` — validation requires exactly one of the two.
+  The pick is a stateless weighted hash (`hash % total_weight` over
+  the same FNV-1a the balancer's consistent-hash ring uses): with no
+  sticky cookie the key is the request id (per-request distribution
+  whose ratios converge on the weights statistically), and a weight of
+  0 parks a target (the blue-green side) without serving traffic. The
+  blue-green switch is a republish that flips the weights — the pick
+  is stateless, so the next request dispatches by the new generation,
+  no restart, no drain. Displacement is bounded by an INVARIANT total:
+  a same-total change (95/5 -> 90/10, or the 100/0 -> 0/100 flip)
+  moves only the changed share; a total-changing bump reshuffles every
+  session, so ramp a canary by re-balancing the pair, never by growing
+  one side alone. An optional `services[].sticky` block
+  (`cookie`: an RFC 6265 token name; `ttl_s` default 3600, 1..=2592000)
+  pins a session to its branch: the gateway mints an opaque affinity
+  handle (hex time + counter — not a secret, carrying no identity) as
+  the cookie value on the FIRST response (before the pick, so the
+  branch picked IS the cookie-pinned branch; `Set-Cookie` appended,
+  never replacing upstream cookies, never re-set when presented) and
+  the value consistently selects the same upstream. Stickiness is
+  layered: the cookie guarantees BRANCH affinity, and when the branch
+  upstream runs `ip_hash` the value becomes the ring key so the
+  session pins one endpoint through the existing ketama machinery;
+  with other balancers the endpoint floats (documented). One edge: a
+  session whose first request is a response cache HIT mints no cookie
+  until its first miss (no dispatch, nothing to pin while hits last).
+  Zero new dependencies. New metrics:
+  `dwara_split_picks_total{service,upstream}` (both labels
+  config-declared — canary share is the upstream's share of the
+  service) and `dwara_sticky_sessions_total` (affinity cookies set).
+
 - gRPC and WebSocket polish (DW-039): gRPC over H2 now works
   end to end through the gateway with protocol semantics honored —
   the spec's `TE: trailers` request header is forwarded (previously

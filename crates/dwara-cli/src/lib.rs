@@ -340,9 +340,16 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
         }
     }
 
-    // upstream-unreferenced.
+    // upstream-unreferenced (DW-040: a split target counts as a
+    // reference too).
     for u in &gateway.upstreams {
-        if !gateway.services.iter().any(|s| s.upstream == u.name) {
+        let referenced = gateway.services.iter().any(|s| {
+            s.upstream.as_deref() == Some(u.name.as_str())
+                || s.split
+                    .as_ref()
+                    .is_some_and(|sp| sp.targets.iter().any(|t| t.upstream == u.name))
+        });
+        if !referenced {
             warnings.push(LintWarning {
                 kind: "upstream",
                 name: u.name.clone(),

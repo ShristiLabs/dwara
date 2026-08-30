@@ -284,7 +284,10 @@ fn build_ring(eps: &[LbEndpoint]) -> BTreeMap<u64, usize> {
 }
 
 /// Hash a client key onto ring space (same FNV-1a as the ring uses).
-fn key_hash(key: &str) -> u64 {
+/// pub(crate): the DW-040 service split hashes branch keys with the
+/// SAME function so a sticky cookie maps consistently across both
+/// decision layers.
+pub(crate) fn key_hash(key: &str) -> u64 {
     let mut h = Fnv1a::new();
     h.update(key.as_bytes());
     h.finish()

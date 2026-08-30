@@ -1840,6 +1840,35 @@ fn validate_analytics_stream(gateway: &Gateway, issues: &mut Vec<ValidationIssue
     }
 }
 
+/// Whether a string is a valid RFC 6265 cookie-name (the RFC 2616
+/// `token` grammar: alphanumerics and `!#$%&'*+-.^_`|~` — no
+/// separators, spaces, or controls). DW-040's sticky cookie names ride
+/// `Set-Cookie` headers serialized by hand-adjacent code paths, so the
+/// name must be provably header-safe.
+fn is_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -2429,13 +2458,120 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     }
 
     for s in &gateway.services {
-        if !upstreams.contains(s.upstream.as_str()) {
-            issues.push(issue(
+        // DW-040: a service dispatches through exactly one of
+        // `upstream` (single target) or `split` (weighted targets) —
+        // both set is ambiguous routing, neither is a service that
+        // can serve nothing.
+        match (&s.upstream, &s.split) {
+            (Some(_), Some(_)) => issues.push(issue(
                 "service",
                 &s.name,
                 "upstream",
-                format!("references unknown upstream '{}'", s.upstream),
-            ));
+                "upstream and split are both set: a service dispatches through exactly one \
+                 (upstream = single target; split = weighted canary/blue-green)",
+            )),
+            (None, None) => issues.push(issue(
+                "service",
+                &s.name,
+                "upstream",
+                "neither upstream nor split is set: set upstream (single target) or split \
+                 (weighted targets)",
+            )),
+            _ => {}
+        }
+        if let Some(upstream) = &s.upstream {
+            if !upstreams.contains(upstream.as_str()) {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "upstream",
+                    format!("references unknown upstream '{upstream}'"),
+                ));
+            }
+        }
+        // DW-040 split validation: existing upstreams, sane bounds, no
+        // duplicates, and a positive total (individual zeros are the
+        // parked side of a blue-green pair; an all-zero split routes
+        // nowhere).
+        if let Some(split) = &s.split {
+            if split.targets.len() < 2 || split.targets.len() > 8 {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "split.targets",
+                    format!(
+                        "a split needs 2..=8 targets ({} given): one target is what \
+                         services[].upstream expresses",
+                        split.targets.len()
+                    ),
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            let mut total: u64 = 0;
+            for (i, t) in split.targets.iter().enumerate() {
+                if !upstreams.contains(t.upstream.as_str()) {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        &format!("split.targets[{i}].upstream"),
+                        format!("references unknown upstream '{}'", t.upstream),
+                    ));
+                }
+                if !seen.insert(t.upstream.clone()) {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        &format!("split.targets[{i}].upstream"),
+                        format!(
+                            "duplicate upstream '{}' in the split (weights merge by intent; \
+                             name it once)",
+                            t.upstream
+                        ),
+                    ));
+                }
+                total += u64::from(t.weight);
+            }
+            if total == 0 {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "split.targets",
+                    "every weight is 0: a split must serve some traffic (a parked \
+                     blue-green side is weight 0, the other side is not)",
+                ));
+            }
+            if total > 100_000 {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "split.targets",
+                    format!("weights sum to {total}; keep the total at or under 100000"),
+                ));
+            }
+        }
+        // DW-040 sticky validation: a usable cookie-name token and a
+        // bounded lifetime.
+        if let Some(sticky) = &s.sticky {
+            if !is_cookie_name(&sticky.cookie) {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "sticky.cookie",
+                    format!(
+                        "'{}' is not a valid cookie name (RFC 6265 token: no \
+                         separators, spaces, or non-token characters)",
+                        sticky.cookie
+                    ),
+                ));
+            }
+            if sticky.ttl_s == 0 || sticky.ttl_s > 2_592_000 {
+                issues.push(issue(
+                    "service",
+                    &s.name,
+                    "sticky.ttl_s",
+                    "ttl_s must be in 1..=2592000 (30 days)",
+                ));
+            }
         }
         for p in &s.policies {
             if !policies.contains(p.as_str()) {
