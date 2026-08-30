@@ -107,6 +107,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        analytics_stream: None,
         geoip: None,
     }
 }
@@ -456,6 +457,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            analytics_stream: None,
             geoip: None,
         })
         .unwrap();
@@ -584,6 +586,7 @@ async fn reserved_paths_shadow_configured_routes() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            analytics_stream: None,
             geoip: None,
         })
         .unwrap();

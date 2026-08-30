@@ -91,6 +91,17 @@
 //!   stays a plain atomic with zero registry coupling, the same model
 //!   as the rate-limiter eviction gauge): events dropped at EMIT time
 //!   (full queue / no deliverer) and events handed to the queue.
+//! - `dwara_access_records_streamed_total{outcome}` counter (DW-121):
+//!   access records counted per flushed-batch delivery outcome —
+//!   `delivered` / `failed` (tried and not taken) / `dropped`
+//!   (per-record byte cap) — a closed three-value label set, counted
+//!   by the stream flusher, never the request path.
+//! - `dwara_access_records_offered_total` /
+//!   `dwara_access_records_dropped_total` gauges (DW-121, scrape-time
+//!   snapshots of the record stream's monotonic counters, the same
+//!   gauge-not-counter model as the event bus): records offered at
+//!   request completion and records dropped at OFFER time (channel
+//!   full / stream disabled).
 //! - `dwara_quota_denied_total{consumer,budget}` counter (DW-033) —
 //!   requests refused by a consumer request budget (429), by consumer
 //!   (the quota-configured set, config-bounded) and binding budget
@@ -340,6 +351,20 @@ pub struct Observability {
     /// docs for the gauge-not-counter rationale).
     events_dropped: IntGauge,
     events_emitted: IntGauge,
+    /// DW-121: access records counted per flushed-batch delivery
+    /// outcome — a CLOSED label set (`delivered`, `failed`, `dropped`),
+    /// so the family's cardinality is three series total. Counted by
+    /// the flusher (never the request path).
+    access_records_streamed_total: IntCounterVec,
+    /// DW-121: access records offered to the stream channel at request
+    /// completion; scrape-time snapshot of the stream's monotonic
+    /// counter (the emit path bumps a plain atomic — the same
+    /// gauge-not-counter model as the event bus).
+    access_records_offered: IntGauge,
+    /// DW-121: access records dropped at OFFER time (stream channel
+    /// full or the stream disabled); scrape-time snapshot, same model
+    /// as `dwara_events_dropped_total`.
+    access_records_dropped: IntGauge,
     /// DW-037: response-cache lookup outcomes — a CLOSED label set
     /// (`hit`, `stale`, `miss`, `bypass`), one increment per request on
     /// a cache-configured route, decided at lookup.
@@ -561,6 +586,36 @@ impl Observability {
              (DW-044).",
         )
         .expect("valid metric definition");
+        let access_records_streamed_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_access_records_streamed_total",
+                "Access records counted per flushed-batch delivery outcome \
+                 (DW-121). outcome: delivered (the batch's sink accepted it, \
+                 2xx on some attempt), failed (the batch was tried and not \
+                 taken: retries exhausted, non-transient answer, or budget \
+                 spent), dropped (never delivered: over the per-record byte \
+                 cap, or flushed after the stream was disabled with a \
+                 queued tail). Emit-time channel drops are the separate \
+                 dwara_access_records_dropped_total gauge.",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        let access_records_offered = IntGauge::new(
+            "dwara_access_records_offered_total",
+            "Access records offered to the stream channel at request \
+             completion since process start; scrape-time snapshot of the \
+             stream's monotonic counter (DW-121).",
+        )
+        .expect("valid metric definition");
+        let access_records_dropped = IntGauge::new(
+            "dwara_access_records_dropped_total",
+            "Access records dropped at OFFER time (stream channel full, or \
+             the stream disabled by the current generation); scrape-time \
+             snapshot of the stream's monotonic counter (DW-121) — the \
+             never-block posture's honest loss counter.",
+        )
+        .expect("valid metric definition");
         let cache_lookups_total = IntCounterVec::new(
             Opts::new(
                 "dwara_cache_lookups_total",
@@ -691,6 +746,9 @@ impl Observability {
             Box::new(webhook_events_total.clone()),
             Box::new(events_dropped.clone()),
             Box::new(events_emitted.clone()),
+            Box::new(access_records_streamed_total.clone()),
+            Box::new(access_records_offered.clone()),
+            Box::new(access_records_dropped.clone()),
             Box::new(cache_lookups_total.clone()),
             Box::new(cache_stores_total.clone()),
             Box::new(cache_revalidated_total.clone()),
@@ -729,6 +787,9 @@ impl Observability {
             webhook_events_total,
             events_dropped,
             events_emitted,
+            access_records_streamed_total,
+            access_records_offered,
+            access_records_dropped,
             cache_lookups_total,
             cache_stores_total,
             cache_revalidated_total,
@@ -1011,6 +1072,33 @@ impl Observability {
     /// snapshot setter; see [`Self::set_events_dropped`].
     pub fn set_events_emitted(&self, emitted: i64) {
         self.events_emitted.set(emitted);
+    }
+
+    /// Count `records` access records into
+    /// `dwara_access_records_streamed_total{outcome}` (DW-121). The
+    /// stream flusher is the only caller; `outcome` is one of
+    /// `delivered`, `failed`, `dropped` (the closed set documented on
+    /// the family), counted at BATCH granularity by the records each
+    /// flushed batch carried.
+    pub fn record_access_stream(&self, outcome: &str, records: u64) {
+        self.access_records_streamed_total
+            .with_label_values(&[outcome])
+            .inc_by(records);
+    }
+
+    /// Set the `dwara_access_records_offered_total` gauge (DW-121):
+    /// records offered to the stream channel since process start.
+    /// Scrape-time snapshot of the stream's monotonic counter; see
+    /// [`Self::set_events_dropped`] for the gauge-not-counter model.
+    pub fn set_access_records_offered(&self, offered: i64) {
+        self.access_records_offered.set(offered);
+    }
+
+    /// Set the `dwara_access_records_dropped_total` gauge (DW-121):
+    /// records dropped at OFFER time. Scrape-time snapshot setter; see
+    /// [`Self::set_access_records_offered`].
+    pub fn set_access_records_dropped(&self, dropped: i64) {
+        self.access_records_dropped.set(dropped);
     }
 
     /// Set the `endpoint_health` gauge for one endpoint (1 available,

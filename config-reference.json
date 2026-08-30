@@ -30,6 +30,17 @@
         }
       ]
     },
+    "analytics_stream": {
+      "description": "Real-time access-record stream (DW-121, the opt-in firehose out):\nevery completed request's access record — not rollups, not the\ndiscrete DW-044 ops events — streamed to an external sink in\nflushed batches. Complements, never replaces, the embedded\nanalytics store: the two are configured independently and a\ndeployment can run either, both, or neither. Absent (the\ndefault): no stream. The pipeline is fire-and-forget end to end\n(a bounded channel that drops and counts — it can never slow or\nblock the dataplane). See the `events::stream` module docs for\nthe wire format, the batching contract, and the failure\nisolation story. Startup wiring arms the pipeline (the channel\ncapacity is fixed at boot); the sink set — including the\nenabled/disabled state — is live per config generation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AnalyticsStreamConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "authorization": {
       "description": "Gateway-level (global) authorization rules (#123): the least\nspecific link of the authorization precedence chain\nconsumer > route > service > listener > global (see [`Authz`] for\nthe rule semantics and the `authz` module for the merge: a deny at\nANY level wins; otherwise the most specific level with rules\ngoverns). Applies to every request that resolved a route\n(authorization runs after route resolution per the documented\nrequest-path order). Same validation rules as route-level\nauthorization; see [`Authz`].",
       "anyOf": [
@@ -409,6 +420,102 @@
         }
       },
       "additionalProperties": false
+    },
+    "AnalyticsStreamConfig": {
+      "description": "Real-time access-record stream (DW-121,\n`gateway.analytics_stream`).\n\nEvery completed request's access record is copied onto a bounded\nchannel at request completion (drop-and-count on full — the stream\ncan never slow the dataplane), and a background flusher turns the\nqueue into ordered batches delivered to the configured sink: one\ndelivery per flushed BATCH, not per record. The channel capacity is\nfixed at boot; the sink set, flush cadence, and batch bound are read\nlive from the current generation, so a reload can retarget or\ndisable the stream without a restart.",
+      "type": "object",
+      "properties": {
+        "batch_max": {
+          "description": "Maximum records per flushed batch (default 512; validated to\n[1, 4096]). With the batch byte cap, whichever comes first. One\nbatch is one delivery, so this is also the largest single\ndelivery's record count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "buffer": {
+          "description": "Capacity of the bounded record channel (default 8192; validated\nto [64, 65536]). The queue's entire memory story: every queued\nrecord is an owned copy, and a full queue DROPS (and counts)\nrather than blocking the request path. Startup wiring: the\ncapacity is fixed when the gateway boots (a live reload changes\nthe sink and the cadence, not this).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "flush_ms": {
+          "description": "Maximum batch latency in milliseconds (default 1000; validated\nto [100, 60000]): a batch is flushed when it holds\n`batch_max` records, reaches the batch byte cap, or this much\ntime has passed since its first record — whichever comes first.\nRead live per flush cycle.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sink": {
+          "description": "Where flushed batches go. One sink in v1 (`type: webhook`); the\nset is closed so a second implementation (a Kafka producer is\nthe documented slot) is an additive config change, not a silent\nbehavior change.",
+          "$ref": "#/$defs/AnalyticsStreamSink"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sink"
+      ]
+    },
+    "AnalyticsStreamSink": {
+      "description": "The access-record stream's sink (DW-121,\n`gateway.analytics_stream.sink`). Closed set, internally tagged\n(`type: webhook`): `webhook` ships today. A Kafka producer is the\ndocumented second slot, deliberately not shipped in v1 (the\nlean-deps rule — the same decision that deferred Parquet to the\nDW-156 backlog): a sink slot that pulls a client library must earn\nits dependency weight. The variant payloads carry their own\n`deny_unknown_fields`, so a misspelled knob inside a sink is still\na rejected config.",
+      "oneOf": [
+        {
+          "description": "POST each flushed batch as one NDJSON body (one JSON object per\nline, one line per record) to the configured URL, reusing the\nDW-044 webhook delivery engine's retry/budget shape — one\ndelivery (with its retries) per batch.",
+          "type": "object",
+          "properties": {
+            "backoff_base_ms": {
+              "description": "First backoff between batch attempts, doubling per retry up to\n`backoff_cap_ms` (a `Retry-After` answer replaces the computed\nvalue for that wait). Default 250 — a batch retry is heavier\nthan an alert retry, so it starts slower.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "backoff_cap_ms": {
+              "description": "Upper bound on the computed backoff. Default 4000; must be >=\n`backoff_base_ms`.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "headers": {
+              "description": "Headers sent on every batch delivery (e.g. the collector's auth\ntoken). Values may be inline or `${ENV_NAME}` / `${file:/path}`\nsecret references (DW-045), resolved at config-compile time;\ninline values are redacted in every config echo. Use a\nreference for bearer tokens and signing secrets.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "max_attempts": {
+              "description": "Total attempts per batch delivery (first try plus retries);\nretries cover transport failures and the transient status set\n(429/502/503/504), honoring a seconds-form `Retry-After`.\nDefault 3; validation enforces\n1..=[`limits::MAX_WEBHOOK_ATTEMPTS`].",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "timeout_ms": {
+              "description": "TOTAL budget for one batch delivery (all retry attempts share\nit), in milliseconds. Default 5000: a BATCH is heavier than a\nsingle alert envelope, and the flusher delivers batches strictly\nin order, so this bounds how long one unlucky batch can hold\nback the queue. Validation enforces\n1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's\nbound).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "webhook"
+            },
+            "url": {
+              "description": "Absolute `http://` or `https://` URL the batch is POSTed to.\n`https://` verifies against the public webpki root set (no\n`trusted_ca_file` override — v1 scope, same as alert webhooks).",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
     },
     "Authz": {
       "description": "Route-level authorization rules (DW-020, feature analysis 4.7).\n\nRule semantics (frozen here; evaluation lives in the `authz` module):\n\n- `denied_consumers` / `denied_groups` beat `allowed_*` at the SAME\n  level: within one [`Authz`], a deny always wins a tie.\n- `allowed_consumers`, when non-empty, is a closed set: the\n  authenticated consumer must be listed. Empty = any authenticated\n  consumer passes the consumer rule.\n- `allowed_groups`, when non-empty, requires the consumer to be a\n  member of at least one listed group. Group membership comes from\n  the CONFIG consumer's `groups` field; store-only consumers\n  (DWARA_STATE_DB deployments whose consumer has no config entry)\n  have no groups and therefore never satisfy an `allowed_groups`\n  rule (documented limitation until the state store carries groups).\n- `required_scopes`: every listed scope must appear in the JWT\n  `scope` claim. The claim may be a space-separated string\n  (`\"read write\"`, the OAuth convention) or a JSON array of strings\n  (`[\"read\", \"write\"]`, joined to its space-separated form when the\n  identity's claims are captured in `authn`); non-JWT identities\n  (API key / Basic) carry no claims and never satisfy scope rules.\n- `required_claims`: exact string equality on the stringified claim\n  value; a claim absent from the token fails the match. Only\n  string- and number-valued claims are captured on the identity\n  (see `authn`), so a claim that is a JSON `true`/`false`, `null`,\n  object, or nested structure can NEVER satisfy a `required_claims`\n  entry — there is no stringified form to compare. Comparisons are\n  CASE-SENSITIVE throughout: consumer names, groups, scopes, and\n  claim values must match byte-for-byte.\n- `ip_acl`: evaluated against the EFFECTIVE client IP — the\n  `X-Forwarded-For`-resolved client when the direct peer is inside\n  `gateway.trusted_proxies` (DW-009 chain), otherwise the direct\n  peer. See [`IpAcl`].\n\nAuthentication implication: an [`Authz`] carrying ANY identity rule\n(consumer/group/scope/claim) rejects anonymous requests with 401; an\n`ip_acl`-only [`Authz`] is the one authorization shape that can\nADMIT anonymous traffic (from an IP the ACL allows). A denial of an\nAUTHENTICATED request is 403 (forbidden), never 401.",

@@ -125,6 +125,7 @@ fn bench_gateway() -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        analytics_stream: None,
         geoip: None,
     }
 }

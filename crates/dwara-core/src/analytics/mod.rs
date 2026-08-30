@@ -20,17 +20,23 @@
 //! request completion — a `try_send` onto a bounded channel. When the
 //! channel is full the record is DROPPED (counted, logged throttled):
 //! the analytics pipeline must never slow or block a request, the same
-//! fire-and-forget posture DW-121's export pipeline will require. A
-//! background writer drains the channel in batched transactions.
+//! fire-and-forget posture DW-121's record stream
+//! (`events::stream`, a sibling pipeline that ships each record to an
+//! external sink instead of the local store) holds. A background
+//! writer drains the channel in batched transactions.
 //!
 //! # The sink seam
 //!
 //! The M1 extension contract
 //! `extensions::analytics::AnalyticsSink` is the OSS/Ent seam (feature
 //! analysis 11.4): the embedded store implements it (over the richer
-//! per-request fields DW-043 added to `extensions::analytics::Event`);
-//! the federated analytics and raw-record export pipelines (DW-121,
-//! DW-095) are future sibling implementations of the same contract.
+//! per-request fields DW-043 added to `extensions::analytics::Event`).
+//! DW-121's raw-record firehose is NOT an implementation of this
+//! contract — it streams the completion-time access record (which
+//! carries `request_id` and the redacted path the extension event
+//! deliberately omits) through its own sink seam in `events::stream`;
+//! the federated analytics pipeline (DW-095) remains a future sibling
+//! implementation of THIS contract.
 //!
 //! # Custom dimensions
 //!

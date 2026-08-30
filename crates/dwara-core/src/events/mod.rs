@@ -81,6 +81,7 @@
 //! `dwara-<pid>-<boot unix ms>` — unique per process start, no
 //! hostname dependency, stable for the process lifetime.
 
+pub mod stream;
 pub mod webhook;
 
 use std::sync::atomic::{AtomicU64, Ordering};

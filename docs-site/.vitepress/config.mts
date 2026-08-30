@@ -88,6 +88,10 @@ export default withMermaid(
                   link: "/guide/webhooks",
                 },
                 { text: "Analytics", link: "/guide/analytics" },
+                {
+                  text: "Analytics stream",
+                  link: "/guide/analytics-stream",
+                },
                 { text: "Secrets", link: "/guide/secrets" },
                 {
                   text: "HMAC signing",

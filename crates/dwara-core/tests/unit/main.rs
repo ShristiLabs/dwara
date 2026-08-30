@@ -24,6 +24,7 @@ mod retries;
 mod secrets;
 mod snapshot;
 mod store_public;
+mod stream;
 mod tls;
 mod transforms;
 mod upstream;

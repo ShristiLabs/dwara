@@ -65,6 +65,12 @@ Feature areas written up so far (M1 complete; M2 in progress):
   behind the admin `/analytics/*` endpoints: the fire-and-forget write
   path, the rollup cascade, bounded disk, and the query surface
   (DW-043).
+- [Real-time analytics stream](./features/analytics-stream.md) — the
+  opt-in access-record firehose: every completed request's record to
+  an external sink as ordered NDJSON batches (one webhook delivery per
+  batch through the DW-044 engine), the `RecordSink` seam with the
+  Kafka slot documented, and the never-blocks-the-dataplane contract
+  (DW-121).
 - [API versioning](./features/versioning.md) — the version routing
   patterns (path segment / header / query / Accept media type), the
   `match.accept` criterion, Deprecation/Sunset header automation

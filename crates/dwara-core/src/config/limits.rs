@@ -60,3 +60,33 @@ pub const MAX_WEBHOOK_ATTEMPTS: u32 = 10;
 /// (the gateway is not a durable queue; anything slower should be an
 /// event sink, not a webhook).
 pub const MAX_WEBHOOK_TIMEOUT_MS: u64 = 60_000;
+
+/// Validation bound on `gateway.analytics_stream.buffer` (DW-121): the
+/// firehose channel's capacity floor. Below this a single flush tick of
+/// bursty traffic would spill into emit-time drops that no buffer
+/// tuning could have absorbed.
+pub const MIN_STREAM_BUFFER: u64 = 64;
+
+/// Validation bound on `gateway.analytics_stream.buffer` (DW-121): the
+/// ceiling on records queued between the dataplane and the flusher.
+/// Every queued record is an owned copy of the access record, so the
+/// buffer is the firehose's whole memory story — this bound keeps a
+/// mistyped config from allocating an unbounded "bounded" queue.
+pub const MAX_STREAM_BUFFER: u64 = 65_536;
+
+/// Validation bound on `gateway.analytics_stream.flush_ms` (DW-121):
+/// the batch-latency ceiling (one minute — the same shape as the
+/// webhook timeout ceiling: a batch older than this is a backlogged
+/// pipeline, not a tuning knob).
+pub const MAX_STREAM_FLUSH_MS: u64 = 60_000;
+
+/// Validation floor on `gateway.analytics_stream.flush_ms` (DW-121):
+/// below 100 ms the flusher degenerates into per-record delivery, which
+/// the batch knob exists to prevent.
+pub const MIN_STREAM_FLUSH_MS: u64 = 100;
+
+/// Validation bound on `gateway.analytics_stream.batch_max` (DW-121):
+/// records per flushed batch ceiling (with the byte cap, whichever
+/// comes first — the batch is the delivery unit, so this is also the
+/// per-delivery record-count bound).
+pub const MAX_STREAM_BATCH_RECORDS: u64 = 4_096;

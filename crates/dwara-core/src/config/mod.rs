@@ -214,6 +214,21 @@ pub struct Gateway {
     /// reload can add or rename dimensions without a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analytics: Option<AnalyticsConfig>,
+    /// Real-time access-record stream (DW-121, the opt-in firehose out):
+    /// every completed request's access record — not rollups, not the
+    /// discrete DW-044 ops events — streamed to an external sink in
+    /// flushed batches. Complements, never replaces, the embedded
+    /// analytics store: the two are configured independently and a
+    /// deployment can run either, both, or neither. Absent (the
+    /// default): no stream. The pipeline is fire-and-forget end to end
+    /// (a bounded channel that drops and counts — it can never slow or
+    /// block the dataplane). See the `events::stream` module docs for
+    /// the wire format, the batching contract, and the failure
+    /// isolation story. Startup wiring arms the pipeline (the channel
+    /// capacity is fixed at boot); the sink set — including the
+    /// enabled/disabled state — is live per config generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_stream: Option<AnalyticsStreamConfig>,
     /// The GeoIP database (DW-050): MaxMind-format .mmdb file backing
     /// `authorization.geoip` country/ASN predicates. Absent: geo rules
     /// are rejected by validation (an unevaluable gate is an authoring
@@ -523,6 +538,174 @@ fn is_default_webhook_backoff_base_ms(v: &u64) -> bool {
 }
 fn is_default_webhook_backoff_cap_ms(v: &u64) -> bool {
     *v == DEFAULT_WEBHOOK_BACKOFF_CAP_MS
+}
+
+/// Real-time access-record stream (DW-121,
+/// `gateway.analytics_stream`).
+///
+/// Every completed request's access record is copied onto a bounded
+/// channel at request completion (drop-and-count on full — the stream
+/// can never slow the dataplane), and a background flusher turns the
+/// queue into ordered batches delivered to the configured sink: one
+/// delivery per flushed BATCH, not per record. The channel capacity is
+/// fixed at boot; the sink set, flush cadence, and batch bound are read
+/// live from the current generation, so a reload can retarget or
+/// disable the stream without a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsStreamConfig {
+    /// Where flushed batches go. One sink in v1 (`type: webhook`); the
+    /// set is closed so a second implementation (a Kafka producer is
+    /// the documented slot) is an additive config change, not a silent
+    /// behavior change.
+    pub sink: AnalyticsStreamSink,
+    /// Capacity of the bounded record channel (default 8192; validated
+    /// to [64, 65536]). The queue's entire memory story: every queued
+    /// record is an owned copy, and a full queue DROPS (and counts)
+    /// rather than blocking the request path. Startup wiring: the
+    /// capacity is fixed when the gateway boots (a live reload changes
+    /// the sink and the cadence, not this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer: Option<u64>,
+    /// Maximum batch latency in milliseconds (default 1000; validated
+    /// to [100, 60000]): a batch is flushed when it holds
+    /// `batch_max` records, reaches the batch byte cap, or this much
+    /// time has passed since its first record — whichever comes first.
+    /// Read live per flush cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_ms: Option<u64>,
+    /// Maximum records per flushed batch (default 512; validated to
+    /// [1, 4096]). With the batch byte cap, whichever comes first. One
+    /// batch is one delivery, so this is also the largest single
+    /// delivery's record count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_max: Option<u64>,
+}
+
+/// The access-record stream's sink (DW-121,
+/// `gateway.analytics_stream.sink`). Closed set, internally tagged
+/// (`type: webhook`): `webhook` ships today. A Kafka producer is the
+/// documented second slot, deliberately not shipped in v1 (the
+/// lean-deps rule — the same decision that deferred Parquet to the
+/// DW-156 backlog): a sink slot that pulls a client library must earn
+/// its dependency weight. The variant payloads carry their own
+/// `deny_unknown_fields`, so a misspelled knob inside a sink is still
+/// a rejected config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AnalyticsStreamSink {
+    /// POST each flushed batch as one NDJSON body (one JSON object per
+    /// line, one line per record) to the configured URL, reusing the
+    /// DW-044 webhook delivery engine's retry/budget shape — one
+    /// delivery (with its retries) per batch.
+    Webhook(AnalyticsStreamWebhook),
+}
+
+/// The webhook batch sink (DW-121,
+/// `gateway.analytics_stream.sink.webhook`). Same URL/header/retry
+/// grammar as `gateway.webhooks[]` (DW-044) — the delivery engine is
+/// shared — minus the `events` filter (a record stream has no kinds to
+/// filter: every record goes to the sink).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsStreamWebhook {
+    /// Absolute `http://` or `https://` URL the batch is POSTed to.
+    /// `https://` verifies against the public webpki root set (no
+    /// `trusted_ca_file` override — v1 scope, same as alert webhooks).
+    pub url: String,
+    /// Headers sent on every batch delivery (e.g. the collector's auth
+    /// token). Values may be inline or `${ENV_NAME}` / `${file:/path}`
+    /// secret references (DW-045), resolved at config-compile time;
+    /// inline values are redacted in every config echo. Use a
+    /// reference for bearer tokens and signing secrets.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// TOTAL budget for one batch delivery (all retry attempts share
+    /// it), in milliseconds. Default 5000: a BATCH is heavier than a
+    /// single alert envelope, and the flusher delivers batches strictly
+    /// in order, so this bounds how long one unlucky batch can hold
+    /// back the queue. Validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's
+    /// bound).
+    #[serde(
+        default = "default_stream_webhook_timeout_ms",
+        skip_serializing_if = "is_default_stream_webhook_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+    /// Total attempts per batch delivery (first try plus retries);
+    /// retries cover transport failures and the transient status set
+    /// (429/502/503/504), honoring a seconds-form `Retry-After`.
+    /// Default 3; validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_ATTEMPTS`].
+    #[serde(
+        default = "default_stream_webhook_attempts",
+        skip_serializing_if = "is_default_stream_webhook_attempts"
+    )]
+    pub max_attempts: u32,
+    /// First backoff between batch attempts, doubling per retry up to
+    /// `backoff_cap_ms` (a `Retry-After` answer replaces the computed
+    /// value for that wait). Default 250 — a batch retry is heavier
+    /// than an alert retry, so it starts slower.
+    #[serde(
+        default = "default_stream_webhook_backoff_base_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_base_ms"
+    )]
+    pub backoff_base_ms: u64,
+    /// Upper bound on the computed backoff. Default 4000; must be >=
+    /// `backoff_base_ms`.
+    #[serde(
+        default = "default_stream_webhook_backoff_cap_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_cap_ms"
+    )]
+    pub backoff_cap_ms: u64,
+}
+
+/// Default `analytics_stream.buffer` (DW-121): the bounded record
+/// channel's capacity when the block is absent at boot (the stream is
+/// always constructed so a live reload can arm it). Lives in `config`
+/// with the retention defaults — the lowest consuming domain — so
+/// validation docs, the stream, and the binary read one definition.
+pub const DEFAULT_STREAM_BUFFER: u64 = 8_192;
+/// Default `analytics_stream.flush_ms` (DW-121): maximum batch latency.
+pub const DEFAULT_STREAM_FLUSH_MS: u64 = 1_000;
+/// Default `analytics_stream.batch_max` (DW-121): records per flushed
+/// batch.
+pub const DEFAULT_STREAM_BATCH_MAX: u64 = 512;
+/// Default `analytics_stream.sink.webhook.timeout_ms` (DW-121): a
+/// batch carries up to `batch_max` records, so its budget starts
+/// heavier than the alert webhook's 2000 but stays far under the
+/// one-minute ceiling.
+pub const DEFAULT_STREAM_WEBHOOK_TIMEOUT_MS: u64 = 5_000;
+/// Default `analytics_stream.sink.webhook.max_attempts` (DW-121).
+pub const DEFAULT_STREAM_WEBHOOK_ATTEMPTS: u32 = 3;
+/// Default `analytics_stream.sink.webhook.backoff_base_ms` (DW-121).
+pub const DEFAULT_STREAM_WEBHOOK_BACKOFF_BASE_MS: u64 = 250;
+/// Default `analytics_stream.sink.webhook.backoff_cap_ms` (DW-121).
+pub const DEFAULT_STREAM_WEBHOOK_BACKOFF_CAP_MS: u64 = 4_000;
+
+fn default_stream_webhook_timeout_ms() -> u64 {
+    DEFAULT_STREAM_WEBHOOK_TIMEOUT_MS
+}
+fn default_stream_webhook_attempts() -> u32 {
+    DEFAULT_STREAM_WEBHOOK_ATTEMPTS
+}
+fn default_stream_webhook_backoff_base_ms() -> u64 {
+    DEFAULT_STREAM_WEBHOOK_BACKOFF_BASE_MS
+}
+fn default_stream_webhook_backoff_cap_ms() -> u64 {
+    DEFAULT_STREAM_WEBHOOK_BACKOFF_CAP_MS
+}
+fn is_default_stream_webhook_timeout_ms(v: &u64) -> bool {
+    *v == DEFAULT_STREAM_WEBHOOK_TIMEOUT_MS
+}
+fn is_default_stream_webhook_attempts(v: &u32) -> bool {
+    *v == DEFAULT_STREAM_WEBHOOK_ATTEMPTS
+}
+fn is_default_stream_webhook_backoff_base_ms(v: &u64) -> bool {
+    *v == DEFAULT_STREAM_WEBHOOK_BACKOFF_BASE_MS
+}
+fn is_default_stream_webhook_backoff_cap_ms(v: &u64) -> bool {
+    *v == DEFAULT_STREAM_WEBHOOK_BACKOFF_CAP_MS
 }
 
 /// Gateway-wide HMAC request-signing policy (DW-036). The credential

@@ -144,6 +144,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        analytics_stream: None,
         geoip: None,
     }
 }

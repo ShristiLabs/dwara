@@ -20,8 +20,10 @@
 //! and the DW-043 embedded store (`analytics::EmbeddedAnalytics`, SQLite
 //! rollups), which implements this contract on top of the richer
 //! per-request fields below. Ent planned: federated sink + warehouse
-//! export (DW-095); raw-record firehose (DW-121) taps the same event
-//! shape.
+//! export (DW-095). The raw-record firehose (DW-121) deliberately does
+//! NOT implement this contract: it streams the access record itself
+//! (with `request_id` and the redacted path this event shape omits)
+//! through its own sink seam — see `events::stream`.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

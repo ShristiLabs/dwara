@@ -458,6 +458,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // its pending queue is abandoned (the gateway is not a durable
     // queue).
     let webhook_task = dp.spawn_webhook_deliverer(shutdown_rx.clone());
+    // DW-121: the access-record stream — constructed ALWAYS (an
+    // unconfigured stream is disabled by its enabled flag, so a live
+    // reload can arm the pipeline without a restart; only the channel
+    // CAPACITY is a boot-time property, taken from the config when the
+    // block is present at boot), with the flusher spawned against the
+    // same shutdown watch. The flusher delivers batches inline and in
+    // order; on shutdown it drains what is queued into one final
+    // flush attempt (the gateway is not a durable queue).
+    let stream_cfg_buffer = state
+        .snapshot()
+        .gateway()
+        .analytics_stream
+        .as_ref()
+        .and_then(|c| c.buffer)
+        .unwrap_or(dwara_core::config::DEFAULT_STREAM_BUFFER);
+    let record_stream =
+        dwara_core::events::stream::AccessRecordStream::with_capacity(stream_cfg_buffer as usize);
+    dp.set_record_stream(std::sync::Arc::clone(&record_stream));
+    let stream_task = dp.spawn_record_stream_flusher(shutdown_rx.clone());
     // DW-120: the usage-report export worker — same background machinery
     // as the analytics rollup cascade, reading the live config each
     // tick. Runs even without an analytics store or an exports block
@@ -690,6 +709,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for h in analytics_handles {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
     }
+    // DW-121: the record-stream flusher drains the same way — its
+    // shutdown handler flushes one final batch (bounded by the sink's
+    // delivery timeout, and by this 5 s window whichever is shorter).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream_task).await;
 
     // Final drain within the shutdown budget; whatever is left when the
     // deadline passes is force-closed by process exit. The deadline is

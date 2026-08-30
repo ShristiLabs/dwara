@@ -9,6 +9,36 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Real-time analytics stream (DW-121): an `analytics_stream` block
+  streams every completed request's access record — one per request,
+  not rollups, not the discrete DW-044 ops events; unrouted 404s
+  included — to an external sink as ordered NDJSON batches: one JSON
+  object per line (`application/x-ndjson`, redacted-by-construction
+  fields: no query strings, no headers, no credentials; config-declared
+  custom dimensions ride along), one POST per flushed batch
+  (`batch_max` records default 512, a 2 MiB byte cap, or `flush_ms`
+  default 1 s — whichever comes first). The one shipped sink is
+  `type: webhook`, compiled through the SAME URL/`${...}`-header/retry
+  grammar as alert webhooks and delivered by the same budget-bounded
+  engine extracted for both (one total `timeout_ms` per batch shared
+  by every retry attempt, exponential backoff, Retry-After honored,
+  429/502/503/504 the retry set); a Kafka producer is the documented
+  second sink slot, deferred by the lean-deps rule (the Parquet/DW-156
+  precedent). Batches deliver strictly in order; the pipeline is
+  fire-and-forget end to end (bounded `buffer` channel, default 8192,
+  drop-and-count on full — a dead or slow collector degrades the
+  stream's completeness counters, never gateway latency). Reloads are
+  live: sink URL, cadence, batch bound, and enabled/disabled state are
+  per-generation (the refresh arms the offer path only after the
+  flusher has the new sink set, so arming loses nothing; a disable
+  with a queued tail counts the tail as dropped — `offered ==
+  delivered + failed + dropped` always holds). New metrics:
+  `dwara_access_records_streamed_total{outcome}` (closed set
+  delivered/failed/dropped), `dwara_access_records_offered_total`,
+  `dwara_access_records_dropped_total` (scrape-time gauges; the offer
+  path stays registry-free). Independent of the embedded analytics
+  store — run either, both, or neither.
+
 - Scheduled usage reports & exports (DW-120): an `analytics.exports`
   block (requires the DW-043 analytics store) turns the store into a
   scheduled reporter — a background worker (30 s tick, config read

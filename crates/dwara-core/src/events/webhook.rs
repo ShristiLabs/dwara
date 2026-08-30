@@ -174,23 +174,60 @@ impl WebhookTarget {
     /// target loudly (the microsecond-race backstop, same as the
     /// authenticator's credential resolution).
     pub fn compile(cfg: &Webhook) -> Result<Self, String> {
-        let uri: hyper::Uri = cfg
-            .url
+        let mut target = Self::compile_endpoint(
+            &cfg.url,
+            &cfg.headers,
+            cfg.timeout_ms,
+            cfg.max_attempts,
+            cfg.backoff_base_ms,
+            cfg.backoff_cap_ms,
+        )?;
+        let mut events = Vec::with_capacity(cfg.events.len());
+        for e in &cfg.events {
+            let Some(kind) = EventKind::from_config(e) else {
+                return Err(format!(
+                    "webhook url '{}' lists unknown event kind '{e}'",
+                    cfg.url
+                ));
+            };
+            events.push(kind);
+        }
+        target.events = events;
+        Ok(target)
+    }
+
+    /// Compile the endpoint half of a target — URL decomposition,
+    /// secret-reference header resolution (with the header-value
+    /// legality re-check), and the retry knobs — without any event-kind
+    /// filter. The shared bottom of [`WebhookTarget::compile`] and the
+    /// DW-121 record-stream sink's compilation
+    /// (`events::stream::WebhookRecordSink`), which delivers to an
+    /// endpoint with no kind filter at all. Same failure contract:
+    /// log-safe messages, fail closed, never a resolved value in the
+    /// error.
+    pub(super) fn compile_endpoint(
+        url: &str,
+        headers: &std::collections::BTreeMap<String, String>,
+        timeout_ms: u64,
+        max_attempts: u32,
+        backoff_base_ms: u64,
+        backoff_cap_ms: u64,
+    ) -> Result<Self, String> {
+        let uri: hyper::Uri = url
             .parse()
-            .map_err(|e| format!("webhook url '{}' does not parse: {e}", cfg.url))?;
+            .map_err(|e| format!("webhook url '{url}' does not parse: {e}"))?;
         let tls = match uri.scheme_str() {
             Some("http") => false,
             Some("https") => true,
             other => {
                 return Err(format!(
-                    "webhook url '{}' must be http:// or https://, got {other:?}",
-                    cfg.url
+                    "webhook url '{url}' must be http:// or https://, got {other:?}"
                 ))
             }
         };
         let host = uri
             .host()
-            .ok_or_else(|| format!("webhook url '{}' has no host", cfg.url))?
+            .ok_or_else(|| format!("webhook url '{url}' has no host"))?
             .to_string();
         let default_port = if tls { 443 } else { 80 };
         let port = uri.port_u16().unwrap_or(default_port);
@@ -208,20 +245,10 @@ impl WebhookTarget {
             .path_and_query()
             .map(|p| p.as_str().to_string())
             .unwrap_or_else(|| "/".to_string());
-        let mut events = Vec::with_capacity(cfg.events.len());
-        for e in &cfg.events {
-            let Some(kind) = EventKind::from_config(e) else {
-                return Err(format!(
-                    "webhook url '{}' lists unknown event kind '{e}'",
-                    cfg.url
-                ));
-            };
-            events.push(kind);
-        }
-        let mut headers = Vec::with_capacity(cfg.headers.len());
-        for (name, value) in &cfg.headers {
+        let mut compiled_headers = Vec::with_capacity(headers.len());
+        for (name, value) in headers {
             let resolved = resolve_configured_secret(value)
-                .map_err(|e| format!("webhook url '{}' header '{name}': {e}", cfg.url))?;
+                .map_err(|e| format!("webhook url '{url}' header '{name}': {e}"))?;
             // The request head is serialized by hand, so the resolved
             // bytes must be a legal single header value. Validation
             // checked this against the compile-time resolution; a secret
@@ -230,26 +257,25 @@ impl WebhookTarget {
             // target — the error names the header, never the value.
             if hyper::header::HeaderValue::from_str(&resolved).is_err() {
                 return Err(format!(
-                    "webhook url '{}' header '{name}': the resolved value contains \
+                    "webhook url '{url}' header '{name}': the resolved value contains \
                      characters that cannot appear in an HTTP header value",
-                    cfg.url
                 ));
             }
-            headers.push((name.clone(), resolved));
+            compiled_headers.push((name.clone(), resolved));
         }
         Ok(WebhookTarget {
-            url: cfg.url.clone(),
+            url: url.to_string(),
             host_header,
             dial_host,
             port,
             tls,
             path_and_query,
-            events,
-            headers,
-            timeout: Duration::from_millis(cfg.timeout_ms),
-            attempts: cfg.max_attempts,
-            backoff_base: Duration::from_millis(cfg.backoff_base_ms),
-            backoff_cap: Duration::from_millis(cfg.backoff_cap_ms),
+            events: Vec::new(),
+            headers: compiled_headers,
+            timeout: Duration::from_millis(timeout_ms),
+            attempts: max_attempts,
+            backoff_base: Duration::from_millis(backoff_base_ms),
+            backoff_cap: Duration::from_millis(backoff_cap_ms),
         })
     }
 
@@ -375,8 +401,17 @@ fn remaining(deadline: Instant) -> Option<Duration> {
 /// (DNS + TCP + optional TLS), write the request, read the response
 /// head. The whole attempt runs inside one `tokio::time::timeout` of
 /// the remaining budget, so no phase of it — resolution included — can
-/// outlive the delivery's total.
-async fn post_once(target: &WebhookTarget, body: &[u8], deadline: Instant) -> Attempt {
+/// outlive the delivery's total. `content_type` and `user_agent` name
+/// the body the caller is POSTing (the alert envelope and the DW-121
+/// record batch use different media types and agents; the transport
+/// shape is shared).
+async fn post_once(
+    target: &WebhookTarget,
+    body: &[u8],
+    deadline: Instant,
+    content_type: &str,
+    user_agent: &str,
+) -> Attempt {
     let Some(budget) = remaining(deadline) else {
         return Attempt::Fatal("delivery budget spent before the attempt".to_string());
     };
@@ -407,8 +442,8 @@ async fn post_once(target: &WebhookTarget, body: &[u8], deadline: Instant) -> At
             // Content-Type/User-Agent by appearing later.
             let mut head = format!(
                 "POST {} HTTP/1.1\r\nhost: {}\r\ncontent-length: {}\r\n\
-             connection: close\r\nuser-agent: {USER_AGENT}\r\n\
-             content-type: application/json\r\n",
+             connection: close\r\nuser-agent: {user_agent}\r\n\
+             content-type: {content_type}\r\n",
                 target.path_and_query,
                 target.host_header,
                 body.len()
@@ -516,49 +551,54 @@ fn webpki_root_store() -> rustls::RootCertStore {
     roots
 }
 
-/// Deliver one envelope to one target, with the documented retry shape.
-/// Counts exactly one outcome (`delivered` or `failed`) in
-/// `dwara_webhook_events_total{kind,outcome}`. Public for the delivery
-/// contract's unit tests; the deliverer calls it per delivery.
-pub async fn deliver(target: WebhookTarget, body: Bytes, kind: EventKind, obs: Arc<Observability>) {
+/// Terminal outcome of one body's retry cycle through the shared
+/// delivery engine. The engine itself counts nothing and logs only
+/// debug-level retry traces — each CALLER owns the outcome logging and
+/// the metric family it reports into (alert events:
+/// `dwara_webhook_events_total`; DW-121 record batches: the stream
+/// families).
+pub(super) enum DeliveryEnd {
+    /// A 2xx answer arrived on the `attempts`-th attempt.
+    Delivered { attempts: u32 },
+    /// Retries exhausted, a non-transient answer, or the budget spent.
+    Failed { attempts: u32, error: String },
+}
+
+/// The shared delivery engine (DW-044's retry/budget shape): one body,
+/// one target, ONE total timeout shared by every attempt, exponential
+/// backoff doubling to the target's cap, seconds-form `Retry-After`
+/// honored in place of the computed wait. This is the whole
+/// failure-isolation guarantee — a slow, hung, or flapping receiver
+/// costs at most `timeout` — and it is deliberately extractor-shared by
+/// the two POST-based pipelines in this domain: the alert-event
+/// deliverer and the DW-121 access-record batch sink. The caller
+/// decides how the outcome is counted.
+pub(super) async fn deliver_with_retry(
+    target: &WebhookTarget,
+    body: Bytes,
+    content_type: &str,
+    user_agent: &str,
+) -> DeliveryEnd {
     let deadline = Instant::now() + target.timeout;
     let mut backoff = target.backoff_base;
     let mut attempt = 1;
     loop {
-        match post_once(&target, &body, deadline).await {
+        match post_once(target, &body, deadline, content_type, user_agent).await {
             Attempt::Accepted => {
-                tracing::debug!(
-                    code = "webhook_delivered",
-                    url = %target.url,
-                    kind = kind.as_str(),
-                    attempt,
-                    "webhook delivered"
-                );
-                obs.record_webhook_event(kind.as_str(), "delivered");
-                return;
+                return DeliveryEnd::Delivered { attempts: attempt };
             }
             Attempt::Fatal(error) => {
-                tracing::warn!(
-                    code = "webhook_failed",
-                    url = %target.url,
-                    kind = kind.as_str(),
-                    attempt,
-                    "webhook delivery failed (not retrying): {error}"
-                );
-                obs.record_webhook_event(kind.as_str(), "failed");
-                return;
+                return DeliveryEnd::Failed {
+                    attempts: attempt,
+                    error,
+                };
             }
             Attempt::Retry { retry_after, error } => {
                 if attempt >= target.attempts {
-                    tracing::warn!(
-                        code = "webhook_failed",
-                        url = %target.url,
-                        kind = kind.as_str(),
-                        attempt,
-                        "webhook delivery still not accepted after {attempt} attempts: {error}"
-                    );
-                    obs.record_webhook_event(kind.as_str(), "failed");
-                    return;
+                    return DeliveryEnd::Failed {
+                        attempts: attempt,
+                        error: format!("still not accepted after {attempt} attempts: {error}"),
+                    };
                 }
                 // Retry-After replaces the computed backoff for this
                 // wait; a demanded zero falls back to the computed value
@@ -569,32 +609,22 @@ pub async fn deliver(target: WebhookTarget, body: Bytes, kind: EventKind, obs: A
                 };
                 backoff = backoff.saturating_mul(2).min(target.backoff_cap);
                 let Some(left) = remaining(deadline) else {
-                    tracing::warn!(
-                        code = "webhook_failed",
-                        url = %target.url,
-                        kind = kind.as_str(),
-                        attempt,
-                        "webhook delivery budget spent before retry: {error}"
-                    );
-                    obs.record_webhook_event(kind.as_str(), "failed");
-                    return;
+                    return DeliveryEnd::Failed {
+                        attempts: attempt,
+                        error: format!("delivery budget spent before retry: {error}"),
+                    };
                 };
                 if wait >= left {
-                    tracing::warn!(
-                        code = "webhook_failed",
-                        url = %target.url,
-                        kind = kind.as_str(),
-                        attempt,
-                        wait_ms = wait.as_millis() as u64,
-                        "webhook retry wait {wait:?} would exhaust the delivery budget: {error}"
-                    );
-                    obs.record_webhook_event(kind.as_str(), "failed");
-                    return;
+                    return DeliveryEnd::Failed {
+                        attempts: attempt,
+                        error: format!(
+                            "retry wait {wait:?} would exhaust the delivery budget: {error}"
+                        ),
+                    };
                 }
                 tracing::debug!(
                     code = "webhook_retry",
                     url = %target.url,
-                    kind = kind.as_str(),
                     attempt,
                     backoff_ms = wait.as_millis() as u64,
                     "webhook not accepted ({error}); retrying in {wait:?}"
@@ -602,6 +632,36 @@ pub async fn deliver(target: WebhookTarget, body: Bytes, kind: EventKind, obs: A
                 tokio::time::sleep(wait).await;
                 attempt += 1;
             }
+        }
+    }
+}
+
+/// Deliver one alert-event envelope to one target, with the documented
+/// retry shape, counting exactly one outcome (`delivered` or `failed`)
+/// in `dwara_webhook_events_total{kind,outcome}`. Public for the
+/// delivery contract's unit tests; the deliverer calls it per delivery.
+pub async fn deliver(target: WebhookTarget, body: Bytes, kind: EventKind, obs: Arc<Observability>) {
+    let url = target.url().to_string();
+    match deliver_with_retry(&target, body, "application/json", USER_AGENT).await {
+        DeliveryEnd::Delivered { attempts } => {
+            tracing::debug!(
+                code = "webhook_delivered",
+                url = %url,
+                kind = kind.as_str(),
+                attempt = attempts,
+                "webhook delivered"
+            );
+            obs.record_webhook_event(kind.as_str(), "delivered");
+        }
+        DeliveryEnd::Failed { attempts, error } => {
+            tracing::warn!(
+                code = "webhook_failed",
+                url = %url,
+                kind = kind.as_str(),
+                attempt = attempts,
+                "webhook delivery failed: {error}"
+            );
+            obs.record_webhook_event(kind.as_str(), "failed");
         }
     }
 }

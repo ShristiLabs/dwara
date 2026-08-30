@@ -1575,29 +1575,7 @@ fn validate_webhooks(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     let mut seen_urls = std::collections::BTreeSet::new();
     for (i, hook) in gateway.webhooks.iter().enumerate() {
         let field = format!("webhooks[{i}]");
-        match hook.url.parse::<hyper::Uri>() {
-            Ok(uri) => {
-                if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none()
-                {
-                    issues.push(issue(
-                        "gateway",
-                        "(root)",
-                        &format!("{field}.url"),
-                        format!(
-                            "'{}' must be an absolute http(s) URL with a host \
-                             (e.g. https://hooks.example.com/alerts)",
-                            hook.url
-                        ),
-                    ));
-                }
-            }
-            Err(_) => issues.push(issue(
-                "gateway",
-                "(root)",
-                &format!("{field}.url"),
-                format!("'{}' is not a valid URL", hook.url),
-            )),
-        }
+        validate_delivery_url(&format!("{field}.url"), &hook.url, issues);
         if !seen_urls.insert(hook.url.trim().to_string()) {
             issues.push(issue(
                 "gateway",
@@ -1636,44 +1614,7 @@ fn validate_webhooks(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 ));
             }
         }
-        for (name, value) in &hook.headers {
-            if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
-                issues.push(issue(
-                    "gateway",
-                    "(root)",
-                    &format!("{field}.headers"),
-                    format!("header name '{name}' is not a valid HTTP header name"),
-                ));
-                continue;
-            }
-            // DW-045: resolve the value NOW (literals pass through) so an
-            // unresolvable reference fails the generation closed; then the
-            // RESOLVED bytes must be representable as a header value. The
-            // issue names the header and the reason, never the value.
-            let problem = match crate::config::credentials::resolve_configured_secret(value) {
-                Ok(resolved) => {
-                    if hyper::header::HeaderValue::from_str(&resolved).is_err() {
-                        Some(
-                            "the header value (after secret-reference resolution) \
-                             contains characters that cannot appear in an HTTP \
-                             header value"
-                                .to_string(),
-                        )
-                    } else {
-                        None
-                    }
-                }
-                Err(message) => Some(message),
-            };
-            if let Some(message) = problem {
-                issues.push(issue(
-                    "gateway",
-                    "(root)",
-                    &format!("{field}.headers"),
-                    format!("header '{name}': {message}"),
-                ));
-            }
-        }
+        validate_delivery_headers(&field, &hook.headers, issues);
         if hook.timeout_ms == 0 || hook.timeout_ms > crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS {
             issues.push(issue(
                 "gateway",
@@ -1712,6 +1653,188 @@ fn validate_webhooks(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 "(root)",
                 &format!("{field}.backoff_cap_ms"),
                 "backoff_cap_ms must be >= backoff_base_ms",
+            ));
+        }
+    }
+}
+
+/// The URL shape shared by every outbound HTTP delivery surface
+/// (DW-044 webhooks and the DW-121 record-stream sink): absolute
+/// http(s) with a host.
+fn validate_delivery_url(field: &str, url: &str, issues: &mut Vec<ValidationIssue>) {
+    match url.parse::<hyper::Uri>() {
+        Ok(uri) => {
+            if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    field,
+                    format!(
+                        "'{url}' must be an absolute http(s) URL with a host \
+                         (e.g. https://hooks.example.com/alerts)"
+                    ),
+                ));
+            }
+        }
+        Err(_) => issues.push(issue(
+            "gateway",
+            "(root)",
+            field,
+            format!("'{url}' is not a valid URL"),
+        )),
+    }
+}
+
+/// The header grammar shared by every outbound HTTP delivery surface:
+/// names must be valid HTTP header names, and values (with `${...}`
+/// references resolved NOW, the DW-045 compile-time contract — an
+/// unresolvable reference fails the generation closed) must be
+/// representable as a single header value. Issues name the header and
+/// the reason, never the resolved value.
+fn validate_delivery_headers(
+    field: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for (name, value) in headers {
+        if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.headers"),
+                format!("header name '{name}' is not a valid HTTP header name"),
+            ));
+            continue;
+        }
+        let problem = match crate::config::credentials::resolve_configured_secret(value) {
+            Ok(resolved) => {
+                if hyper::header::HeaderValue::from_str(&resolved).is_err() {
+                    Some(
+                        "the header value (after secret-reference resolution) \
+                         contains characters that cannot appear in an HTTP \
+                         header value"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            }
+            Err(message) => Some(message),
+        };
+        if let Some(message) = problem {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.headers"),
+                format!("header '{name}': {message}"),
+            ));
+        }
+    }
+}
+
+/// Validate the `gateway.analytics_stream` block (DW-121): the sink's
+/// URL and headers through the shared outbound-delivery grammar
+/// (alert webhooks and the record stream must not drift), the shared
+/// retry-knob bounds, and the pipeline knobs — `buffer` (a boot-time
+/// memory bound), `flush_ms` (batch latency), and `batch_max` (the
+/// per-delivery record count).
+fn validate_analytics_stream(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(cfg) = gateway.analytics_stream.as_ref() else {
+        return;
+    };
+    match &cfg.sink {
+        crate::config::AnalyticsStreamSink::Webhook(wh) => {
+            validate_delivery_url("analytics_stream.sink.webhook.url", &wh.url, issues);
+            validate_delivery_headers("analytics_stream.sink.webhook", &wh.headers, issues);
+            if wh.timeout_ms == 0 || wh.timeout_ms > crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.webhook.timeout_ms",
+                    format!(
+                        "timeout_ms must be in 1..={} (one total budget per batch \
+                         delivery, shared by every retry attempt — the shared \
+                         webhook engine's bound)",
+                        crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS
+                    ),
+                ));
+            }
+            if wh.max_attempts == 0 || wh.max_attempts > crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+            {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.webhook.max_attempts",
+                    format!(
+                        "max_attempts must be in 1..={} (total attempts per batch \
+                         delivery)",
+                        crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+                    ),
+                ));
+            }
+            if wh.backoff_base_ms == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.webhook.backoff_base_ms",
+                    "backoff_base_ms must be > 0",
+                ));
+            }
+            if wh.backoff_cap_ms < wh.backoff_base_ms {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.webhook.backoff_cap_ms",
+                    "backoff_cap_ms must be >= backoff_base_ms",
+                ));
+            }
+        }
+    }
+    if let Some(buffer) = cfg.buffer {
+        if !(crate::config::limits::MIN_STREAM_BUFFER..=crate::config::limits::MAX_STREAM_BUFFER)
+            .contains(&buffer)
+        {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics_stream.buffer",
+                format!(
+                    "buffer must be in {}..={} (the queue's whole memory story; \
+                     a full queue drops and counts, it never blocks)",
+                    crate::config::limits::MIN_STREAM_BUFFER,
+                    crate::config::limits::MAX_STREAM_BUFFER,
+                ),
+            ));
+        }
+    }
+    if let Some(flush) = cfg.flush_ms {
+        if !(crate::config::limits::MIN_STREAM_FLUSH_MS
+            ..=crate::config::limits::MAX_STREAM_FLUSH_MS)
+            .contains(&flush)
+        {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics_stream.flush_ms",
+                format!(
+                    "flush_ms must be in {}..={} (maximum batch latency)",
+                    crate::config::limits::MIN_STREAM_FLUSH_MS,
+                    crate::config::limits::MAX_STREAM_FLUSH_MS,
+                ),
+            ));
+        }
+    }
+    if let Some(batch) = cfg.batch_max {
+        if batch == 0 || batch > crate::config::limits::MAX_STREAM_BATCH_RECORDS {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics_stream.batch_max",
+                format!(
+                    "batch_max must be in 1..={} (records per flushed batch — \
+                     also the largest single delivery)",
+                    crate::config::limits::MAX_STREAM_BATCH_RECORDS,
+                ),
             ));
         }
     }
@@ -1781,6 +1904,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 
     // DW-044: alert/event webhook targets.
     validate_webhooks(gateway, &mut issues);
+    // DW-121: the access-record stream.
+    validate_analytics_stream(gateway, &mut issues);
 
     // DW-043: the embedded analytics store block.
     validate_analytics(gateway, &mut issues);
@@ -3582,6 +3707,7 @@ impl Snapshot {
                 hmac_auth: None,
                 webhooks: Vec::new(),
                 analytics: None,
+                analytics_stream: None,
                 geoip: None,
             }),
             routes: Arc::new(RouteTable::empty()),

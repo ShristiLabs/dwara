@@ -520,6 +520,24 @@ pub struct DataPlane {
     #[allow(dead_code)]
     webhook_targets_anchor:
         tokio::sync::watch::Receiver<Arc<Vec<crate::events::webhook::WebhookTarget>>>,
+    /// The compiled access-record stream state of the CURRENT
+    /// generation (DW-121): sinks, flush cadence, and batch bound,
+    /// pushed to the flusher task over this watch channel by every
+    /// `refresh` — a reload retargets the stream with no restart.
+    stream_targets: tokio::sync::watch::Sender<crate::events::stream::StreamTargets>,
+    /// The construction-time receiver of `stream_targets` (the
+    /// `webhook_targets_anchor` shape: keeps the watch channel open
+    /// between construction and the flusher's spawn).
+    #[allow(dead_code)]
+    stream_targets_anchor: tokio::sync::watch::Receiver<crate::events::stream::StreamTargets>,
+    /// The access-record stream (DW-121): constructed once at startup
+    /// by dwara-bin (ALWAYS — an unconfigured stream is disabled by
+    /// its enabled flag, so a live reload can arm it) and drained by
+    /// the flusher task. ArcSwap for the same reason as `analytics`:
+    /// the completion path reads it on EVERY request, and the offer
+    /// itself is fire-and-forget (`try_send` onto a bounded channel —
+    /// full drops and counts, never blocks).
+    record_stream: arc_swap::ArcSwapOption<crate::events::stream::AccessRecordStream>,
     /// The local response cache (DW-037): the store backend, route
     /// epochs, and the revalidation guard. RUNTIME STATE on the
     /// dataplane (like the priority counters), deliberately NOT part of
@@ -635,6 +653,16 @@ impl DataPlane {
         let rate_limits = RateLimitEngine::compile(snapshot.gateway());
         let webhook_targets = Arc::new(compile_webhook_targets(&snapshot));
         let (target_tx, target_anchor) = tokio::sync::watch::channel(webhook_targets);
+        let obs = Arc::new(Observability::from_env());
+        // DW-121: the first generation's record-stream state, compiled
+        // through the same path every later `refresh` uses. The sinks
+        // hold THIS dataplane's observability handle (their outcome
+        // counters must land in the registered registry).
+        let stream_targets = crate::events::stream::compile_stream_targets(
+            snapshot.gateway().analytics_stream.as_ref(),
+            &obs,
+        );
+        let (stream_tx, stream_anchor) = tokio::sync::watch::channel(stream_targets);
         let dp = DataPlane {
             current: ArcSwap::from_pointee(Generation { snapshot, registry }),
             global_cap: ArcSwap::from_pointee(global_cap),
@@ -645,10 +673,13 @@ impl DataPlane {
             credential_pepper: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
-            obs: Arc::new(Observability::from_env()),
+            obs: Arc::clone(&obs),
             events,
             webhook_targets: target_tx,
             webhook_targets_anchor: target_anchor,
+            stream_targets: stream_tx,
+            stream_targets_anchor: stream_anchor,
+            record_stream: arc_swap::ArcSwapOption::empty(),
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             analytics: arc_swap::ArcSwapOption::empty(),
             geoip: arc_swap::ArcSwapOption::empty(),
@@ -727,6 +758,84 @@ impl DataPlane {
     /// Admin surface seam.
     pub fn analytics(&self) -> Option<Arc<crate::analytics::EmbeddedAnalytics>> {
         self.analytics.load_full()
+    }
+
+    /// Attach the access-record stream (DW-121): dwara-bin constructs
+    /// it ALWAYS (capacity from the config when the block is present
+    /// at boot, the default otherwise) and hands it here once, before
+    /// serving traffic; the flusher is spawned separately
+    /// ([`DataPlane::spawn_record_stream_flusher`]). Arming is the
+    /// generation's business: this immediately applies the CURRENT
+    /// compiled sink set's enabled flag, so a stream attached after
+    /// construction with sinks configured does not wait for a reload
+    /// to start queuing.
+    pub fn set_record_stream(&self, stream: Arc<crate::events::stream::AccessRecordStream>) {
+        let enabled = !self.stream_targets.borrow().sinks.is_empty();
+        stream.set_enabled(enabled);
+        self.record_stream.store(Some(stream));
+    }
+
+    /// The access-record stream when one is attached (DW-121; None =
+    /// offers are no-ops — the direct-drive tests' shape). Scrape and
+    /// diagnostics seam.
+    pub fn record_stream(&self) -> Option<Arc<crate::events::stream::AccessRecordStream>> {
+        self.record_stream.load_full()
+    }
+
+    /// A fresh receiver of the CURRENT record-stream target state
+    /// (DW-121); updates on every `refresh`. Tests driving the flusher
+    /// directly use this.
+    pub fn stream_targets(
+        &self,
+    ) -> tokio::sync::watch::Receiver<crate::events::stream::StreamTargets> {
+        self.stream_targets.subscribe()
+    }
+
+    /// Spawn the record-stream flusher (DW-121): one background task
+    /// draining the stream's bounded channel into ordered batches and
+    /// delivering each batch (one retry cycle per batch) to the
+    /// current generation's sinks. Exactly one flusher per dataplane
+    /// (the channel's single-consumer receiver is gone after the
+    /// first); a duplicate spawn logs and returns a finished handle.
+    /// The task stops on `shutdown` after one final drain-and-flush.
+    pub fn spawn_record_stream_flusher(
+        self: &Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let Some(stream) = self.record_stream() else {
+            tracing::error!(
+                code = "record_stream_flusher_no_stream",
+                "record stream flusher spawned without a stream attached; ignoring"
+            );
+            return tokio::spawn(async {});
+        };
+        let Some(rx) = stream.take_receiver() else {
+            tracing::error!(
+                code = "record_stream_flusher_already_running",
+                "record stream flusher already spawned for this dataplane; ignoring \
+                 the duplicate spawn"
+            );
+            return tokio::spawn(async {});
+        };
+        tokio::spawn(crate::events::stream::run_stream_flusher(
+            rx,
+            self.stream_targets(),
+            Arc::clone(&self.obs),
+            shutdown,
+        ))
+    }
+
+    /// The request-completion record-stream hook (DW-121):
+    /// fire-and-forget offer of one finished request's record to the
+    /// external sink pipeline. No-op (one ArcSwap load) when no stream
+    /// is attached or the current generation compiled no sink; never
+    /// blocks (a bounded-channel `try_send` that drops and counts on
+    /// full).
+    fn record_stream_offer(&self, rec: &observability::AccessRecord) {
+        let guard = self.record_stream.load();
+        if let Some(stream) = &*guard {
+            stream.offer(rec);
+        }
     }
 
     /// Attach/replace the GeoIP database (DW-050). dwara-bin opens it
@@ -866,6 +975,31 @@ impl DataPlane {
                 code = "webhook_targets_watch_closed",
                 "webhook target watch channel closed; deliveries will keep using the last set"
             );
+        }
+        // DW-121: the new generation's record-stream state — sinks
+        // (re-resolved per compile), flush cadence, batch bound —
+        // applies to the next batch, and the offer path's enabled flag
+        // follows the compiled sink count (an unconfigured or
+        // fail-closed stream never queues a record). ORDER: the watch
+        // is pushed BEFORE the flag flips, so a reload ARMING the
+        // stream never queues a record the flusher has no sink for
+        // yet (the symmetric disarm window — offers stopping a moment
+        // before the flusher's sink set empties — drains the tail to
+        // the still-compiled sink, which is the operator's intent).
+        let stream_state = crate::events::stream::compile_stream_targets(
+            self.state.snapshot().gateway().analytics_stream.as_ref(),
+            &self.obs,
+        );
+        if self.stream_targets.send(stream_state).is_err() {
+            tracing::error!(
+                code = "record_stream_targets_watch_closed",
+                "record stream target watch channel closed; the flusher will keep \
+                 using the last set"
+            );
+        }
+        let armed = !self.stream_targets.borrow().sinks.is_empty();
+        if let Some(stream) = self.record_stream() {
+            stream.set_enabled(armed);
         }
         self.rebuild_authn();
     }
@@ -1112,6 +1246,12 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
             // model as the rate-limiter gauges above).
             refresh_quota_gauges(dp, obs);
             crate::events::refresh_event_gauges(&dp.events, obs);
+            // DW-121: the stream's offered/dropped gauges are a
+            // scrape-time snapshot of the stream's monotonic counters
+            // (the same walk model).
+            if let Some(stream) = dp.record_stream() {
+                crate::events::stream::refresh_stream_gauges(&stream, obs);
+            }
             // DW-037: the cache entries gauge is a scrape-time snapshot
             // of the backing store's approximate count (the same walk
             // model as the rate-limiter gauges above).
@@ -1422,6 +1562,7 @@ where
     obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
     obs.record_slo(&rec.route, status, rec.duration_ms);
     dp.record_analytics(&rec);
+    dp.record_stream_offer(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
     if obs.should_log_access(status) {
         observability::emit_access(&rec);
