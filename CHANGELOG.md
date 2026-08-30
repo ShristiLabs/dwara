@@ -9,6 +9,28 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- SLO & error-budget export (DW-052): routes can declare service-level
+  objectives (`routes[].slo`: `availability` percentage, optional
+  `latency_ms` threshold + `latency_target` percentage, validated),
+  exported as `dwara_slo_burn_rate{route,objective,window}` and
+  `dwara_slo_target{route,objective}` metrics for multiwindow
+  burn-rate alerting. Burn rate is the standard error-budget
+  consumption signal: the bad-request fraction over a process-local
+  sliding window (5m and 1h, 15-second buckets) divided by the allowed
+  fraction — 1.0 consumes the budget at exactly the allowed rate, 14.4
+  over 1h is the classic fast-burn page. Availability counts a request
+  bad only when the GATEWAY answers 5xx (client errors are the
+  caller's policy); latency counts bad when the end-to-end duration
+  exceeds the threshold. Values are computed from windowed counters by
+  a custom Prometheus COLLECTOR at scrape time — always fresh, never a
+  stale sampled gauge, no background task — with empty windows
+  reporting 0.0 (never NaN, which would break alerting comparisons)
+  and unconfigured features exporting no series at all (empty families
+  are dropped: the text encoder would panic on them). Routes whose
+  `slo` block disappears on reload lose their series. The starter
+  Grafana dashboard gains an "SLO burn rate by route and objective"
+  panel with the 6x/14.4x alert thresholds drawn.
+
 - Embedded analytics store (DW-043): an optional `analytics` block on
   the gateway config opens a SEPARATE SQLite database (never the state
   store's file) that records every completed request and answers

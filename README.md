@@ -1698,6 +1698,15 @@ families:
 - `dwara_events_dropped_total` / `dwara_events_emitted_total` — gauges
   (scrape-time snapshots of the event bus's counters: events dropped at
   emit time — full queue or no deliverer — and events queued — DW-044)
+- `dwara_slo_burn_rate{route,objective,window}` — gauge (error-budget
+  consumption per route SLO objective, DW-052: the bad-request fraction
+  over a 5m or 1h process-local sliding window divided by the allowed
+  fraction; 1.0 consumes the budget at exactly the allowed rate, 14.4
+  over 1h is the classic fast-burn page. `objective` is `availability`
+  (bad = gateway-answered 5xx) or `latency` (bad = over the configured
+  threshold); only routes with an `slo` block export series)
+- `dwara_slo_target{route,objective}` — gauge (the configured target as
+  a fraction, DW-052)
 
 Breaker, endpoint-health, fail-open, and rate-limiter series are
 refreshed at scrape time from live state; series for

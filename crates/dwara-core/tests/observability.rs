@@ -1331,3 +1331,86 @@ async fn rate_limiter_families_scrape_live_traffic_with_rules() {
         assert_eq!(samples[0].0, "", "no labels on {family}");
     }
 }
+
+// --- SLO export end to end (DW-052) ----------------------------------------
+
+#[tokio::test]
+async fn slo_series_flow_from_config_through_traffic_to_metrics() {
+    // A route with an `slo` block: two 200s under the latency
+    // threshold and one 500 through the same backend, then a scrape.
+    // The wiring under test is config -> refresh -> completion ->
+    // /metrics; the window arithmetic itself is unit-pinned.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = Arc::new(Mutex::new(0u32));
+    let counter = Arc::clone(&served);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                // Count per REQUEST, not per connection: the pooled
+                // upstream client reuses one TCP connection for all
+                // three requests.
+                let service = service_fn(move |_req: Request<Incoming>| {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        let n = {
+                            let mut c = counter.lock().unwrap();
+                            *c += 1;
+                            *c
+                        };
+                        let status = if n == 3 { 500 } else { 200 };
+                        let resp: Response<Full<Bytes>> = hyper::Response::builder()
+                            .status(status)
+                            .body(Full::new(Bytes::new()))
+                            .unwrap();
+                        Ok::<_, std::convert::Infallible>(resp)
+                    }
+                });
+                let _ = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    let dp = proxy_config(
+        port,
+        "    slo:\n      availability: 99.9\n      latency_ms: 1000\n",
+    );
+    for _ in 0..3 {
+        let resp = dwara_core::proxy::handle(&dp, peer(), req("/api/x")).await;
+        let _ = body_text(resp).await;
+    }
+    let resp = dwara_core::proxy::handle(&dp, peer(), req("/metrics")).await;
+    let text = body_text(resp).await;
+    // Both objectives export for the configured route, both windows.
+    for objective in ["availability", "latency"] {
+        for window in ["5m", "1h"] {
+            assert!(
+                text.contains(&format!(
+                    "dwara_slo_burn_rate{{objective=\"{objective}\",route=\"main\",\
+                     window=\"{window}\"}}"
+                )),
+                "missing {objective}/{window} series:\n{text}"
+            );
+        }
+    }
+    assert!(text.contains("dwara_slo_target{objective=\"availability\",route=\"main\"} 0.999"));
+    // One 500 of three requests at 0.1% allowed -> burn 333.33...
+    let line = text
+        .lines()
+        .find(|l| {
+            l.starts_with(
+                "dwara_slo_burn_rate{objective=\"availability\",route=\"main\",window=\"1h\"}",
+            )
+        })
+        .unwrap();
+    let value: f64 = line.split_whitespace().last().unwrap().parse().unwrap();
+    assert!(
+        (value - (1.0 / 3.0) / 0.001).abs() < 1e-6,
+        "one 500 of three at 99.9% target: {value}"
+    );
+}

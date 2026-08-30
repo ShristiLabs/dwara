@@ -58,11 +58,19 @@ and cleartext listener just like `/healthz` (see
 | `dwara_webhook_events_total` | counter | `kind`, `outcome` |
 | `dwara_events_dropped_total` | gauge | — |
 | `dwara_events_emitted_total` | gauge | — |
+| `dwara_slo_burn_rate` | gauge | `route`, `objective`, `window` |
+| `dwara_slo_target` | gauge | `route`, `objective` |
 
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are
 aggregate/unlabeled even though the engine tracks many per-key cells
-internally. `dwara_policy_dry_run_total` counts requests a
+internally. The SLO series (`dwara_slo_*`, DW-052) exist only for
+routes carrying an [`slo` block](#slos-and-error-budgets):
+`dwara_slo_burn_rate` is the bad-request fraction over a 5m or 1h
+process-local sliding window divided by the allowed fraction — 1.0
+consumes the error budget at exactly the allowed rate, and the
+dashboard's SLO panel draws the 6x (slow burn) and 14.4x (fast burn)
+alerting lines. `dwara_policy_dry_run_total` counts requests a
 [dry-run policy](./maintenance#dry-run-preview-a-policy-before-enforcing-it)
 would have rejected, by phase (`route_limits`, `authz`,
 `rate_limit`, `load_shed`) and route — its log counterpart is the
@@ -98,3 +106,30 @@ Point it at a collector with `DWARA_OTLP_ENDPOINT` (e.g.
 `.../v1/traces` URL is accepted as-is). In a default build, this
 environment variable is reserved but inert — setting it has no effect
 unless the binary was built with the feature.
+
+## SLOs and error budgets
+
+Routes can declare service-level objectives (DW-052); the gateway
+exports them as burn-rate metrics for multiwindow alerting:
+
+```yaml
+routes:
+  - name: checkout
+    # ...
+    slo:
+      availability: 99.9        # percent of requests that must not be a 5xx
+      latency_ms: 250           # optional latency objective threshold
+      latency_target: 99        # percent of requests within latency_ms (default 99)
+```
+
+`dwara_slo_burn_rate{route,objective,window}` is the error-budget
+consumption rate — the bad-request fraction over a 5m or 1h sliding
+window divided by the allowed fraction. `availability` counts a request
+bad only when the GATEWAY answers 5xx (client errors are the caller's
+policy, not availability); `latency` counts a request bad when its
+end-to-end duration exceeds `latency_ms`. Alert on the standard pair:
+14.4x over 1h pages (the 28-day budget would burn in ~2 days), 6x over
+1h is the slow-burn signal. The windows are process-local and start
+empty at boot; the shipped dashboard's "SLO burn rate" panel draws both
+the 6x and 14.4x thresholds. Routes without an `slo` block export
+nothing.

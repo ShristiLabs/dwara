@@ -474,6 +474,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     name: "steal-liveness".into(),
                     cache: None,
                     methods: vec![],
+                    slo: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {
@@ -509,6 +510,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     name: "catch".into(),
                     cache: None,
                     methods: vec![],
+                    slo: None,
                     service: "svc".into(),
                     r#match: RouteMatch {
                         path: PathMatch {

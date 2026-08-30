@@ -1885,6 +1885,17 @@
           "description": "Name of the service this route targets.",
           "type": "string"
         },
+        "slo": {
+          "description": "Service-level objectives (DW-052, feature analysis 4.17): the\nroute's availability target and optional latency objective,\nexported as `dwara_slo_burn_rate` / `dwara_slo_target` metrics\nover process-local 5m and 1h sliding windows for multiwindow\nburn-rate alerting. Availability counts a request BAD only when\nthe GATEWAY answers 5xx (client errors are the caller's policy,\nnot this route's availability). Absent (the default): the route\nrecords nothing and exports no SLO series. See [`RouteSlo`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSlo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "transforms": {
           "description": "Request/response transforms (DW-028, feature analysis 4.12):\nheader and query manipulation on the forwarded request and the\nroute's responses, plus the size-capped JSON-pointer body\ntransform — the transforms surface's ONE explicitly buffering\npiece. Absent (the default): bytes and headers flow untouched.\nSee [`Transforms`].",
           "anyOf": [
@@ -2120,6 +2131,37 @@
       "additionalProperties": false,
       "required": [
         "path"
+      ]
+    },
+    "RouteSlo": {
+      "description": "Per-route SLO objectives (DW-052, `routes[].slo`).",
+      "type": "object",
+      "properties": {
+        "availability": {
+          "description": "Availability target as a PERCENTAGE in (0, 100]: the share of\nrequests the gateway must answer outside the 5xx class.\n`99.9` allows one bad request per thousand.",
+          "type": "number",
+          "format": "double"
+        },
+        "latency_ms": {
+          "description": "Latency objective threshold in milliseconds: a request is BAD\nfor the latency objective when its end-to-end duration exceeds\nthis. Absent: no latency objective (only availability is\nexported for the route).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "latency_target": {
+          "description": "Latency target as a PERCENTAGE in (0, 100): the share of\nrequests that must complete within `latency_ms` (default 99).\nRequires `latency_ms`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "availability"
       ]
     },
     "SecurityHeaders": {

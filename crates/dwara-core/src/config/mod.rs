@@ -893,6 +893,37 @@ pub struct Route {
     /// default) allows every method, exactly like pre-DW-030.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<String>,
+    /// Service-level objectives (DW-052, feature analysis 4.17): the
+    /// route's availability target and optional latency objective,
+    /// exported as `dwara_slo_burn_rate` / `dwara_slo_target` metrics
+    /// over process-local 5m and 1h sliding windows for multiwindow
+    /// burn-rate alerting. Availability counts a request BAD only when
+    /// the GATEWAY answers 5xx (client errors are the caller's policy,
+    /// not this route's availability). Absent (the default): the route
+    /// records nothing and exports no SLO series. See [`RouteSlo`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slo: Option<RouteSlo>,
+}
+
+/// Per-route SLO objectives (DW-052, `routes[].slo`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSlo {
+    /// Availability target as a PERCENTAGE in (0, 100]: the share of
+    /// requests the gateway must answer outside the 5xx class.
+    /// `99.9` allows one bad request per thousand.
+    pub availability: f64,
+    /// Latency objective threshold in milliseconds: a request is BAD
+    /// for the latency objective when its end-to-end duration exceeds
+    /// this. Absent: no latency objective (only availability is
+    /// exported for the route).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    /// Latency target as a PERCENTAGE in (0, 100): the share of
+    /// requests that must complete within `latency_ms` (default 99).
+    /// Requires `latency_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_target: Option<f64>,
 }
 
 /// Route maintenance mode (DW-041): a per-route availability state that

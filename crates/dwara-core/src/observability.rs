@@ -370,6 +370,9 @@ pub struct Observability {
     coalescing_saved_upstream_calls_total: IntCounter,
     /// DW-038: requests currently parked as coalescing followers.
     coalescing_waiters: IntGauge,
+    /// DW-052: the SLO burn-rate collector (per-route windowed state
+    /// plus the two exported families; values refresh at scrape time).
+    slo: std::sync::Arc<SloState>,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -613,6 +616,10 @@ impl Observability {
              (DW-038).",
         )
         .expect("valid metric definition");
+        // DW-052: created once, shared between the recorder methods and
+        // the registered collector handle (the window state must be the
+        // SAME object the completion path writes and the scrape reads).
+        let slo = std::sync::Arc::new(SloState::new());
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -643,6 +650,7 @@ impl Observability {
             Box::new(coalescing_followers_total.clone()),
             Box::new(coalescing_saved_upstream_calls_total.clone()),
             Box::new(coalescing_waiters.clone()),
+            Box::new(SloCollectorHandle(std::sync::Arc::clone(&slo))),
         ] {
             registry
                 .register(m)
@@ -677,6 +685,7 @@ impl Observability {
             coalescing_followers_total,
             coalescing_saved_upstream_calls_total,
             coalescing_waiters,
+            slo,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -949,5 +958,336 @@ impl Observability {
 pub fn stamp_request_id(headers: &mut HeaderMap, request_id: &str) {
     if let Ok(v) = HeaderValue::from_str(request_id) {
         headers.insert(&X_REQUEST_ID, v);
+    }
+}
+
+// --- SLO & error budgets (DW-052) -----------------------------------------
+//
+// Per-route objectives (config: routes[].slo) exported as burn-rate
+// metrics for multiwindow alerting. Availability counts a request BAD
+// when the gateway answered 5xx (client errors are the caller's
+// policy, not availability); latency counts a request BAD when the
+// end-to-end duration exceeds the configured threshold. Burn rate is
+// the standard error-budget consumption signal:
+//
+//   burn = (bad_fraction over window) / (1 - target)
+//
+// 1.0 = consuming budget at exactly the allowed rate (the budget lasts
+// its whole period); 14.4 over 1h = the 28-day budget exhausted in
+// ~49 hours (the classic fast-burn page); 6 over 1h the slow-burn
+// signal. The exported windows are the alerting pair 5m and 1h.
+//
+// Values are computed from in-process sliding-window counters (15 s
+// buckets) and published at SCRAPE time through a custom Collector —
+// always fresh, never a stale sampled gauge, and no background task.
+// The windows are process-local: they start empty at boot (documented
+// — burn rates become meaningful as traffic accumulates, and a restart
+// is itself an availability event the SLOs of OTHER processes catch).
+
+/// Plain per-route SLO targets. Primitives on purpose: observability
+/// depends on nothing, so the config types are converted at the call
+/// site (dataplane refresh).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SloTargets {
+    /// Availability target as a fraction in (0, 1]: the share of
+    /// requests that must NOT be a gateway-answered 5xx.
+    pub availability: f64,
+    /// Latency objective threshold in milliseconds. `None` = no
+    /// latency objective for this route.
+    pub latency_threshold_ms: Option<f64>,
+    /// Latency target as a fraction in (0, 1): the share of requests
+    /// that must complete within `latency_threshold_ms`.
+    pub latency_target: f64,
+}
+
+/// Sliding-window bucket width (15 s): the 5m window is 20 buckets,
+/// the 1h window 240 — per route, trivially small, and granular
+/// enough that scrape-time computation is never more than one bucket
+/// stale.
+const SLO_BUCKET_MS: i64 = 15_000;
+
+/// The exported windows: (milliseconds, label). The standard
+/// multiwindow-burn-rate alerting pair.
+const SLO_WINDOWS: [(i64, &str); 2] = [(300_000, "5m"), (3_600_000, "1h")];
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SloBucket {
+    start_ms: i64,
+    total: u64,
+    errors: u64,
+    over_latency: u64,
+}
+
+#[derive(Debug)]
+struct SloRouteState {
+    targets: SloTargets,
+    /// One ring per [`SLO_WINDOWS`] entry; the ring at index i has
+    /// `SLO_WINDOWS[i].0 / SLO_BUCKET_MS` buckets.
+    rings: Vec<Vec<SloBucket>>,
+}
+
+impl SloRouteState {
+    fn new(targets: SloTargets) -> Self {
+        let rings = SLO_WINDOWS
+            .iter()
+            .map(|(ms, _)| {
+                let n = (*ms / SLO_BUCKET_MS) as usize;
+                vec![SloBucket::default(); n.max(1)]
+            })
+            .collect();
+        SloRouteState { targets, rings }
+    }
+
+    /// Record one outcome into every ring (each ring buckets
+    /// independently by its own wraparound index).
+    fn record(&mut self, now_ms: i64, error: bool, over_latency: bool) {
+        let idx = (now_ms / SLO_BUCKET_MS) as usize;
+        let stamp = idx as i64 * SLO_BUCKET_MS;
+        for ring in &mut self.rings {
+            let slot = idx % ring.len();
+            let b = &mut ring[slot];
+            if b.start_ms != stamp {
+                *b = SloBucket {
+                    start_ms: stamp,
+                    ..SloBucket::default()
+                };
+            }
+            b.total += 1;
+            if error {
+                b.errors += 1;
+            }
+            if over_latency {
+                b.over_latency += 1;
+            }
+        }
+    }
+
+    /// Sum a window ring over the buckets whose start is within the
+    /// window ending at `now_ms` (whole buckets; a partially-expired
+    /// edge bucket is included — the 15 s granularity is the
+    /// documented precision).
+    fn sums(&self, ring: usize, now_ms: i64) -> (u64, u64, u64) {
+        let cutoff = now_ms - SLO_WINDOWS[ring].0;
+        let mut total = 0u64;
+        let mut errors = 0u64;
+        let mut over = 0u64;
+        for b in &self.rings[ring] {
+            if b.start_ms > cutoff && b.total > 0 {
+                total += b.total;
+                errors += b.errors;
+                over += b.over_latency;
+            }
+        }
+        (total, errors, over)
+    }
+}
+
+/// The SLO collector: owns the per-route window state and the two
+/// output families, refreshing the gauges from the windows when
+/// Prometheus gathers (scrape time — see the section docs).
+struct SloState {
+    routes: std::sync::RwLock<std::collections::HashMap<String, SloRouteState>>,
+    burn_rate: prometheus::GaugeVec,
+    target: prometheus::GaugeVec,
+}
+
+impl SloState {
+    fn new() -> Self {
+        let burn_rate = prometheus::GaugeVec::new(
+            prometheus::Opts::new(
+                "dwara_slo_burn_rate",
+                "Error-budget consumption rate per route SLO objective \
+                 (DW-052): (bad fraction over the window) / (1 - target). \
+                 1.0 consumes the budget at exactly the allowed rate; \
+                 14.4 over 1h is the classic fast-burn page. window: 5m or \
+                 1h (process-local sliding windows — they start empty at \
+                 boot). objective: availability (bad = gateway-answered \
+                 5xx) or latency (bad = duration over the configured \
+                 threshold).",
+            ),
+            &["route", "objective", "window"],
+        )
+        .expect("valid metric definition");
+        let target = prometheus::GaugeVec::new(
+            prometheus::Opts::new(
+                "dwara_slo_target",
+                "The configured target per route SLO objective (DW-052), as \
+                 a fraction: availability or latency-target share.",
+            ),
+            &["route", "objective"],
+        )
+        .expect("valid metric definition");
+        SloState {
+            routes: std::sync::RwLock::new(std::collections::HashMap::new()),
+            burn_rate,
+            target,
+        }
+    }
+
+    /// Swap the configured route set (dataplane refresh). Routes that
+    /// vanish from the config lose their gauge children so a removed
+    /// SLO stops exporting stale series.
+    fn set_routes(&self, slos: Vec<(String, SloTargets)>) {
+        let mut routes = self.routes.write().expect("slo state lock");
+        let names: std::collections::HashSet<String> =
+            slos.iter().map(|(n, _)| n.clone()).collect();
+        for gone in routes.keys().filter(|n| !names.contains(*n)) {
+            let name = gone.as_str();
+            let objectives: &[&str] = if routes[gone].targets.latency_threshold_ms.is_some() {
+                &["availability", "latency"]
+            } else {
+                &["availability"]
+            };
+            for objective in objectives {
+                for window in ["5m", "1h"] {
+                    let _ = self
+                        .burn_rate
+                        .remove_label_values(&[name, objective, window]);
+                }
+                let _ = self.target.remove_label_values(&[name, objective]);
+            }
+        }
+        routes.clear();
+        for (name, targets) in slos {
+            routes.insert(name, SloRouteState::new(targets));
+        }
+    }
+
+    /// Record one completed request's outcome for a configured route
+    /// (no-op for routes without an SLO — the common case).
+    fn record(&self, route: &str, status: u16, duration_ms: f64, now_ms: i64) {
+        if let Some(state) = self.routes.write().expect("slo state lock").get_mut(route) {
+            let error = status >= 500;
+            let over_latency = state
+                .targets
+                .latency_threshold_ms
+                .is_some_and(|t| duration_ms > t);
+            state.record(now_ms, error, over_latency);
+        }
+    }
+
+    /// Refresh the gauge children from the current windows (scrape
+    /// time). No traffic in a window => burn 0.0 (no consumption), by
+    /// explicit decision: NaN would break alerting comparisons.
+    fn refresh(&self, now_ms: i64) {
+        let routes = self.routes.read().expect("slo state lock");
+        for (route_name, state) in routes.iter() {
+            let name = route_name.as_str();
+            let allowed_avail = 1.0 - state.targets.availability;
+            for (ring, (_, window)) in SLO_WINDOWS.iter().enumerate() {
+                let (total, errors, over) = state.sums(ring, now_ms);
+                let burn = if total > 0 && allowed_avail > 0.0 {
+                    (errors as f64 / total as f64) / allowed_avail
+                } else {
+                    0.0
+                };
+                self.burn_rate
+                    .with_label_values(&[name, "availability", window])
+                    .set(burn);
+                if state.targets.latency_threshold_ms.is_some() {
+                    let allowed_lat = 1.0 - state.targets.latency_target;
+                    let burn = if total > 0 && allowed_lat > 0.0 {
+                        (over as f64 / total as f64) / allowed_lat
+                    } else {
+                        0.0
+                    };
+                    self.burn_rate
+                        .with_label_values(&[name, "latency", window])
+                        .set(burn);
+                }
+            }
+            self.target
+                .with_label_values(&[name, "availability"])
+                .set(state.targets.availability);
+            if state.targets.latency_threshold_ms.is_some() {
+                self.target
+                    .with_label_values(&[name, "latency"])
+                    .set(state.targets.latency_target);
+            }
+        }
+    }
+}
+
+impl prometheus::core::Collector for SloState {
+    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+        let mut d = self.burn_rate.desc();
+        d.extend(self.target.desc());
+        d
+    }
+
+    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+        let now = unix_now_ms();
+        self.refresh(now);
+        let mut families = self.burn_rate.collect();
+        families.extend(self.target.collect());
+        // A family with zero children (no route has an SLO — the
+        // default) would make the text encoder PANIC on "no metrics";
+        // emit nothing instead (an unconfigured feature exports no
+        // series, exactly like a family that was never registered).
+        families.retain(|f| !f.get_metric().is_empty());
+        families
+    }
+}
+
+/// Registration handle: shares the live [`SloState`] so the scrape
+/// reads the same windows the completion path writes (a cloned
+/// GaugeVec would share only the metric handles, not the state).
+struct SloCollectorHandle(std::sync::Arc<SloState>);
+
+impl prometheus::core::Collector for SloCollectorHandle {
+    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+        prometheus::core::Collector::desc(&*self.0)
+    }
+    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+        prometheus::core::Collector::collect(&*self.0)
+    }
+}
+
+/// Wall-clock ms since the Unix epoch (the SLO windows' time domain).
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+impl Observability {
+    /// DW-052: swap the configured per-route SLO set. Called by the
+    /// dataplane on every generation refresh; routes without an `slo`
+    /// block record nothing (the completion-path call is a no-op for
+    /// them).
+    pub fn set_route_slos(&self, slos: Vec<(String, SloTargets)>) {
+        self.slo.set_routes(slos);
+    }
+
+    /// DW-052: record one completed request against its route's SLO
+    /// windows (request-completion path; no-op when unconfigured).
+    pub fn record_slo(&self, route: &str, status: u16, duration_ms: f64) {
+        self.slo.record(route, status, duration_ms, unix_now_ms());
+    }
+
+    /// Deterministic-clock twin of [`Self::record_slo`] for the unit
+    /// tests (window math is time-driven; the real clock cannot make
+    /// "the 5m window expired" deterministic).
+    #[doc(hidden)]
+    pub fn record_slo_at(&self, route: &str, status: u16, duration_ms: f64, now_ms: i64) {
+        self.slo.record(route, status, duration_ms, now_ms);
+    }
+
+    /// DW-052: scrape-time refresh + gather of the SLO families only
+    /// (the full render is [`Self::render`]; this is the tests' window
+    /// into the collector's output).
+    #[doc(hidden)]
+    pub fn render_slo(&self, now_ms: i64) -> String {
+        use prometheus::core::Collector as _;
+        self.slo.refresh(now_ms);
+        let mut families = self.slo.burn_rate.collect();
+        families.extend(self.slo.target.collect());
+        families.retain(|f| !f.get_metric().is_empty());
+        let mut buf = Vec::new();
+        TextEncoder::new()
+            .encode(&families, &mut buf)
+            .expect("text encoding of gathered families cannot fail");
+        String::from_utf8(buf).expect("prometheus text format is ASCII")
     }
 }

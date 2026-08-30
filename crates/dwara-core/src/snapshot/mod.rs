@@ -2258,6 +2258,62 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        // Per-route SLO objectives (DW-052): targets must be achievable
+        // percentages, a latency target without a threshold can never
+        // evaluate, and a threshold without a target would silently use
+        // the default (it does — the error is only for the impossible
+        // combination).
+        if let Some(slo) = &r.slo {
+            if !(0.0..=100.0).contains(&slo.availability) || slo.availability <= 0.0 {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "slo.availability",
+                    format!(
+                        "availability {} is out of range: a percentage in (0, 100] \
+                         (100 = every request must be non-5xx)",
+                        slo.availability
+                    ),
+                ));
+            }
+            if let Some(ms) = slo.latency_ms {
+                if !(1.0..=600_000.0).contains(&ms) {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "slo.latency_ms",
+                        format!(
+                            "latency_ms {ms} is out of range: 1..=600000 (the \
+                             whole-request budget; nothing sensible is faster \
+                             than 1 ms or slower than the 10-minute class of \
+                             timeouts)"
+                        ),
+                    ));
+                }
+            }
+            if let Some(t) = slo.latency_target {
+                if !(0.0..=100.0).contains(&t) || t <= 0.0 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "slo.latency_target",
+                        format!(
+                            "latency_target {t} is out of range: a percentage in \
+                             (0, 100]"
+                        ),
+                    ));
+                }
+            }
+            if slo.latency_target.is_some() && slo.latency_ms.is_none() {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "slo.latency_target",
+                    "latency_target without latency_ms: the objective has no \
+                     threshold to measure against",
+                ));
+            }
+        }
         // Media-type criterion (DW-048): the shared grammar in
         // config::versioning is the whole check — a value that is not a
         // bare type/subtype can never match and is an authoring error.

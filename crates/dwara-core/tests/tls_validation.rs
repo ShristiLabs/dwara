@@ -78,6 +78,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             service: "svc".into(),
             cache: None,
             methods: vec![],
+            slo: None,
             r#match: RouteMatch {
                 path: PathMatch {
                     kind: PathMatchKind::Exact,

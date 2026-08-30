@@ -596,6 +596,7 @@ impl DataPlane {
             &snapshot,
             Some(&events.emitter()),
         ));
+        let slos = compile_route_slos(&snapshot);
         let global_cap = global_cap_of(snapshot.gateway());
         let rate_limits = RateLimitEngine::compile(snapshot.gateway());
         let webhook_targets = Arc::new(compile_webhook_targets(&snapshot));
@@ -619,6 +620,10 @@ impl DataPlane {
             state,
         };
         dp.obs.set_config_generation(generation);
+        // DW-052: the startup generation's SLO set (refresh() handles
+        // every subsequent generation; construction builds the FIRST
+        // one inline, so both paths must seed the collector).
+        dp.obs.set_route_slos(slos);
         dp.rebuild_authn();
         Arc::new(dp)
     }
@@ -738,6 +743,7 @@ impl DataPlane {
         let snapshot = self.state.snapshot();
         let generation = snapshot.generation();
         let previous = self.current();
+        let slos = compile_route_slos(&snapshot);
         let registry = Arc::new(UpstreamRegistry::from_snapshot_with_previous_and_events(
             &snapshot,
             &previous.registry,
@@ -755,6 +761,10 @@ impl DataPlane {
         self.current
             .store(Arc::new(Generation { snapshot, registry }));
         self.obs.set_config_generation(generation);
+        // DW-052: the new generation's SLO set (plain targets, converted
+        // here — observability takes primitives, not config types).
+        // Routes whose `slo` block vanished stop exporting series.
+        self.obs.set_route_slos(slos);
         // DW-044: the new generation's webhook targets (secret references
         // re-resolved at compile) apply from the next event on.
         let compiled = Arc::new(compile_webhook_targets(&self.state.snapshot()));
@@ -919,6 +929,31 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
 pub fn refresh_rate_limiter_gauges(engine: &RateLimitEngine, obs: &Observability) {
     obs.set_rate_limiter_evictions(engine.evictions() as i64);
     obs.set_rate_limiter_live_keys(engine.live_keys() as i64);
+}
+
+/// Compile one generation's per-route SLO targets (DW-052): config
+/// percentages to the plain fractions observability consumes (that
+/// domain takes primitives only — it depends on nothing).
+fn compile_route_slos(
+    snapshot: &crate::snapshot::Snapshot,
+) -> Vec<(String, observability::SloTargets)> {
+    snapshot
+        .gateway()
+        .routes
+        .iter()
+        .filter_map(|r| {
+            r.slo.as_ref().map(|s| {
+                (
+                    r.name.clone(),
+                    observability::SloTargets {
+                        availability: s.availability / 100.0,
+                        latency_threshold_ms: s.latency_ms,
+                        latency_target: s.latency_target.unwrap_or(99.0) / 100.0,
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// Compile one generation's webhook targets (DW-044). Validation
@@ -1095,6 +1130,7 @@ where
     rec.status = status;
     rec.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
+    obs.record_slo(&rec.route, status, rec.duration_ms);
     dp.record_analytics(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
     if obs.should_log_access(status) {

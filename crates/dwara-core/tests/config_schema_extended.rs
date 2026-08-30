@@ -504,6 +504,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             name: "r".into(),
             cache: None,
             methods: vec![],
+            slo: None,
             service: "s".into(),
             r#match: RouteMatch {
                 path: PathMatch {
@@ -843,4 +844,67 @@ fn validation_rejects_bad_analytics_blocks() {
             .any(|i| i.field == "analytics.dimensions[1].name" && i.message.contains("duplicate")),
         "duplicate dimension: {issues:?}"
     );
+}
+
+// --- Route SLO validation (DW-052) ----------------------------------------
+
+#[test]
+fn validation_rejects_bad_route_slo_blocks() {
+    let base = "listeners: []\nroutes:\n  - name: r\n    service: s\n    match:\n      path: { type: regex, value: /.* }\n    action: { type: respond, status: 200 }\n";
+    let with_slo = |slo: &str| {
+        parse_ok(&format!(
+            "listeners: []\nroutes:\n  - name: r\n    service: s\n{slo}    match:\n      path: {{ type: regex, value: /.* }}\n    action: {{ type: respond, status: 200 }}\n"
+        ))
+    };
+    // Valid: both objectives.
+    let gw = with_slo("    slo: { availability: 99.9, latency_ms: 250, latency_target: 99 }\n");
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.contains("slo")),
+        "valid slo: {issues:?}"
+    );
+    // Valid: availability only.
+    let gw = with_slo("    slo: { availability: 100 }\n");
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.contains("slo")),
+        "availability-only slo: {issues:?}"
+    );
+    for bad in [
+        ("slo: { availability: 0 }", "availability"),
+        ("slo: { availability: 101 }", "availability"),
+        ("slo: { availability: -1 }", "availability"),
+        ("slo: { availability: 99, latency_ms: 0 }", "latency_ms"),
+        (
+            "slo: { availability: 99, latency_ms: 700000 }",
+            "latency_ms",
+        ),
+        (
+            "slo: { availability: 99, latency_target: 0 }",
+            "latency_target",
+        ),
+        (
+            "slo: { availability: 99, latency_target: 101 }",
+            "latency_target",
+        ),
+    ] {
+        let gw = with_slo(&format!("    {}\n", bad.0));
+        let issues = dwara_core::snapshot::validate(&gw);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == format!("slo.{}", bad.1) && i.message.contains("range")),
+            "{bad:?}: {issues:?}"
+        );
+    }
+    // latency_target without latency_ms: unsatisfiable combination.
+    let gw = with_slo("    slo: { availability: 99, latency_target: 99 }\n");
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "slo.latency_target" && i.message.contains("latency_ms")),
+        "target without threshold: {issues:?}"
+    );
+    let _ = base;
 }
