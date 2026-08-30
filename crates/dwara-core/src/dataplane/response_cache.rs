@@ -609,7 +609,7 @@ impl ResponseCache {
             flow.identity.as_ref(),
             &rid,
             &mut rec,
-            dp.observability(),
+            &dp.observability_arc(),
         )
         .await;
         // The foreground store stage expects post-masking/

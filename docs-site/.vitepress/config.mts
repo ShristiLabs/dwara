@@ -84,6 +84,10 @@ export default withMermaid(
                   link: "/guide/maintenance",
                 },
                 {
+                  text: "gRPC and WebSockets",
+                  link: "/guide/grpc-websockets",
+                },
+                {
                   text: "Alert webhooks",
                   link: "/guide/webhooks",
                 },

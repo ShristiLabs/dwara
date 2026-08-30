@@ -26,6 +26,7 @@ fn good_gateway() -> Gateway {
                 cache: None,
                 methods: vec![],
                 slo: None,
+                websocket: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -58,6 +59,7 @@ fn good_gateway() -> Gateway {
                 cache: None,
                 methods: vec![],
                 slo: None,
+                websocket: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -90,6 +92,7 @@ fn good_gateway() -> Gateway {
                 cache: None,
                 methods: vec![],
                 slo: None,
+                websocket: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {

@@ -9,6 +9,40 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- gRPC and WebSocket polish (DW-039): gRPC over H2 now works
+  end to end through the gateway with protocol semantics honored —
+  the spec's `TE: trailers` request header is forwarded (previously
+  stripped as hop-by-hop; still stripped for non-gRPC traffic), and
+  `grpc-timeout` (1..=8 digits + H/M/S/m/u/n, case-exact; overflow
+  saturates at a day; garbage ignored) is enforced as the RPC's TOTAL
+  budget: each upstream attempt runs inside the remaining slice (a
+  retry that cannot fit is cut, not started) and the response BODY
+  carries the same absolute deadline (a server that answers headers
+  then starves the stream is cut at the same instant); expiry answers
+  504 with `grpc-status: 4` (DEADLINE_EXCEEDED) in the headers — the
+  trailers-only shape — plus the JSON envelope for non-gRPC tooling.
+  Response trailers (`grpc-status`/`grpc-message`) pass through
+  untouched (body frames forward verbatim; pinned end to end against
+  a TLS-h2 upstream). New `routes[].websocket` block makes the
+  generic 101 tunnel managed for browser traffic: `origins` is an
+  exact-match allowlist evaluated before ANY upstream contact (a
+  non-empty list denies non-matches AND missing `Origin` — browsers
+  always send one — with 403 `websocket_origin_denied`; absent/empty
+  list = every origin, the transparent default) and
+  `max_frames_per_sec` (1..=100000) polices the UPGRADED connection
+  client-to-upstream: a token bucket (sustained rate, one-second
+  burst) over DATA frames only (ping/pong/close free), closing an
+  abusive client with close code 1008 and disconnecting. Policing is
+  keyed off the UPSTREAM's actual 101 upgrade (a mixed-token request
+  whose backend upgrades something else tunnels unpoliced — no WS
+  frame is parsed into a non-WS stream) and is one-directional
+  (protects upstreams, not clients). Zero new dependencies: the RFC
+  6455 frame-boundary scanner reads 2..=14 header bytes (mask folded
+  into the skip, no unmasking, no allocation on hostile input) and
+  the 1008 close frame is four fixed bytes. New metric
+  `dwara_websocket_policy_total{route,outcome}` with the closed set
+  origin_denied/rate_closed.
+
 - Real-time analytics stream (DW-121): an `analytics_stream` block
   streams every completed request's access record — one per request,
   not rollups, not the discrete DW-044 ops events; unrouted 404s

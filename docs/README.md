@@ -71,6 +71,12 @@ Feature areas written up so far (M1 complete; M2 in progress):
   batch through the DW-044 engine), the `RecordSink` seam with the
   Kafka slot documented, and the never-blocks-the-dataplane contract
   (DW-121).
+- [gRPC and WebSocket polish](./features/grpc-websocket.md) — gRPC
+  over H2 (TE forwarded, grpc-timeout enforced as the RPC's total
+  budget across forward and body, 504 + grpc-status 4 on expiry,
+  trailers through) and the managed WebSocket tunnel (origin
+  allowlist at the handshake, post-upgrade frame-rate policing with
+  the 1008 close), hand-rolled with zero new dependencies (DW-039).
 - [API versioning](./features/versioning.md) — the version routing
   patterns (path segment / header / query / Accept media type), the
   `match.accept` criterion, Deprecation/Sunset header automation

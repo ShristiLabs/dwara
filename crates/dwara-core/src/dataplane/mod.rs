@@ -27,3 +27,4 @@ pub mod response_cache;
 pub mod transforms;
 pub mod upstream;
 pub mod versioning;
+pub mod websocket;

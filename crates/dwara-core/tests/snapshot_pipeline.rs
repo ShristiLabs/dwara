@@ -38,6 +38,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         cache: None,
         methods: vec![],
         slo: None,
+        websocket: None,
         service: "svc".into(),
         r#match: RouteMatch {
             path: PathMatch {

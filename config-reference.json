@@ -2193,6 +2193,17 @@
               "type": "null"
             }
           ]
+        },
+        "websocket": {
+          "description": "WebSocket policy (DW-039, feature analysis 4.13): origin\nallowlisting before an upgrade is offered and post-upgrade\nframe-rate policing on the tunneled connection. Absent (the\ndefault): upgrades are transparent — any origin, unlimited\nframe rate, the generic 101 tunnel unchanged. See\n[`RouteWebsocket`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteWebsocket"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -2450,6 +2461,29 @@
       "required": [
         "availability"
       ]
+    },
+    "RouteWebsocket": {
+      "description": "Route-scoped WebSocket policy (DW-039, `routes[].websocket`).\n\nBoth knobs are opt-in and independent: an `origins` list gates the\nupgrade handshake (403 before any upstream contact), and\n`max_frames_per_sec` polices the ESTABLISHED tunnel (a client\nsending data frames faster than the allowance is closed with a\n1008 policy-violation close frame and disconnected). The policing\nworks on the client-to-upstream direction only — the gateway\nprotects upstreams from abusive clients, not the reverse (an\nabusive upstream is the operator's backend problem).",
+      "type": "object",
+      "properties": {
+        "max_frames_per_sec": {
+          "description": "Post-upgrade policing: the sustained allowance of DATA frames\n(text, binary, continuation — control frames are free) the\nCLIENT may send per second, with a one-second burst of the same\nsize. A client past its allowance is closed with close code\n1008 (policy violation) and disconnected. Absent: no policing\n(unlimited, the transparent default). Validation enforces\n1..=[`limits::MAX_WEBSOCKET_FRAMES_PER_SEC`].",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "origins": {
+          "description": "Allowed `Origin` header values for the upgrade handshake\n(case-sensitive exact match, e.g. `https://app.example.com`).\nEmpty or absent: every origin is allowed (the transparent\ndefault). Non-empty: ONLY listed origins upgrade — a missing\n`Origin` header is DENIED (browsers always send one on\nWebSocket handshakes; a request without one is not a browser\nand must be named explicitly or fail closed). The literal\nstring `null` matches the sandboxed-document origin by exact\nmatch.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "SecurityHeaders": {
       "description": "Security-header injection policy (DW-028, feature analysis\n5-Security \"security header injection\"). Each field that is present\ninjects (REPLACING any upstream-sent value — the gateway is the\nsource of truth at its edge) exactly one standard hardening header\non every response the route emits, including gateway\nshort-circuits (401/403/413/429/503, CORS preflights): unlike\ndeprecation stamps, these harden every byte the edge sends, and a\nbrowser parsing an error page deserves the same guarantees as one\nparsing a 200.\n\nNot on responses with no route to consult: the framing 400 (the\npre-parse sniff rejects the request before any route exists) and\nunrouted 404s.",

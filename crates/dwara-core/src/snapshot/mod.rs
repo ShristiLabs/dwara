@@ -2639,6 +2639,45 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // WebSocket policy (DW-039): origins must be comparable header
+        // values (the gate is an exact string match, so an entry that
+        // could never appear in an Origin header is an authoring
+        // error), and the frame allowance lives under the same ceiling
+        // as every other rate-shaped knob.
+        if let Some(ws) = &r.websocket {
+            for (i, origin) in ws.origins.iter().enumerate() {
+                if origin.is_empty() {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("websocket.origins[{i}]"),
+                        "origin is empty: an allowlist entry must name an origin \
+                         (e.g. https://app.example.com, or the literal null)",
+                    ));
+                } else if origin.len() > 256 || !origin.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        &format!("websocket.origins[{i}]"),
+                        "origin must be printable ASCII at most 256 bytes",
+                    ));
+                }
+            }
+            if let Some(rate) = ws.max_frames_per_sec {
+                if rate == 0 || rate > crate::config::limits::MAX_WEBSOCKET_FRAMES_PER_SEC {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "websocket.max_frames_per_sec",
+                        format!(
+                            "max_frames_per_sec must be in 1..={} (sustained data \
+                             frames per second, one-second burst)",
+                            crate::config::limits::MAX_WEBSOCKET_FRAMES_PER_SEC
+                        ),
+                    ));
+                }
+            }
+        }
         let m = &r.r#match.path;
         for (field, entries) in [
             ("match.query", &r.r#match.query),

@@ -90,3 +90,9 @@ pub const MIN_STREAM_FLUSH_MS: u64 = 100;
 /// comes first — the batch is the delivery unit, so this is also the
 /// per-delivery record-count bound).
 pub const MAX_STREAM_BATCH_RECORDS: u64 = 4_096;
+
+/// Validation bound on `routes[].websocket.max_frames_per_sec`
+/// (DW-039): one hundred thousand frames per second sustained is the
+/// most an operator should need to allow (a chatty app ticks far
+/// below it; above it the policing itself becomes the load).
+pub const MAX_WEBSOCKET_FRAMES_PER_SEC: u64 = 100_000;

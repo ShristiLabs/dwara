@@ -269,6 +269,10 @@ pub enum UpstreamBodyError {
     /// The gap between two body frames exceeded `timeouts.write_ms`
     /// (inactivity timeout; see the module docs).
     WriteTimeout { after: Duration },
+    /// The response body crossed its ABSOLUTE deadline (DW-039: a
+    /// gRPC request's `grpc-timeout` covers the whole RPC, so the
+    /// deadline armed at dispatch keeps ticking through the body).
+    DeadlineExceeded,
 }
 
 impl std::fmt::Display for UpstreamBodyError {
@@ -277,6 +281,9 @@ impl std::fmt::Display for UpstreamBodyError {
             UpstreamBodyError::Upstream(e) => write!(f, "upstream body failed: {e}"),
             UpstreamBodyError::WriteTimeout { after } => {
                 write!(f, "upstream body stalled for more than {after:?}")
+            }
+            UpstreamBodyError::DeadlineExceeded => {
+                write!(f, "response crossed its request deadline (grpc-timeout)")
             }
         }
     }
@@ -316,6 +323,15 @@ pub struct UpstreamBody {
     /// completes (or the response is dropped — client disconnect included).
     /// Dropped with the body; no polling logic needed.
     release: Option<OwnedSemaphorePermit>,
+    /// ABSOLUTE deadline for the body (DW-039): a gRPC request's
+    /// `grpc-timeout` covers the whole RPC, so the same deadline that
+    /// bounded the forward keeps ticking here. Checked at the top of
+    /// every poll; unlike `idle`, no timer is armed — the deadline is
+    /// compared against the clock each poll the frame path runs, and
+    /// the body's own activity drives polling (a body mid-flight
+    /// polls constantly; a stalled one is bounded by the idle timer
+    /// first). `None` = no deadline.
+    deadline: Option<std::time::Instant>,
 }
 
 impl hyper::body::Body for UpstreamBody {
@@ -328,6 +344,14 @@ impl hyper::body::Body for UpstreamBody {
     ) -> Poll<Option<Result<Frame<Bytes>, UpstreamBodyError>>> {
         let this = self.get_mut();
         loop {
+            // Absolute deadline (DW-039): fires whether or not the inner
+            // stream is active — the RPC is over when it is over.
+            if let Some(deadline) = this.deadline {
+                if std::time::Instant::now() >= deadline {
+                    this.report_health_failure();
+                    return Poll::Ready(Some(Err(UpstreamBodyError::DeadlineExceeded)));
+                }
+            }
             // Idle deadline armed: check it before (and after) polling the
             // inner stream so an elapsed stall errors even when the inner
             // stream is still Pending.
@@ -395,6 +419,13 @@ impl UpstreamBody {
     /// "release at body completion" contract of the global cap.
     pub fn set_release_permit(&mut self, permit: OwnedSemaphorePermit) {
         self.release = Some(permit);
+    }
+
+    /// Arm the ABSOLUTE body deadline (DW-039): set by the proxy from a
+    /// gRPC request's `grpc-timeout` (the deadline that bounded the
+    /// forward, continuing through the body — the RPC's total budget).
+    pub fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.deadline = Some(deadline);
     }
 }
 
@@ -1111,6 +1142,7 @@ impl UpstreamHandle {
                     sleep: None,
                     health: body_health,
                     release: None,
+                    deadline: None,
                 }),
                 (),
             )

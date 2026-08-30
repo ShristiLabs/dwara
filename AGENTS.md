@@ -209,6 +209,9 @@ Rules for new code:
   (503 + Retry-After, preflight-exempt, DW-041) → route method allowlist
   (405 + Allow, preflight-exempt like maintenance, DW-030) → route
   limits (413/431) → CORS preflight short-circuit (204, pre-authn) →
+  WebSocket origin gate (DW-039: a websocket upgrade on a route with a
+  non-empty `websocket.origins` list is denied 403 at the proxy action,
+  before any upstream contact) →
   authn → authz → rate limit → gateway cap admission (priority-aware) →
   breaker → endpoint pick → pending cap → connect (request transforms
   run on the forward path inside the proxy action, DW-028: query ops

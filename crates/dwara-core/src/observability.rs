@@ -365,6 +365,11 @@ pub struct Observability {
     /// full or the stream disabled); scrape-time snapshot, same model
     /// as `dwara_events_dropped_total`.
     access_records_dropped: IntGauge,
+    /// DW-039: WebSocket policy decisions — a CLOSED label set
+    /// (`origin_denied`, `rate_closed`) over the route label space
+    /// (config-bounded, the same cardinality class as
+    /// `requests_total`).
+    websocket_policy_total: IntCounterVec,
     /// DW-037: response-cache lookup outcomes — a CLOSED label set
     /// (`hit`, `stale`, `miss`, `bypass`), one increment per request on
     /// a cache-configured route, decided at lookup.
@@ -616,6 +621,19 @@ impl Observability {
              never-block posture's honest loss counter.",
         )
         .expect("valid metric definition");
+        let websocket_policy_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_websocket_policy_total",
+                "WebSocket policy decisions (DW-039), by route. outcome: \
+                 origin_denied (an upgrade handshake rejected by the route's \
+                 origin allowlist, before any upstream contact), rate_closed \
+                 (an established tunnel closed by the frame-rate policer, \
+                 close code 1008; counted when the tunnel task completes, so \
+                 a process exit mid-tunnel can undercount).",
+            ),
+            &["route", "outcome"],
+        )
+        .expect("valid metric definition");
         let cache_lookups_total = IntCounterVec::new(
             Opts::new(
                 "dwara_cache_lookups_total",
@@ -749,6 +767,7 @@ impl Observability {
             Box::new(access_records_streamed_total.clone()),
             Box::new(access_records_offered.clone()),
             Box::new(access_records_dropped.clone()),
+            Box::new(websocket_policy_total.clone()),
             Box::new(cache_lookups_total.clone()),
             Box::new(cache_stores_total.clone()),
             Box::new(cache_revalidated_total.clone()),
@@ -790,6 +809,7 @@ impl Observability {
             access_records_streamed_total,
             access_records_offered,
             access_records_dropped,
+            websocket_policy_total,
             cache_lookups_total,
             cache_stores_total,
             cache_revalidated_total,
@@ -1099,6 +1119,16 @@ impl Observability {
     /// [`Self::set_access_records_offered`].
     pub fn set_access_records_dropped(&self, dropped: i64) {
         self.access_records_dropped.set(dropped);
+    }
+
+    /// Count one WebSocket policy decision (DW-039) in
+    /// `dwara_websocket_policy_total{route,outcome}`. `outcome` is one
+    /// of `origin_denied`, `rate_closed` (the closed set documented on
+    /// the family); `route` is the config-declared route name.
+    pub fn record_websocket_policy(&self, route: &str, outcome: &str) {
+        self.websocket_policy_total
+            .with_label_values(&[route, outcome])
+            .inc();
     }
 
     /// Set the `endpoint_health` gauge for one endpoint (1 available,

@@ -505,6 +505,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             cache: None,
             methods: vec![],
             slo: None,
+            websocket: None,
             service: "s".into(),
             r#match: RouteMatch {
                 path: PathMatch {

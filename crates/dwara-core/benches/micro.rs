@@ -49,6 +49,7 @@ fn bench_gateway() -> Gateway {
                 cache: None,
                 methods: Vec::new(),
                 slo: None,
+                websocket: None,
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,
@@ -184,7 +185,7 @@ fn bench_micro(c: &mut Criterion) {
     g.bench_function("strip_hop_by_hop_30", |b| {
         b.iter(|| {
             let mut headers = fixture.clone();
-            dwara_core::proxy::strip_hop_by_hop(&mut headers, false)
+            dwara_core::proxy::strip_hop_by_hop(&mut headers, false, false)
         })
     });
     g.finish();

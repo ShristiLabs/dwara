@@ -1215,6 +1215,49 @@ pub struct Route {
     /// records nothing and exports no SLO series. See [`RouteSlo`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slo: Option<RouteSlo>,
+    /// WebSocket policy (DW-039, feature analysis 4.13): origin
+    /// allowlisting before an upgrade is offered and post-upgrade
+    /// frame-rate policing on the tunneled connection. Absent (the
+    /// default): upgrades are transparent — any origin, unlimited
+    /// frame rate, the generic 101 tunnel unchanged. See
+    /// [`RouteWebsocket`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<RouteWebsocket>,
+}
+
+/// Route-scoped WebSocket policy (DW-039, `routes[].websocket`).
+///
+/// Both knobs are opt-in and independent: an `origins` list gates the
+/// upgrade handshake (403 before any upstream contact), and
+/// `max_frames_per_sec` polices the ESTABLISHED tunnel (a client
+/// sending data frames faster than the allowance is closed with a
+/// 1008 policy-violation close frame and disconnected). The policing
+/// works on the client-to-upstream direction only — the gateway
+/// protects upstreams from abusive clients, not the reverse (an
+/// abusive upstream is the operator's backend problem).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteWebsocket {
+    /// Allowed `Origin` header values for the upgrade handshake
+    /// (case-sensitive exact match, e.g. `https://app.example.com`).
+    /// Empty or absent: every origin is allowed (the transparent
+    /// default). Non-empty: ONLY listed origins upgrade — a missing
+    /// `Origin` header is DENIED (browsers always send one on
+    /// WebSocket handshakes; a request without one is not a browser
+    /// and must be named explicitly or fail closed). The literal
+    /// string `null` matches the sandboxed-document origin by exact
+    /// match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<String>,
+    /// Post-upgrade policing: the sustained allowance of DATA frames
+    /// (text, binary, continuation — control frames are free) the
+    /// CLIENT may send per second, with a one-second burst of the same
+    /// size. A client past its allowance is closed with close code
+    /// 1008 (policy violation) and disconnected. Absent: no policing
+    /// (unlimited, the transparent default). Validation enforces
+    /// 1..=[`limits::MAX_WEBSOCKET_FRAMES_PER_SEC`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frames_per_sec: Option<u64>,
 }
 
 /// Per-route SLO objectives (DW-052, `routes[].slo`).

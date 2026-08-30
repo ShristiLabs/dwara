@@ -1023,6 +1023,13 @@ impl DataPlane {
         &self.obs
     }
 
+    /// The shared handle behind [`Self::observability`] (DW-039: the
+    /// WebSocket tunnel task outlives the request and needs an owned
+    /// handle to record its policy outcome).
+    pub fn observability_arc(&self) -> Arc<Observability> {
+        Arc::clone(&self.obs)
+    }
+
     /// This dataplane's event bus (DW-044): breaker/ejection/config
     /// events emit onto it; `spawn_webhook_deliverer` drains it.
     pub fn events(&self) -> &Arc<crate::events::EventBus> {
@@ -2481,7 +2488,7 @@ where
                         identity.as_ref(),
                         rid,
                         rec,
-                        &dp.obs,
+                        &dp.observability_arc(),
                     )
                     .await
                 }
@@ -3091,12 +3098,13 @@ pub(super) async fn proxy_request<B>(
     identity: Option<&Identity>,
     rid: &str,
     rec: &mut AccessRecord,
-    obs: &Observability,
+    obs_arc: &Arc<Observability>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    let obs: &Observability = obs_arc;
     let gateway = gen.snapshot.gateway();
     let Some(service) = gateway.services.iter().find(|s| s.name == route.service) else {
         // Validation rejects dangling references, so this is a generation
@@ -3127,6 +3135,75 @@ where
             rid,
         );
     }
+
+    // WebSocket policy (DW-039): the origin gate runs at the proxy
+    // action — after authn/authz/rate limit (the documented request
+    // path: the origin allowlist is a ROUTE policy about the upgrade,
+    // not an identity claim) and BEFORE any upstream contact (no dial,
+    // no breaker observation, no pick). Applies only to requests
+    // offering a WEBSOCKET upgrade; other upgrades are untouched.
+    let ws_policy = route.websocket.as_ref();
+    let ws_police = if wants_upgrade
+        && ws_policy.is_some_and(|_| crate::dataplane::websocket::offers_websocket(req.headers()))
+    {
+        if let Some(ws) = ws_policy {
+            match crate::dataplane::websocket::handshake_verdict(req.headers(), ws) {
+                crate::dataplane::websocket::Handshake::OriginDenied => {
+                    obs.record_websocket_policy(&route.name, "origin_denied");
+                    tracing::warn!(
+                        code = "websocket_origin_denied",
+                        request_id = %rid,
+                        route = %route.name,
+                        origin = req
+                            .headers()
+                            .get(ORIGIN)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("(none)"),
+                        "websocket upgrade denied: origin not in the route allowlist"
+                    );
+                    return simple(
+                        StatusCode::FORBIDDEN,
+                        "websocket_origin_denied",
+                        "websocket origin not allowed",
+                        rid,
+                    );
+                }
+                crate::dataplane::websocket::Handshake::Allowed => {}
+            }
+        }
+        ws_policy
+            .and_then(|ws| ws.max_frames_per_sec)
+            .map(|rate| WsPoliceDecision {
+                route: route.name.clone(),
+                rate,
+            })
+    } else {
+        None
+    };
+
+    // gRPC (DW-039): an h2 request with an `application/grpc` content
+    // type. Its `grpc-timeout` header is the RPC's TOTAL budget — arm
+    // it as the forward deadline (bounding the attempt below) and let
+    // the same instant keep ticking through the response body (the
+    // upstream body's absolute deadline). Parse failures are ignored:
+    // a malformed timeout is the caller's bug, not the gateway's.
+    // Health-report split (deliberate): a BODY-phase deadline crossing
+    // reports a passive-health failure (the endpoint accepted the RPC
+    // and then starved it), while a FORWARD-phase cut does NOT (the
+    // client's own budget expired before the endpoint answered — the
+    // gateway cancelling on the caller's clock is not endpoint
+    // misbehavior, and the operator's fixed `timeouts.read_ms` already
+    // bounds genuinely hung endpoints).
+    let grpc = grpc_request(req.headers(), req.version());
+    let grpc_deadline = grpc
+        .then(|| {
+            req.headers()
+                .get("grpc-timeout")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_grpc_timeout)
+        })
+        .flatten()
+        .map(|d| std::time::Instant::now() + d);
 
     // Path rewrite (DW-010): applied to the path component only, before
     // anything is sent upstream; the inbound query string is re-attached
@@ -3191,7 +3268,7 @@ where
     // request: stripping it would leave conformant backends (which require
     // the Connection token to offer a 101) declining every upgrade.
     let (mut parts, body) = req.into_parts();
-    let conn_tokens = strip_hop_by_hop(&mut parts.headers, wants_upgrade);
+    let conn_tokens = strip_hop_by_hop(&mut parts.headers, wants_upgrade, grpc);
     if wants_upgrade {
         let mut tokens = conn_tokens;
         if !tokens.iter().any(|t| t.eq_ignore_ascii_case("upgrade")) {
@@ -3396,10 +3473,51 @@ where
             upstream = handle.name()
         );
         let mut picked: Option<String> = None;
-        let result = handle
-            .send_with_hash_key_observed(out_req, Some(&peer.to_string()), &mut picked)
-            .instrument(attempt_span)
-            .await;
+        let peer_key = peer.to_string();
+        // gRPC deadline (DW-039): the RPC's total budget bounds every
+        // attempt's forward — the remaining slice, so a retry that
+        // cannot fit before the deadline is cut by the timeout, not
+        // started in vain. Non-gRPC requests are unwrapped (zero cost).
+        let send = handle
+            .send_with_hash_key_observed(out_req, Some(&peer_key), &mut picked)
+            .instrument(attempt_span);
+        let result = match grpc_deadline {
+            Some(deadline) => match tokio::time::timeout(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+                send,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    // The deadline expired before headers resolved: for a
+                    // gRPC caller the answer carries grpc-status 4
+                    // (DEADLINE_EXCEEDED) in the headers — the
+                    // trailers-only shape — plus the standard envelope
+                    // body for non-gRPC tooling.
+                    tracing::warn!(
+                        code = "grpc_deadline_exceeded",
+                        request_id = %rid,
+                        upstream = handle.name(),
+                        "grpc-timeout expired before the upstream answered"
+                    );
+                    if let Some(ep) = &picked {
+                        rec.endpoint = Some(ep.clone());
+                    }
+                    rec.attempts = done_tries + 1;
+                    let mut resp = simple(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "grpc_deadline_exceeded",
+                        "grpc-timeout expired",
+                        rid,
+                    );
+                    let v = HeaderValue::from_static("4");
+                    resp.headers_mut().insert("grpc-status", v);
+                    return resp;
+                }
+            },
+            None => send.await,
+        };
         rec.attempts = done_tries + 1;
         if let Some(ep) = &picked {
             rec.endpoint = Some(ep.clone());
@@ -3461,6 +3579,9 @@ where
                     wants_upgrade,
                     on_client_upgrade,
                     global_permit.take(),
+                    ws_police,
+                    obs_arc,
+                    grpc_deadline,
                     rid,
                 );
             }
@@ -3561,27 +3682,65 @@ fn breaker_open(retry_after_ms: u64, rid: &str) -> Response<ProxyBody> {
         .expect("static breaker response is valid")
 }
 
-/// Finalize a proxied response: upgrade tunneling for 101s, hop-by-hop
+/// Finalize a proxied response: upgrade tunneling for 101s (with the
+/// DW-039 WebSocket policer when the route asked for one), hop-by-hop
 /// stripping, and the streaming body passthrough. The gateway
 /// concurrency-cap permit (DW-015), when present, is attached to the
 /// streaming body so the global slot is held until the body completes or
 /// the response is dropped (client disconnect included); a tunneled 101
-/// releases it when the (empty) 101 response is dropped.
+/// releases it when the (empty) 101 response is dropped. A gRPC
+/// request's armed deadline (DW-039) keeps ticking through the body as
+/// its ABSOLUTE bound.
+#[allow(clippy::too_many_arguments)] // the per-request explicit-inputs rule (see proxy_request)
 fn finish_proxy_response(
     mut resp: Response<UpstreamBody>,
     wants_upgrade: bool,
     on_client_upgrade: Option<hyper::upgrade::OnUpgrade>,
     global_permit: Option<OwnedSemaphorePermit>,
+    ws_police: Option<WsPoliceDecision>,
+    obs_arc: &Arc<Observability>,
+    grpc_deadline: Option<std::time::Instant>,
     rid: &str,
 ) -> Response<ProxyBody> {
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS && wants_upgrade {
+        // DW-039: policing keys off what the UPSTREAM actually
+        // upgraded (its 101 names the protocol), not what the client
+        // offered — a mixed-token request (`Upgrade: foo, websocket`)
+        // whose upstream upgrades `foo` must not have a non-WebSocket
+        // tunnel parsed as WS frames (and a WS close frame injected
+        // into it). Read the header BEFORE `upgrade::on` consumes the
+        // response.
+        let upgraded_websocket = crate::dataplane::websocket::offers_websocket(resp.headers());
+        let ws_police = if upgraded_websocket { ws_police } else { None };
         let on_upstream = hyper::upgrade::on(&mut resp);
         if let Some(client) = on_client_upgrade {
+            let obs = Arc::clone(obs_arc);
             tokio::spawn(async move {
                 match tokio::try_join!(client, on_upstream) {
-                    Ok((client_io, upstream_io)) => {
-                        tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await
-                    }
+                    Ok((client_io, upstream_io)) => match ws_police {
+                        Some(policy) => {
+                            // DW-039: police the client side — count data
+                            // frames, close 1008 past the allowance. The
+                            // violation flag is shared with the wrapper so
+                            // the metric survives the tunnel consuming it.
+                            let flag = Arc::new(AtomicU64::new(0));
+                            let policed = crate::dataplane::websocket::WsPoliceIo::with_flag(
+                                TokioIo::new(client_io),
+                                policy.rate,
+                                Arc::clone(&flag),
+                            );
+                            tunnel(policed, TokioIo::new(upstream_io)).await;
+                            if flag.load(Ordering::Relaxed) == 1 {
+                                obs.record_websocket_policy(&policy.route, "rate_closed");
+                                tracing::warn!(
+                                    code = "websocket_rate_closed",
+                                    route = %policy.route,
+                                    "websocket connection closed by frame-rate policy"
+                                );
+                            }
+                        }
+                        None => tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await,
+                    },
                     Err(err) => {
                         tracing::warn!("upgrade handshake failed: {err}");
                     }
@@ -3602,9 +3761,12 @@ fn finish_proxy_response(
         }
         return resp.map(ProxyBody::Upstream);
     }
-    let _ = strip_hop_by_hop(resp.headers_mut(), false);
+    let _ = strip_hop_by_hop(resp.headers_mut(), false, false);
     if let Some(permit) = global_permit {
         resp.body_mut().set_release_permit(permit);
+    }
+    if let Some(deadline) = grpc_deadline {
+        resp.body_mut().set_deadline(deadline);
     }
     resp.map(ProxyBody::Upstream)
 }
@@ -4011,9 +4173,11 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
 /// Header names always treated as hop-by-hop per RFC 7230 section 6.1
 /// (plus the de-facto `Proxy-Connection`), and any name listed in ANY
 /// `Connection` header (RFC 7230 allows multiple; only `get_all` sees them
-/// all). `TE` is always dropped: trailers are not supported in v1, so there
-/// is nothing a `TE: trailers` could license. `Upgrade` (and its
-/// `Connection` token) survives only when the request is being tunneled.
+/// all). `TE` is dropped — EXCEPT for a gRPC request (DW-039), whose
+/// spec-mandated `TE: trailers` rides through so conformant gRPC
+/// servers see the client's dialect (h2 carries trailers natively; the
+/// header is the courtesy contract). `Upgrade` (and its `Connection`
+/// token) survives only when the request is being tunneled.
 ///
 /// Returns the `Connection` token list collected before stripping (original
 /// case, deduplicated, order preserved) so the tunneling caller can rebuild
@@ -4021,7 +4185,11 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
 ///
 /// (Public so the DW-024 micro-benchmark can exercise it directly; it is
 /// not part of the stable public surface.)
-pub fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) -> Vec<String> {
+pub fn strip_hop_by_hop(
+    headers: &mut HeaderMap,
+    keep_upgrade: bool,
+    preserve_te: bool,
+) -> Vec<String> {
     let tokens = connection_tokens(headers);
     let listed: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
     let drop: Vec<HeaderName> = headers
@@ -4038,10 +4206,10 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) -> Vec<Stri
                     | "proxy-authenticate"
                     | "proxy-authorization"
                     | "proxy-connection"
-                    | "te"
                     | "trailer"
                     | "transfer-encoding"
-            ) || (n == "upgrade" && !keep_upgrade)
+            ) || (n == "te" && !preserve_te)
+                || (n == "upgrade" && !keep_upgrade)
         })
         .cloned()
         .collect();
@@ -4049,6 +4217,57 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) -> Vec<Stri
         headers.remove(&name);
     }
     tokens
+}
+
+/// Whether a request is gRPC (DW-039): HTTP/2 with an
+/// `application/grpc` content type (the spec's family prefix —
+/// `application/grpc+proto`, `+json`, ... all match).
+///
+/// (Public for the DW-039 unit tests; like `strip_hop_by_hop`, not
+/// part of the stable public surface.)
+pub fn grpc_request(headers: &HeaderMap, version: Version) -> bool {
+    version == Version::HTTP_2
+        && headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/grpc"))
+}
+
+/// Parse a `grpc-timeout` value (DW-039): 1..=8 ASCII decimal digits
+/// plus a unit — Hours, Minutes, Seconds, milliseconds, microseconds,
+/// nanoseconds (RFC `SnH` grammar, case-exact per the spec). Values
+/// that overflow the duration space saturate at one day (a longer RPC
+/// budget than that is un-enforceable by this gateway anyway); garbage
+/// is `None` (the caller treats absence as no deadline).
+///
+/// (Public for the DW-039 unit tests; like `strip_hop_by_hop`, not
+/// part of the stable public surface.)
+pub fn parse_grpc_timeout(value: &str) -> Option<std::time::Duration> {
+    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
+    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    let nanos = match unit {
+        "H" => n.saturating_mul(3_600_000_000_000),
+        "M" => n.saturating_mul(60_000_000_000),
+        "S" => n.saturating_mul(1_000_000_000),
+        "m" => n.saturating_mul(1_000_000),
+        "u" => n.saturating_mul(1_000),
+        "n" => n,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_nanos(
+        nanos.min(86_400_000_000_000),
+    ))
+}
+
+/// The post-upgrade WebSocket policing decision threaded to the
+/// tunnel (DW-039): the route label for the metric and the frame
+/// allowance.
+struct WsPoliceDecision {
+    route: String,
+    rate: u64,
 }
 
 /// Deduplicated tokens across ALL `Connection` header lines (an HTTP/1
