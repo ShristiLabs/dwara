@@ -159,6 +159,13 @@
         }
       ]
     },
+    "oidc_providers": {
+      "description": "OIDC providers (DW-034): trusted OpenID Connect issuers whose\nBearer tokens are validated by token introspection (RFC 7662)\nrather than local JWT signature verification. Each provider\nindependently introspects `Authorization: Bearer` tokens that did\nnot verify against any JWT provider (DW-019) and maps the\nintrospection result to a consumer via the provider's explicit\n`consumer` binding. The gateway also supports the\nauthorization-code + PKCE flow (acting as an OIDC relying party),\ntoken exchange (RFC 8693), and token revocation (RFC 7009). Empty\n(the default): the gateway does not introspect Bearer tokens and\nOIDC is inert. See the `security::oidc` module docs for the full\nflow, caching, and fail-open/fail-closed posture.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OidcProvider"
+      }
+    },
     "policies": {
       "description": "Named reusable rule bundles.",
       "type": "array",
@@ -1846,6 +1853,79 @@
       "required": [
         "client_cert",
         "client_key"
+      ]
+    },
+    "OidcProvider": {
+      "description": "One OIDC provider (DW-034): an OpenID Connect issuer whose Bearer\ntokens are validated by token introspection (RFC 7662) rather than\nlocal JWT signature verification. The gateway fetches the issuer's\ndiscovery document (`{issuer}/.well-known/openid-configuration`) to\nlearn the introspection, revocation, authorization, and token\nendpoints, then introspects presented Bearer tokens (caching the\nresult keyed by token hash with a configurable TTL). The provider\nalso backs the authorization-code + PKCE relying-party flow, token\nexchange (RFC 8693), and token revocation (RFC 7009).",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "description": "The gateway's client identifier at the IdP (RFC 6749 section\n2.2). Sent as the username of the HTTP Basic auth header to the\nintrospection and token endpoints, and as `client_id` in the\nauthorization-code and token-exchange request bodies.",
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "The gateway's client secret (RFC 6749 section 2.3.1). Either the\nvalue INLINE (redacted in every config echo, DW-045) or a\n`${...}` secret reference (env or file) resolved at config-compile\ntime and re-read on every reload. Sent as the password of the\nHTTP Basic auth header. SECRET: never logged, never in Debug.",
+          "type": "string"
+        },
+        "consumer": {
+          "description": "Consumer this provider's tokens authenticate (like\n[`JwtProvider::consumer`]). Absent: the introspection result's\n`sub` claim is used as the consumer name. When set, every\nsuccessfully introspected token resolves to this consumer\nregardless of the `sub` claim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fail_open": {
+          "description": "Fail-open posture when the IdP is unreachable (network error,\nnon-2xx, malformed response). Default false (fail closed = 401):\nthe gateway refuses to authenticate a token it cannot introspect.\nWhen true, the gateway treats an IdP failure as anonymous\n(pass-through) rather than rejecting the request. Fail-open\ntrades security for availability; use with care.",
+          "type": "boolean"
+        },
+        "introspection_cache_ttl_s": {
+          "description": "Cache TTL for introspection results, in seconds (default 60). A\ncached `active: true` result short-circuits the IdP call for this\nduration; a cached `active: false` result is NOT cached (it is\nre-checked on the next request so a revoked token is noticed\npromptly). Must be > 0; validation rejects 0.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "introspection_endpoint": {
+          "description": "Override the discovery-discovered introspection endpoint. Absent\n(the default): the endpoint is taken from the discovery document.\nUseful when the IdP's discovery document is incorrect or the\nendpoint is behind a different host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "The OIDC issuer URL (e.g. `https://idp.example.com`). The\ndiscovery document is fetched from\n`{issuer}/.well-known/openid-configuration`. Must be an absolute\n`http(s)://` URL; validation rejects anything else. The\nintrospection result's `iss` (when present) is checked against\nthis issuer for defense against token confusion.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "revocation_endpoint": {
+          "description": "Override the discovery-discovered revocation endpoint. Absent\n(the default): the endpoint is taken from the discovery document.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "Scopes to request (default `[\"openid\"]`). Sent in the\nauthorization-code flow's authorization request and the\ntoken-exchange request body (space-joined).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "trusted_ca_file": {
+          "description": "Path to a PEM file of CA certificates the OIDC HTTP client\ntrusts for its `https://` connections INSTEAD of the default\npublic (webpki) root set: for an IdP served over TLS by a private\nCA. The file may carry several certificates (a typical CA bundle).\nOnly meaningful with an `https://` issuer; validation rejects the\ncombination with an `http://` issuer. The file must exist and be\nreadable at config compile time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "issuer",
+        "client_id",
+        "client_secret"
       ]
     },
     "OpenApiMeta": {

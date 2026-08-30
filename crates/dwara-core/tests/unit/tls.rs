@@ -430,6 +430,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     };
     (gateway, tls)

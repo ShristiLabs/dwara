@@ -94,6 +94,8 @@ pub use security::authn;
 #[doc(hidden)]
 pub use security::authz;
 #[doc(hidden)]
+pub use security::oidc;
+#[doc(hidden)]
 pub use security::tls;
 #[doc(hidden)]
 pub use state::migrations;

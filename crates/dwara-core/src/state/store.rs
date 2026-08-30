@@ -80,6 +80,11 @@ pub enum CredentialKind {
     /// the raw key bytes), so no row of this kind is ever written —
     /// the kind exists so the resolved identity can name its family.
     Hmac,
+    /// OIDC introspection credential (DW-034): a Bearer token validated
+    /// by RFC 7662 token introspection against an external IdP. Like
+    /// `Hmac`, no row of this kind is ever written to the store — the
+    /// kind exists so the resolved identity can name its family.
+    Oidc,
 }
 
 impl CredentialKind {
@@ -91,6 +96,7 @@ impl CredentialKind {
             CredentialKind::Jwt => "jwt",
             CredentialKind::Mtls => "mtls",
             CredentialKind::Hmac => "hmac",
+            CredentialKind::Oidc => "oidc",
         }
     }
 
@@ -100,6 +106,7 @@ impl CredentialKind {
             "jwt" => Some(CredentialKind::Jwt),
             "mtls" => Some(CredentialKind::Mtls),
             "hmac" => Some(CredentialKind::Hmac),
+            "oidc" => Some(CredentialKind::Oidc),
             _ => None,
         }
     }

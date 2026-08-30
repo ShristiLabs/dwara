@@ -556,6 +556,15 @@ pub struct DataPlane {
     /// keyed by the token endpoint URL. The OAuth2 CLIENTS (with their
     /// TLS config) are per-generation; the token CACHE is per-dataplane.
     oauth2_token_cache: Arc<crate::security::oauth2::OAuth2TokenCache>,
+    /// OIDC introspection cache (DW-034), carried ACROSS generation
+    /// swaps like `jwks_caches` and `oauth2_token_cache`: a reload
+    /// must never discard a cached `active: true` introspection (that
+    /// would re-introspect every Bearer token on every request after
+    /// every reload). Per-provider, keyed by
+    /// `{provider_name}:{sha256_hex(token)}`. The OIDC CLIENTS (with
+    /// their TLS config) are per-generation; the introspection CACHE
+    /// is per-dataplane.
+    oidc_introspection_cache: Arc<crate::security::oidc::OidcIntrospectionCache>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -796,6 +805,8 @@ impl DataPlane {
         );
         let (stream_tx, stream_anchor) = tokio::sync::watch::channel(stream_targets);
         let oauth2_token_cache = Arc::new(crate::security::oauth2::OAuth2TokenCache::new());
+        let oidc_introspection_cache =
+            Arc::new(crate::security::oidc::OidcIntrospectionCache::new());
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let dp = DataPlane {
             current: ArcSwap::from_pointee(Generation {
@@ -812,6 +823,7 @@ impl DataPlane {
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
             oauth2_token_cache,
+            oidc_introspection_cache,
             obs: Arc::clone(&obs),
             events,
             webhook_targets: target_tx,
@@ -1104,6 +1116,7 @@ impl DataPlane {
             Some(&self.obs),
             pepper.as_ref(),
             Arc::clone(&self.nonce_cache),
+            Arc::clone(&self.oidc_introspection_cache),
         );
         self.authn.store(authn);
     }

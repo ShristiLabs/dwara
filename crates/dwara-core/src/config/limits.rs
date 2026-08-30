@@ -132,3 +132,16 @@ pub const MIN_REDIS_KEY_TTL_S: u64 = 1;
 /// linger in Redis (beyond that the operator should lower it to keep
 /// Redis memory bounded under key spray).
 pub const MAX_REDIS_KEY_TTL_S: u64 = 604_800;
+
+/// Validation floor on `gateway.oidc_providers[].introspection_cache_ttl_s`
+/// (DW-034): below 1 second the introspection cache would expire before
+/// the next request can benefit, degenerating into a per-request IdP
+/// call (the cache exists precisely to avoid that).
+pub const MIN_OIDC_INTROSPECTION_CACHE_TTL_S: u64 = 1;
+
+/// Validation ceiling on
+/// `gateway.oidc_providers[].introspection_cache_ttl_s` (DW-034): one
+/// hour is the longest a cached `active: true` introspection should be
+/// trusted without re-checking (a revoked token would otherwise keep
+/// authenticating for an hour after revocation).
+pub const MAX_OIDC_INTROSPECTION_CACHE_TTL_S: u64 = 3600;

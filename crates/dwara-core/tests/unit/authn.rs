@@ -94,6 +94,7 @@ async fn disabled_composite_is_anonymous_for_anything() {
         None,
         None,
         std::sync::Arc::new(NonceCache::new()),
+        std::sync::Arc::new(dwara_core::security::oidc::OidcIntrospectionCache::new()),
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -401,6 +402,7 @@ fn hmac_authenticator(yaml: &str) -> Arc<CompositeAuthenticator> {
         None,
         None,
         Arc::new(NonceCache::new()),
+        Arc::new(dwara_core::security::oidc::OidcIntrospectionCache::new()),
     )
 }
 

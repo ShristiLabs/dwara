@@ -285,6 +285,20 @@ pub struct Gateway {
     /// `LicenseGate::none()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<LicenseConfig>,
+    /// OIDC providers (DW-034): trusted OpenID Connect issuers whose
+    /// Bearer tokens are validated by token introspection (RFC 7662)
+    /// rather than local JWT signature verification. Each provider
+    /// independently introspects `Authorization: Bearer` tokens that did
+    /// not verify against any JWT provider (DW-019) and maps the
+    /// introspection result to a consumer via the provider's explicit
+    /// `consumer` binding. The gateway also supports the
+    /// authorization-code + PKCE flow (acting as an OIDC relying party),
+    /// token exchange (RFC 8693), and token revocation (RFC 7009). Empty
+    /// (the default): the gateway does not introspect Bearer tokens and
+    /// OIDC is inert. See the `security::oidc` module docs for the full
+    /// flow, caching, and fail-open/fail-closed posture.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_providers: Vec<OidcProvider>,
     /// Distributed Redis rate limiter (DW-031). Absent (the default):
     /// the local in-memory GCRA limiter is used (one limit per
     /// process). When present, the `ent` cargo feature is compiled in,
@@ -1217,6 +1231,107 @@ fn is_default_jwt_refresh_secs(v: &u64) -> bool {
 
 fn is_default_jwt_leeway_secs(v: &u64) -> bool {
     *v == 30
+}
+
+/// One OIDC provider (DW-034): an OpenID Connect issuer whose Bearer
+/// tokens are validated by token introspection (RFC 7662) rather than
+/// local JWT signature verification. The gateway fetches the issuer's
+/// discovery document (`{issuer}/.well-known/openid-configuration`) to
+/// learn the introspection, revocation, authorization, and token
+/// endpoints, then introspects presented Bearer tokens (caching the
+/// result keyed by token hash with a configurable TTL). The provider
+/// also backs the authorization-code + PKCE relying-party flow, token
+/// exchange (RFC 8693), and token revocation (RFC 7009).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OidcProvider {
+    pub name: String,
+    /// The OIDC issuer URL (e.g. `https://idp.example.com`). The
+    /// discovery document is fetched from
+    /// `{issuer}/.well-known/openid-configuration`. Must be an absolute
+    /// `http(s)://` URL; validation rejects anything else. The
+    /// introspection result's `iss` (when present) is checked against
+    /// this issuer for defense against token confusion.
+    pub issuer: String,
+    /// The gateway's client identifier at the IdP (RFC 6749 section
+    /// 2.2). Sent as the username of the HTTP Basic auth header to the
+    /// introspection and token endpoints, and as `client_id` in the
+    /// authorization-code and token-exchange request bodies.
+    pub client_id: String,
+    /// The gateway's client secret (RFC 6749 section 2.3.1). Either the
+    /// value INLINE (redacted in every config echo, DW-045) or a
+    /// `${...}` secret reference (env or file) resolved at config-compile
+    /// time and re-read on every reload. Sent as the password of the
+    /// HTTP Basic auth header. SECRET: never logged, never in Debug.
+    pub client_secret: String,
+    /// Path to a PEM file of CA certificates the OIDC HTTP client
+    /// trusts for its `https://` connections INSTEAD of the default
+    /// public (webpki) root set: for an IdP served over TLS by a private
+    /// CA. The file may carry several certificates (a typical CA bundle).
+    /// Only meaningful with an `https://` issuer; validation rejects the
+    /// combination with an `http://` issuer. The file must exist and be
+    /// readable at config compile time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_ca_file: Option<String>,
+    /// Scopes to request (default `["openid"]`). Sent in the
+    /// authorization-code flow's authorization request and the
+    /// token-exchange request body (space-joined).
+    #[serde(
+        default = "default_oidc_scopes",
+        skip_serializing_if = "is_default_oidc_scopes"
+    )]
+    pub scopes: Vec<String>,
+    /// Cache TTL for introspection results, in seconds (default 60). A
+    /// cached `active: true` result short-circuits the IdP call for this
+    /// duration; a cached `active: false` result is NOT cached (it is
+    /// re-checked on the next request so a revoked token is noticed
+    /// promptly). Must be > 0; validation rejects 0.
+    #[serde(
+        default = "default_oidc_introspection_cache_ttl_s",
+        skip_serializing_if = "is_default_oidc_introspection_cache_ttl_s"
+    )]
+    pub introspection_cache_ttl_s: u64,
+    /// Override the discovery-discovered introspection endpoint. Absent
+    /// (the default): the endpoint is taken from the discovery document.
+    /// Useful when the IdP's discovery document is incorrect or the
+    /// endpoint is behind a different host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_endpoint: Option<String>,
+    /// Override the discovery-discovered revocation endpoint. Absent
+    /// (the default): the endpoint is taken from the discovery document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_endpoint: Option<String>,
+    /// Consumer this provider's tokens authenticate (like
+    /// [`JwtProvider::consumer`]). Absent: the introspection result's
+    /// `sub` claim is used as the consumer name. When set, every
+    /// successfully introspected token resolves to this consumer
+    /// regardless of the `sub` claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+    /// Fail-open posture when the IdP is unreachable (network error,
+    /// non-2xx, malformed response). Default false (fail closed = 401):
+    /// the gateway refuses to authenticate a token it cannot introspect.
+    /// When true, the gateway treats an IdP failure as anonymous
+    /// (pass-through) rather than rejecting the request. Fail-open
+    /// trades security for availability; use with care.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fail_open: bool,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec!["openid".to_string()]
+}
+
+fn is_default_oidc_scopes(v: &[String]) -> bool {
+    v.len() == 1 && v[0] == "openid"
+}
+
+fn default_oidc_introspection_cache_ttl_s() -> u64 {
+    60
+}
+
+fn is_default_oidc_introspection_cache_ttl_s(v: &u64) -> bool {
+    *v == 60
 }
 
 /// Entry point: bind address + port + TLS termination (or passthrough) config.

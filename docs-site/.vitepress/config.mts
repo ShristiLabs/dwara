@@ -151,6 +151,10 @@ export default withMermaid(
                   link: "/guide/oauth2-mtls",
                 },
                 {
+                  text: "OpenID Connect",
+                  link: "/guide/oidc",
+                },
+                {
                   text: "Enterprise licensing",
                   link: "/guide/licensing",
                 },

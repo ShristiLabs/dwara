@@ -105,6 +105,7 @@ fn authenticator(gateway: &Gateway) -> Arc<CompositeAuthenticator> {
         None,
         None,
         Arc::new(NonceCache::new()),
+        Arc::new(dwara_core::security::oidc::OidcIntrospectionCache::new()),
     )
 }
 

@@ -2636,6 +2636,7 @@ async fn disabled_jwt_provider_fails_closed_on_bearer_tokens() {
         None,
         None,
         std::sync::Arc::new(dwara_core::security::authn::NonceCache::new()),
+        std::sync::Arc::new(dwara_core::security::oidc::OidcIntrospectionCache::new()),
     );
 
     let mut headers = HeaderMap::new();
@@ -2694,6 +2695,7 @@ async fn disabled_jwt_provider_without_a_bearer_still_passes_through() {
         None,
         None,
         std::sync::Arc::new(dwara_core::security::authn::NonceCache::new()),
+        std::sync::Arc::new(dwara_core::security::oidc::OidcIntrospectionCache::new()),
     );
 
     let headers = HeaderMap::new();

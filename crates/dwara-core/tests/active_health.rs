@@ -114,6 +114,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     }
 }
@@ -469,6 +470,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
             license: None,
+            oidc_providers: Vec::new(),
             redis_rate_limiter: None,
         })
         .unwrap();
@@ -614,6 +616,7 @@ async fn reserved_paths_shadow_configured_routes() {
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
             license: None,
+            oidc_providers: Vec::new(),
             redis_rate_limiter: None,
         })
         .unwrap();

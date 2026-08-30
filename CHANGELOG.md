@@ -9,6 +9,33 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- OpenID Connect support (DW-034): the gateway now validates Bearer
+  tokens by token introspection (RFC 7662) as the second Bearer family
+  in the authenticator dispatch chain. A Bearer token that did not
+  verify against any JWT provider (DW-019) is introspected against each
+  configured `oidc_providers` entry in order; the first `active: true`
+  result resolves an identity. Introspection results are cached per
+  provider, keyed by the SHA-256 hash of the token, with a configurable
+  TTL (`introspection_cache_ttl_s`, default 60, range 1..=3600); only
+  `active: true` results are cached so a revoked token is noticed
+  promptly. The cache lives on the dataplane and survives config
+  reloads. OIDC discovery (`{issuer}/.well-known/openid-configuration`)
+  is fetched and cached for one hour; the discovered `issuer` is
+  checked against the configured issuer for token-confusion defense.
+  Each provider's `fail_open` flag (default false) controls the posture
+  when the IdP is unreachable: fail-closed (401) or fail-open
+  (anonymous pass-through). The gateway also supports the
+  authorization-code + PKCE relying-party flow (RFC 6749 + RFC 7636,
+  S256 method), token exchange (RFC 8693), and token revocation (RFC
+  7009, which invalidates the introspection cache entry). A
+  `trusted_ca_file` per provider supports IdPs behind a private CA
+  (https only, the JWT-provider trust model). New `Oidc` credential
+  kind in the state store. New `security::oidc` module. Operator docs:
+  docs-site guide `oidc.md`; developer docs: `docs/features/oidc.md`.
+  Tests: `crates/dwara-core/tests/oidc.rs` (11 tests: active/inactive
+  token, caching, fail-closed/open, IdP unreachable, token exchange,
+  revocation, auth-code+PKCE, pass-through, consumer binding).
+
 - Enterprise licensing gate (DW-032): a `LicenseGate` runtime value
   that holds an optional verified license and gates enterprise features
   behind feature-claim flags. The gate is the edition boundary as a

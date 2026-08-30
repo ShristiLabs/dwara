@@ -157,6 +157,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     }
 }

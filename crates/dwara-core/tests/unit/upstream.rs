@@ -54,6 +54,7 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     };
     let state = ConfigState::new();
@@ -438,6 +439,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     });
     let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
@@ -492,6 +494,7 @@ fn with_root_certificates_rejects_malformed_root() {
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
             license: None,
+            oidc_providers: Vec::new(),
             redis_rate_limiter: None,
         })
         .expect("publish");

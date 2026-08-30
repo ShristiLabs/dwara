@@ -600,6 +600,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     };
     let once = gateway_to_yaml(&gw).expect("serialize");

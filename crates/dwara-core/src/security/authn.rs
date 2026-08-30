@@ -1609,6 +1609,22 @@ pub struct CompositeAuthenticator {
     /// (the gateway promised to verify Bearer tokens and cannot —
     /// fail closed with `Unavailable`).
     jwt_configured: bool,
+    /// OIDC providers (DW-034): runtime clients for token introspection.
+    /// Built from `gateway.oidc_providers`; a build failure for one
+    /// provider logs and skips (the provider is disabled, like a broken
+    /// JWT provider). Empty when no OIDC providers are configured.
+    oidc: Vec<Arc<crate::security::oidc::OidcClient>>,
+    /// Whether the config declares ANY oidc provider (DW-034):
+    /// distinguishes "no provider configured" (Bearer introspection is
+    /// not the gateway's credential to interpret) from "providers
+    /// configured but every client failed to build" (fail closed).
+    oidc_configured: bool,
+    /// The shared introspection cache (DW-034), carried ACROSS
+    /// generation swaps so a reload never discards a cached `active:
+    /// true` result (the `jwks_caches` / `oauth2_token_cache`
+    /// precedent). Owned by the dataplane; the authenticator holds an
+    /// Arc clone.
+    oidc_cache: Arc<crate::security::oidc::OidcIntrospectionCache>,
     /// issuer -> (consumer name, audiences) from consumers' jwt
     /// credentials: the claims-based consumer mapping for tokens whose
     /// provider has no explicit `consumer` binding.
@@ -1668,6 +1684,9 @@ impl CompositeAuthenticator {
             registry: CredentialRegistry::Config(HashMap::new()),
             jwt: Vec::new(),
             jwt_configured: false,
+            oidc: Vec::new(),
+            oidc_configured: false,
+            oidc_cache: Arc::new(crate::security::oidc::OidcIntrospectionCache::new()),
             jwt_consumer_index: HashMap::new(),
             consumer_groups_index: HashMap::new(),
             pepper: None,
@@ -1689,7 +1708,9 @@ impl CompositeAuthenticator {
     /// holder (no byte copy; the bytes zeroize when the last holder
     /// drops), resolved by the CALLER through the SecretSource extension
     /// seam (this domain must not import extensions) — or `None` for
-    /// legacy-only mode.
+    /// legacy-only mode. `oidc_cache` (DW-034) is the shared
+    /// introspection cache carried across rebuilds (the
+    /// `jwks_caches`/`oauth2_token_cache` precedent).
     pub fn build(
         gateway: &Gateway,
         store: Option<Arc<StateStore>>,
@@ -1697,6 +1718,7 @@ impl CompositeAuthenticator {
         obs: Option<&Observability>,
         pepper: Option<&Arc<Zeroizing<Vec<u8>>>>,
         nonce_cache: Arc<NonceCache>,
+        oidc_cache: Arc<crate::security::oidc::OidcIntrospectionCache>,
     ) -> Arc<Self> {
         let registry = match store {
             Some(store) => CredentialRegistry::Store(store),
@@ -1712,6 +1734,24 @@ impl CompositeAuthenticator {
                 Ok(v) => jwt.push(Arc::new(v)),
                 Err(e) => {
                     tracing::error!(code = "jwt_provider_disabled", "jwt provider disabled: {e}")
+                }
+            }
+        }
+        // DW-034: OIDC providers. Each provider's `trusted_ca_file` is
+        // loaded at build time so a broken bundle disables that provider
+        // at build instead of failing every request (the JWT provider
+        // precedent). A build failure logs and skips — the provider is
+        // disabled, like a broken JWT provider.
+        let mut oidc = Vec::new();
+        for cfg in &gateway.oidc_providers {
+            match crate::security::oidc::OidcClient::build(cfg.clone()) {
+                Ok(client) => oidc.push(client),
+                Err(e) => {
+                    tracing::error!(
+                        code = "oidc_provider_disabled",
+                        provider = %cfg.name,
+                        "oidc provider disabled: {e}"
+                    );
                 }
             }
         }
@@ -1760,7 +1800,7 @@ impl CompositeAuthenticator {
                 }
             }
         }
-        let enabled = !gateway.consumers.is_empty() || !jwt.is_empty();
+        let enabled = !gateway.consumers.is_empty() || !jwt.is_empty() || !oidc.is_empty();
         // DW-035: gateway-level mTLS consumer mapping. Built when
         // `mtls_consumer_mapping` is present and enabled; `None`
         // otherwise (certificates matched only through per-consumer
@@ -1774,6 +1814,9 @@ impl CompositeAuthenticator {
             registry,
             jwt,
             jwt_configured: !gateway.jwt_providers.is_empty(),
+            oidc,
+            oidc_configured: !gateway.oidc_providers.is_empty(),
+            oidc_cache,
             jwt_consumer_index,
             consumer_groups_index,
             pepper: pepper.cloned(),
@@ -1992,6 +2035,139 @@ impl CompositeAuthenticator {
         // so operators see it instead of a wall of caller-side 401s.
         if let Some(e) = unavailable {
             return Err(e);
+        }
+        Err(last_invalid)
+    }
+
+    /// OIDC token introspection (DW-034): the second Bearer family. A
+    /// presented Bearer token that did not verify against any JWT
+    /// provider (DW-019) is introspected against each configured OIDC
+    /// provider in order; the first `active: true` result resolves an
+    /// [`Identity`]. Returns `Ok(None)` when NO OIDC provider is
+    /// configured (pass-through, like JWT with no providers). When
+    /// providers ARE configured but every introspection fails, the
+    /// fail-open/fail-closed posture is governed by each provider's
+    /// `fail_open` config: a fail-open provider yields `Ok(None)`
+    /// (anonymous) on an IdP failure; a fail-closed provider yields
+    /// `Err(Invalid)` (401) — the story's "fail-closed = 401" applies
+    /// to ALL IdP failures (network, non-2xx, malformed, inactive), so
+    /// a down IdP does not surface as a 500-class gateway error (the
+    /// operator chose fail-closed, meaning "reject the token"). A
+    /// cached `active: true` result short-circuits the IdP call (see
+    /// `OidcIntrospectionCache`).
+    async fn authenticate_oidc(&self, token: &str) -> Result<Option<Identity>, AuthError> {
+        if self.oidc.is_empty() {
+            if !self.oidc_configured {
+                // No provider configured: Bearer stays pass-through
+                // (not interpreted), so the certificate family may
+                // still authenticate the connection.
+                return Ok(None);
+            }
+            // Providers configured but every client failed to build:
+            // the gateway promised to introspect Bearer tokens and
+            // cannot. Fail closed (the JWT-disabled precedent, #131).
+            return Err(AuthError::Unavailable(
+                "oidc providers are configured but disabled (client build failed); \
+                 failing closed instead of proxying Bearer tokens unverified"
+                    .to_string(),
+            ));
+        }
+        let mut last_invalid = AuthError::Invalid("token did not introspect as active");
+        for client in &self.oidc {
+            match client.introspect(token, &self.oidc_cache).await {
+                Ok(resp) => {
+                    // `active: true` (introspect returns Ok only for
+                    // active results; Inactive is an Err). Map the
+                    // introspection result to an Identity.
+                    let consumer_name = match &client.config().consumer {
+                        Some(name) => name.clone(),
+                        None => resp
+                            .sub
+                            .clone()
+                            .unwrap_or_else(|| "oidc-anonymous".to_string()),
+                    };
+                    let groups = self.consumer_groups_of(&consumer_name);
+                    // Build the identity claims map from the
+                    // introspection response (the JWT claims-map
+                    // precedent: string and number scalars, arrays of
+                    // strings flattened to space-joined form).
+                    let mut claims = BTreeMap::new();
+                    if let Some(obj) = resp.raw.as_object() {
+                        for (k, v) in obj {
+                            if claims.len() >= 32 {
+                                break;
+                            }
+                            match v {
+                                serde_json::Value::String(s) => {
+                                    claims.insert(k.clone(), s.clone());
+                                }
+                                serde_json::Value::Number(n) => {
+                                    claims.insert(k.clone(), n.to_string());
+                                }
+                                serde_json::Value::Array(a)
+                                    if !a.is_empty() && a.iter().all(|v| v.is_string()) =>
+                                {
+                                    claims.insert(
+                                        k.clone(),
+                                        a.iter()
+                                            .filter_map(|v| v.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(" "),
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    return Ok(Some(Identity {
+                        consumer_name,
+                        credential_kind: CredentialKind::Oidc,
+                        groups,
+                        claims,
+                        body_digest: None,
+                    }));
+                }
+                Err(crate::security::oidc::OidcError::Inactive) => {
+                    // The token was explicitly rejected (`active:
+                    // false`). This is a 401 regardless of fail_open
+                    // (the token is not valid, not a gateway problem).
+                    last_invalid = AuthError::Invalid("token introspected as inactive");
+                }
+                Err(e) => {
+                    // An IdP failure (network, non-2xx, malformed).
+                    // Fail-open providers yield anonymous; fail-closed
+                    // providers record the error as 401 (the story's
+                    // "fail-closed = 401" applies to ALL IdP failures,
+                    // so a down IdP does not surface as 500 — the
+                    // operator chose to reject). The error text is
+                    // logged via the OidcError's Display, not sent to
+                    // the client (the envelope never leaks IdP
+                    // internals).
+                    if client.config().fail_open {
+                        // Fail open: this provider declines to
+                        // authenticate but does not reject. Continue
+                        // to the next provider; if none succeed, the
+                        // caller sees `Ok(None)` (pass-through).
+                        continue;
+                    }
+                    // Fail closed: 401 for every IdP failure shape.
+                    last_invalid = AuthError::Invalid("oidc introspection failed");
+                    tracing::warn!(
+                        code = "oidc_introspection_failed",
+                        provider = %client.config().name,
+                        "oidc introspection failed (fail-closed): {e}"
+                    );
+                }
+            }
+        }
+        // If every fail-closed provider rejected the token (or every
+        // provider was fail-open and none succeeded), return the last
+        // invalid. When every provider was fail-open and none
+        // succeeded, `last_invalid` is the default — but fail-open
+        // means the operator chose pass-through, so return `Ok(None)`
+        // when NO fail-closed provider was consulted.
+        if self.oidc.iter().all(|c| c.config().fail_open) {
+            return Ok(None);
         }
         Err(last_invalid)
     }
@@ -2294,17 +2470,44 @@ impl Authenticator for CompositeAuthenticator {
                 if rest.trim().is_empty() {
                     return Err(AuthError::Invalid("empty bearer token"));
                 }
+                let token = rest.trim();
+                // JWT verification (DW-019): the first Bearer family.
                 // No provider configured leaves `Ok(None)`: Bearer stays
-                // pass-through (not interpreted), so the certificate
-                // family may still authenticate the connection; any
-                // resolved identity or failure is the answer. Providers
+                // pass-through (not interpreted) for JWT, so the OIDC
+                // family (DW-034) and then the certificate family may
+                // still authenticate the connection. Providers
                 // configured but disabled (#131) instead answers
                 // `Err(Unavailable)` — the presented credential was the
                 // gateway's to verify and it cannot, so it never
                 // proxies unverified.
-                if let verified @ (Ok(Some(_)) | Err(_)) = self.authenticate_jwt(rest.trim()).await
-                {
-                    return verified;
+                match self.authenticate_jwt(token).await {
+                    Ok(Some(id)) => return Ok(Some(id)),
+                    Ok(None) => {
+                        // No JWT provider: fall through to OIDC
+                        // introspection (DW-034). If OIDC also has no
+                        // providers, it returns `Ok(None)` and the
+                        // certificate family may still authenticate.
+                        if let oidc @ (Ok(Some(_)) | Err(_)) = self.authenticate_oidc(token).await {
+                            return oidc;
+                        }
+                    }
+                    Err(AuthError::Unavailable(e)) => {
+                        return Err(AuthError::Unavailable(e));
+                    }
+                    Err(AuthError::Invalid(jwt_msg)) => {
+                        // JWT rejected the token. Try OIDC
+                        // introspection (the token may be an opaque
+                        // token, not a JWT). If OIDC resolves an
+                        // identity, return it; otherwise fail closed
+                        // with the JWT rejection (the presented
+                        // credential was the gateway's to verify and
+                        // neither family accepted it).
+                        match self.authenticate_oidc(token).await {
+                            Ok(Some(id)) => return Ok(Some(id)),
+                            Ok(None) => return Err(AuthError::Invalid(jwt_msg)),
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
         }
@@ -2333,6 +2536,12 @@ impl Authenticator for CompositeAuthenticator {
             }
         }
         if !self.jwt.is_empty() {
+            parts.push("Bearer".to_string());
+        }
+        // DW-034: OIDC providers also interpret Bearer tokens (via
+        // introspection), so the challenge offers Bearer when OIDC
+        // providers are configured even if no JWT provider is.
+        if !self.oidc.is_empty() {
             parts.push("Bearer".to_string());
         }
         if !self.hmac_keys.is_empty() {

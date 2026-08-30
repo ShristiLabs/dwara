@@ -423,6 +423,7 @@ async fn dataplane_reload_changes_weights_without_restart() {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        oidc_providers: Vec::new(),
         redis_rate_limiter: None,
     };
     st.compile_and_publish(&g).expect("publish A");

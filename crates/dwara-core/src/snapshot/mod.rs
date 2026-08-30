@@ -1680,6 +1680,110 @@ fn validate_redis_rate_limiter(gateway: &Gateway, issues: &mut Vec<ValidationIss
     }
 }
 
+/// Validate the `gateway.oidc_providers` list (DW-034): each issuer must
+/// be an absolute `http(s)://` URL, the introspection cache TTL must be
+/// in `1..=3600`, the `consumer` reference (when set) must name a known
+/// consumer, the `trusted_ca_file` (when set) must be a readable PEM
+/// bundle and only applies to an `https://` issuer, and provider names
+/// must be unique. Endpoint overrides (`introspection_endpoint`,
+/// `revocation_endpoint`) are checked for URL shape when present.
+fn validate_oidc_providers(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    // Duplicate provider names (inline: check_dups is a local closure in
+    // the calling validate function, not a free function).
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &gateway.oidc_providers {
+            if !seen.insert(p.name.as_str()) {
+                issues.push(issue("oidc_provider", &p.name, "name", "duplicate name"));
+            }
+        }
+    }
+    for p in &gateway.oidc_providers {
+        match p.issuer.parse::<hyper::Uri>() {
+            Ok(uri) => {
+                if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none()
+                {
+                    issues.push(issue(
+                        "oidc_provider",
+                        &p.name,
+                        "issuer",
+                        format!("'{}' must be an absolute http(s) URL", p.issuer),
+                    ));
+                }
+            }
+            Err(_) => issues.push(issue(
+                "oidc_provider",
+                &p.name,
+                "issuer",
+                format!("'{}' is not a valid URL", p.issuer),
+            )),
+        }
+        let ttl = p.introspection_cache_ttl_s;
+        if !(crate::config::limits::MIN_OIDC_INTROSPECTION_CACHE_TTL_S
+            ..=crate::config::limits::MAX_OIDC_INTROSPECTION_CACHE_TTL_S)
+            .contains(&ttl)
+        {
+            issues.push(issue(
+                "oidc_provider",
+                &p.name,
+                "introspection_cache_ttl_s",
+                format!(
+                    "introspection_cache_ttl_s {} is out of range: must be {}..={}",
+                    ttl,
+                    crate::config::limits::MIN_OIDC_INTROSPECTION_CACHE_TTL_S,
+                    crate::config::limits::MAX_OIDC_INTROSPECTION_CACHE_TTL_S,
+                ),
+            ));
+        }
+        if let Some(consumer) = &p.consumer {
+            if !gateway.consumers.iter().any(|c| &c.name == consumer) {
+                issues.push(issue(
+                    "oidc_provider",
+                    &p.name,
+                    "consumer",
+                    format!("references unknown consumer '{consumer}'"),
+                ));
+            }
+        }
+        // trusted_ca_file: same rules as JwtProvider (#121) — only
+        // meaningful for an https issuer, and must be a readable PEM
+        // bundle when it does apply.
+        if let Some(ca) = &p.trusted_ca_file {
+            if let Ok(uri) = p.issuer.parse::<hyper::Uri>() {
+                if uri
+                    .scheme_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("https"))
+                {
+                    check_trusted_ca_file("oidc_provider", &p.name, "trusted_ca_file", ca, issues);
+                } else {
+                    issues.push(issue(
+                        "oidc_provider",
+                        &p.name,
+                        "trusted_ca_file",
+                        "trusted_ca_file only applies to an https issuer (no TLS is \
+                         negotiated toward an http endpoint)",
+                    ));
+                }
+            }
+        }
+        // Endpoint overrides: when present, must be absolute http(s) URLs.
+        if let Some(ep) = &p.introspection_endpoint {
+            validate_delivery_url(
+                &format!("oidc_provider[{}].introspection_endpoint", p.name),
+                ep,
+                issues,
+            );
+        }
+        if let Some(ep) = &p.revocation_endpoint {
+            validate_delivery_url(
+                &format!("oidc_provider[{}].revocation_endpoint", p.name),
+                ep,
+                issues,
+            );
+        }
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected; `quota_near_limit` IS emitted since
@@ -2130,6 +2234,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // startup in dwara-bin, where a missing claim logs a warning and
     // falls back to the local limiter).
     validate_redis_rate_limiter(gateway, &mut issues);
+
+    // DW-034: OIDC providers (issuer URL shape, introspection cache TTL
+    // bounds, consumer references, trusted_ca_file readability).
+    validate_oidc_providers(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -4414,6 +4522,7 @@ impl Snapshot {
                 mtls_consumer_mapping: None,
                 mtls_forward_headers: None,
                 license: None,
+                oidc_providers: Vec::new(),
                 redis_rate_limiter: None,
             }),
             routes: Arc::new(RouteTable::empty()),
