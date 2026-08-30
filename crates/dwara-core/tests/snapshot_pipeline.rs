@@ -930,6 +930,7 @@ fn validation_rejects_missing_trusted_ca_file_on_jwt_provider() {
         audience: None,
         algorithms: vec!["RS256".into()],
         refresh_secs: 300,
+        retired_key_grace_secs: None,
         leeway_secs: 30,
         consumer: None,
     });
@@ -948,6 +949,7 @@ fn validation_rejects_trusted_ca_file_with_http_jwks_url() {
         audience: None,
         algorithms: vec!["RS256".into()],
         refresh_secs: 300,
+        retired_key_grace_secs: None,
         leeway_secs: 30,
         consumer: None,
     });

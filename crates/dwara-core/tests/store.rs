@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
+use dwara_core::config::credentials::{credential_selector, sha256_stored_hash};
 use dwara_core::config::parse_gateway;
 use dwara_core::store::{sync_consumers_from_config, CredentialKind, StateStore, StoreError};
 
@@ -412,4 +413,98 @@ fn five_hundred_selectors_warmed_serve_five_thousand_lookups_with_zero_disk() {
         "disk touched after warmup"
     );
     assert!(store.cache_hits() >= hits_at_warmup + LOOKUPS - 1);
+}
+
+// --- Scheduled retirement & rotation lifecycle (DW-046) --------------------
+
+#[test]
+fn retire_lifecycle_schedules_immediately_and_lazily() {
+    let store = StateStore::open_in_memory().unwrap();
+    let consumer = store.upsert_consumer("acme", None, &[]).unwrap().id;
+    let row = store
+        .add_credential(
+            consumer,
+            CredentialKind::ApiKey,
+            sha256_stored_hash("rotating-key"),
+            None,
+            credential_selector("rotating-key"),
+        )
+        .unwrap();
+
+    // Future retirement: the row stays active in the SQL lookup.
+    let soon = now_epoch() + 3600;
+    assert!(store.retire_credential(row.id, soon).unwrap());
+    let active = store
+        .lookup_credentials_by_selector(&credential_selector("rotating-key"))
+        .unwrap();
+    assert_eq!(active.len(), 1, "still inside the window");
+    assert_eq!(active[0].retire_at, Some(soon));
+
+    // Postponement is refused (only EARLIER moves allowed).
+    assert!(!store.retire_credential(row.id, soon + 100).unwrap());
+
+    // Immediate retirement: gone from the active lookup, present in
+    // the list view with the stamp.
+    assert!(store.retire_credential(row.id, 0).unwrap());
+    let active = store
+        .lookup_credentials_by_selector(&credential_selector("rotating-key"))
+        .unwrap();
+    assert!(active.is_empty(), "retired rows never serve");
+    let listed = store.list_credentials_for_consumer("acme").unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].retire_at,
+        Some(0),
+        "the list view keeps the stamp"
+    );
+    assert_eq!(listed[0].revoked_at, None, "retirement is not revocation");
+
+    // Re-retiring a retired row is a no-op (not active).
+    assert!(!store.retire_credential(row.id, 0).unwrap());
+}
+
+#[test]
+fn list_credentials_includes_revoked_and_retired_rows() {
+    let store = StateStore::open_in_memory().unwrap();
+    let consumer = store.upsert_consumer("acme", None, &[]).unwrap().id;
+    let a = store
+        .add_credential(
+            consumer,
+            CredentialKind::ApiKey,
+            sha256_stored_hash("key-a"),
+            None,
+            credential_selector("key-a"),
+        )
+        .unwrap();
+    let b = store
+        .add_credential(
+            consumer,
+            CredentialKind::ApiKey,
+            sha256_stored_hash("key-b"),
+            None,
+            credential_selector("key-b"),
+        )
+        .unwrap();
+    store.revoke_credential(a.id).unwrap();
+    store.retire_credential(b.id, now_epoch() + 60).unwrap();
+
+    let listed = store.list_credentials_for_consumer("acme").unwrap();
+    assert_eq!(listed.len(), 2, "every row, whatever its lifecycle state");
+    assert!(listed.iter().any(|r| r.revoked_at.is_some()));
+    assert!(listed.iter().any(|r| r.retire_at.is_some()));
+    // Newest first (the rotation runbook identifies old vs new by order).
+    assert_eq!(listed[0].id, b.id);
+
+    // Unknown consumer: empty, not an error.
+    assert!(store
+        .list_credentials_for_consumer("ghost")
+        .unwrap()
+        .is_empty());
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }

@@ -1751,6 +1751,23 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 "refresh_secs must be > 0",
             ));
         }
+        // DW-046: the retired-key grace is a bounded safety window —
+        // past a week it is no longer bridging a rotation, it is
+        // keeping a retired key alive on purpose.
+        if let Some(grace) = p.retired_key_grace_secs {
+            if grace > 604_800 {
+                issues.push(issue(
+                    "jwt_provider",
+                    &p.name,
+                    "retired_key_grace_secs",
+                    format!(
+                        "retired_key_grace_secs {grace} exceeds the 604800 cap \
+                         (7 days): a longer window would keep a retired issuer \
+                         key verifying indefinitely"
+                    ),
+                ));
+            }
+        }
         if let Some(consumer) = &p.consumer {
             if !gateway.consumers.iter().any(|c| &c.name == consumer) {
                 issues.push(issue(

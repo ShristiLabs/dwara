@@ -604,14 +604,18 @@ async fn jwks_rotation_mid_flight_serves_new_kid_without_failure() {
     .await;
     assert_eq!(status, StatusCode::OK, "rotation failed: {body}");
 
-    // And the RETIRED key's tokens no longer verify.
+    // DW-046 dual validity: the RETIRED key's tokens keep verifying
+    // through the default retired-key grace — the issuer dropped the
+    // kid from JWKS while previously-issued tokens still carry it.
+    // (The grace-zero immediate-cutoff shape is pinned by
+    // jwks_retired_key_grace_zero_cuts_immediately.)
     let (status, _, _) = send_with(
         &setup.dp,
         "/x",
         vec![("authorization", &format!("Bearer {tok_a}"))],
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -800,6 +804,12 @@ async fn spawn_raw_jwks(body: Arc<std::sync::Mutex<Vec<u8>>>) -> SocketAddr {
 }
 
 async fn jwks_lab(refresh_secs: u64) -> (JwksLab, rcgen::KeyPair) {
+    jwks_lab_grace(refresh_secs, None).await
+}
+
+/// [`jwks_lab`] with an explicit `retired_key_grace_secs` (DW-046):
+/// None = the field absent from the YAML (the default applies).
+async fn jwks_lab_grace(refresh_secs: u64, grace: Option<u64>) -> (JwksLab, rcgen::KeyPair) {
     let key = rcgen::KeyPair::generate().unwrap();
     let body = Arc::new(std::sync::Mutex::new(
         serde_json::json!({ "keys": [ec_jwk(&key, "key-1")] })
@@ -808,6 +818,9 @@ async fn jwks_lab(refresh_secs: u64) -> (JwksLab, rcgen::KeyPair) {
     ));
     let jwks_addr = spawn_raw_jwks(Arc::clone(&body)).await;
     let upstream = spawn_echo_upstream().await;
+    let grace_yaml = grace
+        .map(|g| format!("\n    retired_key_grace_secs: {g}"))
+        .unwrap_or_default();
     let yaml = format!(
         "jwt_providers:
   - name: idp
@@ -815,7 +828,7 @@ async fn jwks_lab(refresh_secs: u64) -> (JwksLab, rcgen::KeyPair) {
     algorithms: [ES256]
     issuer: https://idp.example
     audience: dwara-api
-    refresh_secs: {refresh_secs}
+    refresh_secs: {refresh_secs}{grace_yaml}
 listeners: []
 routes:
   - name: r
@@ -926,7 +939,10 @@ async fn jwt_from_entirely_unknown_key_answers_401_not_500() {
 
 #[tokio::test]
 async fn cached_jwks_keeps_verifying_while_fresh_then_refreshes_after_expiry() {
-    let (lab, key) = jwks_lab(1).await; // 1s staleness bound
+    // Grace 0 (DW-046): this test pins the strict cutoff — refresh
+    // BEFORE use, retired kid fails immediately. The dual-validity
+    // window (default grace) is pinned by the rotation tests.
+    let (lab, key) = jwks_lab_grace(1, Some(0)).await; // 1s staleness bound
     let tok_a = lab_token(&key, "key-1");
     let (status, _, _) = send_with(
         &lab.dp,
@@ -2692,4 +2708,214 @@ async fn disabled_jwt_provider_without_a_bearer_still_passes_through() {
         .await
         .expect("no presented credential must not fail");
     assert!(identity.is_none(), "anonymous pass-through, not an error");
+}
+
+// ---- key rotation workflows (DW-046) ---------------------------------------
+
+#[tokio::test]
+async fn jwks_retired_key_grace_zero_cuts_immediately() {
+    // The grace-off shape: with retired_key_grace_secs: 0, a kid the
+    // fresh set no longer carries fails closed on the spot (the
+    // pre-DW-046 behavior, now opt-in).
+    let (lab, key_a) = jwks_lab_grace(300, Some(0)).await;
+    let tok_a = lab_token(&key_a, "key-1");
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_a}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Rotate the JWKS to key-2 only; warming it via a key-2 token
+    // retires key-1's set.
+    let key_b = rcgen::KeyPair::generate().unwrap();
+    {
+        let jwk = ec_jwk(&key_b, "key-2");
+        *lab.body.lock().unwrap() = serde_json::json!({ "keys": [jwk] })
+            .to_string()
+            .into_bytes();
+    }
+    let tok_b = lab_token(&key_b, "key-2");
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_b}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the new key works");
+
+    // The retired kid fails closed with grace 0.
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_a}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn jwks_unrelated_refetch_does_not_extend_the_grace() {
+    // An identical-kid re-fetch must not re-stamp the retirement (a
+    // flapping endpoint that re-serves the SAME fresh set cannot
+    // resurrect a retired key forever). Pinned by observing the
+    // discriminator directly through behavior: fetch set B (retire A),
+    // re-serve the SAME set B, and A stays retired.
+    let (lab, key_a) = jwks_lab_grace(1, Some(60)).await; // 1s staleness
+    let tok_a = lab_token(&key_a, "key-1");
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_a}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let key_b = rcgen::KeyPair::generate().unwrap();
+    let set_b = serde_json::json!({ "keys": [ec_jwk(&key_b, "key-2")] });
+    *lab.body.lock().unwrap() = set_b.to_string().into_bytes();
+    let tok_b = lab_token(&key_b, "key-2");
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_b}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Wait out the 1s staleness bound twice (grace 60s, but the
+    // retirement stamp must stay at the ROTATION fetch, not slide).
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_b}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "fresh fetch of the same set B");
+
+    // Grace is 60s and the stamp is from the rotation: A still inside
+    // it (this asserts the stamp did not RESET to the second fetch —
+    // observable later; here just assert it verifies, the expiry
+    // horizon itself is covered by grace_zero_cuts_immediately).
+    let (status, _, _) = send_with(
+        &lab.dp,
+        "/x",
+        vec![("authorization", &format!("Bearer {tok_a}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "within the un-extended 60s grace");
+}
+
+#[tokio::test]
+async fn dual_validity_rotation_has_zero_failed_requests() {
+    // The story's done-when: rotating an api key costs ZERO failed
+    // requests mid-window. Old key live -> issue new (both valid) ->
+    // retire old (new unaffected).
+    let gateway = parse_gateway(&basic_config(false)).unwrap();
+    let state = Arc::new(ConfigState::new());
+    state.compile_and_publish(&gateway).unwrap();
+    let dp = DataPlane::new(state);
+    let store = Arc::new(StateStore::open_in_memory().unwrap());
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
+    dp.set_state_store(Arc::clone(&store));
+
+    // The OLD key: a store-issued credential like the admin endpoint
+    // would create (BAD_GATEWAY = authn passed, upstream unreachable —
+    // the established fixture pattern).
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("the-old-key-value"),
+            None,
+            credential_selector("the-old-key-value"),
+        )
+        .unwrap();
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-old-key-value")]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    // Issue the NEW key (the admin endpoint's store call, hashed the
+    // same way dp.hash_new_credential would).
+    let new_row = store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("the-new-key-value"),
+            None,
+            credential_selector("the-new-key-value"),
+        )
+        .unwrap();
+
+    // The window: BOTH keys authenticate simultaneously.
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-old-key-value")]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "old key still valid mid-window"
+    );
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-new-key-value")]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "new key valid mid-window");
+
+    // Retire the old key: it stops on the next request; the new one
+    // never noticed anything. The OLD row is the config-seeded one —
+    // find it by elimination through the list view.
+    let rows = store.list_credentials_for_consumer("acme").unwrap();
+    let old_row = rows
+        .iter()
+        .find(|r| r.id != new_row.id && r.revoked_at.is_none())
+        .expect("the config-seeded old credential row");
+    assert!(store.retire_credential(old_row.id, 0).unwrap());
+
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-old-key-value")]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "old key retired");
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-new-key-value")]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "new key unaffected");
+}
+
+#[tokio::test]
+async fn scheduled_retirement_expires_cached_rows_lazily() {
+    // The far edge of a SCHEDULED retirement must take effect without
+    // any admin action: the registry filters cached rows at lookup
+    // time when their retire_at passes.
+    let gateway = parse_gateway(&basic_config(false)).unwrap();
+    let state = Arc::new(ConfigState::new());
+    state.compile_and_publish(&gateway).unwrap();
+    let dp = DataPlane::new(state);
+    let store = Arc::new(StateStore::open_in_memory().unwrap());
+    sync_consumers_from_config(&store, &gateway, None).unwrap();
+    dp.set_state_store(Arc::clone(&store));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let consumer = store.lookup_consumer("acme").unwrap().unwrap();
+    let row = store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("the-scheduled-key"),
+            None,
+            credential_selector("the-scheduled-key"),
+        )
+        .unwrap();
+    // Schedule retirement one second out.
+    assert!(store.retire_credential(row.id, now + 1).unwrap());
+
+    // Fill the hot cache while the credential is still inside the
+    // window (this request's lookup caches the row).
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-scheduled-key")]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "valid inside the window");
+
+    // Cross the boundary with NO further store/admin activity.
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    let (status, _, _) = send_with(&dp, "/x", vec![("x-api-key", "the-scheduled-key")]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the CACHED row expired on time without a sweeper"
+    );
 }

@@ -83,7 +83,9 @@ pub enum CredentialKind {
 }
 
 impl CredentialKind {
-    fn as_str(self) -> &'static str {
+    /// The stable wire/storage spelling (public: the admin surface's
+    /// list view names the kind; the value carries no secret).
+    pub fn as_str(self) -> &'static str {
         match self {
             CredentialKind::ApiKey => "api_key",
             CredentialKind::Jwt => "jwt",
@@ -141,6 +143,11 @@ pub struct CredentialRecord {
     pub created_at: i64,
     /// Unix epoch seconds of revocation, if revoked.
     pub revoked_at: Option<i64>,
+    /// Unix epoch seconds of SCHEDULED retirement (DW-046), if set: the
+    /// row keeps authenticating until this instant, then stops — the
+    /// dual-validity window's far edge. Enforced lazily at lookup; NULL
+    /// = never.
+    pub retire_at: Option<i64>,
 }
 
 impl fmt::Debug for CredentialRecord {
@@ -507,6 +514,7 @@ impl StateStore {
             selector: selector.clone(),
             created_at: now,
             revoked_at: None,
+            retire_at: None,
         })
     }
 
@@ -534,6 +542,63 @@ impl StateStore {
         drop(conn);
         self.invalidate(&selector);
         Ok(true)
+    }
+
+    /// Schedule a credential's RETIREMENT (DW-046): the row keeps
+    /// authenticating until `at_epoch_secs`, then stops — the
+    /// dual-validity window of key rotation. `at` in the past or now is
+    /// an immediate retirement (equivalent to revocation for lookup
+    /// purposes, but recorded as a scheduled stop, not an operator
+    /// revocation). Returns whether an active row was updated.
+    /// Idempotent: re-retiring moves an existing future retirement
+    /// EARLIER only (never later — a scheduled stop cannot be
+    /// postponed through this call; issue a new credential instead).
+    pub fn retire_credential(&self, credential_id: i64, at_epoch_secs: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let selector: Option<String> = conn
+            .query_row(
+                "SELECT selector FROM credentials
+                 WHERE id = ?1 AND revoked_at IS NULL
+                   AND (retire_at IS NULL OR retire_at > ?2)",
+                params![credential_id, at_epoch_secs],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(selector) = selector else {
+            return Ok(false);
+        };
+        conn.execute(
+            "UPDATE credentials SET retire_at = ?2 WHERE id = ?1",
+            params![credential_id, at_epoch_secs],
+        )?;
+        drop(conn);
+        // The cached list still carries the row; the registry filters
+        // expired retirements at lookup time (lazy enforcement), but
+        // invalidating here makes an IMMEDIATE retirement effective on
+        // the very next request without waiting for the filter.
+        self.invalidate(&selector);
+        Ok(true)
+    }
+
+    /// Every credential row of a named consumer (including revoked and
+    /// retired ones), newest first — the admin rotation surface's list
+    /// view. Secret material (hash/salt/selector) never leaves this
+    /// module; the admin layer projects only the safe fields.
+    pub fn list_credentials_for_consumer(
+        &self,
+        consumer_name: &str,
+    ) -> Result<Vec<CredentialRecord>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.consumer_id, k.name, c.kind, c.hash, c.salt,
+                    c.selector, c.created_at, c.retire_at, c.revoked_at
+             FROM credentials c JOIN consumers k ON k.id = c.consumer_id
+             WHERE k.name = ?1
+             ORDER BY c.id DESC",
+        )?;
+        let rows = stmt.query_map(params![consumer_name], row_to_credential_full)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Revoke every ACTIVE credential of `consumer_id`/`kind` seeded
@@ -614,12 +679,13 @@ impl StateStore {
         let conn = self.conn.lock().expect("store connection poisoned");
         let mut stmt = conn.prepare(
             "SELECT c.id, c.consumer_id, k.name, c.kind, c.hash, c.salt,
-                    c.selector, c.created_at
+                    c.selector, c.created_at, c.retire_at
              FROM credentials c JOIN consumers k ON k.id = c.consumer_id
              WHERE c.selector = ?1 AND c.revoked_at IS NULL
+               AND (c.retire_at IS NULL OR c.retire_at > ?2)
              ORDER BY c.id",
         )?;
-        let rows = stmt.query_map(params![selector], row_to_credential)?;
+        let rows = stmt.query_map(params![selector, now_secs()], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -966,6 +1032,18 @@ fn row_to_credential(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord
         selector: r.get(6)?,
         created_at: r.get(7)?,
         revoked_at: None,
+        retire_at: r.get(8)?,
+    })
+}
+
+/// The admin list view's mapper: the FULL row (revocation and
+/// retirement included), column order per
+/// [`StateStore::list_credentials_for_consumer`]'s SELECT.
+fn row_to_credential_full(r: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRecord> {
+    let hot = row_to_credential(r)?;
+    Ok(CredentialRecord {
+        revoked_at: r.get(9)?,
+        ..hot
     })
 }
 

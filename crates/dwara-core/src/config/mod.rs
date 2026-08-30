@@ -575,6 +575,25 @@ pub struct JwtProvider {
     /// `iss` claim is matched against consumers' `jwt` credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer: Option<String>,
+    /// How long a key REMOVED from a fresh JWKS fetch keeps verifying
+    /// (DW-046), in seconds (default 86400 = 24 h; 0 disables). The
+    /// dual-validity window for JWKS rotation: issuers drop the old
+    /// key from their JWKS the moment the new one appears, while
+    /// previously-issued tokens still carry the old `kid` — during
+    /// this grace the gateway honors the immediately-previous key set
+    /// for kids the fresh set no longer carries. Only ONE previous set
+    /// is retained (rotation is one step at a time). Validation caps
+    /// the value at 7 days (604800).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_key_grace_secs: Option<u64>,
+}
+
+impl JwtProvider {
+    /// `retired_key_grace_secs` resolved to its effective value
+    /// (default 86 400; the DW-046 dual-validity window).
+    pub fn retired_key_grace_secs(&self) -> u64 {
+        self.retired_key_grace_secs.unwrap_or(86_400)
+    }
 }
 
 fn default_jwt_algorithms() -> Vec<String> {

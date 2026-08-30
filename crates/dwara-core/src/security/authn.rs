@@ -721,6 +721,12 @@ pub struct KnownCredential {
     pub consumer_name: String,
     pub kind: CredentialKind,
     pub hash: String,
+    /// Scheduled retirement instant (DW-046, epoch seconds): the
+    /// credential stops verifying once this passes. The STORE lookup
+    /// filters retired rows in SQL; this field exists for the CACHED
+    /// list, which was filled before the boundary and must go stale
+    /// exactly on time — the registry lookup below re-checks it.
+    pub retire_at: Option<i64>,
     /// Store row id when the credential came from the state store (used
     /// by the #124 pepper transition to re-hash a legacy-verified row in
     /// place); `None` for config-seeded credentials.
@@ -736,6 +742,7 @@ impl std::fmt::Debug for KnownCredential {
             .field("consumer_name", &self.consumer_name)
             .field("kind", &self.kind)
             .field("hash", &"[redacted]")
+            .field("retire_at", &self.retire_at)
             .field("id", &self.id)
             .field("selector", &"[redacted]")
             .finish()
@@ -748,6 +755,7 @@ impl From<&CredentialRecord> for KnownCredential {
             consumer_name: r.consumer_name.clone(),
             kind: r.kind,
             hash: r.hash.clone(),
+            retire_at: r.retire_at,
             id: Some(r.id),
             selector: r.selector.clone(),
         }
@@ -838,6 +846,7 @@ impl CredentialRegistry {
                     consumer_name: consumer.name.clone(),
                     kind,
                     hash,
+                    retire_at: None,
                     id: None,
                     selector,
                 });
@@ -849,6 +858,15 @@ impl CredentialRegistry {
     /// Look up the active credentials for a selector (hash of the
     /// presented material — never plaintext — or an mTLS match value).
     async fn lookup(&self, selector: &str) -> Result<Vec<KnownCredential>, AuthError> {
+        // DW-046: the dual-validity window's far edge is enforced HERE
+        // (in addition to the store's SQL filter) so a CACHED list
+        // filled before a scheduled retirement stops serving the row
+        // exactly on time, with no background sweeper.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        let retired = |c: &KnownCredential| c.retire_at.is_some_and(|t| t <= now);
         match self {
             CredentialRegistry::Store(store) => {
                 let entry = store
@@ -858,12 +876,16 @@ impl CredentialRegistry {
                 Ok(entry
                     .iter()
                     .map(|r| KnownCredential::from(r.as_ref()))
+                    .filter(|c| !retired(c))
                     .collect())
             }
             CredentialRegistry::Config(map) => Ok(map
                 .get(selector)
                 .map(|v| v.as_ref().clone())
-                .unwrap_or_default()),
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| !retired(c))
+                .collect()),
         }
     }
 }
@@ -1032,6 +1054,17 @@ impl Service<Uri> for JwksConnector {
 /// config reload reuses the cache (rotation state survives reloads).
 pub struct JwksCacheEntry {
     keys: RwLock<Arc<JwkSet>>,
+    /// The SUPERSEDED key set and when it was retired (DW-046): when a
+    /// successful fetch delivers a set that no longer contains a key
+    /// the previous set had, the old set is kept here for
+    /// `retired_key_grace_secs` — the JWKS half of the dual-validity
+    /// window. Tokens signed by an issuer key dropped from the fresh
+    /// set (the rotation race: keys are removed from JWKS while
+    /// previously-issued tokens still carry the old kid) keep
+    /// verifying during the grace; after it they fail closed. Only the
+    /// immediately-previous set is retained (rotation is one step at a
+    /// time); a set identical in kids does not retire anything.
+    retired: RwLock<Option<(Arc<JwkSet>, Instant)>>,
     last_refresh: RwLock<Instant>,
     /// When the last refresh-triggered (unknown-kid) fetch started.
     /// Unknown-kid fetches are refused for a minimum spacing afterwards
@@ -1055,6 +1088,7 @@ impl JwksCacheEntry {
     fn new() -> Self {
         JwksCacheEntry {
             keys: RwLock::new(Arc::new(JwkSet { keys: Vec::new() })),
+            retired: RwLock::new(None),
             last_refresh: RwLock::new(
                 Instant::now()
                     .checked_sub(Duration::from_secs(86400))
@@ -1173,7 +1207,27 @@ impl JwtVerifier {
         let set: JwkSet = serde_json::from_slice(&body)
             .map_err(|e| AuthError::Unavailable(format!("jwks body is not a jwk set: {e}")))?;
         let set = Arc::new(set);
-        *self.cache.keys.write().expect("jwks cache poisoned") = Arc::clone(&set);
+        // DW-046: swap the cached set under ONE write guard, retiring
+        // the superseded set only when its kid set differs (the issuer
+        // rotated); identical kids keep the old retirement stamp (an
+        // unrelated re-fetch must not extend any grace). The retired
+        // stamp happens AFTER the keys guard drops — std RwLock is not
+        // reentrant, and a second keys.write on this thread would
+        // self-deadlock.
+        let superseded = {
+            let mut keys = self.cache.keys.write().expect("jwks cache poisoned");
+            if jwk_sets_same_kids(&keys, &set) {
+                *keys = Arc::clone(&set);
+                None
+            } else {
+                let old = Arc::clone(&keys);
+                *keys = Arc::clone(&set);
+                Some(old)
+            }
+        };
+        if let Some(old) = superseded {
+            *self.cache.retired.write().expect("jwks cache poisoned") = Some((old, Instant::now()));
+        }
         *self
             .cache
             .last_refresh
@@ -1265,8 +1319,13 @@ impl JwtVerifier {
                 if !in_failure_backoff {
                     match self.fetch().await {
                         Ok(set) => {
-                            return find_jwk(&set, kid, alg)
-                                .cloned()
+                            if let Some(jwk) = find_jwk(&set, kid, alg) {
+                                return Ok(jwk.clone());
+                            }
+                            // DW-046: missing from the FRESH set — the
+                            // retired set's grace decides.
+                            return self
+                                .find_retired(kid, alg)
                                 .ok_or(AuthError::Invalid("token key id is unknown"));
                         }
                         Err(e) => {
@@ -1279,18 +1338,27 @@ impl JwtVerifier {
                 }
             }
             let keys = self.cache.keys.read().expect("jwks cache poisoned");
-            return find_jwk(&keys, kid, alg)
-                .cloned()
-                .ok_or(AuthError::Invalid("token key id is unknown"));
+            if let Some(jwk) = find_jwk(&keys, kid, alg) {
+                return Ok(jwk.clone());
+            }
+            if let Some(jwk) = self.find_retired(kid, alg) {
+                return Ok(jwk);
+            }
+            return Err(AuthError::Invalid("token key id is unknown"));
         }
         // Fresh cache, unknown kid: the rotation path. Re-check the cached
         // set under the lock first — a concurrent request's fetch may have
-        // already delivered our kid.
+        // already delivered our kid — and consult the RETIRED set (DW-046):
+        // a kid the issuer already dropped needs no fetch at all, so it
+        // must not spend (or be refused by) the forced-refresh throttle.
         {
             let keys = self.cache.keys.read().expect("jwks cache poisoned");
             if let Some(jwk) = find_jwk(&keys, kid, alg) {
                 return Ok(jwk.clone());
             }
+        }
+        if let Some(jwk) = self.find_retired(kid, alg) {
+            return Ok(jwk);
         }
         // Claim the throttle
         // window BEFORE fetching so a failed fetch also spends it (the
@@ -1315,10 +1383,50 @@ impl JwtVerifier {
             return Err(AuthError::Invalid("token key id is unknown"));
         }
         let set = self.fetch().await?;
-        find_jwk(&set, kid, alg)
-            .cloned()
+        if let Some(jwk) = find_jwk(&set, kid, alg) {
+            return Ok(jwk.clone());
+        }
+        // DW-046: the forced rotation fetch delivered a set without the
+        // kid; the retired set's grace decides.
+        self.find_retired(kid, alg)
             .ok_or(AuthError::Invalid("token key id is unknown"))
     }
+
+    /// The retired-set fallback (DW-046): the immediately-previous key
+    /// set, honored while younger than the provider's
+    /// `retired_key_grace_secs` (0 disables the fallback entirely).
+    fn find_retired(&self, kid: Option<&str>, alg: Algorithm) -> Option<Jwk> {
+        let grace = Duration::from_secs(self.cfg.retired_key_grace_secs());
+        if grace.is_zero() {
+            return None;
+        }
+        let retired = self
+            .cache
+            .retired
+            .read()
+            .expect("jwks cache poisoned")
+            .clone();
+        let (set, at) = retired?;
+        if at.elapsed() >= grace {
+            return None;
+        }
+        find_jwk(&set, kid, alg).cloned()
+    }
+}
+
+/// Whether two JWK sets carry the SAME key ids (the retire-on-change
+/// discriminator; algorithms may re-order freely).
+fn jwk_sets_same_kids(a: &JwkSet, b: &JwkSet) -> bool {
+    fn kids(s: &JwkSet) -> Vec<String> {
+        let mut v: Vec<String> = s
+            .keys
+            .iter()
+            .filter_map(|k| k.common.key_id.clone())
+            .collect();
+        v.sort_unstable();
+        v
+    }
+    kids(a) == kids(b)
 }
 
 fn find_jwk<'a>(set: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Option<&'a Jwk> {

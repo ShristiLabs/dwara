@@ -810,6 +810,58 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // (consumers|routes|slowest|error_prone|rate_limited), from_ms,
         // to_ms, n.
         ("GET", "/analytics/top") => analytics_top(ctx, &req, &request_id).await,
+        // Credential lifecycle (DW-046 key rotation): list a consumer's
+        // credential rows (ids and lifecycle stamps only — never
+        // selector/hash material), issue a NEW api key alongside the
+        // existing ones (the dual-validity window opens here), and
+        // schedule-or-execute a credential's retirement.
+        (m, p) if p.starts_with("/consumers/") && p.ends_with("/credentials") => {
+            let name = percent_decode(
+                p.trim_start_matches("/consumers/")
+                    .strip_suffix("/credentials")
+                    .unwrap_or(""),
+            );
+            match m {
+                "GET" => credentials_list(ctx, &name, &request_id).await,
+                "POST" => {
+                    let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+                    let body = match limited.collect().await {
+                        Ok(c) => c.to_bytes(),
+                        Err(err) => {
+                            return envelope(400, "body_read_failed", &err.to_string(), &request_id)
+                        }
+                    };
+                    credentials_issue(ctx, &name, body, &request_id).await
+                }
+                _ => envelope(405, "method_not_allowed", "GET or POST here", &request_id),
+            }
+        }
+        (m, p) if m == "POST" && p.starts_with("/credentials/") && p.ends_with("/retire") => {
+            let id = p
+                .trim_start_matches("/credentials/")
+                .strip_suffix("/retire")
+                .unwrap_or("")
+                .parse::<i64>()
+                .ok();
+            match id {
+                None => envelope(
+                    400,
+                    "bad_credential_id",
+                    "credential id must be an integer",
+                    &request_id,
+                ),
+                Some(id) => {
+                    let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+                    let body = match limited.collect().await {
+                        Ok(c) => c.to_bytes(),
+                        Err(err) => {
+                            return envelope(400, "body_read_failed", &err.to_string(), &request_id)
+                        }
+                    };
+                    credentials_retire(ctx, id, body, &request_id).await
+                }
+            }
+        }
         // POST /analytics/query (DW-043): the structured query — a
         // closed JSON grammar translated to SQL (never SQL text).
         ("POST", "/analytics/query") => {
@@ -1000,6 +1052,213 @@ async fn serve_conn<S>(
     ));
     if let Err(err) = conn.await {
         tracing::warn!(code = "admin_conn_error", "admin connection error: {err}");
+    }
+}
+
+// --- Credential lifecycle: key rotation (DW-046) --------------------------
+
+/// Epoch seconds (the credential lifecycle stamps' time domain).
+fn now_secs() -> i64 {
+    now_ms() as i64 / 1000
+}
+
+/// The store-absent answer shared by the credential endpoints.
+fn store_absent(request_id: &str) -> Response<AdminBody> {
+    envelope(
+        404,
+        "state_store_not_configured",
+        "credential management requires a DWARA_STATE_DB deployment (config-only \
+         credentials rotate by editing the config and reloading)",
+        request_id,
+    )
+}
+
+/// GET /consumers/{name}/credentials: the rotation runbook's view —
+/// one row per credential with id, kind, and lifecycle stamps. The
+/// selector (a key id) and hash are credential material and never
+/// leave the store module.
+async fn credentials_list(
+    ctx: Arc<AdminContext>,
+    consumer: &str,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return store_absent(request_id);
+    };
+    match store.list_credentials_for_consumer(consumer) {
+        Ok(rows) if rows.is_empty() => {
+            if store.lookup_consumer(consumer).ok().flatten().is_none() {
+                envelope(
+                    404,
+                    "unknown_consumer",
+                    &format!("no consumer '{consumer}'"),
+                    request_id,
+                )
+            } else {
+                json_response(
+                    200,
+                    serde_json::json!({ "consumer": consumer, "credentials": [] }),
+                )
+            }
+        }
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "consumer": consumer,
+                "credentials": rows.iter().map(|r| serde_json::json!({
+                    "id": r.id,
+                    "kind": r.kind.as_str(),
+                    "created_at": r.created_at,
+                    "revoked_at": r.revoked_at,
+                    "retire_at": r.retire_at,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => envelope(500, "credentials_list_failed", &e.to_string(), request_id),
+    }
+}
+
+/// POST /consumers/{name}/credentials: issue a NEW api key. Body:
+/// `{"key": "<the new secret>"}` (REQUIRED — the gateway returns
+/// nothing derived from it beyond the row id; the operator already
+/// holds the secret). The hash is computed with the dataplane's OWN
+/// pepper state (the same format the config seed path and the
+/// authenticator use), so the key authenticates from the next request.
+/// The OLD credentials keep working until retired: this call OPENS
+/// the dual-validity window.
+async fn credentials_issue(
+    ctx: Arc<AdminContext>,
+    consumer: &str,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return store_absent(request_id);
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            return envelope(
+                400,
+                "credential_issue_invalid",
+                &format!("body is not valid JSON: {err}"),
+                request_id,
+            )
+        }
+    };
+    let Some(key) = parsed.get("key").and_then(|v| v.as_str()) else {
+        return envelope(
+            400,
+            "credential_issue_invalid",
+            "body must carry {\"key\": \"<new secret>\"}",
+            request_id,
+        );
+    };
+    if key.len() < 16 || key.len() > 512 {
+        return envelope(
+            400,
+            "credential_issue_invalid",
+            "key length must be 16..=512 bytes (rotation is not the moment for a \
+             weak secret)",
+            request_id,
+        );
+    }
+    let Some(record) = store.lookup_consumer(consumer).ok().flatten() else {
+        return envelope(
+            404,
+            "unknown_consumer",
+            &format!("no consumer '{consumer}' in the state store"),
+            request_id,
+        );
+    };
+    let selector = dwara_core::config::credentials::credential_selector(key);
+    let hash = ctx.dp.hash_new_credential(key);
+    match store.add_credential(
+        record.id,
+        dwara_core::state::store::CredentialKind::ApiKey,
+        hash,
+        None,
+        selector,
+    ) {
+        Ok(row) => {
+            tracing::info!(
+                code = "credential_issued",
+                consumer = consumer,
+                credential_id = row.id,
+                "api key issued (dual-validity window open; retire the old key \
+                 when clients have switched)"
+            );
+            json_response(
+                201,
+                serde_json::json!({
+                    "consumer": consumer,
+                    "credential_id": row.id,
+                    "created_at": row.created_at,
+                    "note": "the new key authenticates immediately; existing \
+                             keys keep working until retired",
+                }),
+            )
+        }
+        Err(e) => envelope(500, "credential_issue_failed", &e.to_string(), request_id),
+    }
+}
+
+/// POST /credentials/{id}/retire: schedule (or, with no `at_ms`, execute
+/// immediately) a credential's retirement — the dual-validity window's
+/// far edge. Body: `{"at_ms": <epoch ms>}` optional; absent/now/past =
+/// effective immediately.
+async fn credentials_retire(
+    ctx: Arc<AdminContext>,
+    credential_id: i64,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return store_absent(request_id);
+    };
+    let at_ms: Option<i64> = if body.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(v) => v.get("at_ms").and_then(|m| m.as_i64()),
+            Err(_) => {
+                return envelope(
+                    400,
+                    "credential_retire_invalid",
+                    "body must be empty or {\"at_ms\": <epoch ms>}",
+                    request_id,
+                )
+            }
+        }
+    };
+    let at_secs = at_ms.map(|ms| ms.div_euclid(1000));
+    match store.retire_credential(credential_id, at_secs.unwrap_or_else(now_secs)) {
+        Ok(true) => {
+            tracing::info!(
+                code = "credential_retired",
+                credential_id = credential_id,
+                at = at_secs.unwrap_or_else(now_secs),
+                "credential retirement scheduled"
+            );
+            json_response(
+                200,
+                serde_json::json!({
+                    "credential_id": credential_id,
+                    "retire_at": at_secs.unwrap_or_else(now_secs),
+                    "effective": if at_secs.is_some_and(|t| t > now_secs()) { "scheduled" } else { "immediate" },
+                }),
+            )
+        }
+        Ok(false) => envelope(
+            404,
+            "credential_not_active",
+            &format!(
+                "no active credential {credential_id} (unknown, already \
+                      revoked, or already retiring earlier)"
+            ),
+            request_id,
+        ),
+        Err(e) => envelope(500, "credential_retire_failed", &e.to_string(), request_id),
     }
 }
 

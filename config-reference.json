@@ -1011,6 +1011,15 @@
           "format": "uint64",
           "minimum": 0
         },
+        "retired_key_grace_secs": {
+          "description": "How long a key REMOVED from a fresh JWKS fetch keeps verifying\n(DW-046), in seconds (default 86400 = 24 h; 0 disables). The\ndual-validity window for JWKS rotation: issuers drop the old\nkey from their JWKS the moment the new one appears, while\npreviously-issued tokens still carry the old `kid` — during\nthis grace the gateway honors the immediately-previous key set\nfor kids the fresh set no longer carries. Only ONE previous set\nis retained (rotation is one step at a time). Validation caps\nthe value at 7 days (604800).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "trusted_ca_file": {
           "description": "Path to a PEM file of CA certificates the JWKS fetcher trusts for\nits `https://` connection INSTEAD of the default public (webpki)\nroot set (#121): for JWKS endpoints served over TLS by a private\nCA. The file may carry several certificates (a typical CA bundle).\nOnly meaningful with an `https://` jwks_url — no TLS is negotiated\ntoward an `http://` endpoint, so validation rejects that\ncombination. The file must exist and be readable at config compile\ntime; validation names this field otherwise.",
           "type": [

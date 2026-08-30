@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -116,6 +116,18 @@ const MIGRATION_003_CONSUMER_GROUPS: &str =
 const MIGRATION_004_CREDENTIAL_SOURCE_REF: &str =
     "ALTER TABLE credentials ADD COLUMN source_ref TEXT;";
 
+/// Migration 005 (DW-046): `credentials.retire_at` — nullable INTEGER,
+/// Unix epoch SECONDS at which an ACTIVE credential stops
+/// authenticating (scheduled retirement, the dual-validity window of
+/// key rotation: the new key is added, both validate, the old key's
+/// row carries the far edge of the window). NULL = never (the
+/// pre-005 posture). Distinct from `revoked_at` (immediate,
+/// operator-confirmed) on purpose: retirement is SCHEDULED forward at
+/// rotation time and enforced lazily (rows with a past `retire_at` are
+/// filtered at lookup), so no background task is required. Additive.
+const MIGRATION_005_CREDENTIAL_RETIRE_AT: &str =
+    "ALTER TABLE credentials ADD COLUMN retire_at INTEGER;";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -124,6 +136,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_002_QUOTA_WINDOW_INDEX),
         M::up(MIGRATION_003_CONSUMER_GROUPS),
         M::up(MIGRATION_004_CREDENTIAL_SOURCE_REF),
+        M::up(MIGRATION_005_CREDENTIAL_RETIRE_AT),
     ])
 }
 

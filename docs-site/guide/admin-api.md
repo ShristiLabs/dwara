@@ -76,3 +76,32 @@ to start unless the admin bind is loopback. It exists purely so you can
 `curl` the admin API from a developer machine without generating
 certificates. It removes the admin surface's only authentication —
 never set it in production or on a shared host.
+
+## Key rotation workflows (DW-046)
+
+Source: state store schema v5 + `security::authn` + the admin
+credential endpoints. Tests: `authn` rotation cases, `store`
+retirement lifecycle, `admin_api` credential endpoints.
+
+The frozen rotation procedure (zero failed requests mid-window):
+
+1. **Issue** `POST /consumers/{name}/credentials {"key": "<new>"}` —
+   hashed with the dataplane's pepper state (16..=512 bytes enforced).
+   The dual-validity window OPENS: old and new keys authenticate
+   simultaneously from the next request.
+2. **Switch clients** to the new key at your leisure. Both keys work.
+3. **Retire the old key** `POST /credentials/{id}/retire` — empty body
+   for immediate, `{"at_ms": <epoch ms>}` to schedule the far edge.
+   Retirement is lazy (no sweeper): the SQL lookup filters it and the
+   registry re-checks cached rows, so the boundary lands on time.
+   Retirement can only move EARLIER; to postpone, issue another key.
+   `GET /consumers/{name}/credentials` lists rows with lifecycle
+   stamps only (never selector/hash material).
+
+JWKS rotation is bridged by `retired_key_grace_secs` (default 24 h,
+0 disables, capped 7 days): when a fetch delivers a changed kid set,
+the superseded set keeps verifying dropped kids through the grace —
+issuers remove old keys while previously-issued tokens still carry
+them. An identical-kid re-fetch never extends the grace. Config-only
+deployments rotate by editing the config (two credential entries)
+and reloading.

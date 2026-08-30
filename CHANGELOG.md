@@ -9,6 +9,35 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Key rotation workflows (DW-046): dual-validity windows for API keys
+  and JWKS, admin lifecycle endpoints, and a zero-failure rotation
+  runbook. API keys: the state store gains `credentials.retire_at`
+  (schema v5, additive) — SCHEDULED retirement, the far edge of the
+  dual-validity window. Issue a new key, both keys authenticate
+  simultaneously, retire the old one now or at a chosen instant;
+  retirement is enforced lazily (SQL filter at lookup PLUS a
+  registry-side time check so a CACHED row expires exactly on time
+  with no background sweeper), can only move EARLIER (a scheduled stop
+  cannot be postponed — issue a new credential instead), and is
+  distinct from revocation in the row's record. New admin endpoints on
+  the mTLS listener: GET /consumers/{name}/credentials (lifecycle
+  stamps only — selector/hash material never leaves the store module),
+  POST /consumers/{name}/credentials (issue an api key hashed with the
+  dataplane's own pepper state — 16..=512-byte keys enforced), and
+  POST /credentials/{id}/retire (empty body = immediate;
+  {"at_ms"} = scheduled). All 404 with a named envelope without a
+  DWARA_STATE_DB deployment. JWKS: `retired_key_grace_secs` per JWT
+  provider (default 86400 = 24 h, 0 disables, capped at 7 days) — when
+  a successful JWKS fetch delivers a set whose kids CHANGED, the
+  superseded set is retained and tokens carrying a kid the fresh set
+  dropped keep verifying through the grace (the rotation race:
+  issuers remove the old key while previously-issued tokens still use
+  it); an identical-kid re-fetch does not re-stamp the grace. The
+  retired-set consult happens BEFORE the forced-refresh throttle (a
+  dropped kid needs no fetch). Two behavior pins updated to the new
+  frozen semantics (retired kids now verify within the grace by
+  default; the grace-0 immediate-cutoff shape is pinned separately).
+
 - SLO & error-budget export (DW-052): routes can declare service-level
   objectives (`routes[].slo`: `availability` percentage, optional
   `latency_ms` threshold + `latency_target` percentage, validated),

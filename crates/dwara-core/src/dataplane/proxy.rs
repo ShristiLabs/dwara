@@ -691,6 +691,21 @@ impl DataPlane {
         self.rebuild_authn();
     }
 
+    /// Hash a NEW api-key secret exactly as the config seed path does
+    /// (DW-046, the admin credential-issue endpoint's helper):
+    /// `hmac-sha256:<hex>` when a pepper is configured (#124),
+    /// legacy `sha256:<hex>` otherwise — the authenticator verifies
+    /// either shape with the SAME pepper state, so an issued key
+    /// authenticates immediately. The secret never leaves this call's
+    /// stack in the clear (hashing is one-shot; no storage of raw
+    /// bytes anywhere).
+    pub fn hash_new_credential(&self, secret: &str) -> String {
+        match self.pepper_bytes() {
+            Some(pepper) => crate::config::credentials::hmac_stored_hash(&pepper, secret),
+            None => crate::config::credentials::sha256_stored_hash(secret),
+        }
+    }
+
     /// The credential pepper for the authenticator rebuild: a clone of
     /// the Arc-held Zeroizing buffer (an Arc bump, NO byte copy; the
     /// authenticator keeps it alive until its next rebuild and the bytes

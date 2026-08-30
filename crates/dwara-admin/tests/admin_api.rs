@@ -1544,3 +1544,156 @@ async fn analytics_dashboard_top_and_query_serve_rollups() {
     assert!(body.contains("analytics_query_invalid"), "{body}");
     let _ = std::fs::remove_file(&db);
 }
+
+// --- Credential lifecycle endpoints (DW-046) --------------------------------
+
+#[tokio::test]
+async fn credential_endpoints_404_without_a_state_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    for (method, path, body) in [
+        ("GET", "/consumers/acme/credentials", ""),
+        (
+            "POST",
+            "/consumers/acme/credentials",
+            "{\"key\":\"aaaaaaaaaaaaaaaa\"}",
+        ),
+        ("POST", "/credentials/1/retire", ""),
+    ] {
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, text) = plaintext_request(server.addr, &req).await;
+        assert_eq!(status, 404, "{path}: {text}");
+        assert!(text.contains("state_store_not_configured"), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn credential_rotation_flow_issue_list_retire_over_admin() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    // Attach a store with one consumer and one OLD credential (the
+    // dwara-bin startup shape, minus the file).
+    let store = std::sync::Arc::new(dwara_core::store::StateStore::open(&db).unwrap());
+    let consumer = store.upsert_consumer("acme", None, &[]).unwrap();
+    store
+        .add_credential(
+            consumer.id,
+            dwara_core::store::CredentialKind::ApiKey,
+            dwara_core::config::credentials::sha256_stored_hash("the-old-secret-value"),
+            None,
+            dwara_core::config::credentials::credential_selector("the-old-secret-value"),
+        )
+        .unwrap();
+    server.dp.set_state_store(std::sync::Arc::clone(&store));
+
+    // Unknown consumer: named 404.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /consumers/ghost/credentials HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("unknown_consumer"), "{body}");
+
+    // Issue the new key: 201, id, and the runbook note.
+    let key = "the-new-rotated-secret";
+    let body_json = format!("{{\"key\":\"{key}\"}}");
+    let req = format!(
+        "POST /consumers/acme/credentials HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body_json.len(),
+        body_json
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body.contains("credential_id"), "{body}");
+
+    // The issued key authenticates through the dataplane-backed store
+    // (the dual-validity window is open: the row verifies).
+    let active = store
+        .lookup_credentials_by_selector(&dwara_core::config::credentials::credential_selector(key))
+        .unwrap();
+    assert_eq!(active.len(), 1, "issued key is live: {active:?}");
+
+    // Weak keys are refused.
+    let weak = "{\"key\":\"short\"}";
+    let req = format!(
+        "POST /consumers/acme/credentials HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        weak.len(),
+        weak
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("credential_issue_invalid"), "{body}");
+
+    // List: two rows, lifecycle stamps only (no selector/hash material).
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /consumers/acme/credentials HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body.matches("\"id\"").count(), 2, "{body}");
+    assert!(!body.contains("selector"), "no selector material: {body}");
+    assert!(!body.contains("hash"), "no hash material: {body}");
+
+    // Retire the OLD row immediately (empty body).
+    let old_id: i64 = {
+        let rows = store.list_credentials_for_consumer("acme").unwrap();
+        // The list is newest-first; the OLD key is the smallest id.
+        rows.iter().map(|r| r.id).min().unwrap()
+    };
+    let req = format!(
+        "POST /credentials/{old_id}/retire HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"effective\":\"immediate\""), "{body}");
+    // The old key is gone from the active set.
+    let active = store
+        .lookup_credentials_by_selector(&dwara_core::config::credentials::credential_selector(
+            "the-old-secret-value",
+        ))
+        .unwrap();
+    assert!(active.is_empty());
+
+    // Retiring it again: named 404 (not active).
+    let req = format!(
+        "POST /credentials/{old_id}/retire HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("credential_not_active"), "{body}");
+
+    // Scheduled retirement carries the stamp and the scheduled flag.
+    let new_id: i64 = store
+        .list_credentials_for_consumer("acme")
+        .unwrap()
+        .iter()
+        .find(|r| r.retire_at.is_none())
+        .map(|r| r.id)
+        .unwrap();
+    let future = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64)
+        + 3_600_000;
+    let body_json = format!("{{\"at_ms\":{future}}}");
+    let req = format!(
+        "POST /credentials/{new_id}/retire HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body_json.len(),
+        body_json
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"effective\":\"scheduled\""), "{body}");
+}
