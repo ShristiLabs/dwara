@@ -285,6 +285,21 @@ pub struct Gateway {
     /// `LicenseGate::none()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<LicenseConfig>,
+    /// Distributed Redis rate limiter (DW-031). Absent (the default):
+    /// the local in-memory GCRA limiter is used (one limit per
+    /// process). When present, the `ent` cargo feature is compiled in,
+    /// AND a valid license with the `redis_rate_limiter` feature claim
+    /// is loaded, the gateway uses a Redis-backed GCRA limiter so two
+    /// or more instances share one rate limit. The same GCRA algorithm
+    /// runs, but the bucket state lives in Redis and is updated
+    /// atomically via a Lua script in a single round-trip. When the
+    /// `ent` feature is NOT compiled in, or the license lacks the
+    /// claim, the block is accepted but inert (the local limiter is
+    /// used and a warning is logged). When Redis is unreachable,
+    /// `fail_open` (default true) lets requests through; `false`
+    /// rejects with 429.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_rate_limiter: Option<RedisRateLimiterConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -451,6 +466,85 @@ fn default_license_grace_period_days() -> u32 {
 
 fn is_default_license_grace_period_days(v: &u32) -> bool {
     *v == crate::config::limits::DEFAULT_LICENSE_GRACE_PERIOD_DAYS
+}
+
+/// Distributed Redis rate limiter config (DW-031, `gateway.redis_rate_limiter`).
+///
+/// When present and the `ent` cargo feature is compiled in AND a valid
+/// license with the `redis_rate_limiter` feature claim is loaded, the
+/// gateway uses a Redis-backed GCRA limiter instead of the local
+/// in-memory one — so two or more gateway instances share one rate
+/// limit. The same GCRA algorithm runs, but the bucket state (the
+/// theoretical arrival time) lives in Redis and is updated atomically
+/// via a Lua script in a single round-trip. When the `ent` feature is
+/// NOT compiled in, or the license lacks the claim, the block is
+/// accepted but inert (the local GCRA limiter is used). When Redis is
+/// unreachable, `fail_open` (default true) lets requests through; set
+/// it to false to reject with 429 instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedisRateLimiterConfig {
+    /// Redis connection URL (e.g. `redis://127.0.0.1:6379` or
+    /// `redis-cluster://...`). The connection is established once at
+    /// startup and pooled via a multiplexed `ConnectionManager`.
+    pub url: String,
+    /// Fail-open behavior when Redis is unreachable (default true):
+    /// `true` allows the request (no rate limiting); `false` rejects
+    /// with 429. Fail-open is the safer default for availability — a
+    /// Redis outage should not take down the gateway — but operators
+    /// who need hard limits can set this to `false`.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub fail_open: bool,
+    /// Prefix for rate-limit keys in Redis (default `dwara:rl:`). Each
+    /// rule's per-key bucket is stored as `{prefix}{key}:{window_index}`.
+    #[serde(
+        default = "default_redis_key_prefix",
+        skip_serializing_if = "is_default_redis_key_prefix"
+    )]
+    pub key_prefix: String,
+    /// Connection timeout in milliseconds (default 1000; validated to
+    /// 100..=30 000). The timeout applies to the initial connection
+    /// establishment at startup, not to per-request Lua script calls
+    /// (those use the pooled connection's own timeout).
+    #[serde(
+        default = "default_redis_connection_timeout_ms",
+        skip_serializing_if = "is_default_redis_connection_timeout_ms"
+    )]
+    pub connection_timeout_ms: u64,
+    /// TTL for rate-limit keys in Redis, in seconds (default 3600).
+    /// Stale keys auto-expire so a key that stops receiving traffic
+    /// does not accumulate forever. The per-window GCRA Lua script
+    /// also sets an EXPIRE based on the burst tolerance; this value is
+    /// a floor that ensures cleanup even for long-burst windows.
+    #[serde(
+        default = "default_redis_key_ttl_s",
+        skip_serializing_if = "is_default_redis_key_ttl_s"
+    )]
+    pub key_ttl_s: u64,
+}
+
+fn default_redis_key_prefix() -> String {
+    "dwara:rl:".to_string()
+}
+
+fn is_default_redis_key_prefix(p: &str) -> bool {
+    p == "dwara:rl:"
+}
+
+fn default_redis_connection_timeout_ms() -> u64 {
+    1000
+}
+
+fn is_default_redis_connection_timeout_ms(v: &u64) -> bool {
+    *v == 1000
+}
+
+fn default_redis_key_ttl_s() -> u64 {
+    3600
+}
+
+fn is_default_redis_key_ttl_s(v: &u64) -> bool {
+    *v == 3600
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).

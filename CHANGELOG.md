@@ -42,6 +42,29 @@ the project follows semantic versioning once 1.0 is reached.
   Apache-2.0, already in the tree via jsonwebtoken) for license
   expiry/grace-period arithmetic.
 
+- Distributed Redis rate limiter (DW-031): a `RedisRateLimiter` that
+  implements the `RateLimiter` trait with the same GCRA algorithm as
+  the local limiter, but stores per-key TAT (theoretical arrival time)
+  state in Redis and updates it atomically via a Lua script in a
+  single round-trip. Multiple gateway instances share one rate limit
+  so the effective limit is not multiplied by the instance count.
+  Activated only when the `ent` cargo feature is compiled in, the
+  config carries a `gateway.redis_rate_limiter` block, and the loaded
+  license grants the `redis_rate_limiter` feature claim; when any
+  condition is missing the block is accepted but inert (the local
+  in-memory GCRA limiter is used). Configurable fail-open (default
+  true: Redis outage does not take down the gateway) or fail-closed
+  (reject with 429) behavior when Redis is unreachable. Uses
+  `redis::aio::ConnectionManager` (multiplexed, auto-reconnecting,
+  Arc-based cheap clones) established once at startup. The
+  `RateLimitEngine`'s `check` and `evaluate` methods are now async
+  (the local limiter path is sync-in-async with no overhead). New
+  `redis` workspace dependency (BSD-3-Clause, allow-listed in
+  `deny.toml`, optional via `ent` feature) on dwara-core and dwara-bin.
+  New `redis_rate_limiter` config block: `url`, `fail_open`,
+  `key_prefix`, `connection_timeout_ms` (100..=30000), `key_ttl_s`
+  (60..=86400).
+
 - OAuth2 client-credentials proxying and mTLS consumer mapping (DW-035):
   the gateway can obtain an access token from an external OAuth2 token
   endpoint using the client-credentials grant (RFC 6749 section 4.4)

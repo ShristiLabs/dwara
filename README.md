@@ -66,6 +66,8 @@ Each capability is documented in its own guide page on the docs site.
 - Load shedding with priority-aware admission (`max_concurrent_requests`).
 - Local rate limiting (GCRA, stacked windows) at global, listener, service,
   route, or consumer scope.
+- Distributed rate limiting via Redis (enterprise) so multiple gateway
+  instances share one limit.
 - Per-consumer request budgets (quotas) over durable state-store counters.
 
 **Security**

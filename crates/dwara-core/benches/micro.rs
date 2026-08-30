@@ -138,6 +138,7 @@ fn bench_gateway() -> Gateway {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        redis_rate_limiter: None,
     }
 }
 

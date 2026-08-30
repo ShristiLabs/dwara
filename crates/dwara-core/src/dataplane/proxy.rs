@@ -619,6 +619,16 @@ pub struct DataPlane {
     /// per request (an Arc bump), and in-flight lookups keep the
     /// reader they loaded across a swap. None = geo-UNKNOWN.
     geoip: arc_swap::ArcSwapOption<crate::security::geoip::GeoipDb>,
+    /// DW-031: the Redis connection for the distributed rate limiter
+    /// (ent feature only). Set once at startup by dwara-bin when the
+    /// config carries a `redis_rate_limiter` block AND the license
+    /// grants the `redis_rate_limiter` feature claim. When set, the
+    /// rate-limit engine compiles with Redis-backed limiters instead
+    /// of local ones; when None, the local GCRA limiter is used. The
+    /// connection persists across reloads (a reload re-clones it for
+    /// the new engine, it does not re-establish).
+    #[cfg(feature = "ent")]
+    redis_conn: std::sync::RwLock<Option<redis::aio::ConnectionManager>>,
     /// Quota near-limit edge-trigger bookkeeping (DW-033): the
     /// (consumer, budget, window_start) triples already reported, so
     /// `quota_near_limit` fires ONCE per budget per window instead of
@@ -812,6 +822,8 @@ impl DataPlane {
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             analytics: arc_swap::ArcSwapOption::empty(),
             geoip: arc_swap::ArcSwapOption::empty(),
+            #[cfg(feature = "ent")]
+            redis_conn: std::sync::RwLock::new(None),
             quota_near_limit_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
             state,
         };
@@ -838,6 +850,40 @@ impl DataPlane {
     /// Set once at startup and on every reload.
     pub fn set_license_status(&self, status: i64) {
         self.obs.set_license_status(status);
+    }
+
+    /// Attach the Redis connection for the distributed rate limiter
+    /// (DW-031, ent feature only). Set once at startup by dwara-bin
+    /// when the config carries a `redis_rate_limiter` block AND the
+    /// license grants the `redis_rate_limiter` feature claim. After
+    /// storing the connection, the rate-limit engine is IMMEDIATELY
+    /// rebuilt with Redis-backed limiters (so the first generation
+    /// served uses Redis, not the local limiter the constructor built).
+    /// Subsequent `refresh` calls also use the Redis connection.
+    #[cfg(feature = "ent")]
+    pub fn set_redis_conn(&self, conn: redis::aio::ConnectionManager) {
+        *self.redis_conn.write().expect("redis conn lock poisoned") = Some(conn.clone());
+        // Rebuild the rate-limit engine with Redis-backed limiters.
+        let snapshot = self.state.snapshot();
+        if let Some(config) = snapshot.gateway().redis_rate_limiter.as_ref() {
+            self.rate_limits
+                .store(Arc::new(RateLimitEngine::compile_with_redis(
+                    snapshot.gateway(),
+                    conn,
+                    config,
+                )));
+        }
+    }
+
+    /// Whether a Redis connection is attached for the distributed rate
+    /// limiter (DW-031, ent feature only). Used by `refresh` to decide
+    /// whether to compile with Redis-backed limiters.
+    #[cfg(feature = "ent")]
+    fn redis_conn_for_compile(&self) -> Option<redis::aio::ConnectionManager> {
+        self.redis_conn
+            .read()
+            .expect("redis conn lock poisoned")
+            .clone()
     }
 
     /// The DWARA_STATE_DB store when one is attached (None = pure-config
@@ -1089,8 +1135,33 @@ impl DataPlane {
         ));
         self.global_cap
             .store(Arc::new(global_cap_of(snapshot.gateway())));
-        self.rate_limits
-            .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
+        // DW-031: compile with Redis-backed limiters when a Redis
+        // connection is attached (ent feature) and the config carries
+        // a redis_rate_limiter block; otherwise the local GCRA limiter.
+        #[cfg(feature = "ent")]
+        {
+            if let Some(conn) = self.redis_conn_for_compile() {
+                if let Some(config) = snapshot.gateway().redis_rate_limiter.as_ref() {
+                    self.rate_limits
+                        .store(Arc::new(RateLimitEngine::compile_with_redis(
+                            snapshot.gateway(),
+                            conn,
+                            config,
+                        )));
+                } else {
+                    self.rate_limits
+                        .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
+                }
+            } else {
+                self.rate_limits
+                    .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
+            }
+        }
+        #[cfg(not(feature = "ent"))]
+        {
+            self.rate_limits
+                .store(Arc::new(RateLimitEngine::compile(snapshot.gateway())));
+        }
         // DW-037: cache epochs advance for every route whose definition
         // changed between generations (stored bytes were shaped by the
         // old masking/transform/policy); unchanged routes stay warm.
@@ -1576,7 +1647,7 @@ fn compile_webhook_targets(snapshot: &Snapshot) -> Vec<crate::events::webhook::W
 /// responses). The reserved paths never reach here. The `route` key
 /// component of the rate context is the empty string (see
 /// `RateLimitKeyContext::route`).
-fn unrouted_response(
+async fn unrouted_response(
     dp: &DataPlane,
     gateway: &Gateway,
     listener_cfg: Option<&crate::config::Listener>,
@@ -1600,7 +1671,9 @@ fn unrouted_response(
     };
     // Dry-run bundles (DW-041) observe here exactly as on routed traffic
     // (route label "unrouted"); live bundles alone decide the 429.
-    let evaluation = engine.evaluate(&ctx, &[], &[], &[], listener_policies, global_policies);
+    let evaluation = engine
+        .evaluate(&ctx, &[], &[], &[], listener_policies, global_policies)
+        .await;
     if let Some(crate::extensions::rate_limiter::RateLimitOutcome::Denied {
         retry_after_s, ..
     }) = evaluation.dry_denied
@@ -1800,10 +1873,10 @@ where
     // admit-at-entry ordering — and unknown paths cost nothing under
     // saturation.
     let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
-        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
     let Some(route) = gateway.routes.get(idx) else {
-        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
 
     if !route_applies(
@@ -1811,7 +1884,7 @@ where
         gen.snapshot.route_table().accept_media_type(idx),
         &req,
     ) {
-        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     }
     rec.route = route.name.clone();
     root.record("route", route.name.as_str());
@@ -2024,7 +2097,7 @@ where
             .find(|li| li.name.as_str() == &*l.0)
     });
     let Some(route) = gateway.routes.get(idx) else {
-        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec);
+        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
     let mut req = req;
     // Route-scoped request limits (DW-027): header caps and a declared
@@ -2321,12 +2394,15 @@ where
     let service_policies: &[String] = service.map(|s| s.policies.as_slice()).unwrap_or(&[]);
     let consumer_policies: &[String] = consumer_cfg.map(|c| c.policies.as_slice()).unwrap_or(&[]);
     let listener_policies: &[String] = listener_cfg.map(|l| l.policies.as_slice()).unwrap_or(&[]);
-    // The ratelimit phase span (DW-021); sync bookkeeping, so a plain
-    // entered guard is correct (nothing is awaited under it). Dry-run
-    // bundles (DW-041) report their would-be denial through the same
-    // evaluation; live bundles alone decide the 429 and the headers.
+    // The ratelimit phase span (DW-021). The evaluate call is async
+    // (DW-031: Redis-backed limiters await a network round-trip), so
+    // the span is instrumented onto the future rather than held as an
+    // entered guard — an EnteredSpan is !Send and would poison the
+    // handler future for hyper's h2 executor. Dry-run bundles (DW-041)
+    // report their would-be denial through the same evaluation; live
+    // bundles alone decide the 429 and the headers.
     let rate_headers = {
-        let _ratelimit_phase = tracing::info_span!("ratelimit").entered();
+        let ratelimit_span = tracing::info_span!("ratelimit");
         let engine = dp.rate_limits.load_full();
         if engine.is_empty() {
             None
@@ -2336,14 +2412,17 @@ where
                 consumer: identity.as_ref().map(|id| id.consumer_name.as_str()),
                 route: &route.name,
             };
-            let evaluation = engine.evaluate(
-                &ctx,
-                consumer_policies,
-                &route.policies,
-                service_policies,
-                listener_policies,
-                &gateway.global_policies,
-            );
+            let evaluation = engine
+                .evaluate(
+                    &ctx,
+                    consumer_policies,
+                    &route.policies,
+                    service_policies,
+                    listener_policies,
+                    &gateway.global_policies,
+                )
+                .instrument(ratelimit_span)
+                .await;
             if let Some(RateLimitOutcome::Denied { retry_after_s, .. }) = evaluation.dry_denied {
                 dp.obs.record_policy_dry_run("rate_limit", &route.name);
                 dp.obs.emit_policy_dry_run(

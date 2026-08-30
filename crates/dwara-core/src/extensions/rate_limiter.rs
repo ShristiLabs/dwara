@@ -660,7 +660,7 @@ impl GcraRateLimiter {
     }
 }
 
-fn denied_outcome(limit: u32, retry_after_ms: u64) -> GcraOutcome {
+pub fn denied_outcome(limit: u32, retry_after_ms: u64) -> GcraOutcome {
     GcraOutcome {
         decision: RateDecision {
             allowed: false,
@@ -688,8 +688,53 @@ impl RateLimiter for GcraRateLimiter {
 /// returned as the enforcement outcome.
 struct EngineRule {
     selectors: Vec<crate::config::RateLimitSelector>,
-    limiter: GcraRateLimiter,
+    limiter: EngineLimiter,
     dry_run: bool,
+}
+
+/// The limiter backend for one compiled rule (DW-031): the local
+/// in-memory GCRA limiter (OSS default) or the Redis-backed GCRA
+/// limiter (ent feature, when configured and licensed). Both expose
+/// the same `check` shape returning a [`GcraOutcome`], so the engine
+/// can use either uniformly — the Redis variant is async (one
+/// round-trip per window), the local variant is sync (in-memory).
+enum EngineLimiter {
+    Local(GcraRateLimiter),
+    #[cfg(feature = "ent")]
+    Redis(Box<crate::extensions::redis_rate_limiter::RedisRateLimiter>),
+}
+
+impl EngineLimiter {
+    /// Check-and-reserve `cost` units for `key`. Delegates to the
+    /// local (sync) or Redis (async) backend. The Redis path is one
+    /// round-trip per stacked window; the local path is in-memory.
+    async fn check(&self, key: &str, cost: u32) -> GcraOutcome {
+        match self {
+            EngineLimiter::Local(l) => l.check(key, cost),
+            #[cfg(feature = "ent")]
+            EngineLimiter::Redis(l) => l.check(key, cost).await,
+        }
+    }
+
+    /// Live per-key cell count (local only; Redis manages its own keys
+    /// and reports 0 here — the gauge is a local-limiter metric).
+    fn live_keys(&self) -> usize {
+        match self {
+            EngineLimiter::Local(l) => l.live_keys(),
+            #[cfg(feature = "ent")]
+            EngineLimiter::Redis(_) => 0,
+        }
+    }
+
+    /// Cells dropped by eviction sweeps (local only; Redis manages its
+    /// own key expiry and reports 0 here).
+    fn evictions(&self) -> u64 {
+        match self {
+            EngineLimiter::Local(l) => l.evictions(),
+            #[cfg(feature = "ent")]
+            EngineLimiter::Redis(_) => 0,
+        }
+    }
 }
 
 /// The per-request attributes a rule key can be built from (DW-017).
@@ -813,12 +858,14 @@ impl RateLimitEngine {
                         policy.name.clone(),
                         EngineRule {
                             selectors: vec![crate::config::RateLimitSelector::Route],
-                            limiter: GcraRateLimiter::new(vec![GcraWindowSpec {
-                                requests,
-                                window: Duration::from_secs(rl.window_seconds),
-                                burst: Some(requests),
-                            }])
-                            .expect("one window spec"),
+                            limiter: EngineLimiter::Local(
+                                GcraRateLimiter::new(vec![GcraWindowSpec {
+                                    requests,
+                                    window: Duration::from_secs(rl.window_seconds),
+                                    burst: Some(requests),
+                                }])
+                                .expect("one window spec"),
+                            ),
                             dry_run: policy.dry_run,
                         },
                     ));
@@ -833,7 +880,68 @@ impl RateLimitEngine {
                     policy.name.clone(),
                     EngineRule {
                         selectors: rule.selector.clone(),
-                        limiter,
+                        limiter: EngineLimiter::Local(limiter),
+                        dry_run: policy.dry_run,
+                    },
+                ));
+            }
+        }
+        Self { rules }
+    }
+
+    /// Compile every policy's rate rules with Redis-backed limiters
+    /// (DW-031, ent feature only). Same rule compilation as
+    /// [`Self::compile`], but each rule's limiter is a
+    /// [`RedisRateLimiter`](crate::extensions::redis_rate_limiter::RedisRateLimiter)
+    /// sharing the provided connection (cloned cheaply per rule). The
+    /// config supplies the fail-open flag, key prefix, and key TTL.
+    /// Used when the `ent` feature is compiled in, the
+    /// `redis_rate_limiter` config block is present, and the license
+    /// grants the `redis_rate_limiter` feature claim.
+    #[cfg(feature = "ent")]
+    pub fn compile_with_redis(
+        gateway: &crate::config::Gateway,
+        conn: redis::aio::ConnectionManager,
+        config: &crate::config::RedisRateLimiterConfig,
+    ) -> Self {
+        use crate::extensions::redis_rate_limiter::RedisRateLimiter;
+
+        let mut rules = Vec::new();
+        for policy in &gateway.policies {
+            if let Some(rl) = &policy.rate_limit {
+                if rl.requests > 0 && rl.window_seconds > 0 {
+                    let requests = NonZeroU32::new(u32::try_from(rl.requests).unwrap_or(u32::MAX))
+                        .expect("validated > 0");
+                    let specs = vec![GcraWindowSpec {
+                        requests,
+                        window: Duration::from_secs(rl.window_seconds),
+                        burst: Some(requests),
+                    }];
+                    if let Some(limiter) =
+                        RedisRateLimiter::from_config(conn.clone(), specs, config)
+                    {
+                        rules.push((
+                            policy.name.clone(),
+                            EngineRule {
+                                selectors: vec![crate::config::RateLimitSelector::Route],
+                                limiter: EngineLimiter::Redis(Box::new(limiter)),
+                                dry_run: policy.dry_run,
+                            },
+                        ));
+                    }
+                }
+            }
+            for rule in &policy.rate_limits {
+                let specs = window_specs(&rule.requests_per, rule.burst);
+                let Some(limiter) = RedisRateLimiter::from_config(conn.clone(), specs, config)
+                else {
+                    continue;
+                };
+                rules.push((
+                    policy.name.clone(),
+                    EngineRule {
+                        selectors: rule.selector.clone(),
+                        limiter: EngineLimiter::Redis(Box::new(limiter)),
                         dry_run: policy.dry_run,
                     },
                 ));
@@ -889,7 +997,7 @@ impl RateLimitEngine {
     /// Dry-run bundles (DW-041, `policies[].dry_run`) never contribute
     /// to this outcome — see [`RateLimitEngine::evaluate`], which this
     /// delegates to.
-    pub fn check(
+    pub async fn check(
         &self,
         ctx: &RateLimitKeyContext<'_>,
         consumer_policies: &[String],
@@ -906,6 +1014,7 @@ impl RateLimitEngine {
             listener_policies,
             global_policies,
         )
+        .await
         .outcome
     }
 
@@ -919,7 +1028,7 @@ impl RateLimitEngine {
     /// `X-RateLimit-*` header values: a monitor never touches the
     /// response. A request can therefore be BOTH 429'd by a live rule
     /// and reported as a dry would-deny in the same evaluation.
-    pub fn evaluate(
+    pub async fn evaluate(
         &self,
         ctx: &RateLimitKeyContext<'_>,
         consumer_policies: &[String],
@@ -968,7 +1077,7 @@ impl RateLimitEngine {
                     continue;
                 }
                 let key = build_key(ctx, &rule.selectors);
-                match rate_outcome(rule.limiter.check(&key, 1)) {
+                match rate_outcome(rule.limiter.check(&key, 1).await) {
                     RateLimitOutcome::Denied {
                         limit,
                         remaining,

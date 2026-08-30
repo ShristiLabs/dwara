@@ -35,6 +35,11 @@ tracing-opentelemetry = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+# DW-031: Redis client for the distributed rate limiter connection
+# establishment at startup (ent feature only). Optional so OSS builds
+# never pull it in; enabled via the `ent` feature. Same workspace dep
+# as dwara-core (BSD-3-Clause, allow-listed in deny.toml).
+redis = { workspace = true, optional = true }
 
 [features]
 # #126: OTLP trace export (http/protobuf) of the existing root/phase
@@ -58,7 +63,7 @@ otlp = [
 # OFF: OSS builds keep the license block inert (the gate is always
 # none()). Build with `cargo build --features ent` (or
 # `--features dwara-bin/ent`) to enable license verification.
-ent = ["dwara-core/ent"]
+ent = ["dwara-core/ent", "dep:redis"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

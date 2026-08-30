@@ -171,6 +171,12 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 # canonical source is the private git repo; a path dependency is used in local
 # development where the repo is checked out alongside dwara.
 licensing-core = { git = "https://github.com/ShristiLabs/licensing.git" }
+# DW-031: Redis client for the distributed rate limiter (ent feature only).
+# redis is BSD-3-Clause (allow-listed in deny.toml). Optional so OSS builds
+# (the default) never pull it in; enabled via the `ent` feature on dwara-core.
+# The `tokio-comp` feature enables the async API (ConnectionManager) used by
+# the distributed GCRA limiter.
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 [profile.release]
 lto = true

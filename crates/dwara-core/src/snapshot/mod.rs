@@ -1616,6 +1616,70 @@ fn validate_license(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// Validate the `gateway.redis_rate_limiter` block (DW-031): the URL
+/// must be non-empty, the connection timeout must be in
+/// 100..=30 000 ms, and the key TTL must be in 1..=604 800 s. The
+/// license check (does the license grant `redis_rate_limiter`?) is NOT
+/// a validation concern — it runs at startup in dwara-bin (where a
+/// missing claim can log a warning and fall back to the local
+/// limiter), not in the compile pipeline (a license's validity is a
+/// runtime property that can change between reloads without a
+/// config-schema change).
+fn validate_redis_rate_limiter(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(rl) = &gateway.redis_rate_limiter else {
+        return;
+    };
+    if rl.url.trim().is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_rate_limiter.url",
+            "redis_rate_limiter.url must be a non-empty Redis URL",
+        ));
+    }
+    let timeout = rl.connection_timeout_ms;
+    if !(crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS
+        ..=crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS)
+        .contains(&timeout)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_rate_limiter.connection_timeout_ms",
+            format!(
+                "redis_rate_limiter.connection_timeout_ms {} is out of range: must be {}..={}",
+                timeout,
+                crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS,
+                crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS,
+            ),
+        ));
+    }
+    let ttl = rl.key_ttl_s;
+    if !(crate::config::limits::MIN_REDIS_KEY_TTL_S..=crate::config::limits::MAX_REDIS_KEY_TTL_S)
+        .contains(&ttl)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_rate_limiter.key_ttl_s",
+            format!(
+                "redis_rate_limiter.key_ttl_s {} is out of range: must be {}..={}",
+                ttl,
+                crate::config::limits::MIN_REDIS_KEY_TTL_S,
+                crate::config::limits::MAX_REDIS_KEY_TTL_S,
+            ),
+        ));
+    }
+    if rl.key_prefix.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_rate_limiter.key_prefix",
+            "redis_rate_limiter.key_prefix must be a non-empty string",
+        ));
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected; `quota_near_limit` IS emitted since
@@ -2060,6 +2124,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // signature/expiry check is NOT validation — it runs at startup in
     // dwara-bin, where a missing/invalid file can exit 1).
     validate_license(gateway, &mut issues);
+
+    // DW-031: Redis rate limiter config (URL non-empty, timeout/TTL
+    // bounds; the license claim check is NOT validation — it runs at
+    // startup in dwara-bin, where a missing claim logs a warning and
+    // falls back to the local limiter).
+    validate_redis_rate_limiter(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -4344,6 +4414,7 @@ impl Snapshot {
                 mtls_consumer_mapping: None,
                 mtls_forward_headers: None,
                 license: None,
+                redis_rate_limiter: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

@@ -137,3 +137,28 @@ logged and counted (`dwara_policy_dry_run_total{phase="rate_limit"}`)
 instead of answered, and the bundle contributes no `X-RateLimit-*`
 headers. Live bundles on the same request enforce unaffected. See
 [maintenance mode and policy dry-run](./maintenance-dry-run.md).
+
+## Distributed Redis limiter (DW-031, enterprise)
+
+Source: `crates/dwara-core/src/extensions/redis_rate_limiter.rs`.
+
+The local GCRA limiter keeps per-key TAT state in process memory, so
+two or more gateway instances each get their own independent budget.
+The distributed Redis limiter moves the TAT state to Redis so every
+instance shares one limit. The same GCRA algorithm runs, but the TAT
+for each key lives in Redis and is updated atomically via a Lua script
+in a single round-trip.
+
+The `RateLimitEngine` holds an `EngineLimiter` enum per rule: `Local`
+(the in-memory `GcraRateLimiter`) or `Redis` (a `RedisRateLimiter`
+behind `Box` to keep the enum small). The engine's `check` and
+`evaluate` methods are async; the local path is sync-in-async (no
+overhead — the future completes without yielding), the Redis path
+awaits one round-trip per stacked window.
+
+Activation requires all three: the `ent` cargo feature, a
+`gateway.redis_rate_limiter` config block, and a license with the
+`redis_rate_limiter` feature claim. When any is missing, the block is
+inert and the local limiter is used. See the docs-site
+[Redis rate limiter](../../docs-site/guide/redis-rate-limiter.md) guide
+for configuration and operations.

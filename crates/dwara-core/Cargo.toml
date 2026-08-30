@@ -71,6 +71,11 @@ loom = { version = "0.7", optional = true }
 # authenticate via the GITHUB_TOKEN env var (see the ci workflow's
 # "Configure git for private deps" step).
 licensing-core = { workspace = true, optional = true }
+# DW-031: Redis client for the distributed rate limiter (ent feature only).
+# redis is BSD-3-Clause (allow-listed in deny.toml). Optional so OSS builds
+# (the default) never pull it in; enabled via the `ent` feature. The
+# `tokio-comp` feature enables the async API (ConnectionManager).
+redis = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -81,8 +86,9 @@ loom = ["dep:loom"]
 # DW-032: Enterprise edition features. When enabled, the gateway can
 # verify a ShristiLabs license file and gate enterprise features (Redis
 # rate limiter, config convergence, etc.) behind license claims. OSS
-# builds (the default) compile without the licensing-core dependency.
-ent = ["dep:licensing-core"]
+# builds (the default) compile without the licensing-core or redis
+# dependencies.
+ent = ["dep:licensing-core", "dep:redis"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

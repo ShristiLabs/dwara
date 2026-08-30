@@ -619,6 +619,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        redis_rate_limiter: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -821,6 +822,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        redis_rate_limiter: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1083,6 +1085,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
         license: None,
+        redis_rate_limiter: None,
     }
 }
 

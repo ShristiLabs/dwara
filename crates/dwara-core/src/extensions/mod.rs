@@ -28,6 +28,11 @@ pub mod cache;
 pub mod config_source;
 pub mod licensing;
 pub mod rate_limiter;
+// DW-031: Distributed Redis-backed GCRA rate limiter (ent feature only).
+// The module compiles only when the `ent` cargo feature is enabled; OSS
+// builds never pull in the redis dependency.
+#[cfg(feature = "ent")]
+pub mod redis_rate_limiter;
 pub mod secrets;
 
 /// Shared error type for all extension traits.

@@ -109,3 +109,26 @@ pub const DEFAULT_LICENSE_GRACE_PERIOD_DAYS: u32 = 7;
 /// (DW-032). `gateway.license.grace_period_days` is validated to
 /// 0..=this.
 pub const MAX_LICENSE_GRACE_PERIOD_DAYS: u32 = 30;
+
+/// Validation floor on `gateway.redis_rate_limiter.connection_timeout_ms`
+/// (DW-031): below 100 ms a connection attempt is too aggressive for a
+/// network round-trip (the timeout would fire before DNS resolution
+/// completes on many setups).
+pub const MIN_REDIS_CONNECTION_TIMEOUT_MS: u64 = 100;
+
+/// Validation ceiling on `gateway.redis_rate_limiter.connection_timeout_ms`
+/// (DW-031): 30 seconds is the longest a startup connection should
+/// stall the gateway (beyond that the operator should fix their Redis,
+/// not widen the timeout).
+pub const MAX_REDIS_CONNECTION_TIMEOUT_MS: u64 = 30_000;
+
+/// Validation floor on `gateway.redis_rate_limiter.key_ttl_s` (DW-031):
+/// below 1 second keys would expire before the GCRA bucket can refill
+/// for any non-trivial rate, making the limiter ineffective.
+pub const MIN_REDIS_KEY_TTL_S: u64 = 1;
+
+/// Validation ceiling on `gateway.redis_rate_limiter.key_ttl_s`
+/// (DW-031): 7 days is the longest a stale rate-limit key should
+/// linger in Redis (beyond that the operator should lower it to keep
+/// Redis memory bounded under key spray).
+pub const MAX_REDIS_KEY_TTL_S: u64 = 604_800;

@@ -154,6 +154,10 @@ export default withMermaid(
                   text: "Enterprise licensing",
                   link: "/guide/licensing",
                 },
+                {
+                  text: "Redis rate limiter",
+                  link: "/guide/redis-rate-limiter",
+                },
               ],
             },
           ],

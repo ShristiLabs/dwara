@@ -431,6 +431,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // (which owns the observability registry) is constructed.
     dp.set_license_status(license_gate.status().as_metric());
 
+    // DW-031: distributed Redis rate limiter (ent feature only).
+    // Activated when ALL three conditions hold:
+    //   1. The `ent` cargo feature is compiled in.
+    //   2. The config carries a `redis_rate_limiter` block.
+    //   3. The license grants the `redis_rate_limiter` feature claim.
+    // When any condition fails, the block is accepted but inert and the
+    // local in-memory GCRA limiter is used. The Redis connection is
+    // established ONCE here (with the configured timeout) and attached
+    // to the dataplane; subsequent reloads recompile the rate-limit
+    // engine with the same connection.
+    #[cfg(feature = "ent")]
+    {
+        if let Some(redis_cfg) = state.snapshot().gateway().redis_rate_limiter.clone() {
+            if license_gate.has_feature("redis_rate_limiter") {
+                match establish_redis_connection(&redis_cfg).await {
+                    Ok(conn) => {
+                        dp.set_redis_conn(conn);
+                        tracing::info!(
+                            code = "redis_rate_limiter_active",
+                            url = %redis_cfg.url,
+                            fail_open = redis_cfg.fail_open,
+                            "Redis distributed rate limiter activated (DW-031)"
+                        );
+                    }
+                    Err(err) => {
+                        if redis_cfg.fail_open {
+                            tracing::warn!(
+                                code = "redis_rate_limiter_connect_failed",
+                                url = %redis_cfg.url,
+                                "Redis connection failed ({err}); serving with the LOCAL rate \
+                                 limiter (fail_open=true)"
+                            );
+                        } else {
+                            tracing::error!(
+                                code = "redis_rate_limiter_connect_failed",
+                                url = %redis_cfg.url,
+                                "Redis connection failed ({err}); refusing to start \
+                                 (fail_open=false)"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            } else {
+                tracing::info!(
+                    code = "redis_rate_limiter_not_licensed",
+                    "redis_rate_limiter config block present but the license does not grant \
+                     the redis_rate_limiter feature claim; using the local rate limiter"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "ent"))]
+    {
+        if state.snapshot().gateway().redis_rate_limiter.is_some() {
+            tracing::info!(
+                code = "redis_rate_limiter_inert",
+                "redis_rate_limiter config block present but the ent cargo feature is not \
+                 compiled in; using the local rate limiter"
+            );
+        }
+    }
+
     // Admin listener (DW-022): started ONLY when the config carries an
     // `admin` block (default: no admin block, no admin listener). The
     // production shape is mTLS-only (decision 6); DWARA_ADMIN_DEV=1 is
@@ -758,6 +821,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 const DEFAULT_BIND_PORT: u16 = 8080;
+
+/// Establish a pooled Redis connection for the distributed rate limiter
+/// (DW-031, ent feature only). The connection is established once at
+/// startup with the configured timeout and cloned cheaply per rule at
+/// engine compile time. Returns a `ConnectionManager` (multiplexed,
+/// auto-reconnecting) on success.
+#[cfg(feature = "ent")]
+async fn establish_redis_connection(
+    config: &dwara_core::config::RedisRateLimiterConfig,
+) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
+    let client = redis::Client::open(config.url.as_str())?;
+    let timeout = Duration::from_millis(config.connection_timeout_ms);
+    let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+    Ok(conn)
+}
 
 fn config_dir(path: &Path) -> PathBuf {
     path.parent()

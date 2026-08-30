@@ -166,6 +166,17 @@
         "$ref": "#/$defs/Policy"
       }
     },
+    "redis_rate_limiter": {
+      "description": "Distributed Redis rate limiter (DW-031). Absent (the default):\nthe local in-memory GCRA limiter is used (one limit per\nprocess). When present, the `ent` cargo feature is compiled in,\nAND a valid license with the `redis_rate_limiter` feature claim\nis loaded, the gateway uses a Redis-backed GCRA limiter so two\nor more instances share one rate limit. The same GCRA algorithm\nruns, but the bucket state lives in Redis and is updated\natomically via a Lua script in a single round-trip. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local limiter is\nused and a warning is logged). When Redis is unreachable,\n`fail_open` (default true) lets requests through; `false`\nrejects with 429.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RedisRateLimiterConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "routes": {
       "description": "Match rules routing requests to services.",
       "type": "array",
@@ -2221,6 +2232,40 @@
         }
       },
       "additionalProperties": false
+    },
+    "RedisRateLimiterConfig": {
+      "description": "Distributed Redis rate limiter config (DW-031, `gateway.redis_rate_limiter`).\n\nWhen present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `redis_rate_limiter` feature claim is loaded, the\ngateway uses a Redis-backed GCRA limiter instead of the local\nin-memory one — so two or more gateway instances share one rate\nlimit. The same GCRA algorithm runs, but the bucket state (the\ntheoretical arrival time) lives in Redis and is updated atomically\nvia a Lua script in a single round-trip. When the `ent` feature is\nNOT compiled in, or the license lacks the claim, the block is\naccepted but inert (the local GCRA limiter is used). When Redis is\nunreachable, `fail_open` (default true) lets requests through; set\nit to false to reject with 429 instead.",
+      "type": "object",
+      "properties": {
+        "connection_timeout_ms": {
+          "description": "Connection timeout in milliseconds (default 1000; validated to\n100..=30 000). The timeout applies to the initial connection\nestablishment at startup, not to per-request Lua script calls\n(those use the pooled connection's own timeout).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fail_open": {
+          "description": "Fail-open behavior when Redis is unreachable (default true):\n`true` allows the request (no rate limiting); `false` rejects\nwith 429. Fail-open is the safer default for availability — a\nRedis outage should not take down the gateway — but operators\nwho need hard limits can set this to `false`.",
+          "type": "boolean"
+        },
+        "key_prefix": {
+          "description": "Prefix for rate-limit keys in Redis (default `dwara:rl:`). Each\nrule's per-key bucket is stored as `{prefix}{key}:{window_index}`.",
+          "type": "string"
+        },
+        "key_ttl_s": {
+          "description": "TTL for rate-limit keys in Redis, in seconds (default 3600).\nStale keys auto-expire so a key that stops receiving traffic\ndoes not accumulate forever. The per-window GCRA Lua script\nalso sets an EXPIRE based on the burst tolerance; this value is\na floor that ensures cleanup even for long-burst windows.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "url": {
+          "description": "Redis connection URL (e.g. `redis://127.0.0.1:6379` or\n`redis-cluster://...`). The connection is established once at\nstartup and pooled via a multiplexed `ConnectionManager`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
     },
     "RequestLimits": {
       "description": "Route-scoped request size limits (DW-027, feature analysis 4.16).\n\nSemantics (frozen; enforcement lives in `dataplane::hardening`):\n\n- Header limits (`max_header_count`, `max_header_bytes`) are checked\n  immediately after route resolution, before CORS preflight handling\n  and authentication; a violation answers 431 with the JSON error\n  envelope. `max_header_bytes` is the SUM of all header name and\n  value bytes of the request (hyper's per-connection buffer limits\n  still apply beneath this, process-wide).\n- `max_body_bytes`: a request whose `Content-Length` declares more is\n  rejected 413 before any upstream contact. A body of UNKNOWN length\n  (chunked / h2 without content-length) is wrapped in a counting\n  guard: crossing the cap aborts the request (the upstream attempt\n  fails; the client receives 413 when the failure precedes the\n  upstream's response headers, a torn stream otherwise).\n- A block with NO field set is rejected by validation (always an\n  authoring mistake; omit the block).",
