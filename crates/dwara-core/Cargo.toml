@@ -67,11 +67,10 @@ loom = { version = "0.7", optional = true }
 # licensing-core is BSL-1.1; see the workspace Cargo.toml comment and
 # deny.toml. Optional so OSS builds (the default) never pull it in. The
 # canonical source is the private git repo
-# (https://github.com/ShristiLabs/licensing.git); a path dependency is
-# used here so the local checkout resolves without git credentials. In a
-# CI/publish context that has git access, swap this for the git form:
-#   licensing-core = { git = "https://github.com/ShristiLabs/licensing.git", optional = true }
-licensing-core = { path = "../../../licensing/crates/licensing-core", optional = true }
+# https://github.com/ShristiLabs/licensing. CI configures git to
+# authenticate via the GITHUB_TOKEN env var (see the ci workflow's
+# "Configure git for private deps" step).
+licensing-core = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
