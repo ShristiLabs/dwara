@@ -9,6 +9,31 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Config convergence (DW-054, enterprise feature): two or more gateway
+  instances now share config generation state via a backend (Redis in
+  v1; etcd and Consul are deferred behind the
+  `ConfigConvergenceBackend` trait). Each instance publishes its
+  current generation to the backend and polls for generations
+  published by other instances, converging to the highest generation
+  within the configured `poll_interval_ms` (default 1000 ms; the
+  done-when target is sub-second convergence). A drift report is
+  emitted at `drift_check_interval_ms` (default 5000 ms) when
+  instances serve different config hashes. The coordinator runs
+  alongside the local file watcher: a local reload publishes to the
+  backend; a remote change (detected by polling) triggers a remote
+  reload through the same `compile_and_publish` pipeline. Fail-open
+  behavior (default `true`) keeps serving the local config when the
+  backend is unreachable. New `gateway.config_convergence` config
+  block (`enabled`, `backend`, `redis_url`, `key_prefix`,
+  `poll_interval_ms`, `drift_check_interval_ms`, `fail_open`). New
+  metrics: `dwara_config_convergence_generation{instance}`,
+  `dwara_config_convergence_instances`,
+  `dwara_config_convergence_drift`,
+  `dwara_config_convergence_refresh_total`,
+  `dwara_config_convergence_refresh_failures_total`. Gated behind the
+  `ent` cargo feature and the `config_convergence` license claim.
+  New env var: `DWARA_INSTANCE_ID` (override the per-process instance
+  id used in the backend; defaults to `{pid}-{startup_timestamp_ms}`).
 - Zero-downtime binary upgrade (DW-049): the gateway can swap its binary
   under load with zero failed requests and zero reset connections. Every
   listening socket is bound with `SO_REUSEPORT` so a new process can

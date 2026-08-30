@@ -638,6 +638,17 @@ pub struct DataPlane {
     /// the new engine, it does not re-establish).
     #[cfg(feature = "ent")]
     redis_conn: std::sync::RwLock<Option<redis::aio::ConnectionManager>>,
+    /// DW-054: the config convergence coordinator (ent feature only).
+    /// Set once at startup by dwara-bin when the config carries a
+    /// `config_convergence` block AND the license grants the
+    /// `config_convergence` feature claim. When set, the reload path
+    /// calls `publish_convergence_local` after every successful local
+    /// reload so the backend carries the new generation. The
+    /// coordinator's background poll task is spawned by dwara-bin
+    /// (not here) against the shutdown watch.
+    #[cfg(feature = "ent")]
+    convergence:
+        std::sync::RwLock<Option<Arc<crate::dataplane::convergence::ConvergenceCoordinator>>>,
     /// Quota near-limit edge-trigger bookkeeping (DW-033): the
     /// (consumer, budget, window_start) triples already reported, so
     /// `quota_near_limit` fires ONCE per budget per window instead of
@@ -836,6 +847,8 @@ impl DataPlane {
             geoip: arc_swap::ArcSwapOption::empty(),
             #[cfg(feature = "ent")]
             redis_conn: std::sync::RwLock::new(None),
+            #[cfg(feature = "ent")]
+            convergence: std::sync::RwLock::new(None),
             quota_near_limit_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
             state,
         };
@@ -896,6 +909,38 @@ impl DataPlane {
             .read()
             .expect("redis conn lock poisoned")
             .clone()
+    }
+
+    /// Attach the config convergence coordinator (DW-054, ent feature
+    /// only). Set once at startup by dwara-bin when the config carries
+    /// a `config_convergence` block AND the license grants the
+    /// `config_convergence` feature claim. The coordinator's
+    /// background poll task is spawned separately by dwara-bin; this
+    /// only stores the handle so the reload path can publish the new
+    /// generation after every successful local reload.
+    #[cfg(feature = "ent")]
+    pub fn set_convergence_coordinator(
+        &self,
+        coordinator: Arc<crate::dataplane::convergence::ConvergenceCoordinator>,
+    ) {
+        *self.convergence.write().expect("convergence lock poisoned") = Some(coordinator);
+    }
+
+    /// Publish the current local generation to the convergence backend
+    /// (DW-054, ent feature only). Called by the reload path after
+    /// every successful local reload. A no-op when no coordinator is
+    /// attached (convergence not configured or not licensed).
+    #[cfg(feature = "ent")]
+    pub async fn publish_convergence_local(&self) {
+        let Some(coordinator) = self
+            .convergence
+            .read()
+            .expect("convergence lock poisoned")
+            .clone()
+        else {
+            return;
+        };
+        coordinator.publish_local().await;
     }
 
     /// The DWARA_STATE_DB store when one is attached (None = pure-config

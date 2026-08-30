@@ -117,6 +117,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         license: None,
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
+        config_convergence: None,
     }
 }
 
@@ -473,6 +474,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             license: None,
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
+            config_convergence: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -620,6 +622,7 @@ async fn reserved_paths_shadow_configured_routes() {
             license: None,
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
+            config_convergence: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

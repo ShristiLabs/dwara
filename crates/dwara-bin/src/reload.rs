@@ -91,6 +91,13 @@ pub(crate) async fn reload(
                 );
                     dp.refresh();
                     refresh_tls_states(&state.snapshot(), tls_states, trigger);
+                    // DW-054: publish the new local generation to the
+                    // convergence backend so other instances converge
+                    // to it. A no-op when convergence is not configured
+                    // or not licensed (the ent-gated method returns
+                    // immediately when no coordinator is attached).
+                    #[cfg(feature = "ent")]
+                    dp.publish_convergence_local().await;
                     // Active health checks (DW-013): probe loops are per
                     // generation — cancel the old tasks and spawn against the
                     // new registry. Endpoints whose address:port persists keep

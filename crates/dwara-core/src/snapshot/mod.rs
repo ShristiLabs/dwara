@@ -1680,6 +1680,94 @@ fn validate_redis_rate_limiter(gateway: &Gateway, issues: &mut Vec<ValidationIss
     }
 }
 
+/// Validate the `gateway.config_convergence` block (DW-054): the
+/// backend must be `"redis"` (the only v1 backend; etcd/Consul are
+/// deferred behind the trait), `redis_url` must be present and
+/// non-empty when `backend = "redis"`, the poll and drift-check
+/// intervals must be in range, and the key prefix must be non-empty.
+/// The license check (does the license grant `config_convergence`?)
+/// is NOT a validation concern -- it runs at startup in dwara-bin
+/// (where a missing claim logs a warning and falls back to local-only
+/// mode), not in the compile pipeline (a license's validity is a
+/// runtime property that can change between reloads without a
+/// config-schema change).
+fn validate_config_convergence(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(cc) = &gateway.config_convergence else {
+        return;
+    };
+    if cc.backend != "redis" {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "config_convergence.backend",
+            format!(
+                "config_convergence.backend '{}' is not supported: v1 ships only 'redis' \
+                 (etcd/Consul are deferred behind the ConfigConvergenceBackend trait)",
+                cc.backend,
+            ),
+        ));
+    }
+    if cc.backend == "redis" {
+        match &cc.redis_url {
+            None => issues.push(issue(
+                "gateway",
+                "(root)",
+                "config_convergence.redis_url",
+                "config_convergence.redis_url is required when backend = 'redis'",
+            )),
+            Some(url) if url.trim().is_empty() => issues.push(issue(
+                "gateway",
+                "(root)",
+                "config_convergence.redis_url",
+                "config_convergence.redis_url must be a non-empty Redis URL",
+            )),
+            _ => {}
+        }
+    }
+    let poll = cc.poll_interval_ms;
+    if !(crate::config::limits::MIN_CONFIG_CONVERGENCE_POLL_MS
+        ..=crate::config::limits::MAX_CONFIG_CONVERGENCE_POLL_MS)
+        .contains(&poll)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "config_convergence.poll_interval_ms",
+            format!(
+                "config_convergence.poll_interval_ms {} is out of range: must be {}..={}",
+                poll,
+                crate::config::limits::MIN_CONFIG_CONVERGENCE_POLL_MS,
+                crate::config::limits::MAX_CONFIG_CONVERGENCE_POLL_MS,
+            ),
+        ));
+    }
+    let drift = cc.drift_check_interval_ms;
+    if !(crate::config::limits::MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS
+        ..=crate::config::limits::MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS)
+        .contains(&drift)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "config_convergence.drift_check_interval_ms",
+            format!(
+                "config_convergence.drift_check_interval_ms {} is out of range: must be {}..={}",
+                drift,
+                crate::config::limits::MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS,
+                crate::config::limits::MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS,
+            ),
+        ));
+    }
+    if cc.key_prefix.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "config_convergence.key_prefix",
+            "config_convergence.key_prefix must be a non-empty string",
+        ));
+    }
+}
+
 /// Validate the `gateway.oidc_providers` list (DW-034): each issuer must
 /// be an absolute `http(s)://` URL, the introspection cache TTL must be
 /// in `1..=3600`, the `consumer` reference (when set) must name a known
@@ -2234,6 +2322,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // startup in dwara-bin, where a missing claim logs a warning and
     // falls back to the local limiter).
     validate_redis_rate_limiter(gateway, &mut issues);
+
+    // DW-054: config convergence (backend type, redis_url presence,
+    // interval bounds; the license claim check is NOT validation — it
+    // runs at startup in dwara-bin, where a missing claim logs a
+    // warning and falls back to local-only mode).
+    validate_config_convergence(gateway, &mut issues);
 
     // DW-034: OIDC providers (issuer URL shape, introspection cache TTL
     // bounds, consumer references, trusted_ca_file readability).
@@ -4560,6 +4654,7 @@ impl Snapshot {
                 license: None,
                 oidc_providers: Vec::new(),
                 redis_rate_limiter: None,
+                config_convergence: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

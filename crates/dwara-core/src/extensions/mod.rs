@@ -26,6 +26,12 @@
 pub mod analytics;
 pub mod cache;
 pub mod config_source;
+// DW-054: Config convergence backend (ent feature only). The module
+// compiles only when the `ent` cargo feature is enabled; OSS builds
+// never pull in the redis dependency. The trait is the seam for
+// etcd/Consul backends (deferred); v1 ships a Redis implementation.
+#[cfg(feature = "ent")]
+pub mod config_convergence;
 pub mod licensing;
 pub mod rate_limiter;
 // DW-031: Distributed Redis-backed GCRA rate limiter (ent feature only).

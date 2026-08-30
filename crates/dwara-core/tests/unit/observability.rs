@@ -135,6 +135,7 @@ fn render_contains_families() {
             license: None,
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
+            config_convergence: None,
         })
         .expect("publish");
     let registry =

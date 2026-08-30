@@ -167,6 +167,10 @@ export default withMermaid(
                   link: "/guide/redis-rate-limiter",
                 },
                 {
+                  text: "Config convergence",
+                  link: "/guide/config-convergence",
+                },
+                {
                   text: "Dynamic upstream discovery",
                   link: "/guide/dynamic-discovery",
                 },

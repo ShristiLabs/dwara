@@ -6,7 +6,10 @@
 //! ([`active`] — it drives the upstream registry's balancer trackers,
 //! which is dataplane lifecycle), DNS-based dynamic upstream discovery
 //! ([`discovery`] — DW-042, background tasks that resolve and watch
-//! DNS records, updating the endpoint set live), the protocol
+//! DNS records, updating the endpoint set live), config convergence
+//! (`convergence` — DW-054, ent feature only, background task that
+//! polls a shared backend so instances converge to the highest
+//! generation and drift is reported), the protocol
 //! hardening applied to
 //! every serving surface ([`hardening`], plus the route-scoped request
 //! limits of DW-027), the PROXY protocol acceptance of DW-030
@@ -23,6 +26,14 @@ pub mod active;
 pub mod balance;
 pub mod compression;
 pub mod cors;
+// DW-054: config convergence coordinator (ent feature only). The
+// module compiles only when the `ent` cargo feature is enabled; OSS
+// builds never pull in the redis dependency. Lives in the dataplane
+// (the top of the core dependency graph) because it orchestrates the
+// snapshot publish pipeline + the convergence backend trait +
+// observability, and `snapshot` may not import `extensions`.
+#[cfg(feature = "ent")]
+pub mod convergence;
 pub mod discovery;
 pub mod hardening;
 pub mod proxy;

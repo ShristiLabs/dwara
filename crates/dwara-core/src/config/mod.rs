@@ -314,6 +314,22 @@ pub struct Gateway {
     /// rejects with 429.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_rate_limiter: Option<RedisRateLimiterConfig>,
+    /// Config convergence (DW-054, enterprise feature). Absent (the
+    /// default): each gateway instance serves only its local config
+    /// generation and never watches remote instances. When present,
+    /// the `ent` cargo feature is compiled in, AND a valid license
+    /// with the `config_convergence` feature claim is loaded, the
+    /// gateway publishes its config generation to a shared backend
+    /// (Redis in v1; etcd/Consul are deferred behind the
+    /// `ConfigConvergenceBackend` trait) and polls for generations
+    /// published by other instances, converging to the highest
+    /// generation within the poll interval. A drift report is emitted
+    /// at `drift_check_interval_ms` when instances diverge. When the
+    /// `ent` feature is NOT compiled in, or the license lacks the
+    /// claim, the block is accepted but inert (the local file watcher
+    /// runs alone) and a one-line notice is logged at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_convergence: Option<ConfigConvergenceConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -559,6 +575,100 @@ fn default_redis_key_ttl_s() -> u64 {
 
 fn is_default_redis_key_ttl_s(v: &u64) -> bool {
     *v == 3600
+}
+
+/// Config convergence config (DW-054, `gateway.config_convergence`).
+///
+/// When present and the `ent` cargo feature is compiled in AND a valid
+/// license with the `config_convergence` feature claim is loaded, the
+/// gateway publishes its config generation to a shared backend and
+/// polls for generations published by other instances, converging to
+/// the highest generation within `poll_interval_ms`. The backend is
+/// the seam for etcd/Consul (deferred); v1 ships a Redis
+/// implementation. The coordinator runs ALONGSIDE the local file
+/// watcher: a local file change triggers a local reload plus a publish
+/// to the backend; a remote change (detected by polling) triggers a
+/// remote reload. Both go through `compile_and_publish`. When the
+/// `ent` feature is NOT compiled in, or the license lacks the claim,
+/// the block is accepted but inert (the local file watcher runs
+/// alone).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigConvergenceConfig {
+    /// Master switch. Default false: convergence is inert and the
+    /// gateway serves only its local config (the local file watcher
+    /// still runs). When true (and licensed), the coordinator
+    /// publishes and polls.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Convergence backend type. v1 ships `"redis"`; etcd and Consul
+    /// are deferred behind the `ConfigConvergenceBackend` trait (the
+    /// value is the seam a future backend plugs into). Validation
+    /// rejects any value other than `"redis"`.
+    pub backend: String,
+    /// Redis connection URL (e.g. `redis://127.0.0.1:6379`), required
+    /// when `backend = "redis"`. The connection is established once at
+    /// startup and pooled via a multiplexed `ConnectionManager`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_url: Option<String>,
+    /// Prefix for convergence keys in Redis (default `dwara:config`).
+    /// Instance generations live under `{prefix}:instances` and config
+    /// bodies under `{prefix}:config`.
+    #[serde(
+        default = "default_config_convergence_key_prefix",
+        skip_serializing_if = "is_default_config_convergence_key_prefix"
+    )]
+    pub key_prefix: String,
+    /// How often to poll the backend for generations published by
+    /// other instances, in milliseconds (default 1000; validated to
+    /// 100..=60 000). The done-when targets sub-second convergence;
+    /// lower values converge faster at the cost of backend load.
+    #[serde(
+        default = "default_config_convergence_poll_interval_ms",
+        skip_serializing_if = "is_default_config_convergence_poll_interval_ms"
+    )]
+    pub poll_interval_ms: u64,
+    /// How often to read all instances' generations and report drift,
+    /// in milliseconds (default 5000; validated to 1 000..=300 000).
+    /// Drift is reported (structured log + metric) when instances
+    /// serve different config hashes.
+    #[serde(
+        default = "default_config_convergence_drift_check_interval_ms",
+        skip_serializing_if = "is_default_config_convergence_drift_check_interval_ms"
+    )]
+    pub drift_check_interval_ms: u64,
+    /// Fail-open behavior when the convergence backend is unreachable
+    /// (default true): `true` keeps serving the local config
+    /// generation (convergence pauses until the backend recovers);
+    /// `false` refuses to start at cold start when the backend cannot
+    /// be reached. Fail-open is the safer default for availability --
+    /// a backend outage should not take down the gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub fail_open: bool,
+}
+
+fn default_config_convergence_key_prefix() -> String {
+    "dwara:config".to_string()
+}
+
+fn is_default_config_convergence_key_prefix(p: &str) -> bool {
+    p == "dwara:config"
+}
+
+fn default_config_convergence_poll_interval_ms() -> u64 {
+    1000
+}
+
+fn is_default_config_convergence_poll_interval_ms(v: &u64) -> bool {
+    *v == 1000
+}
+
+fn default_config_convergence_drift_check_interval_ms() -> u64 {
+    5000
+}
+
+fn is_default_config_convergence_drift_check_interval_ms(v: &u64) -> bool {
+    *v == 5000
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).

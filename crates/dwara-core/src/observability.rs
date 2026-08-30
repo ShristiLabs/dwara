@@ -481,6 +481,26 @@ pub struct Observability {
     /// DW-042: DNS discovery refresh failures — a counter of failed
     /// resolution cycles per upstream (config-bounded `upstream` label).
     dns_discovery_refresh_failures_total: IntCounterVec,
+    /// DW-054: this instance's current convergence generation, by
+    /// instance id. The instance label is config-bounded (one series
+    /// per process); set by the convergence coordinator after every
+    /// local or remote publish.
+    config_convergence_generation: IntGaugeVec,
+    /// DW-054: total instances the convergence backend currently
+    /// reports (the cluster view the drift check reads). Aggregate and
+    /// unlabeled -- cardinality is one series.
+    config_convergence_instances: IntGauge,
+    /// DW-054: drift flag -- 1 when one or more instances serve a
+    /// different config hash than the majority, 0 when converged.
+    /// Aggregate and unlabeled -- cardinality is one series.
+    config_convergence_drift: IntGauge,
+    /// DW-054: convergence refresh attempts (polls of the backend).
+    /// Aggregate counter -- cardinality is one series.
+    config_convergence_refresh_total: IntCounter,
+    /// DW-054: convergence refresh failures (backend unreachable or
+    /// returned malformed data). Aggregate counter -- cardinality is
+    /// one series.
+    config_convergence_refresh_failures_total: IntCounter,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -880,6 +900,41 @@ impl Observability {
             &["upstream"],
         )
         .expect("valid metric definition");
+        let config_convergence_generation = IntGaugeVec::new(
+            Opts::new(
+                "dwara_config_convergence_generation",
+                "This instance's current config convergence generation \
+                 (DW-054), by instance id. The instance label is \
+                 config-bounded (one series per process).",
+            ),
+            &["instance"],
+        )
+        .expect("valid metric definition");
+        let config_convergence_instances = IntGauge::new(
+            "dwara_config_convergence_instances",
+            "Total gateway instances the convergence backend currently \
+             reports (DW-054); the cluster view the drift check reads.",
+        )
+        .expect("valid metric definition");
+        let config_convergence_drift = IntGauge::new(
+            "dwara_config_convergence_drift",
+            "Config convergence drift flag (DW-054): 1 when one or more \
+             instances serve a different config hash than the majority, 0 \
+             when the cluster is converged.",
+        )
+        .expect("valid metric definition");
+        let config_convergence_refresh_total = IntCounter::new(
+            "dwara_config_convergence_refresh_total",
+            "Config convergence refresh attempts (DW-054): polls of the \
+             convergence backend for remote generations.",
+        )
+        .expect("valid metric definition");
+        let config_convergence_refresh_failures_total = IntCounter::new(
+            "dwara_config_convergence_refresh_failures_total",
+            "Config convergence refresh failures (DW-054): backend \
+             unreachable or returned malformed data.",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -927,6 +982,11 @@ impl Observability {
             Box::new(dns_discovery_endpoints.clone()),
             Box::new(dns_discovery_refresh_total.clone()),
             Box::new(dns_discovery_refresh_failures_total.clone()),
+            Box::new(config_convergence_generation.clone()),
+            Box::new(config_convergence_instances.clone()),
+            Box::new(config_convergence_drift.clone()),
+            Box::new(config_convergence_refresh_total.clone()),
+            Box::new(config_convergence_refresh_failures_total.clone()),
         ] {
             registry
                 .register(m)
@@ -978,6 +1038,11 @@ impl Observability {
             dns_discovery_endpoints,
             dns_discovery_refresh_total,
             dns_discovery_refresh_failures_total,
+            config_convergence_generation,
+            config_convergence_instances,
+            config_convergence_drift,
+            config_convergence_refresh_total,
+            config_convergence_refresh_failures_total,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1249,6 +1314,57 @@ impl Observability {
         self.dns_discovery_refresh_failures_total
             .with_label_values(&[upstream])
             .inc();
+    }
+
+    /// Set this instance's current convergence generation (DW-054) in
+    /// `dwara_config_convergence_generation{instance}`. The instance
+    /// label is config-bounded (one series per process). Set by the
+    /// convergence coordinator after every local or remote publish.
+    pub fn set_config_convergence_generation(&self, instance: &str, generation: i64) {
+        self.config_convergence_generation
+            .with_label_values(&[instance])
+            .set(generation);
+    }
+
+    /// Set the total instances the convergence backend reports
+    /// (DW-054) in `dwara_config_convergence_instances`. Set by the
+    /// coordinator's drift check from the cluster view.
+    pub fn set_config_convergence_instances(&self, count: i64) {
+        self.config_convergence_instances.set(count);
+    }
+
+    /// Set the convergence drift flag (DW-054) in
+    /// `dwara_config_convergence_drift`: 1 when one or more instances
+    /// serve a different config hash than the majority, 0 when
+    /// converged. Set by the coordinator's drift check.
+    pub fn set_config_convergence_drift(&self, drift: bool) {
+        self.config_convergence_drift.set(i64::from(drift));
+    }
+
+    /// Count one convergence refresh attempt (DW-054) in
+    /// `dwara_config_convergence_refresh_total`.
+    pub fn record_config_convergence_refresh(&self) {
+        self.config_convergence_refresh_total.inc();
+    }
+
+    /// Count one convergence refresh failure (DW-054) in
+    /// `dwara_config_convergence_refresh_failures_total`.
+    pub fn record_config_convergence_refresh_failure(&self) {
+        self.config_convergence_refresh_failures_total.inc();
+    }
+
+    /// The current `dwara_config_convergence_drift` gauge value (DW-054):
+    /// 1 when drift was last reported, 0 when converged. Test seam +
+    /// operator introspection (the gauge is also scraped via /metrics).
+    pub fn config_convergence_drift(&self) -> i64 {
+        self.config_convergence_drift.get()
+    }
+
+    /// The current `dwara_config_convergence_instances` gauge value
+    /// (DW-054): the last cluster-view instance count. Test seam +
+    /// operator introspection.
+    pub fn config_convergence_instances(&self) -> i64 {
+        self.config_convergence_instances.get()
     }
 
     /// Set the `breaker_state` gauge for one upstream (0 closed, 1 open,

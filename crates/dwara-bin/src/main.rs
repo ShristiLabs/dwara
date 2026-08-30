@@ -512,7 +512,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                  compiled in; using the local rate limiter"
             );
         }
+        if state.snapshot().gateway().config_convergence.is_some() {
+            tracing::info!(
+                code = "config_convergence_inert",
+                "config_convergence config block present but the ent cargo feature is not \
+                 compiled in; serving local config only (the local file watcher runs alone)"
+            );
+        }
     }
+
+    // DW-054: config convergence (ent feature only). Activated when ALL
+    // three conditions hold:
+    //   1. The `ent` cargo feature is compiled in.
+    //   2. The config carries an enabled `config_convergence` block.
+    //   3. The license grants the `config_convergence` feature claim.
+    // When any condition fails, the block is accepted but inert and the
+    // local file watcher runs alone. The Redis connection is established
+    // ONCE here (with a bounded timeout), the RedisConvergenceBackend is
+    // built over it, the ConvergenceCoordinator is constructed and
+    // attached to the dataplane, and its background poll task is spawned
+    // against the shutdown watch. On every successful local reload the
+    // reload path calls `dp.publish_convergence_local()` so the backend
+    // carries the new generation.
+    #[cfg(feature = "ent")]
+    let convergence_task: Option<tokio::task::JoinHandle<()>> = {
+        let mut task = None;
+        if let Some(cc) = state.snapshot().gateway().config_convergence.clone() {
+            if cc.enabled && license_gate.has_feature("config_convergence") {
+                match build_convergence_coordinator(&cc, Arc::clone(&state), dp.observability_arc())
+                    .await
+                {
+                    Ok(coordinator) => {
+                        dp.set_convergence_coordinator(Arc::clone(&coordinator));
+                        // Publish the startup generation immediately so
+                        // the cluster sees this instance at once (the
+                        // background task's first publish is one poll
+                        // interval away).
+                        coordinator.publish_local().await;
+                        task = Some(coordinator.spawn(shutdown_rx.clone()));
+                        tracing::info!(
+                            code = "config_convergence_active",
+                            backend = %cc.backend,
+                            poll_interval_ms = cc.poll_interval_ms,
+                            drift_check_interval_ms = cc.drift_check_interval_ms,
+                            fail_open = cc.fail_open,
+                            "config convergence activated (DW-054)"
+                        );
+                    }
+                    Err(err) => {
+                        if cc.fail_open {
+                            tracing::warn!(
+                                code = "config_convergence_connect_failed",
+                                "config convergence backend connection failed ({err}); \
+                                 serving local config only (fail_open=true)"
+                            );
+                        } else {
+                            tracing::error!(
+                                code = "config_convergence_connect_failed",
+                                "config convergence backend connection failed ({err}); \
+                                 refusing to start (fail_open=false)"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            } else if cc.enabled {
+                tracing::info!(
+                    code = "config_convergence_not_licensed",
+                    "config_convergence config block present and enabled but the license does \
+                     not grant the config_convergence feature claim; serving local config only"
+                );
+            }
+        }
+        task
+    };
+    #[cfg(not(feature = "ent"))]
+    let convergence_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Admin listener (DW-022): started ONLY when the config carries an
     // `admin` block (default: no admin block, no admin listener). The
@@ -857,6 +932,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     cert_task.abort();
     webhook_task.abort();
     export_task.abort();
+    // DW-054: the convergence task self-exits on the shutdown watch
+    // (after a best-effort remove_instance); abort it here too so a
+    // watch-miss cannot strand it past the drain window.
+    if let Some(t) = convergence_task {
+        t.abort();
+    }
     if let Some(t) = &geoip_task {
         t.abort();
     }
@@ -916,6 +997,74 @@ async fn establish_redis_connection(
     let timeout = Duration::from_millis(config.connection_timeout_ms);
     let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
     Ok(conn)
+}
+
+/// Build the config convergence coordinator (DW-054, ent feature only).
+/// Establishes a Redis connection (reusing the DW-031 connection helper
+/// shape), builds the `RedisConvergenceBackend` over it, and constructs
+/// the `ConvergenceCoordinator` with a per-process instance id. The
+/// coordinator is returned for the caller to attach to the dataplane
+/// and spawn against the shutdown watch.
+#[cfg(feature = "ent")]
+async fn build_convergence_coordinator(
+    config: &dwara_core::config::ConfigConvergenceConfig,
+    state: Arc<dwara_core::snapshot::ConfigState>,
+    obs: Arc<dwara_core::observability::Observability>,
+) -> Result<
+    Arc<dwara_core::dataplane::convergence::ConvergenceCoordinator>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use dwara_core::dataplane::convergence::ConvergenceCoordinator;
+    use dwara_core::extensions::config_convergence::{
+        ConfigConvergenceBackend, RedisConvergenceBackend,
+    };
+
+    let url = config
+        .redis_url
+        .as_deref()
+        .ok_or("config_convergence.redis_url is required when backend = 'redis'")?;
+    let client = redis::Client::open(url)?;
+    // The convergence backend reuses the DW-031 connection timeout
+    // bound (100..=30000 ms); the config block does not carry its own
+    // timeout, so the default startup timeout applies.
+    let conn = tokio::time::timeout(
+        Duration::from_millis(dwara_core::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS / 3),
+        client.get_connection_manager(),
+    )
+    .await??;
+    // TTLs: instances hash expires after 3x the poll interval (a
+    // healthy instance refreshes it each cycle, so 3x is a generous
+    // miss margin); config bodies live for 1 hour (a slow instance
+    // converging well past the poll interval still finds the body).
+    let instances_ttl_s = (config.poll_interval_ms / 1000).max(1) * 3;
+    let config_ttl_s = 3600;
+    let backend = Arc::new(RedisConvergenceBackend::new(
+        conn,
+        config.key_prefix.clone(),
+        instances_ttl_s,
+        config_ttl_s,
+    )) as Arc<dyn ConfigConvergenceBackend>;
+    // Instance id: DWARA_INSTANCE_ID overrides; otherwise derive from
+    // pid + a startup timestamp so two processes on one host differ.
+    let instance_id = std::env::var("DWARA_INSTANCE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            format!("{}-{}", std::process::id(), ts)
+        });
+    Ok(Arc::new(ConvergenceCoordinator::new(
+        state,
+        backend,
+        obs,
+        instance_id,
+        config.poll_interval_ms,
+        config.drift_check_interval_ms,
+        config.fail_open,
+    )))
 }
 
 fn config_dir(path: &Path) -> PathBuf {

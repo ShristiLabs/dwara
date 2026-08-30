@@ -141,6 +141,7 @@ fn bench_gateway() -> Gateway {
         license: None,
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
+        config_convergence: None,
     }
 }
 

@@ -63,6 +63,17 @@
         }
       ]
     },
+    "config_convergence": {
+      "description": "Config convergence (DW-054, enterprise feature). Absent (the\ndefault): each gateway instance serves only its local config\ngeneration and never watches remote instances. When present,\nthe `ent` cargo feature is compiled in, AND a valid license\nwith the `config_convergence` feature claim is loaded, the\ngateway publishes its config generation to a shared backend\n(Redis in v1; etcd/Consul are deferred behind the\n`ConfigConvergenceBackend` trait) and polls for generations\npublished by other instances, converging to the highest\ngeneration within the poll interval. A drift report is emitted\nat `drift_check_interval_ms` when instances diverge. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local file watcher\nruns alone) and a one-line notice is logged at startup.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfigConvergenceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "consumers": {
       "description": "API caller identities.",
       "type": "array",
@@ -899,6 +910,51 @@
         "gzip",
         "brotli",
         "zstd"
+      ]
+    },
+    "ConfigConvergenceConfig": {
+      "description": "Config convergence config (DW-054, `gateway.config_convergence`).\n\nWhen present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `config_convergence` feature claim is loaded, the\ngateway publishes its config generation to a shared backend and\npolls for generations published by other instances, converging to\nthe highest generation within `poll_interval_ms`. The backend is\nthe seam for etcd/Consul (deferred); v1 ships a Redis\nimplementation. The coordinator runs ALONGSIDE the local file\nwatcher: a local file change triggers a local reload plus a publish\nto the backend; a remote change (detected by polling) triggers a\nremote reload. Both go through `compile_and_publish`. When the\n`ent` feature is NOT compiled in, or the license lacks the claim,\nthe block is accepted but inert (the local file watcher runs\nalone).",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Convergence backend type. v1 ships `\"redis\"`; etcd and Consul\nare deferred behind the `ConfigConvergenceBackend` trait (the\nvalue is the seam a future backend plugs into). Validation\nrejects any value other than `\"redis\"`.",
+          "type": "string"
+        },
+        "drift_check_interval_ms": {
+          "description": "How often to read all instances' generations and report drift,\nin milliseconds (default 5000; validated to 1 000..=300 000).\nDrift is reported (structured log + metric) when instances\nserve different config hashes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Master switch. Default false: convergence is inert and the\ngateway serves only its local config (the local file watcher\nstill runs). When true (and licensed), the coordinator\npublishes and polls.",
+          "type": "boolean"
+        },
+        "fail_open": {
+          "description": "Fail-open behavior when the convergence backend is unreachable\n(default true): `true` keeps serving the local config\ngeneration (convergence pauses until the backend recovers);\n`false` refuses to start at cold start when the backend cannot\nbe reached. Fail-open is the safer default for availability --\na backend outage should not take down the gateway.",
+          "type": "boolean"
+        },
+        "key_prefix": {
+          "description": "Prefix for convergence keys in Redis (default `dwara:config`).\nInstance generations live under `{prefix}:instances` and config\nbodies under `{prefix}:config`.",
+          "type": "string"
+        },
+        "poll_interval_ms": {
+          "description": "How often to poll the backend for generations published by\nother instances, in milliseconds (default 1000; validated to\n100..=60 000). The done-when targets sub-second convergence;\nlower values converge faster at the cost of backend load.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "redis_url": {
+          "description": "Redis connection URL (e.g. `redis://127.0.0.1:6379`), required\nwhen `backend = \"redis\"`. The connection is established once at\nstartup and pooled via a multiplexed `ConnectionManager`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend"
       ]
     },
     "Consumer": {

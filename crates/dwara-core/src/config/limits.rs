@@ -156,3 +156,28 @@ pub const MIN_DNS_DISCOVERY_REFRESH_S: u64 = 1;
 /// noticing a stale endpoint set (beyond that the TTL-driven refresh
 /// is the better mechanism).
 pub const MAX_DNS_DISCOVERY_REFRESH_S: u64 = 3_600;
+
+/// Validation floor on `gateway.config_convergence.poll_interval_ms`
+/// (DW-054): below 100 ms the convergence poll would hammer the backend
+/// faster than another instance can publish a generation, and the
+/// round-trip itself dominates the interval.
+pub const MIN_CONFIG_CONVERGENCE_POLL_MS: u64 = 100;
+
+/// Validation ceiling on `gateway.config_convergence.poll_interval_ms`
+/// (DW-054): one minute is the longest convergence lag an operator
+/// should tolerate (the done-when targets sub-second convergence; a
+/// poll this slow is a misconfiguration).
+pub const MAX_CONFIG_CONVERGENCE_POLL_MS: u64 = 60_000;
+
+/// Validation floor on
+/// `gateway.config_convergence.drift_check_interval_ms` (DW-054): below
+/// one second the drift check would race the poll and report transient
+/// mid-convergence divergence as drift (noise).
+pub const MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS: u64 = 1_000;
+
+/// Validation ceiling on
+/// `gateway.config_convergence.drift_check_interval_ms` (DW-054): five
+/// minutes is the longest an operator should go without a drift report
+/// (beyond that a divergent instance serves stale config for too long
+/// before anyone notices).
+pub const MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS: u64 = 300_000;
