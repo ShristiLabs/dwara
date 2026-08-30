@@ -2362,6 +2362,37 @@ pub struct Consumer {
     /// rules as route-level authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+    /// Request budgets for this consumer (DW-033): a daily and/or
+    /// monthly request cap counted in fixed UTC calendar windows
+    /// (midnight-to-midnight UTC; the first through the last instant of
+    /// the UTC month). Budgets are DISTINCT from rate limits: a rate
+    /// limit shapes traffic inside seconds or minutes, a budget bounds
+    /// total volume across a day or month, and the two mechanisms run
+    /// independently (both apply when both are configured). Enforcement
+    /// needs the state store (`DWARA_STATE_DB`) for durable counters —
+    /// without one, quota config is inert (logged at request time, see
+    /// the `state::quotas` module docs). Store-managed consumers have no
+    /// config record, so budgets are config-consumer-only in this
+    /// edition; a distributed shared-counter variant is the Ent
+    /// follow-up (issue "DW-155").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas: Option<ConsumerQuotas>,
+}
+
+/// Per-consumer request budgets (DW-033): daily and/or monthly request
+/// caps in fixed UTC calendar windows, counted by the state store's
+/// quota counters. At least one budget must be set and every set budget
+/// must be > 0 (validation); a budget of 0 would deny the consumer's
+/// first request and is expressed by omitting the field instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerQuotas {
+    /// Maximum requests per UTC calendar day (midnight to midnight).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_requests: Option<u64>,
+    /// Maximum requests per UTC calendar month.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_requests: Option<u64>,
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience

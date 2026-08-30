@@ -585,12 +585,48 @@
           "format": "uint8",
           "maximum": 255,
           "minimum": 0
+        },
+        "quotas": {
+          "description": "Request budgets for this consumer (DW-033): a daily and/or\nmonthly request cap counted in fixed UTC calendar windows\n(midnight-to-midnight UTC; the first through the last instant of\nthe UTC month). Budgets are DISTINCT from rate limits: a rate\nlimit shapes traffic inside seconds or minutes, a budget bounds\ntotal volume across a day or month, and the two mechanisms run\nindependently (both apply when both are configured). Enforcement\nneeds the state store (`DWARA_STATE_DB`) for durable counters —\nwithout one, quota config is inert (logged at request time, see\nthe `state::quotas` module docs). Store-managed consumers have no\nconfig record, so budgets are config-consumer-only in this\nedition; a distributed shared-counter variant is the Ent\nfollow-up (issue \"DW-155\").",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConsumerQuotas"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "name"
       ]
+    },
+    "ConsumerQuotas": {
+      "description": "Per-consumer request budgets (DW-033): daily and/or monthly request\ncaps in fixed UTC calendar windows, counted by the state store's\nquota counters. At least one budget must be set and every set budget\nmust be > 0 (validation); a budget of 0 would deny the consumer's\nfirst request and is expressed by omitting the field instead.",
+      "type": "object",
+      "properties": {
+        "daily_requests": {
+          "description": "Maximum requests per UTC calendar day (midnight to midnight).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "monthly_requests": {
+          "description": "Maximum requests per UTC calendar month.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "Cors": {
       "description": "Route-scoped CORS policy (DW-027, feature analysis 4.14).\n\nSemantics (frozen; evaluation lives in `dataplane::cors`):\n\n- `allowed_origins` is a closed set of exact origins\n  (`https://api.example.com`, scheme + host + optional port, compared\n  in normalized form: lowercase scheme/host, default port dropped) or\n  the single entry `*` (any origin). It must be non-empty; `*`\n  combined with `allow_credentials: true` is rejected by validation\n  (the Fetch spec forbids wildcard-credentialed responses).\n- A PREFLIGHT (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)\n  on a CORS-configured route is answered 204 by the gateway —\n  validated against the policy, never forwarded upstream, and never\n  subject to authn/authz/rate limiting (browsers send preflights\n  without credentials). A preflight that fails validation (origin,\n  method, or requested headers not allowed) still short-circuits:\n  204 with NO CORS headers, which the browser reads as a failed\n  preflight. A plain `OPTIONS` without the preflight markers is NOT\n  intercepted; it proxies normally.\n- ACTUAL responses on the route carry `Access-Control-Allow-Origin`\n  (`*`, or the echoed request origin when the list is specific),\n  `Access-Control-Allow-Credentials: true` when configured,\n  `Access-Control-Expose-Headers` when configured, and `Vary: Origin`\n  (merged into any existing `Vary`). A request whose `Origin` is not\n  allowed simply gets no CORS headers — the response passes through\n  as-is (same-origin reads do not consult CORS at all).",

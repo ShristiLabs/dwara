@@ -615,6 +615,92 @@ async fn analytics_query(
     }
 }
 
+/// GET /quotas/usage (DW-033): the metering read — for every
+/// quota-configured consumer (or the one named by the optional
+/// `consumer` param), each budget's current-window used/limit and the
+/// window bounds (`reset_epoch_s` is the same instant a budget 429's
+/// `X-RateLimit-Reset` advertises). Requires the state store
+/// (`DWARA_STATE_DB`): without it there are no counters to read (and,
+/// as the request path has warned, no enforcement either). A consumer
+/// whose store row is missing reports `synced: false` with no budgets
+/// — no counters exist for it, and zero-usage would be a lie.
+async fn quotas_usage(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            404,
+            "state_store_not_configured",
+            "the gateway is running without a state store (set DWARA_STATE_DB and \
+             restart); quota usage is not queryable",
+            request_id,
+        );
+    };
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    let params = query_params(req.uri());
+    let filter = param(&params, "consumer");
+    if let Some(name) = &filter {
+        let quotaed = gateway
+            .consumers
+            .iter()
+            .any(|c| &c.name == name && c.quotas.is_some());
+        if !quotaed {
+            return envelope(
+                400,
+                "quota_bad_consumer",
+                "consumer must name a consumer that declares a quotas block",
+                request_id,
+            );
+        }
+    }
+    let now_epoch_s = (now_ms() / 1000) as i64;
+    let mut consumers = Vec::new();
+    for c in &gateway.consumers {
+        let Some(quotas) = &c.quotas else {
+            continue;
+        };
+        if let Some(f) = &filter {
+            if f != &c.name {
+                continue;
+            }
+        }
+        let record = store.lookup_consumer(&c.name).ok().flatten();
+        let budgets = match &record {
+            Some(rec) => {
+                dwara_core::state::quotas::current_usage(&store, rec.id, quotas, now_epoch_s)
+                    .iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "budget": u.budget.as_str(),
+                            "limit": u.limit,
+                            "used": u.used,
+                            "remaining": u.remaining,
+                            "window_start_epoch_s": u.window_start_epoch_s,
+                            "reset_epoch_s": u.reset_epoch_s,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }
+            None => Vec::new(),
+        };
+        consumers.push(serde_json::json!({
+            "consumer": c.name,
+            "synced": record.is_some(),
+            "budgets": budgets,
+        }));
+    }
+    json_response(
+        200,
+        serde_json::json!({
+            "now_epoch_s": now_epoch_s,
+            "consumers": consumers,
+        }),
+    )
+}
+
 /// Validate + compile a candidate gateway as a dry run; Err carries a
 /// message listing EVERY problem (validation reports all issues at
 /// once, never fail-fast).
@@ -810,6 +896,10 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // (consumers|routes|slowest|error_prone|rate_limited), from_ms,
         // to_ms, n.
         ("GET", "/analytics/top") => analytics_top(ctx, &req, &request_id).await,
+        // GET /quotas/usage (DW-033): per-consumer request-budget
+        // metering — current-window used/limit per budget. Query params:
+        // optional consumer (name filter).
+        ("GET", "/quotas/usage") => quotas_usage(ctx, &req, &request_id).await,
         // Credential lifecycle (DW-046 key rotation): list a consumer's
         // credential rows (ids and lifecycle stamps only — never
         // selector/hash material), issue a NEW api key alongside the
@@ -891,7 +981,8 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/cache/purge"
             | "/analytics/dashboard"
             | "/analytics/top"
-            | "/analytics/query",
+            | "/analytics/query"
+            | "/quotas/usage",
         ) => envelope(
             405,
             "method_not_allowed",

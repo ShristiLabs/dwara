@@ -5,6 +5,12 @@ Source: `crates/dwara-core/src/extensions/rate_limiter.rs` (DW-017,
 `rate_limited_total{route}`,
 [`dwara_rate_limiter_evictions_total`, `dwara_rate_limiter_live_keys`](../../docs-site/guide/observability.md#metrics).
 
+Rate limiting is not the same mechanism as request BUDGETS
+(`consumers[].quotas`, DW-033): a rate limit replenishes inside
+seconds or minutes, a budget bounds total volume across a UTC day or
+month and never replenishes mid-window. Both apply when both are
+configured. See [Quotas and metering](./quotas.md).
+
 ## The extension contract
 
 Rate limiting is implemented behind the `RateLimiter` trait (see

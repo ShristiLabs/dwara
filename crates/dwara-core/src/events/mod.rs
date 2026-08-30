@@ -34,8 +34,11 @@
 //! bounded config labels and numbers ([`EventPayload`]); there is no
 //! free-form field, so the serialized envelope is small by construction
 //! (the deliverer still enforces a hard byte cap). No request-derived
-//! data (paths, headers, consumer names) enters a payload — an envelope
-//! is safe to POST to a third party by construction.
+//! data (paths, headers) enters a payload — identifiers are
+//! CONFIG-DECLARED labels only (`upstream`, and `consumer` for quota
+//! budgets, whose consumers are config records by construction in this
+//! edition) — an envelope is safe to POST to a third party by
+//! construction.
 //!
 //! Emission sites:
 //!
@@ -46,15 +49,15 @@
 //!   `endpoint_ejected`, `endpoint_recovered`
 //!   (`resilience::health`);
 //! - config published (generation + content hash + route count) and
-//!   config rejected (validation issue count) (`snapshot`).
+//!   config rejected (validation issue count) (`snapshot`);
+//! - a consumer's request budget crossing the near-limit threshold
+//!   (DW-033): `quota_near_limit`, edge-triggered once per (consumer,
+//!   budget, window) from the dataplane's quota phase
+//!   (`dataplane::proxy` — the emit lives there because the state
+//!   domain must not import events).
 //!
 //! Deliberately NOT emitted (documented hook points, not gaps):
 //!
-//! - `quota_near_limit` (DW-033): quotas do not exist yet (M2 waves
-//!   2/4). When they land, add the kind here, list it in
-//!   [`EventKind::ALL`], and emit from the quota engine's threshold
-//!   check — the bus, the deliverer, and webhook `events` validation
-//!   need no other change.
 //! - rate-limiter eviction (#132): already observable as
 //!   `dwara_rate_limiter_evictions_total`; an event per eviction would
 //!   be high-frequency noise, not an alert.
@@ -121,6 +124,13 @@ pub enum EventKind {
     /// the previously published generation keeps serving. Payload:
     /// issue_count, generation (the one still running).
     ConfigRejected,
+    /// A consumer's request budget crossed the near-limit threshold
+    /// (80% of the window's cap; DW-033). Payload: consumer, detail
+    /// (the budget: "daily" or "monthly"), used, limit. Edge-triggered
+    /// once per (consumer, budget, window): the SECOND crossing inside
+    /// one window is not re-emitted, and the counter resets with the
+    /// window itself.
+    QuotaNearLimit,
 }
 
 impl EventKind {
@@ -134,6 +144,7 @@ impl EventKind {
         EventKind::EndpointRecovered,
         EventKind::ConfigPublished,
         EventKind::ConfigRejected,
+        EventKind::QuotaNearLimit,
     ];
 
     /// Stable wire/config spelling (serde's snake_case form, spelled out
@@ -148,13 +159,13 @@ impl EventKind {
             EventKind::EndpointRecovered => "endpoint_recovered",
             EventKind::ConfigPublished => "config_published",
             EventKind::ConfigRejected => "config_rejected",
+            EventKind::QuotaNearLimit => "quota_near_limit",
         }
     }
 
     /// Parse one `gateway.webhooks[].events[]` entry. Unknown spellings
-    /// are `None` (validation turns them into an issue); the message
-    /// there names `quota_near_limit` as pending DW-033 so an operator
-    /// subscribing early learns why it is not accepted yet.
+    /// are `None` (validation turns them into an issue naming the
+    /// accepted set).
     pub fn from_config(value: &str) -> Option<EventKind> {
         EventKind::ALL.iter().copied().find(|k| k.as_str() == value)
     }
@@ -191,6 +202,19 @@ pub struct EventPayload {
     /// Validation issues counted on a rejected config (config_rejected).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_count: Option<usize>,
+    /// Config-declared consumer name (quota_near_limit, DW-033). Budgets
+    /// attach to CONFIG consumer records only in this edition, so this
+    /// is a config label, never a request-derived or admin-entered
+    /// string (see the module docs' payload-safety contract).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+    /// Requests counted in the budget's current window
+    /// (quota_near_limit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
+    /// The budget's configured cap (quota_near_limit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 impl EventPayload {
@@ -208,6 +232,18 @@ impl EventPayload {
         EventPayload {
             upstream: Some(upstream.to_string()),
             endpoint: Some(endpoint.to_string()),
+            ..EventPayload::default()
+        }
+    }
+
+    /// Payload for a quota near-limit crossing (DW-033): `budget` is the
+    /// static budget name carried in `detail` ("daily"/"monthly").
+    pub fn quota(consumer: &str, budget: &'static str, used: u64, limit: u64) -> Self {
+        EventPayload {
+            consumer: Some(consumer.to_string()),
+            detail: Some(budget),
+            used: Some(used),
+            limit: Some(limit),
             ..EventPayload::default()
         }
     }

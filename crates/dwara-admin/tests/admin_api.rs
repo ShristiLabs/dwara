@@ -1697,3 +1697,182 @@ async fn credential_rotation_flow_issue_list_retire_over_admin() {
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("\"effective\":\"scheduled\""), "{body}");
 }
+
+// --- quotas (DW-033) -------------------------------------------------------
+
+#[tokio::test]
+async fn quotas_usage_404s_without_a_state_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /quotas/usage HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("state_store_not_configured"), "{body}");
+}
+
+#[tokio::test]
+async fn quotas_usage_reports_current_windows_and_validates_the_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    // Publish a config carrying one quota consumer (the base config the
+    // start() helper publishes has none — quotas are config-declared).
+    let yaml = "consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: acme-key
+    quotas:
+      daily_requests: 2
+      monthly_requests: 10
+routes:
+  - name: r1
+    service: svc
+    match: { path: { type: prefix, value: /api } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: echo
+upstreams:
+  - name: echo
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let gw = dwara_core::config::parse_gateway(yaml).unwrap();
+    server.state.compile_and_publish(&gw).unwrap();
+    // The publish-side refresh the admin PATCH path performs (a raw
+    // state publish alone does not rebuild the dataplane generation).
+    server.dp.refresh();
+    // The dwara-bin startup shape: open the store, seed consumers from
+    // the config, attach to the dataplane.
+    let store = std::sync::Arc::new(dwara_core::store::StateStore::open(&db).unwrap());
+    dwara_core::store::sync_consumers_from_config(&store, &gw, None).unwrap();
+    server.dp.set_state_store(std::sync::Arc::clone(&store));
+
+    // Spend one daily unit through the REAL request path (x-api-key),
+    // so the endpoint reports live counters, not just zeros.
+    let req = http_body_util::Full::new(bytes::Bytes::new());
+    let req = hyper::Request::builder()
+        .uri("/api/thing")
+        .header("x-api-key", "acme-key")
+        .body(req)
+        .unwrap();
+    let resp =
+        dwara_core::proxy::handle(&server.dp, std::net::IpAddr::from([127, 0, 0, 1]), req).await;
+    use http_body_util::BodyExt as _;
+    let (parts, body) = resp.into_parts();
+    let _ = body.collect().await.unwrap();
+    assert_eq!(parts.status, 200);
+
+    let (status, text) = plaintext_request(
+        server.addr,
+        "GET /quotas/usage HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let consumers = v["consumers"].as_array().unwrap();
+    assert_eq!(consumers.len(), 1);
+    let c = &consumers[0];
+    assert_eq!(c["consumer"], "acme");
+    assert_eq!(c["synced"], true);
+    let budgets = c["budgets"].as_array().unwrap();
+    assert_eq!(budgets.len(), 2, "daily and monthly: {budgets:?}");
+    let daily = &budgets[0];
+    assert_eq!(daily["budget"], "daily");
+    assert_eq!(daily["limit"], 2);
+    assert_eq!(daily["used"], 1, "the request-path unit is visible");
+    assert_eq!(daily["remaining"], 1);
+    let monthly = &budgets[1];
+    assert_eq!(monthly["budget"], "monthly");
+    assert_eq!(
+        monthly["used"], 1,
+        "one request spends one unit in every window"
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap();
+    assert!(daily["reset_epoch_s"].as_u64().unwrap() > now);
+    assert!(monthly["reset_epoch_s"].as_u64().unwrap() > daily["reset_epoch_s"].as_u64().unwrap());
+
+    // The consumer filter narrows; an unknown name is a named 400.
+    let (status, text) = plaintext_request(
+        server.addr,
+        "GET /quotas/usage?consumer=acme HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /quotas/usage?consumer=ghost HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("quota_bad_consumer"), "{body}");
+
+    // Wrong method on a known path: the 405 envelope.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "POST /quotas/usage HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Length: 0\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 405, "{body}");
+}
+
+#[tokio::test]
+async fn quotas_usage_marks_an_unsynced_consumer_without_faking_zeros() {
+    // A store is attached but the quota consumer was never synced into
+    // it (no consumer row): there are no counters, so the endpoint
+    // reports synced=false with an EMPTY budgets list — zero-usage
+    // figures would be a lie (nothing was ever counted).
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let yaml = "consumers:
+  - name: ghost-budget
+    credentials:
+      - type: api_key
+        key: ghost-key
+    quotas:
+      daily_requests: 5
+routes:
+  - name: r1
+    service: svc
+    match: { path: { type: prefix, value: /api } }
+    action: { type: respond, status: 200, body: ok }
+services:
+  - name: svc
+    upstream: echo
+upstreams:
+  - name: echo
+    endpoints: [{ address: 127.0.0.1, port: 1 }]
+";
+    let gw = dwara_core::config::parse_gateway(yaml).unwrap();
+    server.state.compile_and_publish(&gw).unwrap();
+    server.dp.refresh();
+    // An EMPTY store: attached, but sync_consumers_from_config never ran.
+    let empty = std::sync::Arc::new(dwara_core::store::StateStore::open_in_memory().unwrap());
+    server.dp.set_state_store(empty);
+
+    let (status, text) = plaintext_request(
+        server.addr,
+        "GET /quotas/usage HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let consumers = v["consumers"].as_array().unwrap();
+    assert_eq!(consumers.len(), 1);
+    assert_eq!(consumers[0]["consumer"], "ghost-budget");
+    assert_eq!(consumers[0]["synced"], false);
+    assert_eq!(
+        consumers[0]["budgets"].as_array().map(Vec::len),
+        Some(0),
+        "no counters exist; no fabricated zeros"
+    );
+}

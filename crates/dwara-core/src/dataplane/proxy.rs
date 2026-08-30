@@ -117,10 +117,29 @@
 //! of truth for `X-RateLimit-*`: any upstream values are silently
 //! replaced.
 //!
+//! Consumer request budgets (DW-033): a quota-configured consumer's
+//! requests additionally run a budget check AFTER rate limiting and
+//! BEFORE cap admission — an in-memory GCRA 429 is cheaper than a
+//! store-backed one, and a refused request never holds a concurrency
+//! slot. A budget 429 reuses the same builder (Retry-After +
+//! `X-RateLimit-*` from the binding budget; reset is the UTC window
+//! boundary), but budget headers appear on DENIALS only: admitted
+//! responses' `X-RateLimit-*` family belongs to the rate limiter when
+//! it applies (two mechanisms racing to write the same header names on
+//! every success would be noise, not information). Budgets apply to
+//! authenticated CONFIG consumers exclusively (anonymous traffic and
+//! store-managed consumers have none); counters live in the state
+//! store, so quota config without `DWARA_STATE_DB` is inert (warned
+//! once). Usage is metered through `dwara_quota_*` metrics, the
+//! admin `GET /quotas/usage` endpoint, the analytics store's
+//! per-consumer axis, and the `quota_near_limit` event (edge-triggered
+//! once per budget per window at 80%). See `state::quotas` for the
+//! window and evaluation semantics.
+//!
 //! Observability (DW-021): every request opens a root `request` span
 //! (request id, method, path WITHOUT the query string, consumer, route,
 //! listener) with child spans per phase — authn, authz, ratelimit,
-//! admission, and one `upstream_attempt` per send (the balancer's pick
+//! quota, admission, and one `upstream_attempt` per send (the balancer's pick
 //! runs inside it as `upstream_pick`). On completion the wrapper
 //! records `requests_total`/`request_duration_seconds`, echoes
 //! `X-Request-Id` (a valid inbound value respected, printable ASCII up
@@ -523,6 +542,15 @@ pub struct DataPlane {
     /// per request (an Arc bump), and in-flight lookups keep the
     /// reader they loaded across a swap. None = geo-UNKNOWN.
     geoip: arc_swap::ArcSwapOption<crate::security::geoip::GeoipDb>,
+    /// Quota near-limit edge-trigger bookkeeping (DW-033): the
+    /// (consumer, budget, window_start) triples already reported, so
+    /// `quota_near_limit` fires ONCE per budget per window instead of
+    /// per request above 80%. Bounded by quota-configured consumers x
+    /// budgets; stale windows are pruned on each insert (see
+    /// `note_quota_near_limit`). Runtime state, deliberately not part
+    /// of a generation — reloads never re-notify a window already
+    /// reported.
+    quota_near_limit_seen: std::sync::Mutex<std::collections::HashSet<(String, &'static str, i64)>>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -624,6 +652,7 @@ impl DataPlane {
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             analytics: arc_swap::ArcSwapOption::empty(),
             geoip: arc_swap::ArcSwapOption::empty(),
+            quota_near_limit_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -652,6 +681,36 @@ impl DataPlane {
             .read()
             .expect("state store lock poisoned")
             .clone()
+    }
+
+    /// Quota near-limit edge trigger (DW-033): `true` exactly when this
+    /// (consumer, budget, window) has not been reported yet — the caller
+    /// emits `quota_near_limit` and warns on `true`, stays silent on
+    /// `false` (the second and later crossings inside one window are
+    /// not noise). Stale windows are pruned under the same lock on the
+    /// insert path only (at most two inserts per window per consumer),
+    /// each budget against its OWN current window start, so the set
+    /// holds at most one live entry per (consumer, budget) — bounded by
+    /// quota-configured consumers x 2.
+    fn note_quota_near_limit(
+        &self,
+        consumer: &str,
+        budget: crate::state::quotas::Budget,
+        window_start: i64,
+    ) -> bool {
+        let now_epoch_s = unix_now_secs();
+        let (day_start, _) = crate::state::quotas::day_window(now_epoch_s);
+        let (month_start, _) = crate::state::quotas::month_window(now_epoch_s);
+        let mut seen = self
+            .quota_near_limit_seen
+            .lock()
+            .expect("quota near-limit set poisoned");
+        seen.retain(|(_, budget_key, window)| match *budget_key {
+            crate::state::quotas::DAILY_KEY => *window >= day_start,
+            crate::state::quotas::MONTHLY_KEY => *window >= month_start,
+            _ => true,
+        });
+        seen.insert((consumer.to_string(), budget.key(), window_start))
     }
 
     /// Attach the embedded analytics store (DW-043): dwara-bin opens
@@ -936,6 +995,10 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
             refresh_observation_gauges(&dp.current().registry, obs);
             let rate_limits = dp.rate_limits.load_full();
             refresh_rate_limiter_gauges(&rate_limits, obs);
+            // DW-033: quota usage/limit gauges are a scrape-time
+            // snapshot of the state store's counters (the same walk
+            // model as the rate-limiter gauges above).
+            refresh_quota_gauges(dp, obs);
             crate::events::refresh_event_gauges(&dp.events, obs);
             // DW-037: the cache entries gauge is a scrape-time snapshot
             // of the backing store's approximate count (the same walk
@@ -963,6 +1026,81 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
 pub fn refresh_rate_limiter_gauges(engine: &RateLimitEngine, obs: &Observability) {
     obs.set_rate_limiter_evictions(engine.evictions() as i64);
     obs.set_rate_limiter_live_keys(engine.live_keys() as i64);
+}
+
+/// Refresh the quota observation gauges at scrape time (DW-033): the
+/// current-window usage and the configured cap of every
+/// quota-configured consumer's every budget, read from the state
+/// store (the same `current_usage` walk the admin `/quotas/usage`
+/// endpoint and the near-limit trigger use). Series cardinality is
+/// config-bounded (quota consumers x the closed daily/monthly set).
+/// A consumer REMOVED from the config by a reload keeps its last
+/// series values until restart — the accepted staleness trade of the
+/// scrape-time snapshot model (the rate-limiter gauges carry the same
+/// caveat); the used/limit ratio of a stale pair stays correct
+/// because both series freeze together. No store (quotas inert) or a
+/// store error skips the refresh without failing the scrape.
+pub fn refresh_quota_gauges(dp: &DataPlane, obs: &Observability) {
+    let Some(store) = dp.state_store() else {
+        return;
+    };
+    let current = dp.current();
+    let gateway = current.snapshot.gateway();
+    let now_epoch_s = unix_now_secs();
+    for c in &gateway.consumers {
+        let Some(quotas) = &c.quotas else {
+            continue;
+        };
+        let Ok(Some(record)) = store.lookup_consumer(&c.name) else {
+            continue;
+        };
+        for u in crate::state::quotas::current_usage(&store, record.id, quotas, now_epoch_s) {
+            obs.set_quota_used(&c.name, u.budget.as_str(), u.used as i64);
+            obs.set_quota_limit(&c.name, u.budget.as_str(), u.limit as i64);
+        }
+    }
+}
+
+/// Wall-clock seconds since the Unix epoch (the quota windows' time
+/// domain; clamped at 0 for a pre-epoch clock, which simply pins every
+/// window to the epoch day).
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// One-shot latches for the two quota wiring gaps (DW-033): both are
+/// deployment mistakes, not per-request events — the first occurrence
+/// warns loudly, the rest stay silent so a misconfigured gateway does
+/// not log-storm under load.
+static QUOTA_STORE_MISSING_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static QUOTA_CONSUMER_UNSYNCED_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_quota_store_missing(consumer: &str) {
+    if !QUOTA_STORE_MISSING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            code = "quota_store_missing",
+            consumer = consumer,
+            "a consumer declares quotas but no state store is attached (set \
+             DWARA_STATE_DB and restart): request budgets are NOT enforced"
+        );
+    }
+}
+
+fn warn_quota_consumer_unsynced(consumer: &str) {
+    if !QUOTA_CONSUMER_UNSYNCED_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            code = "quota_consumer_unsynced",
+            consumer = consumer,
+            "a quota-configured consumer has no state-store row (consumer sync \
+             runs at startup): its request budgets are NOT enforced until \
+             the store is synced"
+        );
+    }
 }
 
 /// Compile one generation's per-route SLO targets (DW-052): config
@@ -1079,7 +1217,13 @@ fn unrouted_response(
         } => {
             rec.rate_limited = true;
             dp.obs.record_rate_limited("unrouted");
-            rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid)
+            rate_limited(
+                u64::from(limit),
+                u64::from(remaining),
+                reset_epoch_s,
+                retry_after_s,
+                rid,
+            )
         }
         crate::extensions::rate_limiter::RateLimitOutcome::Allowed {
             limit,
@@ -1673,8 +1817,13 @@ where
                 } => {
                     rec.rate_limited = true;
                     dp.obs.record_rate_limited(&route.name);
-                    let mut resp =
-                        rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
+                    let mut resp = rate_limited(
+                        u64::from(limit),
+                        u64::from(remaining),
+                        reset_epoch_s,
+                        retry_after_s,
+                        rid,
+                    );
                     stamp_security_headers(&mut resp, route);
                     return resp;
                 }
@@ -1687,6 +1836,143 @@ where
             }
         }
     };
+
+    // Consumer request budgets (DW-033): after rate limiting — an
+    // in-memory GCRA 429 is cheaper than a store-backed budget 429, so
+    // the cheaper rejection wins the ordering — and before cap
+    // admission (a budget wall never holds a concurrency slot, the
+    // same rule the rate limiter follows). Budgets are per
+    // authenticated CONFIG consumer (`consumers[].quotas`): anonymous
+    // traffic has no budget, and store-managed consumers have no
+    // config record to carry one. Counters live in the state store
+    // (durable across restarts); without a store the block is inert —
+    // warned once per process, never a per-request log storm. The
+    // quota phase span (DW-021) opens only when a budget actually
+    // applies, mirroring the ratelimit span's conditional shape.
+    if let Some(quotas) = consumer_cfg.and_then(|c| c.quotas.as_ref()) {
+        let consumer_name = identity
+            .as_ref()
+            .map(|id| id.consumer_name.as_str())
+            .expect("consumer_cfg resolves only for an authenticated identity");
+        match dp.state_store() {
+            None => warn_quota_store_missing(consumer_name),
+            Some(store) => match store.lookup_consumer(consumer_name) {
+                Err(e) => {
+                    tracing::error!(
+                        code = "quota_store_unavailable",
+                        request_id = %rid,
+                        consumer = consumer_name,
+                        "quota consumer lookup failed: {e}"
+                    );
+                    let mut resp = simple(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "quota_store_unavailable",
+                        "quota store unavailable",
+                        rid,
+                    );
+                    stamp_security_headers(&mut resp, route);
+                    return resp;
+                }
+                Ok(None) => warn_quota_consumer_unsynced(consumer_name),
+                Ok(Some(record)) => {
+                    let _quota_phase = tracing::info_span!("quota").entered();
+                    let now_epoch_s = unix_now_secs();
+                    match crate::state::quotas::check(&store, record.id, quotas, now_epoch_s) {
+                        crate::state::quotas::QuotaOutcome::Denied {
+                            limit,
+                            remaining,
+                            reset_epoch_s,
+                            retry_after_s,
+                            budget,
+                        } => {
+                            // rec.rate_limited carries the denial into
+                            // the analytics pipeline (the per-consumer
+                            // usage axis); the rate_limited_total
+                            // metric family stays RATE-limit-only —
+                            // dwara_quota_denied_total owns budgets.
+                            rec.rate_limited = true;
+                            dp.obs.record_quota_denied(consumer_name, budget.as_str());
+                            tracing::info!(
+                                code = "quota_exceeded",
+                                request_id = %rid,
+                                route = %route.name,
+                                consumer = consumer_name,
+                                budget = budget.as_str(),
+                                limit = limit,
+                                retry_after_s = retry_after_s,
+                                "consumer request budget exhausted; answering 429"
+                            );
+                            let mut resp =
+                                rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
+                            stamp_security_headers(&mut resp, route);
+                            return resp;
+                        }
+                        crate::state::quotas::QuotaOutcome::Unavailable => {
+                            tracing::error!(
+                                code = "quota_store_unavailable",
+                                request_id = %rid,
+                                consumer = consumer_name,
+                                "quota counter read/write failed; the budget cannot \
+                                 be vouched for"
+                            );
+                            let mut resp = simple(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "quota_store_unavailable",
+                                "quota store unavailable",
+                                rid,
+                            );
+                            stamp_security_headers(&mut resp, route);
+                            return resp;
+                        }
+                        // NotQuotaed here means the consumer row was
+                        // reported missing mid-check (the engine's
+                        // fail-open path) — the warn already fired.
+                        crate::state::quotas::QuotaOutcome::NotQuotaed => {}
+                        crate::state::quotas::QuotaOutcome::Allowed { .. } => {
+                            // Near-limit notice (DW-033): edge-triggered
+                            // once per (consumer, budget, window) at
+                            // >= 80% of the cap. The read is the same
+                            // current-usage query the admin endpoint
+                            // and the scrape gauges use.
+                            for u in crate::state::quotas::current_usage(
+                                &store,
+                                record.id,
+                                quotas,
+                                now_epoch_s,
+                            ) {
+                                if u.used * 5 >= u.limit * 4
+                                    && dp.note_quota_near_limit(
+                                        consumer_name,
+                                        u.budget,
+                                        u.window_start_epoch_s as i64,
+                                    )
+                                {
+                                    dp.events.emitter().emit(
+                                        crate::events::EventKind::QuotaNearLimit,
+                                        crate::events::EventPayload::quota(
+                                            consumer_name,
+                                            u.budget.as_str(),
+                                            u.used,
+                                            u.limit,
+                                        ),
+                                    );
+                                    tracing::warn!(
+                                        code = "quota_near_limit",
+                                        consumer = consumer_name,
+                                        budget = u.budget.as_str(),
+                                        used = u.used,
+                                        limit = u.limit,
+                                        "consumer request budget at or above 80% of \
+                                         its window cap"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
 
     // Gateway concurrency cap with priority-aware load shedding
     // (DW-015 + DW-016). Admission is two-tier: every request tries the
@@ -2263,12 +2549,15 @@ fn strip_consumer_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// The 429 response for a denied rate limit (DW-017): `Retry-After` in
-/// whole seconds (already rounded up, minimum 1) plus the binding
-/// window's `X-RateLimit-*` headers.
+/// The 429 response for a denied rate limit (DW-017) or a denied
+/// consumer request budget (DW-033 — same client-facing contract):
+/// `Retry-After` in whole seconds (already rounded up, minimum 1) plus
+/// the binding window's `X-RateLimit-*` headers. u64 limits: quota
+/// budgets are u64 config values (a monthly cap can exceed u32 range);
+/// rate-limit callers convert.
 fn rate_limited(
-    limit: u32,
-    remaining: u32,
+    limit: u64,
+    remaining: u64,
     reset_epoch_s: u64,
     retry_after_s: u32,
     rid: &str,

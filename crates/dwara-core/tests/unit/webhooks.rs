@@ -124,7 +124,7 @@ const NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
 #[test]
 fn the_kind_set_is_closed_and_snake_cased() {
-    assert_eq!(EventKind::ALL.len(), 7, "one kind per emission site");
+    assert_eq!(EventKind::ALL.len(), 8, "one kind per emission site");
     for kind in EventKind::ALL {
         assert_eq!(
             EventKind::from_config(kind.as_str()),
@@ -140,9 +140,12 @@ fn the_kind_set_is_closed_and_snake_cased() {
             kind.as_str()
         );
     }
-    // Unknown spellings are rejected (validation turns them into issues);
-    // the pending quota kind is called out by name in that message.
-    assert_eq!(EventKind::from_config("quota_near_limit"), None);
+    // The quota kind is EMITTED since DW-033 (near-limit crossing);
+    // unknown spellings are still rejected.
+    assert_eq!(
+        EventKind::from_config("quota_near_limit"),
+        Some(EventKind::QuotaNearLimit)
+    );
     assert_eq!(EventKind::from_config("nope"), None);
 }
 
@@ -298,10 +301,11 @@ async fn targets_decompose_urls_and_filter_kinds() {
     // Bad URLs and unknown kinds fail compilation with pointed errors.
     assert!(WebhookTarget::compile(&target("ftp://x/y", &["breaker_opened"])).is_err());
     assert!(WebhookTarget::compile(&target("http://", &["breaker_opened"])).is_err());
-    assert!(
-        WebhookTarget::compile(&target("http://x/y", &["quota_near_limit"])).is_err(),
-        "the pending quota kind does not compile"
-    );
+    assert!(WebhookTarget::compile(&target("http://x/y", &["nope"])).is_err());
+    // The quota kind is emitted since DW-033: it compiles and is wanted.
+    let quota = WebhookTarget::compile(&target("http://x/y", &["quota_near_limit"])).unwrap();
+    assert!(quota.wants(EventKind::QuotaNearLimit));
+    assert!(!quota.wants(EventKind::BreakerOpened));
 }
 
 #[tokio::test]
@@ -532,7 +536,7 @@ fn webhook_validation_names_every_authoring_mistake() {
          - url: not-a-url\n\
          \x20 events: []\n\
          - url: https://hooks.example.com/a\n\
-         \x20 events: [quota_near_limit]\n\
+         \x20 events: [nope]\n\
          - url: https://hooks.example.com/a\n\
          \x20 events: [breaker_opened]\n\
          \x20 timeout_ms: 0\n\
@@ -544,7 +548,7 @@ fn webhook_validation_names_every_authoring_mistake() {
     for expected in [
         "must be an absolute http(s) URL",
         "events is empty",
-        "unknown event kind 'quota_near_limit'",
+        "unknown event kind 'nope'",
         "duplicate webhook url 'https://hooks.example.com/a'",
         "timeout_ms must be in 1..=60000",
         "max_attempts must be in 1..=10",

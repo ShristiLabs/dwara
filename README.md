@@ -5,7 +5,8 @@ A high-performance API gateway written in Rust.
 Status: pre-alpha. The core reverse-proxy dataplane works — routing,
 streaming proxying, TLS termination/passthrough, upstream load
 balancing, hot config reload, request authentication (API keys, Basic,
-JWT Bearer), local rate limiting, and observability (structured JSON
+JWT Bearer), local rate limiting, per-consumer request budgets
+(quotas), and observability (structured JSON
 logs, request IDs, Prometheus `/metrics`, uniform error envelope) —
 with more traffic policy still to come in M1.
 
@@ -822,6 +823,9 @@ Local rate limiting (DW-017) runs BEFORE every layer below — after
 route resolution and authentication but before the gateway concurrency
 cap — so a rejected request is the cheapest thing the gateway can do
 with a request and never holds a cap slot. See "Rate limiting" below.
+Consumer request budgets (DW-033, "Request budgets" below) sit one
+step later — after rate limiting, still before the cap — for
+authenticated quota-configured consumers.
 
 The admission layers stack in a fixed order, outermost first:
 
@@ -832,15 +836,17 @@ The admission layers stack in a fixed order, outermost first:
    an anonymous request);
 3. local rate limiting (`rate_limits`, see Rate limiting) — over-limit:
    429 + `Retry-After`;
-4. gateway concurrency cap (`max_concurrent_requests`, see Global
+4. request budgets (`consumers[].quotas`, see Request budgets) —
+   over-budget: 429 + `Retry-After` (to the window boundary);
+5. gateway concurrency cap (`max_concurrent_requests`, see Global
    settings) — over-cap: 503 "gateway saturated";
-5. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
+6. per-upstream circuit breaker (`breaker`) — open: 503 "upstream
    circuit open" + `Retry-After`;
-6. per-endpoint ejection (the `health` block) — an ejected endpoint is
+7. per-endpoint ejection (the `health` block) — an ejected endpoint is
    skipped by the balancer;
-7. per-upstream pending cap (`max_pending`) — queue full: 503
+8. per-upstream pending cap (`max_pending`) — queue full: 503
    "upstream saturated";
-8. connect (`connection_cap`, `timeouts.connect_ms`).
+9. connect (`connection_cap`, `timeouts.connect_ms`).
 
 ### Rate limiting
 
@@ -980,7 +986,58 @@ with `selector: [route]`, a single window of `requests` per
 `window_seconds`, and `burst = requests`. Both fields may be set on
 one policy; both apply. Use `rate_limits` for new configs.
 
+### Request budgets (quotas)
 
+Quotas (DW-033) are per-consumer request BUDGETS, a mechanism distinct
+from rate limiting: a rate limit replenishes inside seconds or minutes,
+a budget caps total volume across a fixed UTC calendar window and never
+replenishes mid-window. Both apply when both are configured.
+
+Budgets are configured on consumers — `quotas` with `daily_requests`
+(midnight-to-midnight UTC) and/or `monthly_requests` (the UTC calendar
+month), each > 0, at least one present:
+
+```yaml
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: ${ACME_KEY}
+    quotas:
+      daily_requests: 50000
+      monthly_requests: 1000000
+```
+
+Enforcement requires the state store (`DWARA_STATE_DB`): counters are
+durable state-store rows, so budgets survive restarts (a reopened store
+resumes at the exact cap) and reloads apply live. Without a store the
+block is inert — warned once, traffic passes. Store-managed consumers
+have no config record and therefore no budgets; a distributed
+shared-counter variant is the Ent follow-up.
+
+**429 contract.** An over-budget request is answered `429` (envelope
+message `rate limit exceeded`) with `Retry-After` (whole seconds to the
+window boundary — day-scale for a daily budget, month-scale for a
+monthly one) and the binding budget's `X-RateLimit-Limit` /
+`-Remaining` / `-Reset` (epoch seconds of the window boundary). When
+both budgets are exhausted, `Retry-After` reports the LATER wall.
+Budget headers appear on denials only — on admitted responses the
+`X-RateLimit-*` family belongs to the rate limiter when it applies.
+
+**Metering.** Usage is visible four ways: `GET /quotas/usage` on the
+admin API (per-consumer current-window used/limit/reset, optional
+`?consumer=` filter), the `dwara_quota_denied_total{consumer,budget}`
+counter plus `dwara_quota_used` / `dwara_quota_limit` scrape-time
+gauges on `/metrics`, the analytics store's per-consumer axis (a
+refused request completes with its consumer name and the
+rate-limited flag), and the `quota_near_limit` webhook event — fired
+once per budget per window at 80% of the cap.
+
+**Cost note.** Each request of a quota-configured consumer performs
+one or two synchronous SQLite writes on the single state-store
+connection (an fsync per commit at the store's default
+`synchronous=FULL`). That is the accepted OSS per-instance shape;
+fleet-wide quota consistency is the Ent follow-up.
 
 ### Authentication
 

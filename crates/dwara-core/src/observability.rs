@@ -91,6 +91,15 @@
 //!   stays a plain atomic with zero registry coupling, the same model
 //!   as the rate-limiter eviction gauge): events dropped at EMIT time
 //!   (full queue / no deliverer) and events handed to the queue.
+//! - `dwara_quota_denied_total{consumer,budget}` counter (DW-033) —
+//!   requests refused by a consumer request budget (429), by consumer
+//!   (the quota-configured set, config-bounded) and binding budget
+//!   (`daily`/`monthly`, a closed set). Distinct from
+//!   `rate_limited_total`: budgets are not rates.
+//! - `dwara_quota_used{consumer,budget}` / `dwara_quota_limit{consumer,
+//!   budget}` gauges (DW-033, scrape-time snapshots of the state
+//!   store's quota counters and the config caps — the same snapshot
+//!   gauge model as the rate-limiter live-keys gauge).
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -370,6 +379,18 @@ pub struct Observability {
     coalescing_saved_upstream_calls_total: IntCounter,
     /// DW-038: requests currently parked as coalescing followers.
     coalescing_waiters: IntGauge,
+    /// DW-033: quota denials by (consumer, budget) — the consumer label
+    /// space is the quota-configured consumer set (config-bounded), and
+    /// `budget` is the closed set `daily`/`monthly`.
+    quota_denied_total: IntCounterVec,
+    /// DW-033: requests counted in each budget's CURRENT window
+    /// (scrape-time snapshot of the state store's quota counters, the
+    /// same gauge model as the rate-limiter live-keys gauge).
+    quota_used: IntGaugeVec,
+    /// DW-033: each budget's configured cap (scrape-time, same snapshot
+    /// walk as `quota_used`; exported so `used / limit` alerting needs
+    /// no config join).
+    quota_limit: IntGaugeVec,
     /// DW-052: the SLO burn-rate collector (per-route windowed state
     /// plus the two exported families; values refresh at scrape time).
     slo: std::sync::Arc<SloState>,
@@ -616,6 +637,35 @@ impl Observability {
              (DW-038).",
         )
         .expect("valid metric definition");
+        let quota_denied_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_quota_denied_total",
+                "Requests refused by a consumer request budget (429), by consumer \
+                 and budget (DW-033). budget is the binding wall: daily or monthly.",
+            ),
+            &["consumer", "budget"],
+        )
+        .expect("valid metric definition");
+        let quota_used = IntGaugeVec::new(
+            Opts::new(
+                "dwara_quota_used",
+                "Requests counted in a consumer budget's current UTC window \
+                 (scrape-time snapshot of the state store's quota counters; \
+                 DW-033).",
+            ),
+            &["consumer", "budget"],
+        )
+        .expect("valid metric definition");
+        let quota_limit = IntGaugeVec::new(
+            Opts::new(
+                "dwara_quota_limit",
+                "A consumer budget's configured cap for the current window \
+                 (scrape-time; DW-033) — pairs with dwara_quota_used for \
+                 used/limit alerting without a config join.",
+            ),
+            &["consumer", "budget"],
+        )
+        .expect("valid metric definition");
         // DW-052: created once, shared between the recorder methods and
         // the registered collector handle (the window state must be the
         // SAME object the completion path writes and the scrape reads).
@@ -650,6 +700,9 @@ impl Observability {
             Box::new(coalescing_followers_total.clone()),
             Box::new(coalescing_saved_upstream_calls_total.clone()),
             Box::new(coalescing_waiters.clone()),
+            Box::new(quota_denied_total.clone()),
+            Box::new(quota_used.clone()),
+            Box::new(quota_limit.clone()),
             Box::new(SloCollectorHandle(std::sync::Arc::clone(&slo))),
         ] {
             registry
@@ -685,6 +738,9 @@ impl Observability {
             coalescing_followers_total,
             coalescing_saved_upstream_calls_total,
             coalescing_waiters,
+            quota_denied_total,
+            quota_used,
+            quota_limit,
             slo,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
@@ -740,6 +796,31 @@ impl Observability {
     /// Count one rate-limit denial (429).
     pub fn record_rate_limited(&self, route: &str) {
         self.rate_limited_total.with_label_values(&[route]).inc();
+    }
+
+    /// Count one quota denial (429, DW-033) by consumer and binding
+    /// budget. Deliberately NOT the `rate_limited_total` family: budgets
+    /// and rates are separate mechanisms (the issue's headline
+    /// distinction); a quota wall is not a rate spike.
+    pub fn record_quota_denied(&self, consumer: &str, budget: &str) {
+        self.quota_denied_total
+            .with_label_values(&[consumer, budget])
+            .inc();
+    }
+
+    /// Set a budget's current-window usage gauge (DW-033, scrape-time
+    /// snapshot; `budget` is `daily` or `monthly`).
+    pub fn set_quota_used(&self, consumer: &str, budget: &str, used: i64) {
+        self.quota_used
+            .with_label_values(&[consumer, budget])
+            .set(used);
+    }
+
+    /// Set a budget's configured cap gauge (DW-033, scrape-time).
+    pub fn set_quota_limit(&self, consumer: &str, budget: &str, limit: i64) {
+        self.quota_limit
+            .with_label_values(&[consumer, budget])
+            .set(limit);
     }
 
     /// Count one gateway-cap shed (503), by priority class.

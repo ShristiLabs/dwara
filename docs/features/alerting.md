@@ -69,6 +69,7 @@ strings; there is no free-form payload field by design):
 | `EndpointHealth::recover_locked` | `endpoint_recovered` | upstream, endpoint |
 | `ConfigState::compile_and_publish` (Ok) | `config_published` | generation, content_hash, route_count |
 | `ConfigState::compile_and_publish` (Err) | `config_rejected` | issue_count, generation (still running) |
+| dataplane quota phase (DW-033) | `quota_near_limit` | consumer (config-declared label), `detail` naming the budget (`daily`/`monthly`), used, limit |
 
 Notes on the wiring:
 
@@ -88,12 +89,18 @@ Notes on the wiring:
   publish path (cold start, file-watch/SIGHUP reload, admin
   `POST /config`) with one emission site.
 
+`quota_near_limit` (DW-033) fires when a consumer's request budget
+crosses 80% of its window cap — edge-triggered ONCE per (consumer,
+budget, window) from the dataplane's quota phase (the state domain
+must not import events, so the emit lives on the caller; see
+[Quotas and metering](./quotas.md)). The `consumer` payload field is a
+CONFIG-DECLARED label (quota budgets attach to config consumers only in
+this edition), the same trust class as `upstream` names — store-managed
+(admin-entered) consumer names must never enter a payload.
+
 Deliberately NOT emitted, with the hook point documented in
-`events/mod.rs`: `quota_near_limit` (quotas do not exist yet — DW-033,
-M2 waves 2/4; when they land, add the kind, list it in
-`EventKind::ALL`, and emit from the quota engine's threshold check —
-nothing else changes), and rate-limiter eviction (already a metric; an
-event per eviction would be noise).
+`events/mod.rs`: rate-limiter eviction (already a metric; an event per
+eviction would be noise).
 
 ## The deliverer
 
@@ -144,7 +151,7 @@ bounded by construction: both labels are closed sets.
 
 `snapshot::validate` checks each `gateway.webhooks[]` entry: absolute
 http(s) URL, non-empty known `events` (the message names the emitted
-set and calls out `quota_near_limit` as pending DW-033), legal header
+set, which includes `quota_near_limit` since DW-033), legal header
 names/values with `${...}` references RESOLVED at validation time (the
 DW-045 compile-time contract — an unresolvable reference fails the
 generation closed, naming the reference, never the value), duplicate

@@ -183,6 +183,7 @@ fn validation_rejects_duplicate_consumer_name() {
         credentials: vec![],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     gw.consumers.push(dwara_core::config::Consumer {
         name: "c".into(),
@@ -191,6 +192,7 @@ fn validation_rejects_duplicate_consumer_name() {
         credentials: vec![],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "name");
 }
@@ -359,6 +361,7 @@ fn validation_rejects_empty_api_key_credential() {
         credentials: vec![Credential::ApiKey { key: String::new() }],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -376,6 +379,7 @@ fn validation_rejects_empty_jwt_issuer() {
         }],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -393,6 +397,7 @@ fn validation_rejects_empty_mtls_fingerprint() {
         }],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "credentials[0]");
 }
@@ -407,6 +412,7 @@ fn validation_rejects_dangling_consumer_policy_reference() {
         credentials: vec![],
         policies: vec!["ghost".into()],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "policies");
 }
@@ -1402,6 +1408,7 @@ fn validation_rejects_empty_authorization_at_each_new_level() {
         credentials: vec![],
         policies: vec![],
         authorization: Some(empty_authz()),
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "authorization");
 }
@@ -1448,6 +1455,7 @@ fn validation_rejects_unresolved_authz_references_at_each_new_level() {
         credentials: vec![],
         policies: vec![],
         authorization: Some(authz),
+        quotas: None,
     });
     assert_single_issue(&gw, "consumer", "c", "authorization.ip_acl.allow[0]");
 }
@@ -1524,6 +1532,7 @@ fn zero_routes_with_other_entities_present_is_still_rejected() {
         credentials: vec![],
         policies: vec![],
         authorization: None,
+        quotas: None,
     });
     assert_single_issue(&gw, "gateway", "(root)", "routes");
 }

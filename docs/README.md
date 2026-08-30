@@ -30,6 +30,11 @@ Feature areas written up so far (M1 complete; M2 in progress):
   retries, circuit breaking, load shedding, and how the layers compose.
 - [Rate limiting](./features/rate-limiting.md) — GCRA, stacked
   windows, bounded key-space eviction.
+- [Quotas and metering](./features/quotas.md) — per-consumer daily
+  and monthly request budgets over durable state-store counters
+  (distinct from rate limiting), the 429 contract, and the four
+  metering surfaces: admin usage query, metrics, analytics,
+  near-limit events (DW-033).
 - [Route edge policies](./features/edge-policies.md) — CORS,
   response compression, per-route request limits (DW-027).
 - [Request/response transforms and security

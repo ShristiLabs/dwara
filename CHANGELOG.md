@@ -9,6 +9,52 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Quotas and metering (DW-033): per-consumer request BUDGETS, a
+  mechanism distinct from rate limiting — a rate limit replenishes
+  inside seconds or minutes, a budget caps total volume across a fixed
+  UTC calendar window and never replenishes mid-window; both apply when
+  both are configured. Config: `consumers[].quotas` with
+  `daily_requests` (midnight-to-midnight UTC) and/or `monthly_requests`
+  (the UTC calendar month), each > 0, at least one present (validation
+  rejects zero values and an explicit empty block). Enforcement uses
+  the state store's `quota_counters` rows (the seam DW-018 shipped):
+  counters are durable across restarts (a reopened store resumes at the
+  exact cap), reloads apply live (budgets are read from the current
+  generation, no engine to rebuild), and an over-budget request answers
+  429 with `Retry-After` (whole seconds to the window boundary —
+  month-scale for a monthly wall; when both budgets are exhausted the
+  LATER wall is reported) plus the binding budget's
+  `X-RateLimit-Limit`/`-Remaining`/`-Reset` (epoch seconds of the
+  window boundary) — budget headers appear on denials only, so
+  admitted responses' rate headers stay the rate limiter's. Evaluation
+  is decide-and-reserve, stops at the first denial, and consumes
+  NOTHING for a refused request (later budgets are peeked read-only to
+  stretch `Retry-After` past an also-exhausted later wall — the DW-017
+  max-wait rule without reservation; a request denied by the monthly
+  budget has already spent its daily unit, the documented stacking
+  trade). Failure model: without `DWARA_STATE_DB` the block is INERT
+  (warned once per process, traffic passes — no counters to enforce);
+  an unsynced consumer row fails open the same way; a store ERROR
+  mid-check answers 500 (`quota_store_unavailable`), the authN
+  "unavailable" posture. Usage is queryable four ways: `GET
+  /quotas/usage` on the admin API (per-consumer current-window
+  used/limit/remaining/reset, optional `?consumer=` filter; a consumer
+  with no store row reports `synced: false` with no fabricated zeros),
+  the `dwara_quota_denied_total{consumer,budget}` counter plus
+  `dwara_quota_used`/`dwara_quota_limit` scrape-time gauges, the
+  analytics store's per-consumer axis (a refused request completes with
+  its consumer name and the rate-limited flag), and the new
+  `quota_near_limit` webhook event (edge-triggered once per consumer,
+  budget, and window at 80% of the cap; its `consumer` payload field is
+  a config-declared label — the same trust class as `upstream` names —
+  which refines the events payload contract, documented in
+  `events/mod.rs`). Cost note: each request of a quota-configured
+  consumer performs one or two synchronous SQLite writes on the single
+  state-store connection (fsync per commit at the store's default
+  `synchronous=FULL`) — the accepted OSS per-instance shape; a
+  distributed shared-counter variant (fleet-wide consistency) is the
+  Ent follow-up (DW-155).
+
 - GeoIP ACL (DW-050): country/ASN authorization predicates backed by a
   MaxMind-format database. `gateway.geoip: {path}` names the .mmdb file
   (GeoLite2-Country, GeoLite2-ASN, or a combined DB — whichever

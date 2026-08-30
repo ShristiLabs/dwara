@@ -1496,10 +1496,51 @@ fn validate_geoip(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// Validate consumer request budgets (DW-033): a `quotas` block must
+/// set at least one budget, and every set budget must be > 0 (a 0
+/// budget would deny the consumer's first request; "no budget" is the
+/// omitted field). Quota enforcement additionally needs the state
+/// store at RUNTIME (`DWARA_STATE_DB`), which config validation
+/// deliberately cannot see — without one the block is inert and the
+/// dataplane warns (see `state::quotas`).
+fn validate_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    for c in &gateway.consumers {
+        let Some(q) = &c.quotas else {
+            continue;
+        };
+        let field = format!("consumers[{}].quotas", c.name);
+        if q.daily_requests.is_none() && q.monthly_requests.is_none() {
+            issues.push(issue(
+                "consumer",
+                &c.name,
+                &field,
+                "sets no budget: at least one of daily_requests or monthly_requests \
+                 must be present (omit the quotas block entirely for no budgets)",
+            ));
+        }
+        for (name, value) in [
+            ("daily_requests", q.daily_requests),
+            ("monthly_requests", q.monthly_requests),
+        ] {
+            if value == Some(0) {
+                issues.push(issue(
+                    "consumer",
+                    &c.name,
+                    &format!("{field}.{name}"),
+                    format!(
+                        "{name} must be > 0 (a zero budget denies the consumer's \
+                             first request; no budget is the omitted field)"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
-/// (unknown spellings are rejected — including `quota_near_limit`,
-/// which arrives with quotas in DW-033), header names/values must be
+/// (unknown spellings are rejected; `quota_near_limit` IS emitted since
+/// DW-033), header names/values must be
 /// representable (with `${...}` references resolved NOW, the DW-045
 /// compile-time contract — an unresolvable reference fails the
 /// generation closed, and the issue names the reference, never the
@@ -1560,9 +1601,7 @@ fn validate_webhooks(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                     "(root)",
                     &format!("{field}.events[{j}]"),
                     format!(
-                        "unknown event kind '{kind}' (emitted kinds: {}; \
-                         quota_near_limit is reserved for DW-033 and is not \
-                         emitted yet)",
+                        "unknown event kind '{kind}' (emitted kinds: {})",
                         crate::events::EventKind::ALL
                             .iter()
                             .map(|k| k.as_str())
@@ -1723,6 +1762,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 
     // DW-050: geo rules need a database; countries must be alpha-2.
     validate_geoip(gateway, &mut issues);
+
+    // DW-033: consumer request budgets.
+    validate_quotas(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
