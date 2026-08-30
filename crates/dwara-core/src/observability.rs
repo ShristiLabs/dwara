@@ -121,6 +121,13 @@
 //! - `dwara_license_status` gauge (DW-032) — 0 = no license (OSS mode),
 //!   1 = valid, 2 = expired within grace period, 3 = expired past grace
 //!   period (degraded to OSS). Set at startup and on reload; no labels.
+//! - `dwara_dns_discovery_endpoints{upstream}` gauge (DW-042) — current
+//!   resolved endpoint count for DNS-discovered upstreams. The `upstream`
+//!   label is config-bounded; cardinality is never per resolved address.
+//! - `dwara_dns_discovery_refresh_total{upstream}` counter (DW-042) — DNS
+//!   discovery refresh attempts, by upstream (config-bounded label).
+//! - `dwara_dns_discovery_refresh_failures_total{upstream}` counter
+//!   (DW-042) — DNS discovery refresh failures, by upstream.
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -463,6 +470,17 @@ pub struct Observability {
     /// OSS). Set once at startup and on every reload; no labels (closed
     /// four-value set, so cardinality is one series).
     license_status: IntGauge,
+    /// DW-042: DNS discovery endpoint count — a gauge of the current
+    /// resolved endpoint count per upstream (config-bounded `upstream`
+    /// label; never per resolved address). Scrape-time snapshot setter
+    /// driven by the discovery task.
+    dns_discovery_endpoints: IntGaugeVec,
+    /// DW-042: DNS discovery refresh attempts — a counter of resolution
+    /// cycles per upstream (config-bounded `upstream` label).
+    dns_discovery_refresh_total: IntCounterVec,
+    /// DW-042: DNS discovery refresh failures — a counter of failed
+    /// resolution cycles per upstream (config-bounded `upstream` label).
+    dns_discovery_refresh_failures_total: IntCounterVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -836,6 +854,32 @@ impl Observability {
              (degraded to OSS).",
         )
         .expect("valid metric definition");
+        let dns_discovery_endpoints = IntGaugeVec::new(
+            Opts::new(
+                "dwara_dns_discovery_endpoints",
+                "Current resolved endpoint count for DNS-discovered upstreams \
+                 (DW-042). The upstream label is config-bounded; cardinality is \
+                 never per resolved address.",
+            ),
+            &["upstream"],
+        )
+        .expect("valid metric definition");
+        let dns_discovery_refresh_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_dns_discovery_refresh_total",
+                "DNS discovery refresh attempts (DW-042), by upstream.",
+            ),
+            &["upstream"],
+        )
+        .expect("valid metric definition");
+        let dns_discovery_refresh_failures_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_dns_discovery_refresh_failures_total",
+                "DNS discovery refresh failures (DW-042), by upstream.",
+            ),
+            &["upstream"],
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -880,6 +924,9 @@ impl Observability {
             Box::new(admission_queue_depth.clone()),
             Box::new(waf_total.clone()),
             Box::new(license_status.clone()),
+            Box::new(dns_discovery_endpoints.clone()),
+            Box::new(dns_discovery_refresh_total.clone()),
+            Box::new(dns_discovery_refresh_failures_total.clone()),
         ] {
             registry
                 .register(m)
@@ -928,6 +975,9 @@ impl Observability {
             admission_queue_depth,
             waf_total,
             license_status,
+            dns_discovery_endpoints,
+            dns_discovery_refresh_total,
+            dns_discovery_refresh_failures_total,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1171,6 +1221,34 @@ impl Observability {
     /// grace (degraded to OSS). Set once at startup and on every reload.
     pub fn set_license_status(&self, status: i64) {
         self.license_status.set(status);
+    }
+
+    /// Set the `dwara_dns_discovery_endpoints` gauge for one upstream
+    /// (DW-042): the current resolved endpoint count. The `upstream`
+    /// label is config-bounded; cardinality is never per resolved
+    /// address. Set by the discovery task after each refresh.
+    pub fn set_dns_discovery_endpoints(&self, upstream: &str, count: i64) {
+        self.dns_discovery_endpoints
+            .with_label_values(&[upstream])
+            .set(count);
+    }
+
+    /// Count one DNS discovery refresh attempt (DW-042) in
+    /// `dwara_dns_discovery_refresh_total{upstream}`. The `upstream`
+    /// label is config-bounded.
+    pub fn record_dns_discovery_refresh(&self, upstream: &str) {
+        self.dns_discovery_refresh_total
+            .with_label_values(&[upstream])
+            .inc();
+    }
+
+    /// Count one DNS discovery refresh failure (DW-042) in
+    /// `dwara_dns_discovery_refresh_failures_total{upstream}`. The
+    /// `upstream` label is config-bounded.
+    pub fn record_dns_discovery_refresh_failure(&self, upstream: &str) {
+        self.dns_discovery_refresh_failures_total
+            .with_label_values(&[upstream])
+            .inc();
     }
 
     /// Set the `breaker_state` gauge for one upstream (0 closed, 1 open,

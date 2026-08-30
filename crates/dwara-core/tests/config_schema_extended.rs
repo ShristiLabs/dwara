@@ -561,6 +561,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             max_pending: None,
             trusted_ca_file: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: vec![Consumer {
             name: "c".into(),

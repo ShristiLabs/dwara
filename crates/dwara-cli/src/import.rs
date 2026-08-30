@@ -219,6 +219,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             max_pending: None,
             timeouts: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: Vec::new(),
         policies: Vec::new(),

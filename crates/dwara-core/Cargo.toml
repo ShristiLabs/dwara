@@ -76,6 +76,11 @@ licensing-core = { workspace = true, optional = true }
 # (the default) never pull it in; enabled via the `ent` feature. The
 # `tokio-comp` feature enables the async API (ConnectionManager).
 redis = { workspace = true, optional = true }
+# DW-042: DNS-based dynamic upstream discovery. hickory-resolver is
+# MIT OR Apache-2.0 (both allow-listed in deny.toml). Regular (non-
+# optional) dep — this is the OSS edition and discovery is a core
+# feature. The `tokio` feature gives the async TokioAsyncResolver.
+hickory-resolver = { workspace = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -110,6 +115,9 @@ criterion = { workspace = true }
 # DW-050 tests: generate .mmdb fixtures at runtime (dev-only;
 # Apache-2.0 OR MIT).
 mmdb-writer = { workspace = true }
+# DW-042 tests: in-process DNS authority/server for deterministic
+# discovery tests. MIT OR Apache-2.0. Dev-only.
+hickory-server = { workspace = true }
 
 [[bench]]
 name = "micro"

@@ -4,7 +4,10 @@
 //! ([`upstream`], with the RFC 8305 happy-eyeballs dial of DW-030),
 //! per-upstream load balancing ([`balance`]), active health probing
 //! ([`active`] — it drives the upstream registry's balancer trackers,
-//! which is dataplane lifecycle), the protocol hardening applied to
+//! which is dataplane lifecycle), DNS-based dynamic upstream discovery
+//! ([`discovery`] — DW-042, background tasks that resolve and watch
+//! DNS records, updating the endpoint set live), the protocol
+//! hardening applied to
 //! every serving surface ([`hardening`], plus the route-scoped request
 //! limits of DW-027), the PROXY protocol acceptance of DW-030
 //! ([`proxy_proto`]), the route-scoped response edge policies of DW-027
@@ -20,6 +23,7 @@ pub mod active;
 pub mod balance;
 pub mod compression;
 pub mod cors;
+pub mod discovery;
 pub mod hardening;
 pub mod proxy;
 pub mod proxy_proto;

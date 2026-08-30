@@ -177,6 +177,17 @@ licensing-core = { git = "https://github.com/ShristiLabs/licensing.git" }
 # The `tokio-comp` feature enables the async API (ConnectionManager) used by
 # the distributed GCRA limiter.
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+# DW-042: DNS-based dynamic upstream discovery (hickory-resolver for
+# TTL-aware A/SRV resolution). MIT OR Apache-2.0 (both allow-listed in
+# deny.toml). The `tokio` feature enables the async TokioAsyncResolver
+# used by the discovery background tasks; `system-config` is OFF so the
+# resolver never reads /etc/resolv.conf — the gateway configures the
+# name servers explicitly (system config is a follow-up if needed).
+hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime"] }
+# DW-042 tests: an in-process DNS authority/server for deterministic
+# discovery tests (no external DNS dependency). MIT OR Apache-2.0.
+# Dev/bench-only — never ships in the gateway binary or library.
+hickory-server = { version = "0.24", default-features = false }
 
 [profile.release]
 lto = true

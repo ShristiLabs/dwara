@@ -162,6 +162,10 @@ export default withMermaid(
                   text: "Redis rate limiter",
                   link: "/guide/redis-rate-limiter",
                 },
+                {
+                  text: "Dynamic upstream discovery",
+                  link: "/guide/dynamic-discovery",
+                },
               ],
             },
           ],

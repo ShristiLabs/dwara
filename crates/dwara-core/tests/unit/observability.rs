@@ -111,6 +111,7 @@ fn render_contains_families() {
                 max_pending: None,
                 trusted_ca_file: None,
                 oauth2_client_credentials: None,
+                dns_discovery: None,
             }],
             consumers: vec![],
             policies: vec![],

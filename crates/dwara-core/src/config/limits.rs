@@ -145,3 +145,14 @@ pub const MIN_OIDC_INTROSPECTION_CACHE_TTL_S: u64 = 1;
 /// trusted without re-checking (a revoked token would otherwise keep
 /// authenticating for an hour after revocation).
 pub const MAX_OIDC_INTROSPECTION_CACHE_TTL_S: u64 = 3600;
+
+/// Validation floor on `upstreams[].dns_discovery.refresh_interval_s`
+/// (DW-042): below 1 second the discovery task would re-resolve faster
+/// than DNS can meaningfully change, hammering the name server.
+pub const MIN_DNS_DISCOVERY_REFRESH_S: u64 = 1;
+
+/// Validation ceiling on `upstreams[].dns_discovery.refresh_interval_s`
+/// (DW-042): one hour is the longest an operator should go without
+/// noticing a stale endpoint set (beyond that the TTL-driven refresh
+/// is the better mechanism).
+pub const MAX_DNS_DISCOVERY_REFRESH_S: u64 = 3_600;

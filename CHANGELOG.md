@@ -9,6 +9,26 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- DNS-based dynamic upstream discovery (DW-042): an upstream may now
+  configure a `dns_discovery` block to resolve its endpoint set from
+  DNS (A or SRV records) with TTL-aware background refresh. A
+  per-upstream discovery task resolves the hostname, updates the
+  balancer's endpoint set live (atomic hot-swap, the same path config
+  reloads use), and re-resolves at `refresh_interval_s` (default 30,
+  range 1..=3600). The `endpoints` field becomes the initial/fallback
+  set (used until the first resolution completes and as a fallback when
+  DNS fails and `fail_open` is true); it may be empty when
+  `dns_discovery` is present. The `fail_open` flag (default true)
+  controls the posture on DNS failure: keep the last set (fail-open) or
+  clear endpoints and answer 503 (fail-closed). The `min_endpoints`
+  floor (default 1) prevents shrinking below a configured minimum.
+  Discovery tasks are per-generation (respawned on every reload,
+  mirroring active health probes). Three metrics are exported:
+  `dwara_dns_discovery_endpoints{upstream}` (gauge),
+  `dwara_dns_discovery_refresh_total{upstream}` (counter), and
+  `dwara_dns_discovery_refresh_failures_total{upstream}` (counter).
+  Consul watch and Kubernetes EndpointSlice watch are deferred to a
+  future milestone; DNS is the first discovery source.
 - OpenID Connect support (DW-034): the gateway now validates Bearer
   tokens by token introspection (RFC 7662) as the second Bearer family
   in the authenticator dispatch chain. A Bearer token that did not

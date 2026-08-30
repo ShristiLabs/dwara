@@ -101,6 +101,7 @@ fn upstream(
         max_pending: None,
         trusted_ca_file: None,
         oauth2_client_credentials: None,
+        dns_discovery: None,
     }
 }
 
@@ -707,6 +708,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 max_pending: None,
                 trusted_ca_file: None,
                 oauth2_client_credentials: None,
+                dns_discovery: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -767,6 +769,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             max_pending: None,
             trusted_ca_file: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: vec![],
         policies: vec![],

@@ -1175,6 +1175,48 @@
       },
       "additionalProperties": false
     },
+    "DnsDiscovery": {
+      "description": "DNS-based dynamic upstream discovery (DW-042): when present on an\nupstream, a background discovery task resolves `hostname` via DNS,\nwatches the record TTL, and re-resolves when the TTL expires (or at\n`refresh_interval_s`, whichever comes first), updating the upstream's\nendpoint set live — without a restart. The `endpoints` field becomes\nthe INITIAL/fallback set: used until the first resolution completes\nand as a fallback when DNS fails and `fail_open` is true. When\nabsent, endpoints remain static (the current behavior — no change).\n\nOnly A and SRV records are supported. A records pair each resolved\naddress with `port`; SRV records carry their own port. Consul watch\nand Kubernetes EndpointSlice watch are deferred to a future\nmilestone — DNS is the first discovery source.",
+      "type": "object",
+      "properties": {
+        "fail_open": {
+          "description": "If true (default), keep the last resolved endpoint set when DNS\nfails. If false, clear endpoints on failure (the upstream\nanswers 503 until DNS recovers).",
+          "type": "boolean"
+        },
+        "hostname": {
+          "description": "The DNS hostname to resolve (e.g. `my-service.example.com`).",
+          "type": "string"
+        },
+        "min_endpoints": {
+          "description": "Minimum endpoints to keep serving (default 1). If a resolution\nyields fewer than this, the previous set is kept (the upstream\ndoes not shrink below the floor).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "port": {
+          "description": "The port to pair with each resolved A-record address. Ignored\nfor SRV records (they carry their own port).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "record_type": {
+          "description": "DNS record type: `\"A\"` (default) or `\"SRV\"`.",
+          "type": "string"
+        },
+        "refresh_interval_s": {
+          "description": "How often to re-resolve, in seconds (default 30; bounded to\n1..=3600). The actual refresh interval is\n`min(refresh_interval_s, record_ttl)` so a short-TTL record is\nrefreshed sooner.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "hostname",
+        "port"
+      ]
+    },
     "Endpoint": {
       "description": "One `address:port` inside an upstream.",
       "type": "object",
@@ -3448,8 +3490,21 @@
           "format": "uint32",
           "minimum": 0
         },
+        "dns_discovery": {
+          "description": "DNS-based dynamic upstream discovery (DW-042): when present, a\nbackground task resolves `hostname` via DNS and updates the\nendpoint set live as records change. The `endpoints` field\nbecomes the initial/fallback set. Absent (the default): endpoints\nremain static (the current behavior — no change).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DnsDiscovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "endpoints": {
+          "description": "Static endpoint list for this upstream. When `dns_discovery` is\npresent, this becomes the initial/fallback set (used until the\nfirst DNS resolution completes and as a fallback when DNS fails\nand `fail_open` is true); it may be empty. When `dns_discovery`\nis absent, this is the complete endpoint set and must be\nnon-empty (validation rejects an empty list).",
           "type": "array",
+          "default": [],
           "items": {
             "$ref": "#/$defs/Endpoint"
           }
@@ -3537,8 +3592,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "endpoints"
+        "name"
       ]
     },
     "UpstreamProtocol": {

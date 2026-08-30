@@ -112,6 +112,7 @@ fn bench_gateway() -> Gateway {
             trusted_ca_file: None,
             timeouts: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         })
         .collect();
     Gateway {

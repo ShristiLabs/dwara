@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dwara_core::extensions::config_source::{ConfigSource, FileConfigSource};
+use dwara_core::observability::Observability;
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::{ConfigState, Snapshot};
 use dwara_core::tls::TlsTermination;
@@ -38,6 +39,7 @@ use tokio::sync::mpsc;
 /// requests keep the old pair) and terminate listeners' TLS configs are
 /// rebuilt from the new snapshot (certificate material follows the config
 /// generation it belongs to).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reload(
     state: &ConfigState,
     dp: &DataPlane,
@@ -45,6 +47,9 @@ pub(crate) async fn reload(
     trigger: &str,
     tls_states: &BTreeMap<String, Arc<TlsTermination>>,
     probes: &mut dwara_core::active::ActiveProbes,
+    discovery: &mut dwara_core::dataplane::discovery::DiscoveryTasks,
+    dns_resolver: &Arc<dwara_core::dataplane::discovery::DnsResolver>,
+    obs: &Arc<Observability>,
 ) {
     let old = state.snapshot();
     match source.load().await {
@@ -92,6 +97,16 @@ pub(crate) async fn reload(
                     // their health trackers (carried by the balancer), so an
                     // ejection streak survives the swap.
                     probes.respawn(&dp.registry(), &state.snapshot());
+                    // DW-042: DNS discovery tasks are per generation —
+                    // cancel the old tasks and spawn against the new
+                    // registry, mirroring ActiveProbes. Upstreams without
+                    // `dns_discovery` spawn nothing.
+                    discovery.respawn(
+                        &dp.registry(),
+                        &state.snapshot(),
+                        Arc::clone(dns_resolver),
+                        Arc::clone(obs),
+                    );
                 }
                 Err(err) => {
                     // CompileError::Validation's Display lists every issue.

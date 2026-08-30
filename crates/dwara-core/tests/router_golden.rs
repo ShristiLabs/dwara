@@ -115,6 +115,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         max_pending: None,
         trusted_ca_file: None,
         oauth2_client_credentials: None,
+        dns_discovery: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

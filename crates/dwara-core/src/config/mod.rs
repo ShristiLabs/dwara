@@ -2871,6 +2871,85 @@ fn is_default_sticky_ttl_s(t: &u64) -> bool {
     *t == 3_600
 }
 
+/// DNS-based dynamic upstream discovery (DW-042): when present on an
+/// upstream, a background discovery task resolves `hostname` via DNS,
+/// watches the record TTL, and re-resolves when the TTL expires (or at
+/// `refresh_interval_s`, whichever comes first), updating the upstream's
+/// endpoint set live — without a restart. The `endpoints` field becomes
+/// the INITIAL/fallback set: used until the first resolution completes
+/// and as a fallback when DNS fails and `fail_open` is true. When
+/// absent, endpoints remain static (the current behavior — no change).
+///
+/// Only A and SRV records are supported. A records pair each resolved
+/// address with `port`; SRV records carry their own port. Consul watch
+/// and Kubernetes EndpointSlice watch are deferred to a future
+/// milestone — DNS is the first discovery source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DnsDiscovery {
+    /// The DNS hostname to resolve (e.g. `my-service.example.com`).
+    pub hostname: String,
+    /// The port to pair with each resolved A-record address. Ignored
+    /// for SRV records (they carry their own port).
+    pub port: u16,
+    /// How often to re-resolve, in seconds (default 30; bounded to
+    /// 1..=3600). The actual refresh interval is
+    /// `min(refresh_interval_s, record_ttl)` so a short-TTL record is
+    /// refreshed sooner.
+    #[serde(
+        default = "default_dns_discovery_refresh_s",
+        skip_serializing_if = "is_default_dns_discovery_refresh_s"
+    )]
+    pub refresh_interval_s: u64,
+    /// DNS record type: `"A"` (default) or `"SRV"`.
+    #[serde(
+        default = "default_dns_discovery_record_type",
+        skip_serializing_if = "is_default_dns_discovery_record_type"
+    )]
+    pub record_type: String,
+    /// If true (default), keep the last resolved endpoint set when DNS
+    /// fails. If false, clear endpoints on failure (the upstream
+    /// answers 503 until DNS recovers).
+    #[serde(
+        default = "default_dns_discovery_fail_open",
+        skip_serializing_if = "is_default_dns_discovery_fail_open"
+    )]
+    pub fail_open: bool,
+    /// Minimum endpoints to keep serving (default 1). If a resolution
+    /// yields fewer than this, the previous set is kept (the upstream
+    /// does not shrink below the floor).
+    #[serde(
+        default = "default_dns_discovery_min_endpoints",
+        skip_serializing_if = "is_default_dns_discovery_min_endpoints"
+    )]
+    pub min_endpoints: u32,
+}
+
+fn default_dns_discovery_refresh_s() -> u64 {
+    30
+}
+fn is_default_dns_discovery_refresh_s(v: &u64) -> bool {
+    *v == 30
+}
+fn default_dns_discovery_record_type() -> String {
+    "A".to_string()
+}
+fn is_default_dns_discovery_record_type(v: &String) -> bool {
+    v == "A"
+}
+fn default_dns_discovery_fail_open() -> bool {
+    true
+}
+fn is_default_dns_discovery_fail_open(v: &bool) -> bool {
+    *v
+}
+fn default_dns_discovery_min_endpoints() -> u32 {
+    1
+}
+fn is_default_dns_discovery_min_endpoints(v: &u32) -> bool {
+    *v == 1
+}
+
 /// Load-balancing pool: algorithm, protocol, endpoints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2893,6 +2972,13 @@ pub struct Upstream {
     /// this field otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_ca_file: Option<String>,
+    /// Static endpoint list for this upstream. When `dns_discovery` is
+    /// present, this becomes the initial/fallback set (used until the
+    /// first DNS resolution completes and as a fallback when DNS fails
+    /// and `fail_open` is true); it may be empty. When `dns_discovery`
+    /// is absent, this is the complete endpoint set and must be
+    /// non-empty (validation rejects an empty list).
+    #[serde(default)]
     pub endpoints: Vec<Endpoint>,
     /// Maximum number of concurrent outbound connections to this upstream
     /// (active plus pooled idle). Defaults to 64 when absent. Enforced by
@@ -2959,6 +3045,13 @@ pub struct Upstream {
     /// the flow, caching, and the mTLS-to-the-token-endpoint option.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth2_client_credentials: Option<OAuth2ClientCredentials>,
+    /// DNS-based dynamic upstream discovery (DW-042): when present, a
+    /// background task resolves `hostname` via DNS and updates the
+    /// endpoint set live as records change. The `endpoints` field
+    /// becomes the initial/fallback set. Absent (the default): endpoints
+    /// remain static (the current behavior — no change).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_discovery: Option<DnsDiscovery>,
 }
 
 /// OAuth2 client-credentials configuration for an upstream (DW-035,

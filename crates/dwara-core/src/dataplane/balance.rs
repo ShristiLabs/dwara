@@ -191,6 +191,12 @@ pub struct UpstreamLb {
     /// Picks that fell back to the full endpoint set because every
     /// endpoint was ejected (fail-open; see `choose`). Observability.
     fail_open_picks: AtomicU64,
+    /// DW-042: the upstream-scoped event emitter, kept so the DNS
+    /// discovery task can pass it to `rebuild_with_health_and_events`
+    /// when it swaps the endpoint set live (new endpoints get
+    /// event-bound health trackers, matching the reload path). None
+    /// when the balancer was built without events.
+    events: Option<crate::events::UpstreamEmitter>,
 }
 
 fn xorshift(x: u64) -> u64 {
@@ -425,6 +431,7 @@ impl UpstreamLb {
             rng: AtomicU64::new(seed | 1),
             health_clock: RwLock::new(system_now_ms),
             fail_open_picks: AtomicU64::new(0),
+            events: events.cloned(),
         })
     }
 
@@ -480,6 +487,31 @@ impl UpstreamLb {
         )));
     }
 
+    /// DW-042: `rebuild_with_health_and_events` taking RESOLVED health
+    /// parameters (`Arc<HealthParams>`) instead of the config form. The
+    /// DNS discovery task reads the resolved parameters from the current
+    /// LbState (via [`UpstreamLb::health_config`]) so a live endpoint-set
+    /// swap uses the same health parameters as the initial build without
+    /// re-resolving the config form.
+    pub fn rebuild_with_resolved_health_and_events(
+        &self,
+        endpoints: &[Endpoint],
+        algorithm: LoadBalancer,
+        slow_start: Duration,
+        health: Option<Arc<HealthParams>>,
+        events: Option<&crate::events::UpstreamEmitter>,
+    ) {
+        let prev = self.state.load_full();
+        self.state.store(Arc::new(build_state(
+            endpoints,
+            algorithm,
+            slow_start,
+            Some(&prev),
+            health,
+            events,
+        )));
+    }
+
     /// Current passive-health clock reading (Unix-epoch ms).
     pub fn now_ms(&self) -> u64 {
         (*self.health_clock.read().expect("health clock poisoned"))()
@@ -507,6 +539,36 @@ impl UpstreamLb {
     /// Whether the current set is empty (only via unvalidated configs).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// DW-042: the load-balancing algorithm of the current state. The
+    /// discovery task reads this so a live endpoint-set swap uses the
+    /// same algorithm as the initial build.
+    pub fn algorithm(&self) -> LoadBalancer {
+        self.state.load().algorithm
+    }
+
+    /// DW-042: the slow-start window of the current state. The discovery
+    /// task reads this so a live endpoint-set swap applies the same
+    /// slow-start ramp as the initial build.
+    pub fn slow_start(&self) -> Duration {
+        self.state.load().slow_start
+    }
+
+    /// DW-042: the resolved passive-health parameters of the current
+    /// state, if passive health is enabled. The discovery task reads
+    /// this so a live endpoint-set swap creates health trackers with
+    /// the same parameters as the initial build.
+    pub fn health_config(&self) -> Option<Arc<HealthParams>> {
+        self.state.load().health.clone()
+    }
+
+    /// DW-042: the upstream-scoped event emitter, if the balancer was
+    /// built with one. The discovery task passes this to
+    /// `rebuild_with_health_and_events` so new endpoints get
+    /// event-bound health trackers.
+    pub fn events(&self) -> Option<crate::events::UpstreamEmitter> {
+        self.events.clone()
     }
 
     /// `address:port` of endpoint `idx` in the current set.

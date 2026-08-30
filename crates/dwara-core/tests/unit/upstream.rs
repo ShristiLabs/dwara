@@ -93,6 +93,7 @@ fn test_upstream(
         max_pending: None,
         trusted_ca_file: None,
         oauth2_client_credentials: None,
+        dns_discovery: None,
     }
 }
 
@@ -418,6 +419,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             max_pending: None,
             trusted_ca_file: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: vec![],
         policies: vec![],

@@ -661,12 +661,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let reload_task = tokio::spawn(async move {
         let mut probes = dwara_core::active::ActiveProbes::new();
         probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
+        // DW-042: DNS discovery tasks — one per upstream that configures
+        // `dns_discovery`. The resolver is shared across all tasks (one
+        // resolver, many upstreams). Tasks are respawned on every reload,
+        // mirroring ActiveProbes. The resolver uses the default public
+        // name servers (system-config is off); a future enhancement
+        // could read name servers from the config.
+        let dns_resolver = Arc::new(dwara_core::dataplane::discovery::DnsResolver::new(&[]));
+        let reload_obs = reload_dp.observability_arc();
+        let mut discovery = dwara_core::dataplane::discovery::DiscoveryTasks::new();
+        discovery.respawn(
+            &reload_dp.registry(),
+            &reload_state.snapshot(),
+            Arc::clone(&dns_resolver),
+            Arc::clone(&reload_obs),
+        );
         let mut watcher_rx = watcher_rx;
         let mut shutting_down = reload_shutdown;
         loop {
             tokio::select! {
                 _ = sighup.recv() => {
-                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls, &mut probes).await;
+                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs).await;
                 }
                 maybe_event = watcher_rx.recv() => {
                     let Some(()) = maybe_event else { break };
@@ -675,7 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         _ = shutting_down.changed() => return,
                     }
                     while watcher_rx.try_recv().is_ok() {}
-                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls, &mut probes).await;
+                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs).await;
                 }
                 _ = shutting_down.changed() => return,
             }

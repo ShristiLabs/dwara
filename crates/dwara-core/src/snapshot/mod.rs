@@ -3313,13 +3313,49 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     }
 
     for u in &gateway.upstreams {
-        if u.endpoints.is_empty() {
+        // DW-042: when dns_discovery is present, endpoints may be empty
+        // (the gateway resolves them from DNS). The static-endpoints
+        // guard only applies to upstreams without dynamic discovery.
+        if u.endpoints.is_empty() && u.dns_discovery.is_none() {
             issues.push(issue(
                 "upstream",
                 &u.name,
                 "endpoints",
                 "upstream has no endpoints",
             ));
+        }
+        // DW-042: validate the dns_discovery block.
+        if let Some(dns) = &u.dns_discovery {
+            if dns.hostname.trim().is_empty() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "dns_discovery.hostname",
+                    "dns_discovery hostname is empty",
+                ));
+            }
+            if dns.record_type != "A" && dns.record_type != "SRV" {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "dns_discovery.record_type",
+                    "dns_discovery record_type must be \"A\" or \"SRV\"",
+                ));
+            }
+            if dns.refresh_interval_s < crate::config::limits::MIN_DNS_DISCOVERY_REFRESH_S
+                || dns.refresh_interval_s > crate::config::limits::MAX_DNS_DISCOVERY_REFRESH_S
+            {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "dns_discovery.refresh_interval_s",
+                    format!(
+                        "dns_discovery refresh_interval_s must be in {}..={}",
+                        crate::config::limits::MIN_DNS_DISCOVERY_REFRESH_S,
+                        crate::config::limits::MAX_DNS_DISCOVERY_REFRESH_S
+                    ),
+                ));
+            }
         }
         // trusted_ca_file (#121): the connector's TLS trust override for
         // private-CA upstreams. It only applies to the TLS protocols —

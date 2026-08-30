@@ -598,6 +598,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             max_pending: None,
             trusted_ca_file: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -795,6 +796,7 @@ fn upstream_cfg(
         max_pending: None,
         trusted_ca_file: None,
         oauth2_client_credentials: None,
+        dns_discovery: None,
     }
 }
 
@@ -1066,6 +1068,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             max_pending: None,
             trusted_ca_file: None,
             oauth2_client_credentials: None,
+            dns_discovery: None,
         }],
         consumers: vec![],
         policies: vec![],
