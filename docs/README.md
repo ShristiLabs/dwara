@@ -56,6 +56,15 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [Alert and event webhooks](./features/alerting.md) — the in-process
   event bus, the emission sites (breaker/health/config publish), and
   the budget-bounded webhook deliverer (DW-044).
+- [Usage reports and exports](./features/usage-reports.md) — scheduled
+  per-consumer usage statements off the analytics store as
+  deterministic CSV/JSON files: the reconcile-with-the-query-API
+  contract, the backfilling scheduler, quota column alignment, and the
+  `export_runs` ledger (DW-120).
+- [Embedded analytics](./features/analytics.md) — the analytics store
+  behind the admin `/analytics/*` endpoints: the fire-and-forget write
+  path, the rollup cascade, bounded disk, and the query surface
+  (DW-043).
 - [API versioning](./features/versioning.md) — the version routing
   patterns (path segment / header / query / Accept media type), the
   `match.accept` criterion, Deprecation/Sunset header automation

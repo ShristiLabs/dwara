@@ -10,6 +10,7 @@ mod breaker;
 mod cache;
 mod config_source;
 mod credentials;
+mod exports;
 mod extensions_error;
 mod geoip;
 mod hardening;

@@ -9,6 +9,48 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Scheduled usage reports & exports (DW-120): an `analytics.exports`
+  block (requires the DW-043 analytics store) turns the store into a
+  scheduled reporter — a background worker (30 s tick, config read
+  live each tick, so reloads add/remove exports without a restart)
+  closes each UTC calendar window of the configured kind
+  (`window: hourly|daily|monthly`, default daily) once it has settled
+  (5 min after close, for writer flush + rollup grace) and writes the
+  per-consumer usage statement — requests, errors, error rate,
+  rate-limited/shed counts, average latency, plus DW-033 quota budget
+  figures — as one deterministic file per format into
+  `analytics.exports.directory` (created on demand; atomic
+  temp+rename write; a re-export overwrites, so output is idempotent).
+  `formats` is a duplicate-free subset of `csv`/`json` — omitted or
+  empty means both (default both; Parquet deferred to the DW-156
+  backlog). CSV is RFC
+  4180 (CRLF, quoting rules; absent quota cells are EMPTY — zero means
+  configured-and-zero-used); JSON is pretty and self-describing
+  (window bounds, generated_at, partial flag, totals, per-consumer
+  rows). The statement's numbers ARE the query API's numbers BY
+  CONSTRUCTION (the export calls the same `structured` aggregation
+  `POST /analytics/query` uses, grouped by consumer plus a totals row;
+  pinned by test) — the acceptance contract of the issue. A restart
+  backfills missed windows oldest-first (max 64/tick); the scheduler
+  never auto-exports past the queried granularity's retention, and
+  windows older than it are flagged `partial: true` (possible
+  undercount, real data). Quota columns appear only when the budget's
+  window FULLY CONTAINS the export window (daily export: same-day
+  daily counter + month-to-date monthly; monthly export: monthly
+  only) and are read by the dataplane from the state store's
+  `quota_counters` — never fabricated zeros. New `export_runs` ledger
+  (analytics schema v2, forward-only migration): one upserted row per
+  (kind, window) with status ok/failed, partial flag, and counts.
+  Admin endpoints: `GET /analytics/exports?limit=` (ledger, newest
+  first, limit 1..=100 default 25) and `POST /analytics/exports/run`
+  (manual trigger; optional `window`/`window_start_ms` default to the
+  configured kind and most recent closed window; 400s on unconfigured
+  exports, misspelled window, unaligned/not-closed window_start_ms).
+  Two analytics query fixes found by the totals row: ungrouped totals
+  over empty ranges are NULL-tolerant (zeros, not an error), and a
+  literal `GROUP BY 1` on the ungrouped path (which resolved
+  positionally to a SUM aggregate) was removed.
+
 - Quotas and metering (DW-033): per-consumer request BUDGETS, a
   mechanism distinct from rate limiting — a rate limit replenishes
   inside seconds or minutes, a budget caps total volume across a fixed

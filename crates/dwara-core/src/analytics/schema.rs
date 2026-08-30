@@ -10,7 +10,8 @@
 //! never be confused for one another, and the state store's
 //! forward-only migration contract stays untouched by analytics churn.
 //!
-//! Schema v1 (this file is migration 001 and the whole history):
+//! Schema v1 (this file is migration 001; v2 adds the DW-120
+//! `export_runs` ledger — see [`SCHEMA_V2`]):
 //!
 //! - `meta` — rollup cursors (see [`super::rollup`]): the exclusive
 //!   upper bound each granularity has durably rolled through, written
@@ -149,8 +150,35 @@ pub const SCHEMA_V1: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Schema v2 (DW-120): the `export_runs` ledger. One row per
+/// scheduled-or-manual usage-statement export attempt per window
+/// (primary key; a re-export REPLACES the row — the file output is
+/// equally idempotent). `status` is `ok` or `failed`; `partial` flags
+/// a window older than the query granularity's retention (undercounts
+/// are possible) so billing consumers can reject flagged statements
+/// instead of trusting them; `windows_nonempty` counts the range's
+/// rollup windows that carry any data (informational — quiet windows
+/// have no rows and are not loss).
+pub const SCHEMA_V2: &str = "
+    CREATE TABLE IF NOT EXISTS export_runs (
+        kind             TEXT NOT NULL,
+        window_start_ms  INTEGER NOT NULL,
+        window_end_ms    INTEGER NOT NULL,
+        status           TEXT NOT NULL,
+        partial          INTEGER NOT NULL,
+        formats          TEXT NOT NULL,
+        directory        TEXT NOT NULL,
+        consumers        INTEGER NOT NULL,
+        requests         INTEGER NOT NULL,
+        windows_nonempty INTEGER NOT NULL,
+        error            TEXT NOT NULL DEFAULT '',
+        generated_at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (kind, window_start_ms)
+    ) WITHOUT ROWID;
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
@@ -165,9 +193,16 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
             )),
         )));
     }
-    if version < LATEST_SCHEMA_VERSION {
+    // Forward-only sequential migrations: each version's batch is
+    // idempotent (IF NOT EXISTS) so a crash between batches re-runs
+    // safely on the next open.
+    if version < 1 {
         conn.execute_batch(SCHEMA_V1)?;
-        conn.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
+        conn.pragma_update(None, "user_version", 1)?;
+    }
+    if version < 2 {
+        conn.execute_batch(SCHEMA_V2)?;
+        conn.pragma_update(None, "user_version", 2)?;
     }
     Ok(())
 }

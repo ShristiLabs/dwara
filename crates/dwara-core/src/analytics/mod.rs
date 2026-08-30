@@ -8,7 +8,9 @@
 //! records for a short retention window and additive rollup tables at
 //! 1m/5m/1h/1d granularities with per-granularity retention, plus the
 //! query surface over them (dashboard series, Top-N, structured
-//! query) served by the admin API.
+//! query) served by the admin API, and the scheduled usage-report
+//! exports (DW-120, [`exports`]) that turn the same rollups into
+//! durable per-consumer statements.
 //!
 //! # Write path (never blocks the dataplane)
 //!
@@ -34,12 +36,13 @@
 //!
 //! Config-declared dimensions extracted from request HEADERS at
 //! completion-time capture (e.g. `x-plan` -> dimension `plan`): they
-//! ride the [`AccessRecord`](crate::observability::AccessRecord) into
+//! ride the [`AccessRecord`] into
 //! raw rows (a JSON object column) and aggregate into their own
 //! narrow rollup table. They are analytics-only — deliberately NOT
 //! added to the access log, whose field list is redacted by
 //! construction and stays that way.
 
+pub mod exports;
 pub mod query;
 pub mod rollup;
 pub mod schema;
@@ -73,8 +76,9 @@ const ROLLUP_INTERVAL_MS: u64 = 30_000;
 pub const ROLLUP_GRACE_MS: i64 = 60_000;
 
 /// Per-granularity retention defaults (ms) — the single definition
-/// lives in [`config::ANALYTICS_DEFAULT_RETENTION_MS`] (the lowest
-/// consuming domain); re-exported here for the module's readers.
+/// lives in [`crate::config::ANALYTICS_DEFAULT_RETENTION_MS`] (the
+/// lowest consuming domain); re-exported here for the module's
+/// readers.
 pub use crate::config::ANALYTICS_DEFAULT_RETENTION_MS as DEFAULT_RETENTION_MS;
 
 /// One raw record as stored (the owned, completion-time copy handed
@@ -183,7 +187,8 @@ pub struct EmbeddedAnalytics {
 impl EmbeddedAnalytics {
     /// Open (or create) the analytics database at `path`, apply
     /// migrations, and return the store with its channel wired. The
-    /// writer is NOT started here — see [`spawn_workers`].
+    /// writer is NOT started here — see
+    /// [`EmbeddedAnalytics::spawn_workers`].
     pub fn open(path: &str, retention_ms: [i64; 5], flush_ms: u64) -> rusqlite::Result<Arc<Self>> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -396,10 +401,11 @@ impl EmbeddedAnalytics {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Run a read-only query against the store (admin endpoints). The
-    /// connection is shared with the writer behind one mutex; queries
-    /// are rollup-table scans sized for the "week under 100 ms"
-    /// contract, so contention is short and rare.
+    /// Run a short locked access against the store's connection (the
+    /// admin read path, and the exports ledger's single-row record
+    /// writes). The connection is shared with the writer behind one
+    /// mutex; access is sized for the "week under 100 ms" contract, so
+    /// contention is short and rare.
     pub fn query<T>(
         &self,
         f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,

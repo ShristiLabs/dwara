@@ -942,6 +942,118 @@ impl DataPlane {
         }
     }
 
+    /// Per-consumer quota figures for one export window (DW-120): the
+    /// read side of the statement's quota columns, assembled from the
+    /// CURRENT config generation's quota blocks and the state store's
+    /// `quota_counters`. A budget's figures appear only when its UTC
+    /// quota window FULLY CONTAINS `[period_start_s, period_end_s)`
+    /// (see `analytics::exports`' alignment rule): a daily export
+    /// carries the same-day daily counter and the month-to-date
+    /// monthly counter; a monthly export carries only the monthly
+    /// counter. Consumers without a quotas block, without a store, or
+    /// not yet synced into the store carry no figures — never
+    /// fabricated zeros.
+    pub fn quota_figures_at(
+        &self,
+        period_start_s: i64,
+        period_end_s: i64,
+    ) -> std::collections::HashMap<String, crate::analytics::exports::QuotaFigures> {
+        let mut out = std::collections::HashMap::new();
+        let Some(store) = self.state_store() else {
+            return out;
+        };
+        for consumer in &self.current().snapshot.gateway().consumers {
+            let Some(quotas) = &consumer.quotas else {
+                continue;
+            };
+            let figures = match store.lookup_consumer(&consumer.name) {
+                Ok(Some(record)) => {
+                    let usage = crate::state::quotas::current_usage(
+                        &store,
+                        record.id,
+                        quotas,
+                        period_start_s,
+                    );
+                    let mut f = crate::analytics::exports::QuotaFigures::default();
+                    for u in &usage {
+                        let contains = u.window_start_epoch_s as i64 <= period_start_s
+                            && period_end_s <= u.reset_epoch_s as i64;
+                        if !contains {
+                            continue;
+                        }
+                        let b = crate::analytics::exports::QuotaBudget {
+                            used: u.used,
+                            limit: u.limit,
+                            window_start_epoch_s: u.window_start_epoch_s as i64,
+                            reset_epoch_s: u.reset_epoch_s as i64,
+                        };
+                        match u.budget {
+                            crate::state::quotas::Budget::Daily => f.daily = Some(b),
+                            crate::state::quotas::Budget::Monthly => f.monthly = Some(b),
+                        }
+                    }
+                    f
+                }
+                _ => crate::analytics::exports::QuotaFigures::default(),
+            };
+            out.insert(consumer.name.clone(), figures);
+        }
+        out
+    }
+
+    /// Spawn the usage-report export worker (DW-120): one background
+    /// task on the same interval-plus-shutdown-watch machinery as the
+    /// analytics rollup cascade, reading the CURRENT config generation
+    /// each tick (a reload can add, change, or remove `analytics.
+    /// exports` without a restart) and exporting every closed window
+    /// of the configured kind that has no successful run record —
+    /// oldest first, so a restart backfills missed windows. No-ops
+    /// without an analytics store or an exports block. Safe to abort:
+    /// each export is an atomic file write plus an idempotent record.
+    pub fn spawn_export_worker(
+        self: &Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let dp = Arc::clone(self);
+        let mut shutdown = shutdown;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                crate::analytics::exports::EXPORT_TICK_MS,
+            ));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let Some(exports_cfg) = dp
+                            .state
+                            .snapshot()
+                            .gateway()
+                            .analytics
+                            .as_ref()
+                            .and_then(|a| a.exports.as_ref())
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        let Some(store) = dp.analytics() else {
+                            continue;
+                        };
+                        crate::analytics::exports::run_due(
+                            &store,
+                            &exports_cfg,
+                            &|ps, pe| dp.quota_figures_at(ps, pe),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                        );
+                    }
+                    _ = shutdown.changed() => return,
+                }
+            }
+        })
+    }
+
     /// The current generation's upstream registry. Used by the
     /// TLS-passthrough path (which picks endpoints through the same
     /// balancers) and by tests.

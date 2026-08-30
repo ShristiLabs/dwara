@@ -140,6 +140,37 @@ async fn start(mode: ListenMode, dir: tempfile::TempDir) -> Server {
     }
 }
 
+/// `start` with the caller's gateway config: the DW-120 export tests
+/// need a live `analytics.exports` block in the PUBLISHED generation
+/// (the run endpoint reads the config's directory), which the base
+/// config lacks. Everything else mirrors `start`.
+async fn start_with_config(mode: ListenMode, dir: tempfile::TempDir, yaml: &str) -> Server {
+    let config_path = dir.path().join("dwara.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let state = Arc::new(ConfigState::new());
+    state
+        .compile_and_publish(&dwara_core::config::parse_gateway(yaml).expect("test config"))
+        .expect("publish config");
+    let dp = DataPlane::new(Arc::clone(&state));
+    let ctx = Arc::new(AdminContext::new(
+        Arc::clone(&state),
+        Arc::clone(&dp),
+        config_path.clone(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let (tx, rx) = watch::channel(());
+    tokio::spawn(dwara_admin::serve(ctx, listener, mode, rx));
+    std::mem::forget(dir); // keep the temp dir alive for the test body
+    Server {
+        addr,
+        state,
+        dp,
+        config_path,
+        _shutdown: tx,
+    }
+}
+
 /// Build a TLS client config trusting `ca_path`; `client` optionally
 /// presents a certificate (cert PEM bytes, key PEM bytes).
 fn client_config(ca_path: &std::path::Path, client: Option<(&str, &str)>) -> rustls::ClientConfig {
@@ -1542,6 +1573,364 @@ async fn analytics_dashboard_top_and_query_serve_rollups() {
     let (status, body) = plaintext_request(server.addr, &req).await;
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("analytics_query_invalid"), "{body}");
+    let _ = std::fs::remove_file(&db);
+}
+
+// --- analytics export endpoints (DW-120) ----------------------------------
+
+/// `YYYY-MM-DD` stamp of a UTC window start (the daily filename's date
+/// segment — mirrors the engine's own civil-calendar stamp so tests can
+/// compute expected filenames without duplicating more of the
+/// formatter; the twin lives in dwara-core's tests/exports.rs).
+fn utc_date_stamp(day_start_ms: i64) -> String {
+    let days = day_start_ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn real_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The base config plus an `analytics` block carrying `analytics.
+/// exports` (formats omitted on purpose: omitted means BOTH csv and
+/// json — pinned here through the live-config path).
+fn exports_yaml(db_path: &std::path::Path, directory: &std::path::Path) -> String {
+    format!(
+        "{}analytics:\n  path: {}\n  exports:\n    directory: {}\n",
+        config_yaml(None),
+        db_path.display(),
+        directory.display()
+    )
+}
+
+/// One POST /analytics/exports/run with a JSON body.
+async fn post_export_run(addr: std::net::SocketAddr, body: &str) -> (u16, String) {
+    let req = format!(
+        "POST /analytics/exports/run HTTP/1.1\r\nHost: localhost\r\n\
+         Connection: close\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    plaintext_request(addr, &req).await
+}
+
+/// GET /analytics/exports: the ledger read (empty shape, newest-first
+/// ordering, and the limit's default of 25 with clamping into 1..=100
+/// — 0 clamps UP to 1, 500 clamps DOWN to 100, an unparseable value
+/// falls back to the default).
+#[tokio::test]
+async fn analytics_exports_list_is_newest_first_with_default_and_clamped_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw120-admin-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+    )
+    .unwrap();
+    server.dp.set_analytics(Arc::clone(&store));
+
+    // Empty ledger: the documented empty shape.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/exports HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"runs\":[]"), "{body}");
+
+    // 105 synthetic ledger rows (the DW-043 direct-seed convention),
+    // with strictly increasing generated_at_ms so ordering is
+    // observable and the 100-clamp is exercised (105 > 100).
+    store
+        .query(|c| {
+            for i in 0..105i64 {
+                c.execute(
+                    "INSERT INTO export_runs (kind, window_start_ms, window_end_ms,
+                                              status, partial, formats, directory,
+                                              consumers, requests, windows_nonempty,
+                                              error, generated_at_ms)
+                     VALUES ('daily', ?1, ?2, 'ok', 0, 'csv', '/tmp/x', 1, 10, 1, '', ?3)",
+                    rusqlite::params![
+                        i * 86_400_000,
+                        (i + 1) * 86_400_000,
+                        1_000_000_000 + i * 1_000
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    for (q, want) in [
+        ("", 25usize),
+        ("?limit=3", 3),
+        ("?limit=0", 1),
+        ("?limit=500", 100),
+        ("?limit=zebra", 25),
+    ] {
+        let (status, body) = plaintext_request(
+            server.addr,
+            &format!("GET /analytics/exports{q} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 200, "{q}: {body}");
+        assert_eq!(
+            body.matches("\"kind\":\"daily\"").count(),
+            want,
+            "{q}: {body}"
+        );
+    }
+
+    // Newest first: the greatest generated_at_ms (row 104) precedes
+    // row 103, and row 0 — older than the limit — is not served.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/exports?limit=5 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let pos = |i: i64| {
+        body.find(&format!("\"window_start_ms\":{}", i * 86_400_000))
+            .unwrap_or_else(|| panic!("row {i} missing: {body}"))
+    };
+    assert!(pos(104) < pos(103) && pos(103) < pos(102), "{body}");
+    assert!(!body.contains("\"window_start_ms\":0,"), "{body}");
+    let _ = std::fs::remove_file(&db);
+}
+
+/// POST /analytics/exports/run happy path: the export runs
+/// synchronously — 200 with the run record, the ledger lists it, both
+/// files (formats omitted = csv AND json) land in the configured
+/// directory, and the statement JSON parses with the query API's own
+/// numbers for the window.
+#[tokio::test]
+async fn analytics_exports_run_writes_files_ledger_and_a_parsable_statement() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw120-admin-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let out = dir.path().join("exports");
+    let server = start_with_config(ListenMode::DevPlaintext, dir, &exports_yaml(&db, &out)).await;
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+    )
+    .unwrap();
+    server.dp.set_analytics(Arc::clone(&store));
+
+    // Seed YESTERDAY, early in the UTC day (hours 5-6 are settled no
+    // matter when this runs; the endpoint's own clock only has to be
+    // past the window's close, which "yesterday" always is).
+    let now = real_now_ms();
+    let day = (now - 86_400_000).div_euclid(86_400_000) * 86_400_000;
+    store
+        .query(|c| {
+            for (ts, consumer, status) in [
+                (day + 5 * 3_600_000, "acme", 200),
+                (day + 5 * 3_600_000 + 30_000, "acme", 500),
+                (day + 5 * 3_600_000 + 60_000, "beta", 200),
+            ] {
+                c.execute(
+                    "INSERT INTO raw (ts_ms, listener, route, consumer, upstream, method,
+                                      status, status_class, duration_ms, attempts,
+                                      rate_limited, broken, shed, dims)
+                     VALUES (?1, 'edge', 'api', ?2, 'up', 'GET', ?3, ?4, 10.0, 1,
+                             0, 0, 0, '{}')",
+                    rusqlite::params![ts, consumer, status, format!("{}xx", status / 100)],
+                )
+                .unwrap();
+            }
+            dwara_core::analytics::rollup::roll_raw_range(c, day, day + 6 * 3_600_000).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    let body = format!("{{\"window\":\"daily\",\"window_start_ms\":{day}}}");
+    let (status, rbody) = post_export_run(server.addr, &body).await;
+    assert_eq!(status, 200, "{rbody}");
+    assert!(rbody.contains("\"status\":\"ok\""), "{rbody}");
+    assert!(rbody.contains("\"partial\":false"), "{rbody}");
+    assert!(rbody.contains("\"consumers\":2"), "{rbody}");
+    assert!(rbody.contains("\"requests\":3"), "{rbody}");
+
+    // The ledger lists the run (window bounds, ok status).
+    let (status, lbody) = plaintext_request(
+        server.addr,
+        "GET /analytics/exports HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{lbody}");
+    assert!(
+        lbody.contains(&format!("\"window_start_ms\":{day}")),
+        "{lbody}"
+    );
+    assert!(lbody.contains("\"status\":\"ok\""), "{lbody}");
+
+    // Both formats landed with the deterministic daily stem.
+    let date = utc_date_stamp(day);
+    for ext in ["csv", "json"] {
+        let path = out.join(format!("dwara-usage-daily-{date}.{ext}"));
+        assert!(path.exists(), "missing {path:?}");
+    }
+    let files: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(files.len(), 2, "exactly csv + json: {files:?}");
+
+    // The statement parses and carries the query API's numbers.
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join(format!("dwara-usage-daily-{date}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc["kind"], "usage_statement");
+    assert_eq!(doc["window"], "daily");
+    assert_eq!(doc["from_ms"], day);
+    assert_eq!(doc["to_ms"], day + 86_400_000);
+    assert_eq!(doc["partial"], false);
+    assert_eq!(doc["totals"]["requests"], 3);
+    assert_eq!(doc["totals"]["errors"], 1);
+    let consumers = doc["consumers"].as_array().unwrap();
+    assert_eq!(consumers.len(), 2);
+    let acme = consumers
+        .iter()
+        .find(|c| c["consumer"] == "acme")
+        .expect("acme row");
+    assert_eq!(acme["requests"], 2);
+    assert_eq!(acme["errors"], 1);
+    let beta = consumers
+        .iter()
+        .find(|c| c["consumer"] == "beta")
+        .expect("beta row");
+    assert_eq!(beta["requests"], 1);
+    let _ = std::fs::remove_file(&db);
+}
+
+/// The run endpoint's 400 family: a misspelled window kind, an
+/// unaligned window_start_ms, a not-yet-closed window, and a body that
+/// is not valid JSON — all named `analytics_export_run_invalid`, none
+/// with side effects (no ledger row, no directory even created).
+#[tokio::test]
+async fn analytics_exports_run_rejects_invalid_requests_without_side_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw120-admin-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let out = dir.path().join("exports");
+    let server = start_with_config(ListenMode::DevPlaintext, dir, &exports_yaml(&db, &out)).await;
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+    )
+    .unwrap();
+    server.dp.set_analytics(Arc::clone(&store));
+
+    let now = real_now_ms();
+    let day = 86_400_000;
+    // Two midnights out: aligned, and its close is at least a day in
+    // the future no matter when this test runs.
+    let future = ((now / day) + 2) * day;
+    // Mid-day instant: aligned check fires first, so its age is
+    // irrelevant to the rejection.
+    let unaligned = (now / day) * day + 1_234;
+    for (body, needle) in [
+        ("{\"window\":\"dailyy\"}", "window must be one of"),
+        (
+            &format!("{{\"window\":\"daily\",\"window_start_ms\":{unaligned}}}"),
+            "not aligned",
+        ),
+        (
+            &format!("{{\"window\":\"daily\",\"window_start_ms\":{future}}}"),
+            "not closed yet",
+        ),
+        ("{not json", "not a valid export run request"),
+    ] {
+        let (status, rbody) = post_export_run(server.addr, body).await;
+        assert_eq!(status, 400, "{body}: {rbody}");
+        assert!(
+            rbody.contains("analytics_export_run_invalid"),
+            "{body}: {rbody}"
+        );
+        assert!(rbody.contains(needle), "{body}: {rbody}");
+    }
+
+    // Nothing ran: the ledger is empty and no output directory exists.
+    let (status, lbody) = plaintext_request(
+        server.addr,
+        "GET /analytics/exports HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{lbody}");
+    assert!(lbody.contains("\"runs\":[]"), "{lbody}");
+    assert!(!out.exists(), "no files were written");
+    let _ = std::fs::remove_file(&db);
+}
+
+/// A store without an `analytics.exports` block in the live config:
+/// the run endpoint refuses (400, named) rather than guessing an
+/// output directory, while the ledger GET still serves — listing needs
+/// no config.
+#[tokio::test]
+async fn analytics_exports_run_without_analytics_exports_block_is_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw120-admin-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+    )
+    .unwrap();
+    server.dp.set_analytics(Arc::clone(&store));
+
+    // Empty body: defaults would apply, but the config check fires
+    // first — exports are simply not configured on this gateway.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "POST /analytics/exports/run HTTP/1.1\r\nHost: localhost\r\n\
+         Connection: close\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("analytics_exports_not_configured"), "{body}");
+
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/exports HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"runs\":[]"), "{body}");
     let _ = std::fs::remove_file(&db);
 }
 

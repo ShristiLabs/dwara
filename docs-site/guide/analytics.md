@@ -101,3 +101,71 @@ POST /analytics/query
 `group_by` accepts exactly the six dimension columns. A week of
 traffic answers in well under 100 ms — the query reads rollup tables,
 never raw records.
+
+## Usage reports and exports
+
+An `exports` block inside `analytics` turns the store into a scheduled
+reporter: once per configured window the gateway writes a per-consumer
+usage statement — requests, errors, error rate, rate-limited and shed
+counts, average latency, and quota budget figures — as one
+deterministic file per format. Durable input for a billing pipeline,
+distinct from the ad hoc query API.
+
+```yaml
+analytics:
+  path: /var/lib/dwara/analytics.db
+  exports:
+    directory: /var/lib/dwara/usage-reports
+    window: daily            # hourly | daily | monthly; default daily (UTC)
+    formats: [csv, json]     # default both
+```
+
+The directory is created on demand. Files are named
+`dwara-usage-{window}-{utc-stamp}.{ext}` — for example
+`dwara-usage-daily-2026-08-29.json` — and a re-export of the same
+window simply overwrites the file, so output is idempotent and safe to
+re-run. A background worker checks every 30 seconds and exports each
+closed window about 5 minutes after it closes (so rollups settle);
+after a restart it backfills missed windows oldest-first. Reloads
+apply live. Validation rejects an empty directory and duplicated
+formats — an omitted or empty format list simply means both; Parquet
+is not offered yet.
+
+The statement's numbers are the query API's numbers: the export runs
+the same aggregation as `POST /analytics/query` (grouped by consumer,
+plus a totals row), so a statement always reconciles with an ad hoc
+query for the same period.
+
+Quota columns follow a strict alignment rule: a budget's
+used/limit figures appear only when its quota window fully contains
+the export window — a daily report carries the same-day daily counter
+plus the month-to-date monthly counter, a monthly report carries only
+the monthly counter. Monthly figures are month-to-date as of
+generation time (the store's live counter, so a re-exported window can
+differ from the original run); each budget's `window_start_epoch_s`
+and `reset_epoch_s` bound what `used` covers. Empty cells mean "no
+applicable budget", never zero.
+
+Two [admin API](./admin-api) endpoints (they answer 404 when analytics
+is not configured):
+
+```
+GET /analytics/exports?limit=25
+POST /analytics/exports/run   {"window": "daily", "window_start_ms": 1770000000000}
+```
+
+`GET /analytics/exports` returns the run ledger, newest first
+(`limit` 1..=100, default 25): one record per exported window with
+status (`ok`/`failed`), the `partial` flag, formats, and
+consumer/request counts. `POST /analytics/exports/run` triggers one
+export by hand; both body fields are optional (defaults: the configured
+window kind and its most recent closed window), and the endpoint
+rejects a misspelled `window` or a `window_start_ms` that is unaligned
+or not yet closed.
+
+A window older than the rollup retention may undercount without the
+store being able to know; such statements carry `"partial": true` so a
+billing consumer can reject them, and the scheduler never auto-exports
+past that horizon — only a manual trigger can, still flagged. Windows
+with no traffic are not loss: counts are exact whenever `partial` is
+false.

@@ -458,6 +458,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // its pending queue is abandoned (the gateway is not a durable
     // queue).
     let webhook_task = dp.spawn_webhook_deliverer(shutdown_rx.clone());
+    // DW-120: the usage-report export worker — same background machinery
+    // as the analytics rollup cascade, reading the live config each
+    // tick. Runs even without an analytics store or an exports block
+    // (both checks are per-tick); aborted on shutdown (each export is
+    // an atomic file write plus an idempotent record — nothing to
+    // drain).
+    let export_task = dp.spawn_export_worker(shutdown_rx.clone());
     // DW-043: the embedded analytics store — opened when the config
     // carries an `analytics` block, workers spawned against the same
     // shutdown watch as every other background task (the writer drains
@@ -672,6 +679,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     reload_task.abort();
     cert_task.abort();
     webhook_task.abort();
+    export_task.abort();
     if let Some(t) = &geoip_task {
         t.abort();
     }

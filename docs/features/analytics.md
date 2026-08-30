@@ -102,6 +102,10 @@ configured:
   `group_by` accepts exactly the six dimension columns, values bind as
   SQL parameters, and SQL TEXT from the caller is never executed.
 
+The scheduled usage-report exports (DW-120) build their per-consumer
+statement by calling this same `structured` aggregation — see
+[Usage reports and exports](./usage-reports.md).
+
 ## The seam
 
 The store implements the M1 `extensions::analytics::AnalyticsSink`

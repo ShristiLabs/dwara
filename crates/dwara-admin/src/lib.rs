@@ -615,6 +615,143 @@ async fn analytics_query(
     }
 }
 
+/// GET /analytics/exports (DW-120): the export run ledger, newest
+/// first — every scheduled or manual usage-statement export attempt
+/// per window (status, partial flag, formats, consumer/request
+/// counts). Query param: `limit` (default 25, 1..=100).
+async fn analytics_exports_list(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let params = query_params(req.uri());
+    let limit = param(&params, "limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(25)
+        .clamp(1, 100);
+    match dwara_core::analytics::exports::list_runs(&store, limit) {
+        Ok(runs) => json_response(
+            200,
+            serde_json::json!({
+                "runs": runs,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_query_failed", &e.to_string(), request_id),
+    }
+}
+
+/// POST /analytics/exports/run (DW-120): manually trigger one export
+/// (the scheduled worker's twin — same engine, same reconciliation
+/// contract). Optional JSON body: `{"window": "hourly|daily|monthly",
+/// "window_start_ms": <aligned, closed>}`; absent fields default to
+/// the configured window kind and its most recent CLOSED window.
+/// Requires `analytics.exports` in the config (the directory is where
+/// outputs land; an ad hoc directory from a request body would be a
+/// write-anywhere footgun).
+async fn analytics_exports_run(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    use dwara_core::analytics::exports;
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let Some(exports_cfg) = ctx
+        .state
+        .snapshot()
+        .gateway()
+        .analytics
+        .as_ref()
+        .and_then(|a| a.exports.clone())
+    else {
+        return envelope(
+            400,
+            "analytics_exports_not_configured",
+            "the gateway config carries no analytics.exports block (set \
+             analytics.exports.directory to enable exports)",
+            request_id,
+        );
+    };
+    let manual: exports::ManualRunBody = if body.is_empty() {
+        exports::ManualRunBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(m) => m,
+            Err(err) => {
+                return envelope(
+                    400,
+                    "analytics_export_run_invalid",
+                    &format!("body is not a valid export run request: {err}"),
+                    request_id,
+                )
+            }
+        }
+    };
+    let window = match manual.window.as_deref() {
+        None => exports::effective_window(&exports_cfg),
+        Some(s) => match exports::WindowKind::parse(s) {
+            Some(w) => w,
+            None => {
+                return envelope(
+                    400,
+                    "analytics_export_run_invalid",
+                    "window must be one of: hourly|daily|monthly",
+                    request_id,
+                )
+            }
+        },
+    };
+    let now = now_ms() as i64;
+    let start = match manual.window_start_ms {
+        None => exports::last_closed_window(window, now),
+        Some(s) => {
+            let (aligned, end) = window.window_of(s);
+            if aligned != s {
+                return envelope(
+                    400,
+                    "analytics_export_run_invalid",
+                    &format!(
+                        "window_start_ms {s} is not aligned to the {} window boundary {aligned}",
+                        window.as_str()
+                    ),
+                    request_id,
+                );
+            }
+            if end > now {
+                return envelope(
+                    400,
+                    "analytics_export_run_invalid",
+                    &format!("window starting at {s} is not closed yet (ends {end}; now {now})",),
+                    request_id,
+                );
+            }
+            s
+        }
+    };
+    let formats = exports::effective_formats(&exports_cfg);
+    let run = exports::run_export(
+        &store,
+        &exports_cfg.directory,
+        window,
+        start,
+        &formats,
+        &|ps, pe| ctx.dp.quota_figures_at(ps, pe),
+        now,
+    );
+    if run.status == "ok" {
+        match serde_json::to_value(&run) {
+            Ok(v) => json_response(200, v),
+            Err(e) => envelope(500, "analytics_export_failed", &e.to_string(), request_id),
+        }
+    } else {
+        envelope(500, "analytics_export_failed", &run.error, request_id)
+    }
+}
+
 /// GET /quotas/usage (DW-033): the metering read — for every
 /// quota-configured consumer (or the one named by the optional
 /// `consumer` param), each budget's current-window used/limit and the
@@ -972,6 +1109,30 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             analytics_query(ctx, body, &request_id).await
         }
+        // GET /analytics/exports (DW-120): the export run ledger,
+        // newest first. Query param: limit (default 25, 1..=100).
+        ("GET", "/analytics/exports") => analytics_exports_list(ctx, &req, &request_id).await,
+        // POST /analytics/exports/run (DW-120): manual trigger of one
+        // window's export (scheduled worker's twin). Optional JSON
+        // body: {window?, window_start_ms?}.
+        ("POST", "/analytics/exports/run") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "query_too_large",
+                            &format!("body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            analytics_exports_run(ctx, body, &request_id).await
+        }
         // A known resource path with the wrong method.
         (
             _,
@@ -982,6 +1143,8 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/analytics/dashboard"
             | "/analytics/top"
             | "/analytics/query"
+            | "/analytics/exports"
+            | "/analytics/exports/run"
             | "/quotas/usage",
         ) => envelope(
             405,

@@ -1400,6 +1400,31 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             ),
         ));
     }
+    if let Some(exports) = &a.exports {
+        if exports.directory.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.exports.directory",
+                "analytics.exports.directory is empty: exports need a real \
+                 directory to write their files into",
+            ));
+        }
+        let mut seen_formats = std::collections::BTreeSet::new();
+        for (i, f) in exports.formats.iter().enumerate() {
+            if !seen_formats.insert(f) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("analytics.exports.formats[{i}]"),
+                    format!(
+                        "duplicate export format '{f:?}': each format writes \
+                         exactly one file per window",
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// Validate GeoIP rules (DW-050): every `authorization.geoip`

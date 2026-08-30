@@ -80,8 +80,7 @@ impl Filters {
     }
 }
 
-/// Shared aggregate read: 5 metric sums then 13 bucket sums starting
-/// at column `start`.
+/// Shared aggregate read state: 5 metric sums plus 13 bucket sums.
 struct Agg {
     requests: i64,
     errors: i64,
@@ -91,21 +90,27 @@ struct Agg {
     buckets: Vec<i64>,
 }
 
+/// Shared aggregate read: 5 metric sums then 13 bucket sums starting
+/// at column `start`. NULL-tolerant: an UNGROUPED aggregate over an
+/// empty range still yields one all-NULL row (there is no GROUP BY to
+/// eliminate it), and the documented totals shape is zeros, not a
+/// type error (found by DW-120's totals statement; grouped reads are
+/// never NULL — a group exists only where rows do).
 fn read_agg(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Agg> {
     let mut i = start;
-    let requests = row.get::<_, i64>(i)?;
+    let requests = row.get::<_, Option<i64>>(i)?.unwrap_or(0);
     i += 1;
-    let errors = row.get::<_, i64>(i)?;
+    let errors = row.get::<_, Option<i64>>(i)?.unwrap_or(0);
     i += 1;
-    let rate_limited = row.get::<_, i64>(i)?;
+    let rate_limited = row.get::<_, Option<i64>>(i)?.unwrap_or(0);
     i += 1;
-    let shed = row.get::<_, i64>(i)?;
+    let shed = row.get::<_, Option<i64>>(i)?.unwrap_or(0);
     i += 1;
-    let duration_sum_ms = row.get::<_, f64>(i)?;
+    let duration_sum_ms = row.get::<_, Option<f64>>(i)?.unwrap_or(0.0);
     i += 1;
     let mut buckets = Vec::with_capacity(BUCKET_COLS);
     for _ in 0..BUCKET_COLS {
-        buckets.push(row.get::<_, i64>(i)?);
+        buckets.push(row.get::<_, Option<i64>>(i)?.unwrap_or(0));
         i += 1;
     }
     Ok(Agg {
@@ -429,13 +434,18 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
                 SUM(b12)
          FROM rollup_fixed
          WHERE gran = ? AND window_start >= ? AND window_start < ?{filter_sql}
-         GROUP BY {group_all}
+         {group_all}
          ORDER BY SUM(requests) DESC
          LIMIT ?",
         group_all = if key_len == 0 {
-            "1".to_string()
+            // No group keys: a plain aggregate over the range — ONE
+            // totals row (the documented shape). A literal `GROUP BY
+            // 1` would resolve positionally to the leading SUM(...) —
+            // an invalid aggregate-in-GROUP-BY (found by DW-120's
+            // totals statement).
+            String::new()
         } else {
-            q.group_by.join(", ")
+            format!("GROUP BY {}", q.group_by.join(", "))
         }
     );
     let limit = q.limit.unwrap_or(1000).min(10_000);

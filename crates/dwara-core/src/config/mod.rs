@@ -252,6 +252,71 @@ pub struct AnalyticsConfig {
     /// (longer values are skipped for that request).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<AnalyticsDimension>,
+    /// Scheduled usage-report exports (DW-120): durable CSV/JSON
+    /// dumps of the per-consumer usage statement, one file set per
+    /// closed UTC calendar window, written by a background worker
+    /// that reuses the analytics store's scheduling machinery. Absent
+    /// (the default): no exports run and the admin export endpoints
+    /// answer that exports are not configured. See the
+    /// `analytics::exports` module docs for the schedule, the
+    /// statement's reconciliation contract with the query API, and
+    /// the quota-column window-alignment rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<AnalyticsExports>,
+}
+
+/// Scheduled usage-report exports (DW-120, `analytics.exports`).
+///
+/// The exports worker ticks on the same background machinery as the
+/// rollup cascade, closes each UTC calendar window of the configured
+/// [`AnalyticsExportWindow`] kind once its data has settled, and
+/// writes one file per configured format into `directory` (created on
+/// demand; unwritable directories fail the run LOUD in the run record
+/// and logs — never the dataplane). Parquet is deliberately NOT a v1
+/// format: the arrow/parquet dependency weight is deferred (see the
+/// DW-156 backlog issue).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsExports {
+    /// Directory the export files are written into (created on demand
+    /// if missing). One deterministic file per (window, format); a
+    /// re-export of the same window overwrites it (idempotent output,
+    /// the rollup recompute philosophy).
+    pub directory: String,
+    /// The schedule/window kind (fixed UTC calendar windows). Default
+    /// `daily` (midnight-to-midnight UTC — aligned with the quota
+    /// daily budget's window, so a daily statement's quota column is
+    /// exactly that day's counter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<AnalyticsExportWindow>,
+    /// Output formats, a subset of `csv`/`json`; omitted or empty
+    /// means BOTH csv and json (the default). Validation rejects only
+    /// duplicates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<AnalyticsExportFormat>,
+}
+
+/// One export schedule kind (DW-120, `analytics.exports.window`).
+/// Closed set; fixed UTC calendar windows.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AnalyticsExportWindow {
+    Hourly,
+    Daily,
+    Monthly,
+}
+
+/// One export output format (DW-120, `analytics.exports.formats[]`).
+/// Closed set: `csv`, `json`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AnalyticsExportFormat {
+    Csv,
+    Json,
 }
 
 /// Per-granularity retention (DW-043, `analytics.retention`).

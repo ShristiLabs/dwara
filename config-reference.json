@@ -254,6 +254,17 @@
             "$ref": "#/$defs/AnalyticsDimension"
           }
         },
+        "exports": {
+          "description": "Scheduled usage-report exports (DW-120): durable CSV/JSON\ndumps of the per-consumer usage statement, one file set per\nclosed UTC calendar window, written by a background worker\nthat reuses the analytics store's scheduling machinery. Absent\n(the default): no exports run and the admin export endpoints\nanswer that exports are not configured. See the\n`analytics::exports` module docs for the schedule, the\nstatement's reconciliation contract with the query API, and\nthe quota-column window-alignment rule.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsExports"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "flush_ms": {
           "description": "Maximum batch latency of the background writer, in\nmilliseconds (default 1000; validated to [100, 60 000]). Not a\ncorrectness knob — the rollup grace covers multiples of this.",
           "type": [
@@ -301,6 +312,55 @@
       "required": [
         "name",
         "header"
+      ]
+    },
+    "AnalyticsExportFormat": {
+      "description": "One export output format (DW-120, `analytics.exports.formats[]`).\nClosed set: `csv`, `json`.",
+      "type": "string",
+      "enum": [
+        "csv",
+        "json"
+      ]
+    },
+    "AnalyticsExportWindow": {
+      "description": "One export schedule kind (DW-120, `analytics.exports.window`).\nClosed set; fixed UTC calendar windows.",
+      "type": "string",
+      "enum": [
+        "hourly",
+        "daily",
+        "monthly"
+      ]
+    },
+    "AnalyticsExports": {
+      "description": "Scheduled usage-report exports (DW-120, `analytics.exports`).\n\nThe exports worker ticks on the same background machinery as the\nrollup cascade, closes each UTC calendar window of the configured\n[`AnalyticsExportWindow`] kind once its data has settled, and\nwrites one file per configured format into `directory` (created on\ndemand; unwritable directories fail the run LOUD in the run record\nand logs — never the dataplane). Parquet is deliberately NOT a v1\nformat: the arrow/parquet dependency weight is deferred (see the\nDW-156 backlog issue).",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "description": "Directory the export files are written into (created on demand\nif missing). One deterministic file per (window, format); a\nre-export of the same window overwrites it (idempotent output,\nthe rollup recompute philosophy).",
+          "type": "string"
+        },
+        "formats": {
+          "description": "Output formats, a subset of `csv`/`json`; omitted or empty\nmeans BOTH csv and json (the default). Validation rejects only\nduplicates.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsExportFormat"
+          }
+        },
+        "window": {
+          "description": "The schedule/window kind (fixed UTC calendar windows). Default\n`daily` (midnight-to-midnight UTC — aligned with the quota\ndaily budget's window, so a daily statement's quota column is\nexactly that day's counter).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsExportWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "directory"
       ]
     },
     "AnalyticsRetention": {
