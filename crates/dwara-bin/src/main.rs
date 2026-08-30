@@ -458,6 +458,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // its pending queue is abandoned (the gateway is not a durable
     // queue).
     let webhook_task = dp.spawn_webhook_deliverer(shutdown_rx.clone());
+    // DW-043: the embedded analytics store — opened when the config
+    // carries an `analytics` block, workers spawned against the same
+    // shutdown watch as every other background task (the writer drains
+    // and takes a final rollup/retention pass on stop). Held alive for
+    // the process lifetime alongside the state store handle.
+    let analytics_handles = state
+        .snapshot()
+        .gateway()
+        .analytics
+        .as_ref()
+        .map(|cfg| {
+            let retention = cfg
+                .retention
+                .as_ref()
+                .map(|r| r.effective())
+                .unwrap_or(dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS);
+            let flush = cfg.flush_ms.unwrap_or(1000);
+            match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush) {
+                Ok(store) => {
+                    dp.set_analytics(Arc::clone(&store));
+                    let handles = store.spawn_workers(shutdown_rx.clone());
+                    tracing::info!(
+                        code = "analytics_open",
+                        path = %cfg.path,
+                        "embedded analytics store open; recording request outcomes"
+                    );
+                    handles
+                }
+                Err(e) => {
+                    // Fail LOUD, serve WITHOUT analytics: traffic must
+                    // not stop because a data file is unwritable — the
+                    // same posture as the state store's advisory modes.
+                    tracing::error!(
+                        code = "analytics_open_failed",
+                        path = %cfg.path,
+                        "analytics store failed to open ({e}); serving WITHOUT analytics"
+                    );
+                    Vec::new()
+                }
+            }
+        })
+        .unwrap_or_default();
     let reload_task = tokio::spawn(async move {
         let mut probes = dwara_core::active::ActiveProbes::new();
         probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
@@ -575,6 +617,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     reload_task.abort();
     cert_task.abort();
     webhook_task.abort();
+    // DW-043: analytics workers are NOT aborted — the shutdown watch
+    // tells the writer to drain, flush, and take a final rollup/retention
+    // pass (a clean restart loses nothing); give them a bounded moment
+    // inside the shutdown budget.
+    for h in analytics_handles {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
+    }
 
     // Final drain within the shutdown budget; whatever is left when the
     // deadline passes is force-closed by process exit. The deadline is

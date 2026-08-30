@@ -2,6 +2,7 @@
 //! link time bounded on CI runners.
 mod active;
 mod analytics;
+mod analytics_store;
 mod authn;
 mod authz;
 mod balance;

@@ -28,3 +28,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+# Analytics endpoint tests seed the embedded store's SQLite file
+# directly (DW-043); the store API itself is exercised through
+# dwara-core's suites.
+rusqlite = { workspace = true }

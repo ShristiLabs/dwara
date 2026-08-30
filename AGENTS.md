@@ -105,6 +105,13 @@ crates/dwara-core/src/
                       snapshot because the config publish pipeline and
                       the resilience state machines both emit onto it
   state/              SQLite store + migrations
+  analytics/          the embedded analytics store (DW-043): its own
+                      SQLite file (raw access records + 1m/5m/1h/1d
+                      additive rollups, cursor-guarded cascade,
+                      per-granularity retention, incremental vacuum);
+                      implements extensions::analytics::AnalyticsSink;
+                      the fire-and-forget channel writer must never
+                      block the request path (drop and count on full)
   security/           tls, authn, authz
   resilience/         health, retries, breaker (passive observation)
   dataplane/          proxy, upstream, balance, hardening, cors,
@@ -122,6 +129,7 @@ observability   <- (none)
 events          <- config, observability
 snapshot        <- config, events
 state           <- config
+analytics       <- config, observability, extensions
 security        <- config, state, observability
 resilience      <- config, snapshot, extensions, observability, events
 dataplane       <- all of the above
@@ -307,6 +315,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Response field masking (DW-029) | dwara-core | `masking` (end to end), `tests/unit/transforms.rs` (union + miss-is-the-leak cases) |
 | Response caching (DW-037) + request coalescing (DW-038) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation; coalescing single-flight, fail-open fallbacks, saturation, SWR no-deadlock), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
+| Embedded analytics (DW-043) | dwara-core / dwara-admin | `analytics` (e2e record path incl. custom dims), `tests/unit/analytics_store.rs` (schema, percentile math, rollup cascade exactness/idempotence/cursor-restart, retention, drop-on-full, writer drain, query layer), `admin_api` analytics cases (dashboard/top/query endpoints, closed grammar, 404 without store) |
 | Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
 | State | dwara-core | `store` |

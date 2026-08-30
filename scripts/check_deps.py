@@ -11,6 +11,7 @@ a review comment:
     events          <- config, observability
     snapshot        <- config, events
     state           <- config
+    analytics       <- config, observability, extensions
     security        <- config, state, observability
     resilience      <- config, snapshot, extensions, observability, events
     dataplane       <- everything
@@ -32,6 +33,14 @@ Placement decisions this enforces (see lib.rs's dependency table):
   import resilience, so the bus lives lower than both and the two
   publish/emit into it. The webhook deliverer reads config types and
   counts outcomes in observability — hence events' two downward deps.
+- the embedded analytics store (DW-043) is its own domain beside state:
+  it consumes the AccessRecord type (observability), the analytics
+  config block (config — which is why the retention defaults live in
+  config, the lowest consumer), and the M1 sink contract
+  (extensions::analytics::AnalyticsSink, which it implements), while
+  the dataplane only CALLS its record method and the admin crate only
+  reads its queries. Like state, it owns a SQLite file and pulls
+  rusqlite; promotion to a crate would be a git mv, not a rewrite.
 
 Usage: python3 scripts/check_deps.py [path-to-dwara-core-src]
 Exits 1 listing every upward import.
@@ -48,6 +57,7 @@ ALLOWED = {
     "events": {"config", "observability"},
     "snapshot": {"config", "events"},
     "state": {"config"},
+    "analytics": {"config", "observability", "extensions"},
     "security": {"config", "state", "observability"},
     "resilience": {"config", "snapshot", "extensions", "observability", "events"},
     "dataplane": {
@@ -57,6 +67,7 @@ ALLOWED = {
         "observability",
         "events",
         "state",
+        "analytics",
         "security",
         "resilience",
     },

@@ -211,6 +211,7 @@ fn empty_document_is_valid() {
             allow_empty_routes: false,
             hmac_auth: None,
             webhooks: Vec::new(),
+            analytics: None,
         }
     );
 }

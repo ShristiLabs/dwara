@@ -169,6 +169,11 @@ pub struct AccessRecord {
     pub shed: bool,
     pub status: u16,
     pub duration_ms: f64,
+    /// Custom analytics dimensions (DW-043): config-declared
+    /// header-sourced tags, captured at record creation. Analytics-
+    /// only — deliberately NOT part of `emit_access`'s redacted
+    /// field list.
+    pub custom: Vec<(String, String)>,
 }
 
 impl AccessRecord {
@@ -188,6 +193,7 @@ impl AccessRecord {
             shed: false,
             status: 0,
             duration_ms: 0.0,
+            custom: Vec::new(),
         }
     }
 }

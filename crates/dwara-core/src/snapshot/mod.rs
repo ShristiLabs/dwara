@@ -1264,6 +1264,142 @@ fn validate_masking(
     }
 }
 
+/// Validate the `gateway.analytics` block (DW-043): the database path
+/// must be non-empty (it is opened at startup — an empty string would
+/// silently create a throwaway temp database), `flush_ms` bounded
+/// (a sub-100 ms flush tick is timer churn; past 60 s the writer's
+/// latency is the rollup grace's problem, not a useful knob),
+/// retention monotone (a coarser table may not expire before a finer
+/// one — the cascade would be recomputing from deleted history), and
+/// dimensions name-valid (`[a-z0-9_]{1,32}` — the name is the rollup
+/// table's `dim` key), header-representable, unique, and at most 16
+/// (every dimension multiplies rollup cardinality).
+fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(a) = &gateway.analytics else { return };
+    if a.path.trim().is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "analytics.path",
+            "analytics.path is empty: the database path must name a real file \
+             (an empty path would open a throwaway temp database, losing every \
+             record)",
+        ));
+    }
+    if let Some(flush) = a.flush_ms {
+        if !(100..=60_000).contains(&flush) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.flush_ms",
+                format!(
+                    "flush_ms {flush} is out of range: must be 100..=60000 \
+                     (below 100 is timer churn; above 60000 adds nothing the \
+                     rollup grace does not already cover)"
+                ),
+            ));
+        }
+    }
+    if let Some(r) = &a.retention {
+        let e = r.effective();
+        let names = ["raw_ms", "m1_ms", "m5_ms", "h1_ms", "d1_ms"];
+        for i in 0..5 {
+            let v = e[i];
+            let cap: i64 = match i {
+                0 => 7 * 86_400_000,     // raw: a week
+                1 => 30 * 86_400_000,    // 1m: a month
+                2 => 90 * 86_400_000,    // 5m: a quarter
+                3 => 365 * 86_400_000,   // 1h: a year
+                _ => 3_650 * 86_400_000, // 1d: a decade
+            };
+            if v > cap {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("analytics.retention.{}", names[i]),
+                    format!(
+                        "{} {} ms exceeds the cap {} ms (bounded disk is the \
+                         point of the store)",
+                        names[i], v, cap
+                    ),
+                ));
+            }
+        }
+        for w in 0..4 {
+            if e[w + 1] < e[w] {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("analytics.retention.{}", names[w + 1]),
+                    format!(
+                        "{} {} ms is shorter than {} {} ms: a coarser \
+                         rollup may not expire before the finer table it \
+                         cascades from",
+                        names[w + 1],
+                        e[w + 1],
+                        names[w],
+                        e[w]
+                    ),
+                ));
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, dim) in a.dimensions.iter().enumerate() {
+        let field = format!("analytics.dimensions[{i}]");
+        let name_ok = !dim.name.is_empty()
+            && dim.name.len() <= 32
+            && dim
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !name_ok {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.name"),
+                format!(
+                    "dimension name '{}' is invalid: lowercase [a-z0-9_], \
+                     1..=32 bytes (it is the rollup dimension key)",
+                    dim.name
+                ),
+            ));
+        }
+        match hyper::header::HeaderName::try_from(dim.header.as_str()) {
+            Ok(_) => {}
+            Err(e) => issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.header"),
+                format!("header name '{}' is not representable: {e}", dim.header),
+            )),
+        }
+        if !seen.insert(dim.name.to_ascii_lowercase()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("{field}.name"),
+                format!(
+                    "duplicate dimension name '{}' (each name is one rollup key)",
+                    dim.name
+                ),
+            ));
+        }
+    }
+    if a.dimensions.len() > 16 {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "analytics.dimensions",
+            format!(
+                "{} dimensions declared; at most 16 (each multiplies rollup \
+                 cardinality)",
+                a.dimensions.len()
+            ),
+        ));
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected — including `quota_near_limit`,
@@ -1485,6 +1621,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 
     // DW-044: alert/event webhook targets.
     validate_webhooks(gateway, &mut issues);
+
+    // DW-043: the embedded analytics store block.
+    validate_analytics(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -3203,6 +3342,7 @@ impl Snapshot {
                 allow_empty_routes: false,
                 hmac_auth: None,
                 webhooks: Vec::new(),
+                analytics: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

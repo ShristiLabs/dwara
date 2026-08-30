@@ -16,9 +16,12 @@
 //! buffer) produce [`ExtensionsError::Backend`]; call sites should log and
 //! continue, never fail the request. No retries.
 //!
-//! **Editions:** OSS ships [`InMemoryAnalyticsSink`] (bounded ring buffer;
-//! DW-021 builds the embedded rollup pipeline behind this trait). Ent
-//! planned: federated sink + warehouse export.
+//! **Editions:** OSS ships [`InMemoryAnalyticsSink`] (bounded ring buffer)
+//! and the DW-043 embedded store (`analytics::EmbeddedAnalytics`, SQLite
+//! rollups), which implements this contract on top of the richer
+//! per-request fields below. Ent planned: federated sink + warehouse
+//! export (DW-095); raw-record firehose (DW-121) taps the same event
+//! shape.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -32,8 +35,11 @@ use super::ExtensionsError;
 /// Deliberately minimal and extensible: new fields are additive. `kind`
 /// selects the event type (e.g. `request`); optional route/consumer
 /// identifiers carry the common correlation keys, and `attributes` holds
-/// everything else as string pairs to avoid a schema lock-in at M1.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// everything else as string pairs to avoid a schema lock-in at M1. The
+/// DW-043 request-completion fields (listener, method, duration,
+/// outcomes) were added additively so the embedded store consumes this
+/// type directly; `attributes` carries custom analytics dimensions.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Event {
     /// Event type discriminator, e.g. `request`.
@@ -48,7 +54,21 @@ pub struct Event {
     pub endpoint: Option<String>,
     /// Upstream response status code, if a response was produced.
     pub status: Option<u16>,
-    /// Additional string key/value data.
+    /// Listener that accepted the request (DW-043).
+    pub listener: Option<String>,
+    /// HTTP method (DW-043).
+    pub method: Option<String>,
+    /// End-to-end request duration in milliseconds (DW-043).
+    pub duration_ms: Option<f64>,
+    /// Upstream attempts made (DW-043).
+    pub attempts: Option<u32>,
+    /// The request was rejected by a rate limit (DW-043).
+    pub rate_limited: bool,
+    /// The request failed through an open breaker (DW-043).
+    pub broken: bool,
+    /// The request was shed by admission control (DW-043).
+    pub shed: bool,
+    /// Additional string key/value data (custom dimensions ride here).
     pub attributes: Vec<(String, String)>,
 }
 
@@ -65,6 +85,13 @@ impl Event {
             consumer: None,
             endpoint: None,
             status: None,
+            listener: None,
+            method: None,
+            duration_ms: None,
+            attempts: None,
+            rate_limited: false,
+            broken: false,
+            shed: false,
             attributes: Vec::new(),
         }
     }

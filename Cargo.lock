@@ -496,6 +496,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
+ "rusqlite",
  "rustls",
  "serde_json",
  "tempfile",

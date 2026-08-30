@@ -153,6 +153,7 @@ fn good_gateway() -> Gateway {
         allow_empty_routes: false,
         hmac_auth: None,
         webhooks: Vec::new(),
+        analytics: None,
     }
 }
 

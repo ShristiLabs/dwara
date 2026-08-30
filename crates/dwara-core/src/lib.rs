@@ -55,6 +55,7 @@
 //! stay out of the rendered docs. Use the domain-qualified path in new
 //! code (`dwara_core::dataplane::proxy`, `dwara_core::security::tls`).
 
+pub mod analytics;
 pub mod config;
 pub mod dataplane;
 pub mod error;

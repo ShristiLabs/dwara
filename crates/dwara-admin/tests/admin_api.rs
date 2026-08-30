@@ -1370,3 +1370,177 @@ async fn cache_purge_error_shapes() {
         "stats carries the cache block: {body}"
     );
 }
+
+// --- analytics endpoints (DW-043) ----------------------------------------
+
+async fn plaintext_request(addr: std::net::SocketAddr, req: &str) -> (u16, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut buf),
+    )
+    .await
+    .expect("read bound")
+    .expect("read ok");
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, text)
+}
+
+#[tokio::test]
+async fn analytics_endpoints_404_without_a_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    for path in ["/analytics/dashboard", "/analytics/top"] {
+        let (status, body) = plaintext_request(
+            server.addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(body.contains("analytics_not_configured"), "{body}");
+    }
+    let (status, body) = plaintext_request(
+        server.addr,
+        "POST /analytics/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+}
+
+#[tokio::test]
+async fn analytics_dashboard_top_and_query_serve_rollups() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw043-admin-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+    )
+    .unwrap();
+    server.dp.set_analytics(Arc::clone(&store));
+    // Seed deterministic history directly (the writer/rollup pipeline
+    // is pinned in dwara-core's suites; these tests pin the ENDPOINTS).
+    store
+        .query(|c| {
+            for i in 0..4i64 {
+                c.execute(
+                    "INSERT INTO raw (ts_ms, listener, route, consumer, upstream, method,
+                                      status, status_class, duration_ms, attempts,
+                                      rate_limited, broken, shed, dims)
+                     VALUES (?1, 'edge', 'api', 'acme', 'up', 'GET', ?2, ?3, 10.0, 1,
+                             ?4, 0, 0, '{}')",
+                    rusqlite::params![
+                        i * 60_000 + 1_000,
+                        if i == 3 { 500 } else { 200 },
+                        if i == 3 { "5xx" } else { "2xx" },
+                        if i == 2 { 1 } else { 0 },
+                    ],
+                )
+                .unwrap();
+            }
+            dwara_core::analytics::rollup::roll_raw_range(c, 0, 4 * 60_000).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    // Dashboard: four 1-minute windows, 4 requests, 1 error, 1
+    // rate-limited.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/dashboard?from_ms=0&to_ms=240000&gran=0 HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // Per-window series: four points of one request each; the error
+    // lands in window 180000 and the rate-limit rejection in 120000.
+    assert_eq!(body.matches("\"window_start\"").count(), 4, "{body}");
+    assert!(body.contains("\"errors\":1"), "{body}");
+    assert!(body.contains("\"rate_limited\":1"), "{body}");
+
+    // Dashboard drill-down by consumer with an equality filter.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/dashboard?from_ms=0&to_ms=240000&gran=0&group_by=consumer&consumer=acme HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"key\":\"acme\""), "{body}");
+
+    // Bad params are rejected with named envelopes.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/dashboard?from_ms=9&to_ms=1 HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/dashboard?from_ms=0&to_ms=240000&group_by=evil HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("analytics_bad_group_by"), "{body}");
+
+    // Top: consumers and error_prone.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/top?kind=consumers&from_ms=0&to_ms=240000&n=5 HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"name\":\"acme\""), "{body}");
+    let (status, _body) = plaintext_request(
+        server.addr,
+        "GET /analytics/top?kind=nope&from_ms=0&to_ms=240000 HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // Structured query: group by status_class.
+    let query = r#"{"from_ms":0,"to_ms":240000,"gran":0,"group_by":["status_class"]}"#;
+    let req = format!(
+        "POST /analytics/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        query.len(),
+        query
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"requests\":3"), "{body}");
+    assert!(body.contains("\"requests\":1"), "{body}");
+
+    // The closed grammar rejects SQL text, not by pattern, by column
+    // set.
+    let evil =
+        r#"{"from_ms":0,"to_ms":240000,"gran":0,"group_by":["status_class; DROP TABLE raw"]}"#;
+    let req = format!(
+        "POST /analytics/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        evil.len(),
+        evil
+    );
+    let (status, body) = plaintext_request(server.addr, &req).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("analytics_query_invalid"), "{body}");
+    let _ = std::fs::remove_file(&db);
+}

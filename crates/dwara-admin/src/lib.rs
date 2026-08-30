@@ -383,6 +383,238 @@ async fn purge_cache(ctx: &AdminContext, body: Bytes, request_id: &str) -> Respo
     json_response(200, serde_json::json!({ "route": route, "epoch": epoch }))
 }
 
+/// Percent-decode one query-string component (`%XX` and `+`-as-space;
+/// a stray `%` without two hex digits decodes as itself — the admin
+/// surface is mTLS-gated, lenient decode beats rejecting).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                if let (Some(h), Some(l)) = (
+                    bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
+                    bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
+                ) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse a request URI's query string into decoded (key, value) pairs.
+fn query_params(uri: &hyper::Uri) -> Vec<(String, String)> {
+    let Some(q) = uri.query() else {
+        return Vec::new();
+    };
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| match pair.split_once('=') {
+            Some((k, v)) => (percent_decode(k), percent_decode(v)),
+            None => (percent_decode(pair), String::new()),
+        })
+        .collect()
+}
+
+/// Look one parameter up (first occurrence wins).
+fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The not-configured answer shared by all three analytics endpoints.
+fn analytics_absent(request_id: &str) -> Response<AdminBody> {
+    envelope(
+        404,
+        "analytics_not_configured",
+        "the gateway is running without an analytics store (configure gateway.analytics \
+         and restart)",
+        request_id,
+    )
+}
+
+/// GET /analytics/dashboard (DW-043).
+async fn analytics_dashboard(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let params = query_params(req.uri());
+    let (Some(from_ms), Some(to_ms)) = (
+        param(&params, "from_ms").and_then(|v| v.parse::<i64>().ok()),
+        param(&params, "to_ms").and_then(|v| v.parse::<i64>().ok()),
+    ) else {
+        return envelope(
+            400,
+            "analytics_bad_range",
+            "from_ms and to_ms are required epoch-millisecond bounds",
+            request_id,
+        );
+    };
+    if from_ms >= to_ms {
+        return envelope(
+            400,
+            "analytics_bad_range",
+            "from_ms must be < to_ms",
+            request_id,
+        );
+    }
+    let gran = param(&params, "gran")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    if gran > 3 {
+        return envelope(400, "analytics_bad_gran", "gran must be 0..=3", request_id);
+    }
+    let group_by = param(&params, "group_by");
+    if let Some(g) = group_by {
+        if !dwara_core::analytics::query::DIM_COLUMNS.contains(&g) {
+            return envelope(
+                400,
+                "analytics_bad_group_by",
+                &format!(
+                    "group_by must be one of: {}",
+                    dwara_core::analytics::query::DIM_COLUMNS.join(", ")
+                ),
+                request_id,
+            );
+        }
+    }
+    let filters = dwara_core::analytics::query::Filters {
+        listener: param(&params, "listener").map(str::to_string),
+        route: param(&params, "route").map(str::to_string),
+        upstream: param(&params, "upstream").map(str::to_string),
+        consumer: param(&params, "consumer").map(str::to_string),
+        method: param(&params, "method").map(str::to_string),
+        status_class: param(&params, "status_class").map(str::to_string),
+    };
+    match store.query(|c| {
+        dwara_core::analytics::query::dashboard(c, from_ms, to_ms, gran, group_by, &filters)
+    }) {
+        Ok(points) => json_response(
+            200,
+            serde_json::json!({
+                "from_ms": from_ms,
+                "to_ms": to_ms,
+                "gran": gran,
+                "points": points,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_query_failed", &e.to_string(), request_id),
+    }
+}
+
+/// GET /analytics/top (DW-043).
+async fn analytics_top(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let params = query_params(req.uri());
+    let Some(kind_s) = param(&params, "kind") else {
+        return envelope(
+            400,
+            "analytics_bad_kind",
+            "kind is required: consumers|routes|slowest|error_prone|rate_limited",
+            request_id,
+        );
+    };
+    let Some(kind) = dwara_core::analytics::query::TopKind::parse(kind_s) else {
+        return envelope(
+            400,
+            "analytics_bad_kind",
+            "kind must be one of: consumers|routes|slowest|error_prone|rate_limited",
+            request_id,
+        );
+    };
+    let (Some(from_ms), Some(to_ms)) = (
+        param(&params, "from_ms").and_then(|v| v.parse::<i64>().ok()),
+        param(&params, "to_ms").and_then(|v| v.parse::<i64>().ok()),
+    ) else {
+        return envelope(
+            400,
+            "analytics_bad_range",
+            "from_ms and to_ms are required epoch-millisecond bounds",
+            request_id,
+        );
+    };
+    let n = param(&params, "n")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
+    match store.query(|c| dwara_core::analytics::query::top(c, kind, from_ms, to_ms, n)) {
+        Ok(entries) => json_response(
+            200,
+            serde_json::json!({
+                "kind": kind_s,
+                "from_ms": from_ms,
+                "to_ms": to_ms,
+                "n": n,
+                "entries": entries,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_query_failed", &e.to_string(), request_id),
+    }
+}
+
+/// POST /analytics/query (DW-043): the structured query endpoint.
+async fn analytics_query(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let q: dwara_core::analytics::query::StructuredQuery = match serde_json::from_slice(&body) {
+        Ok(q) => q,
+        Err(err) => {
+            return envelope(
+                400,
+                "analytics_query_invalid",
+                &format!("body is not a valid structured query: {err}"),
+                request_id,
+            )
+        }
+    };
+    if let Err(err) = q.validate() {
+        return envelope(400, "analytics_query_invalid", &err.to_string(), request_id);
+    }
+    match store.query(|c| dwara_core::analytics::query::structured(c, &q)) {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "query": { "from_ms": q.from_ms, "to_ms": q.to_ms, "gran": q.gran,
+                           "group_by": q.group_by },
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_query_failed", &e.to_string(), request_id),
+    }
+}
+
 /// Validate + compile a candidate gateway as a dry run; Err carries a
 /// message listing EVERY problem (validation reports all issues at
 /// once, never fail-fast).
@@ -568,8 +800,47 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             purge_cache(&ctx, body, &request_id).await
         }
+        // GET /analytics/dashboard (DW-043): per-window series (requests,
+        // error rate, latency percentiles) with optional drill-down
+        // (`group_by`) and filters. Query params: from_ms, to_ms, gran
+        // (0..=3), group_by, and any of listener/route/upstream/
+        // consumer/method/status_class as equality filters.
+        ("GET", "/analytics/dashboard") => analytics_dashboard(ctx, &req, &request_id).await,
+        // GET /analytics/top (DW-043): Top-N reports. Query params: kind
+        // (consumers|routes|slowest|error_prone|rate_limited), from_ms,
+        // to_ms, n.
+        ("GET", "/analytics/top") => analytics_top(ctx, &req, &request_id).await,
+        // POST /analytics/query (DW-043): the structured query — a
+        // closed JSON grammar translated to SQL (never SQL text).
+        ("POST", "/analytics/query") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "query_too_large",
+                            &format!("query body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            analytics_query(ctx, body, &request_id).await
+        }
         // A known resource path with the wrong method.
-        (_, "/config" | "/health" | "/stats" | "/cache/purge") => envelope(
+        (
+            _,
+            "/config"
+            | "/health"
+            | "/stats"
+            | "/cache/purge"
+            | "/analytics/dashboard"
+            | "/analytics/top"
+            | "/analytics/query",
+        ) => envelope(
             405,
             "method_not_allowed",
             &format!("{method} not allowed here"),

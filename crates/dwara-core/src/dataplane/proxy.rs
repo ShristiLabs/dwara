@@ -508,6 +508,15 @@ pub struct DataPlane {
     /// through epoch bumps computed at `refresh` (see
     /// `response_cache::ResponseCache::note_generation`).
     response_cache: Arc<crate::dataplane::response_cache::ResponseCache>,
+    /// The embedded analytics store (DW-043): set once at startup by
+    /// dwara-bin when the config carries an `analytics` block; None =
+    /// analytics off, `record_analytics` is a no-op. ArcSwap (not a
+    /// RwLock) because the completion path reads it on EVERY request.
+    /// The sink call itself is fire-and-forget (`try_send` onto a
+    /// bounded channel — a full channel drops and counts, never
+    /// blocks); queries (admin endpoints) take the connection's mutex
+    /// briefly behind the background writer's batched transactions.
+    analytics: arc_swap::ArcSwapOption<crate::analytics::EmbeddedAnalytics>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -606,6 +615,7 @@ impl DataPlane {
             webhook_targets: target_tx,
             webhook_targets_anchor: target_anchor,
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
+            analytics: arc_swap::ArcSwapOption::empty(),
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -630,6 +640,33 @@ impl DataPlane {
             .read()
             .expect("state store lock poisoned")
             .clone()
+    }
+
+    /// Attach the embedded analytics store (DW-043): dwara-bin opens
+    /// the configured database, spawns the writer/rollup workers, and
+    /// hands the store here ONCE, before serving traffic. There is no
+    /// detach: analytics lifetime is the process lifetime (the
+    /// database file outlives restarts; the runtime handle does not).
+    pub fn set_analytics(&self, store: Arc<crate::analytics::EmbeddedAnalytics>) {
+        self.analytics.store(Some(store));
+    }
+
+    /// The embedded analytics store when one is attached (DW-043;
+    /// None = the analytics endpoints 404 and recording is a no-op).
+    /// Admin surface seam.
+    pub fn analytics(&self) -> Option<Arc<crate::analytics::EmbeddedAnalytics>> {
+        self.analytics.load_full()
+    }
+
+    /// The request-completion analytics hook (DW-043): fire-and-forget
+    /// record of one finished request. No-op (one ArcSwap load) when
+    /// analytics is not configured; never blocks (the sink is a
+    /// bounded-channel `try_send` that drops and counts on full).
+    fn record_analytics(&self, rec: &observability::AccessRecord) {
+        let guard = self.analytics.load();
+        if let Some(store) = &*guard {
+            store.record(rec);
+        }
     }
 
     /// Attach the per-deployment credential pepper (#124). The bytes are
@@ -1031,6 +1068,24 @@ where
         route = tracing::field::Empty
     );
     let mut rec = AccessRecord::new(request_id.clone(), method, path, listener);
+    // Custom analytics dimensions (DW-043): header-sourced tags read
+    // HERE, while the request head is still in hand (the completion
+    // seam has only the record). The dimension list is read from the
+    // CURRENT generation, so reloads add/rename dimensions live.
+    if let Some(dims) = dp.current().snapshot.gateway().analytics.as_ref() {
+        for dim in &dims.dimensions {
+            if let Some(v) = req.headers().get(&dim.header) {
+                // First value of a repeated header wins; non-UTF-8 and
+                // over-128-byte values are skipped (bounded rollup
+                // cardinality per value, documented in the config).
+                if let Ok(s) = v.to_str() {
+                    if !s.is_empty() && s.len() <= 128 {
+                        rec.custom.push((dim.name.clone(), s.to_string()));
+                    }
+                }
+            }
+        }
+    }
     obs.active_requests().inc();
     let mut resp = handle_inner(dp, peer, req, &request_id, &mut rec, &root)
         .instrument(root.clone())
@@ -1040,6 +1095,7 @@ where
     rec.status = status;
     rec.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
+    dp.record_analytics(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
     if obs.should_log_access(status) {
         observability::emit_access(&rec);

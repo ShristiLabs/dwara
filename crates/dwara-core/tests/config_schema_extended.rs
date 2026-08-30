@@ -586,6 +586,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         allow_empty_routes: false,
         hmac_auth: None,
         webhooks: Vec::new(),
+        analytics: None,
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");
@@ -753,4 +754,93 @@ fn unknown_fields_are_still_rejected_on_the_new_attachments() {
         "listeners:\n  - name: edge\n    address: 0.0.0.0\n    port: 1\n    policy: [x]\n",
     );
     assert_eq!(err.path, "listeners[0].policy");
+}
+
+// --- Analytics validation (DW-043) ---------------------------------------
+
+#[test]
+fn validation_rejects_bad_analytics_blocks() {
+    let base = "listeners: []\nroutes:\n  - name: r\n    service: s\n    match:\n      path: { type: regex, value: /.* }\n    action: { type: respond, status: 200 }\n";
+    // A valid block passes clean.
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      dimensions:\n        - name: plan\n          header: x-plan\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.contains("analytics")),
+        "valid analytics block: {issues:?}"
+    );
+    // Empty path would open a throwaway temp database.
+    let gw = parse_ok(&format!("{base}analytics: {{ path: ' ' }}\n"));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.path" && i.message.contains("empty")),
+        "empty path: {issues:?}"
+    );
+    // flush_ms bounds.
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      flush_ms: 10\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.flush_ms" && i.message.contains("range")),
+        "flush under floor: {issues:?}"
+    );
+    // Retention: a coarser table may not expire before a finer one.
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      retention: {{ m5_ms: 60000 }}\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.retention.m5_ms" && i.message.contains("shorter")),
+        "monotonicity: {issues:?}"
+    );
+    // Retention caps (bounded disk).
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      retention: {{ raw_ms: 999999999999 }}\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.retention.raw_ms" && i.message.contains("cap")),
+        "raw cap: {issues:?}"
+    );
+    // Dimension name grammar, bad header, duplicates.
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      dimensions:\n        - name: 'Bad Name!'\n          header: x-plan\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.dimensions[0].name"),
+        "dimension name grammar: {issues:?}"
+    );
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      dimensions:\n        - name: a\n          header: 'not a header'\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.dimensions[0].header"),
+        "bad header name: {issues:?}"
+    );
+    let gw = parse_ok(&format!(
+        "{base}analytics:\n      path: /tmp/a.db\n      dimensions:\n        - name: a\n          header: x-a\n        - name: a\n          header: x-b\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "analytics.dimensions[1].name" && i.message.contains("duplicate")),
+        "duplicate dimension: {issues:?}"
+    );
 }

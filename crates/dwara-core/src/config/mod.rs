@@ -197,6 +197,127 @@ pub struct Gateway {
     /// are still counted (emitted/dropped) but delivered nowhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhooks: Vec<Webhook>,
+    /// The embedded analytics store (DW-043). Absent (the default):
+    /// no analytics database, request records go nowhere beyond the
+    /// Prometheus families and the sampled access log, and the admin
+    /// API's analytics endpoints answer 404. When present, the
+    /// gateway opens a SEPARATE SQLite file (never the state store's
+    /// database) at `path`, feeds every completed request's access
+    /// record to it on a fire-and-forget channel (a full channel
+    /// DROPS and counts — analytics can never slow the dataplane),
+    /// rolls raw records up through 1m/5m/1h/1d additive tables with
+    /// per-granularity retention, and serves the dashboard/Top-N/
+    /// structured-query endpoints from the admin listener. See the
+    /// `analytics` module docs for the write path and the bounded-disk
+    /// story. Part of startup wiring (the database opens once); the
+    /// DIMENSIONS list is read live from the current generation so a
+    /// reload can add or rename dimensions without a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics: Option<AnalyticsConfig>,
+}
+
+/// The embedded analytics store config (DW-043, `gateway.analytics`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsConfig {
+    /// Filesystem path of the analytics SQLite database. The file is
+    /// created (and migrated) on first open. A separate file from the
+    /// state store on purpose: retention deletes and incremental
+    /// vacuum churn must never compact the identity store.
+    pub path: String,
+    /// Maximum batch latency of the background writer, in
+    /// milliseconds (default 1000; validated to [100, 60 000]). Not a
+    /// correctness knob — the rollup grace covers multiples of this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_ms: Option<u64>,
+    /// Per-store retention, in milliseconds (defaults: raw 24 h, 1m
+    /// 48 h, 5m 7 d, 1h 30 d, 1d 365 d). Validation enforces each
+    /// floor (a granularity must outlive its own window comfortably)
+    /// and monotonicity (no coarser table may expire before a finer
+    /// one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<AnalyticsRetention>,
+    /// Custom dimensions (DW-043): request-header-sourced tags that
+    /// become analytics dimensions — `x-plan` as dimension `plan`,
+    /// for consumer tier / plan / feature-flag style cuts the fixed
+    /// dimensions cannot express. Extracted at request completion
+    /// capture; analytics-only (never added to the access log). At
+    /// most 16 (cardinality guard); values are capped at 128 bytes
+    /// (longer values are skipped for that request).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<AnalyticsDimension>,
+}
+
+/// Per-granularity retention (DW-043, `analytics.retention`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsRetention {
+    /// Raw access records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_ms: Option<i64>,
+    /// The 1-minute rollup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m1_ms: Option<i64>,
+    /// The 5-minute rollup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m5_ms: Option<i64>,
+    /// The 1-hour rollup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h1_ms: Option<i64>,
+    /// The 1-day rollup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d1_ms: Option<i64>,
+}
+
+/// Default per-granularity retention (ms), indexed [raw, 1m, 5m, 1h,
+/// 1d] — a week of traffic at every granularity a week query wants,
+/// bounded disk at the 1-minute grain (DW-043). Lives in `config`
+/// (the lowest consuming domain) so both validation and the analytics
+/// store read ONE definition.
+pub const ANALYTICS_DEFAULT_RETENTION_MS: [i64; 5] = [
+    86_400_000,     // raw
+    172_800_000,    // 1m
+    604_800_000,    // 5m
+    2_592_000_000,  // 1h
+    31_536_000_000, // 1d
+];
+
+impl AnalyticsRetention {
+    /// Resolve to the effective [raw, m1, m5, h1, d1] millisecond
+    /// set, defaulting absent entries (and clamping each to its
+    /// floor so programmatic builders cannot under-retain below a
+    /// window's own lifetime).
+    pub fn effective(&self) -> [i64; 5] {
+        let d = ANALYTICS_DEFAULT_RETENTION_MS;
+        let floors = [
+            5 * 60_000,      // raw: five fine windows
+            10 * 60_000,     // m1
+            60 * 60_000,     // m5
+            24 * 3_600_000,  // h1
+            30 * 86_400_000, // d1
+        ];
+        [
+            self.raw_ms.unwrap_or(d[0]).max(floors[0]),
+            self.m1_ms.unwrap_or(d[1]).max(floors[1]),
+            self.m5_ms.unwrap_or(d[2]).max(floors[2]),
+            self.h1_ms.unwrap_or(d[3]).max(floors[3]),
+            self.d1_ms.unwrap_or(d[4]).max(floors[4]),
+        ]
+    }
+}
+
+/// One custom analytics dimension (DW-043,
+/// `analytics.dimensions[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsDimension {
+    /// The dimension name: lowercase `[a-z0-9_]`, at most 32 bytes —
+    /// it becomes the rollup table's `dim` key and the query field.
+    pub name: String,
+    /// The request header whose value is captured (case-insensitive,
+    /// as HTTP header names are). The FIRST value of a repeated
+    /// header wins; non-UTF-8 and over-128-byte values are skipped.
+    pub header: String,
 }
 
 /// One alert/event webhook target (DW-044, `gateway.webhooks[]`).

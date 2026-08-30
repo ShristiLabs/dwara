@@ -9,6 +9,47 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Embedded analytics store (DW-043): an optional `analytics` block on
+  the gateway config opens a SEPARATE SQLite database (never the state
+  store's file) that records every completed request and answers
+  traffic-history queries from the mTLS admin API. The write path is
+  fire-and-forget by construction: the request-completion seam hands
+  the redacted access record to a bounded channel (`try_send`; a full
+  channel DROPS and counts — analytics can never slow or block the
+  dataplane), and a background writer batches raw rows in
+  transactions, then a maintenance worker rolls them through a fixed
+  cascade — raw → 1m → 5m → 1h → 1d — where every stage aggregates
+  the previous stage's COMPLETED windows (a 60 s grace absorbs writer
+  lag), each granularity keeps a cursor advanced in the same
+  transaction as the rows it covers (a crash never double-counts),
+  and every aggregation is a wholesale window RECOMPUTE, so re-running
+  any range — after a crash, a restored backup, or a cursor reset —
+  reproduces identical rows. Rollup rows are fully additive (request/
+  error/rate-limit/shed counters, duration sum/max, and a 13-bucket
+  latency histogram whose bounds are fixed, so any set of windows
+  merges by summation and percentiles estimate without per-request
+  samples). Retention is per-granularity (defaults: raw 24 h, 1m 48 h,
+  5m 7 d, 1h 30 d, 1d 365 d; validated monotone and capped) with
+  incremental vacuum returning pages to the filesystem — bounded disk
+  is the point. The read side serves three admin endpoints:
+  `GET /analytics/dashboard` (per-window requests, error rate,
+  p50/p95/p99, rate-limit and shed counts, with drill-down group_by
+  and equality filters), `GET /analytics/top` (the five frozen
+  reports: top consumers, top routes, slowest, most error-prone,
+  rate-limit offenders), and `POST /analytics/query` — a structured
+  query over a CLOSED grammar translated to parameterized SQL (six
+  groupable dimension columns; never SQL text from the caller).
+  Custom dimensions (`analytics.dimensions[]`) tag requests from
+  configured request headers (e.g. `x-plan` as dimension `plan`) at
+  completion-time capture — analytics-only, deliberately never added
+  to the redacted access log — and aggregate into their own rollup
+  table. The store implements the M1 `extensions::analytics`
+  `AnalyticsSink` contract (extended additively with the per-request
+  fields), making it the OSS implementation of the seam the federated
+  analytics (DW-095) and raw-record firehose (DW-121) pipelines will
+  share. All endpoints 404 with a named envelope when no store is
+  configured; the database open failure is loud but non-fatal (serve
+  without analytics).
 - Protocol hardening pass 2 (DW-030), three features. **PROXY protocol
   acceptance** (`listeners[].proxy_protocol`, opt-in, default false):
   a listener behind an L4 load balancer reads a PROXY protocol v1 or
