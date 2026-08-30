@@ -51,6 +51,8 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -87,6 +89,7 @@ fn test_upstream(
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        oauth2_client_credentials: None,
     }
 }
 
@@ -411,6 +414,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -429,6 +433,8 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     });
     let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
     assert!(fields.contains(&"connection_cap"));
@@ -479,6 +485,8 @@ fn with_root_certificates_rejects_malformed_root() {
             analytics_stream: None,
             geoip: None,
             admission_queue: None,
+            mtls_consumer_mapping: None,
+            mtls_forward_headers: None,
         })
         .expect("publish");
     let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate

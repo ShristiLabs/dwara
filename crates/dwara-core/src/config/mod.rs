@@ -246,6 +246,31 @@ pub struct Gateway {
     /// on an uncapped gateway, the same rule as `load_shed_dry_run`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_queue: Option<AdmissionQueue>,
+    /// mTLS client-certificate consumer mapping (DW-035): maps a
+    /// VERIFIED client certificate (its SHA-256 fingerprint or subject
+    /// CN) to a consumer name, so a client presenting a valid mTLS
+    /// certificate is authenticated WITHOUT an API key, JWT, or other
+    /// header credential — the certificate IS the credential. The
+    /// certificate must still chain to a listener's `client_ca_file`
+    /// (verified at the TLS layer); this mapping only resolves an
+    /// ALREADY-VERIFIED certificate to a consumer. Distinct from the
+    /// per-consumer `mtls` credential (which binds a cert to ONE
+    /// consumer's credential list): this is a gateway-level table that
+    /// can map certificates independent of the consumer credential
+    /// registry. Absent (the default): mTLS certificates are matched
+    /// only through consumers' `mtls` credentials (the DW-019 path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_consumer_mapping: Option<MtlsConsumerMapping>,
+    /// Identity-forwarding headers (DW-035): when mTLS client auth is
+    /// used, the gateway forwards client certificate metadata to the
+    /// upstream as `X-Client-Cert-*` headers. These headers are
+    /// GATEWAY-SET: any inbound headers with these names are STRIPPED
+    /// from the client request before the gateway adds its own
+    /// (spoofing prevention — the "without headers spoofing" part of
+    /// the done-when). Absent (the default): no `X-Client-Cert-*`
+    /// headers are forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_forward_headers: Option<MtlsForwardHeaders>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -287,6 +312,93 @@ pub struct AdmissionQueue {
 
 fn default_true() -> bool {
     true
+}
+
+/// mTLS client-certificate consumer mapping (DW-035,
+/// `gateway.mtls_consumer_mapping`).
+///
+/// Maps a VERIFIED client certificate to a consumer name by its
+/// SHA-256 fingerprint (lowercase colon-separated hex of the DER) or
+/// by subject CommonName. When enabled and a client presents a
+/// certificate that chains to a listener's `client_ca_file` but
+/// matches NO entry in this table, the gateway returns 401
+/// `mtls_consumer_not_mapped` (the certificate was verified but is not
+/// a known caller). A client that presents NO certificate on a
+/// listener with this mapping enabled falls through to the other
+/// authentication families (or 401 if the route requires auth and no
+/// family resolves).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MtlsConsumerMapping {
+    /// Master switch. Default false: the mapping is inert and mTLS
+    /// certificates are matched only through consumers' `mtls`
+    /// credentials (the DW-019 path).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Fingerprint-to-consumer entries. Each `fingerprint` is the
+    /// SHA-256 of the client certificate DER as lowercase
+    /// colon-separated hex (e.g. `ab:cd:ef:...`). The fingerprint is
+    /// the EXACT bytes the gateway computes from the presented
+    /// certificate, so a re-issued certificate needs a new entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<MtlsFingerprintMapping>,
+    /// Subject-CN-to-consumer mapping (alternative to `consumers`):
+    /// maps the certificate's subject CommonName to a consumer name.
+    /// Binding by subject CN survives certificate re-issue under the
+    /// same CN; the certificate must still chain to a listener's
+    /// `client_ca_file`. Keys are exact, case-sensitive CN strings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub subject_cn_mapping: std::collections::BTreeMap<String, String>,
+}
+
+/// One fingerprint-to-consumer mapping entry (DW-035,
+/// `mtls_consumer_mapping.consumers[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MtlsFingerprintMapping {
+    /// SHA-256 fingerprint of the client certificate DER as lowercase
+    /// colon-separated hex (e.g. `ab:cd:ef:...`). Validated to be
+    /// 64 hex digits with optional colon separators.
+    pub fingerprint: String,
+    /// The consumer name this certificate resolves to. Must reference
+    /// a consumer in the `consumers` list (validation rejects an
+    /// unknown name).
+    pub consumer: String,
+}
+
+/// Identity-forwarding headers for mTLS client auth (DW-035,
+/// `gateway.mtls_forward_headers`).
+///
+/// When enabled, the gateway adds `X-Client-Cert-*` headers to the
+/// upstream request carrying metadata from the VERIFIED client
+/// certificate. These headers are GATEWAY-SET: any inbound headers
+/// whose names match the configured prefix are STRIPPED from the
+/// client request before the gateway adds its own, so a client cannot
+/// spoof certificate identity upstream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MtlsForwardHeaders {
+    /// Master switch. Default false: no `X-Client-Cert-*` headers are
+    /// forwarded.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Header name prefix (default `X-Client-Cert`). The gateway adds
+    /// `<prefix>-Fingerprint`, `<prefix>-Subject-CN`, `<prefix>-Issuer-CN`,
+    /// and `<prefix>-Not-After`. Inbound headers starting with this
+    /// prefix (case-insensitive) are stripped before injection.
+    #[serde(
+        default = "default_mtls_forward_prefix",
+        skip_serializing_if = "is_default_mtls_forward_prefix"
+    )]
+    pub prefix: String,
+}
+
+fn default_mtls_forward_prefix() -> String {
+    "X-Client-Cert".to_string()
+}
+
+fn is_default_mtls_forward_prefix(p: &str) -> bool {
+    p == "X-Client-Cert"
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).
@@ -2573,6 +2685,82 @@ pub struct Upstream {
     pub max_pending: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<Timeouts>,
+    /// OAuth2 client-credentials proxying (DW-035): the gateway acts as
+    /// an OAuth2 client itself, obtaining an access token from an
+    /// external token endpoint via the client-credentials flow and
+    /// forwarding it to this upstream as a `Bearer` token (replacing
+    /// any client-supplied `Authorization` header). For service-to-
+    /// service calls where the gateway authenticates to the upstream
+    /// with a token it obtains from an OAuth2 token endpoint. Absent
+    /// (the default): no token acquisition; the upstream sees whatever
+    /// `Authorization` the client sent (subject to the authn family's
+    /// pass-through rules). See the `security::oauth2` module docs for
+    /// the flow, caching, and the mTLS-to-the-token-endpoint option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth2_client_credentials: Option<OAuth2ClientCredentials>,
+}
+
+/// OAuth2 client-credentials configuration for an upstream (DW-035,
+/// `upstreams[].oauth2_client_credentials`).
+///
+/// The gateway obtains an access token from `token_endpoint` using the
+/// client-credentials grant (RFC 6749 section 4.4) and forwards it to
+/// the upstream as `Authorization: Bearer <token>`. The client
+/// authenticates to the token endpoint with HTTP Basic auth
+/// (`client_id:client_secret`, RFC 6749 section 2.3.1). Tokens are
+/// cached per upstream (keyed by upstream name on the dataplane) and
+/// refreshed lazily on the first request after expiry — no background
+/// refresh task. An optional `mtls` block configures a client
+/// certificate for the TLS handshake to the token endpoint itself
+/// (RFC 8705, the `tls_client_auth` method).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OAuth2ClientCredentials {
+    /// The token endpoint URL (RFC 6749 section 3.2). Must be an
+    /// absolute `http(s)://` URL; validation rejects anything else.
+    pub token_endpoint: String,
+    /// The client identifier presented to the token endpoint
+    /// (RFC 6749 section 2.2). Sent as the username of the HTTP Basic
+    /// auth header.
+    pub client_id: String,
+    /// The client secret presented to the token endpoint (RFC 6749
+    /// section 2.3.1). Either the value INLINE (redacted in every
+    /// config echo, DW-045) or a `${...}` secret reference (env or
+    /// file) resolved at config-compile time and re-read on every
+    /// reload. Sent as the password of the HTTP Basic auth header.
+    pub client_secret: String,
+    /// Optional scope string (RFC 6749 section 3.3): a space-delimited
+    /// list of requested scopes sent in the token request body. Absent
+    /// = no scope parameter (the endpoint's default scopes apply).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Optional mTLS client certificate for the TLS handshake to the
+    /// token endpoint itself (RFC 8705 `tls_client_auth`). Absent: the
+    /// token endpoint's TLS is negotiated with no client certificate
+    /// (the default webpki root set, or a `trusted_ca_file` when the
+    /// token endpoint is behind a private CA — note the token endpoint
+    /// trust is NOT the upstream's `trusted_ca_file`; the token
+    /// endpoint is a separate entity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls: Option<OAuth2Mtls>,
+    /// Token cache TTL override in seconds. Absent (the default): use
+    /// the token's own `expires_in` (minus a refresh skew margin). When
+    /// set, the cache TTL is `min(token_expires_in - skew,
+    /// token_cache_ttl_s)` so a shorter override never extends a
+    /// token's real lifetime. Must be > 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_cache_ttl_s: Option<u64>,
+}
+
+/// mTLS client certificate for an OAuth2 token endpoint (DW-035,
+/// `oauth2_client_credentials.mtls`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OAuth2Mtls {
+    /// Path to a PEM file containing the client certificate chain.
+    pub client_cert: String,
+    /// Path to a PEM file containing the matching private key.
+    pub client_key: String,
 }
 
 /// Upstream retry knobs (DW-014). All fields default; a `retries:` block

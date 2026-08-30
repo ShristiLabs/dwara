@@ -111,6 +111,7 @@ fn bench_gateway() -> Gateway {
             max_pending: None,
             trusted_ca_file: None,
             timeouts: None,
+            oauth2_client_credentials: None,
         })
         .collect();
     Gateway {
@@ -134,6 +135,8 @@ fn bench_gateway() -> Gateway {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     }
 }
 

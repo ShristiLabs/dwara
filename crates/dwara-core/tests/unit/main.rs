@@ -17,6 +17,7 @@ mod geoip;
 mod hardening;
 mod health;
 mod migrations;
+mod oauth2_mtls;
 mod observability;
 mod proxy_proto;
 mod rate_limiter;

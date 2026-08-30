@@ -408,6 +408,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -426,6 +427,8 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     };
     (gateway, tls)
 }

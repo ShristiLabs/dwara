@@ -146,6 +146,10 @@ export default withMermaid(
                 { text: "Admin API", link: "/guide/admin-api" },
                 { text: "CLI", link: "/guide/cli" },
                 { text: "OpenAPI import and mock mode", link: "/guide/openapi-import" },
+                {
+                  text: "OAuth2 and mTLS",
+                  link: "/guide/oauth2-mtls",
+                },
               ],
             },
           ],

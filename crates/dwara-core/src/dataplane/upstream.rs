@@ -1577,6 +1577,7 @@ mod tests {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

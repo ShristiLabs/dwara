@@ -117,6 +117,13 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [OpenAPI import and mock mode](./features/openapi-import.md) —
   scaffolding configs from OpenAPI 3.x specs, mock responses without
   an upstream, and request-body validation against a JSON-Schema subset.
+- [OAuth2 client-credentials and mTLS consumer mapping](./features/oauth2-mtls.md)
+  — the gateway obtaining an access token from an external token
+  endpoint and forwarding it as Bearer to the upstream (replacing the
+  client's Authorization), gateway-level mTLS certificate-to-consumer
+  mapping by fingerprint or subject CN (independent of the per-consumer
+  mtls credential), and X-Client-Cert-* identity-forwarding headers
+  with inbound spoofing prevention (DW-035).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

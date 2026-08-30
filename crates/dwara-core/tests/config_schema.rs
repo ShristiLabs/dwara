@@ -215,6 +215,8 @@ fn empty_document_is_valid() {
             analytics_stream: None,
             geoip: None,
             admission_queue: None,
+            mtls_consumer_mapping: None,
+            mtls_forward_headers: None,
         }
     );
 }

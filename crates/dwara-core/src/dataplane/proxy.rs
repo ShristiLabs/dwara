@@ -247,6 +247,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -443,6 +444,55 @@ pub fn resolve_priority(consumer: Option<&Consumer>, route: &Route) -> u8 {
 pub(super) struct Generation {
     pub(super) snapshot: Arc<Snapshot>,
     registry: Arc<UpstreamRegistry>,
+    /// OAuth2 clients (DW-035): per-upstream, built from each
+    /// upstream's `oauth2_client_credentials` config. Keyed by upstream
+    /// name. Empty when no upstream configures OAuth2. Rebuilt every
+    /// generation (the TLS config / client cert may change); the token
+    /// CACHE lives on the dataplane and persists across reloads.
+    oauth2_clients: HashMap<String, Arc<crate::security::oauth2::OAuth2Client>>,
+}
+
+impl Generation {
+    /// The OAuth2 client for `upstream_name`, if that upstream has an
+    /// `oauth2_client_credentials` block (DW-035).
+    fn oauth2_client(
+        &self,
+        upstream_name: &str,
+    ) -> Option<&Arc<crate::security::oauth2::OAuth2Client>> {
+        self.oauth2_clients.get(upstream_name)
+    }
+}
+
+/// Build the per-upstream OAuth2 client map (DW-035) from the gateway
+/// config. Each upstream with an `oauth2_client_credentials` block gets
+/// an [`OAuth2Client`] built here (loading the optional mTLS cert/key
+/// at build time so a broken bundle disables that upstream's OAuth2 at
+/// build instead of failing every request). A build failure for one
+/// upstream logs and skips — the upstream still proxies, just without
+/// the OAuth2 Bearer token (the request reaches the upstream with
+/// whatever `Authorization` the client sent, subject to the authn
+/// family's pass-through rules).
+fn build_oauth2_clients(
+    gateway: &crate::config::Gateway,
+) -> HashMap<String, Arc<crate::security::oauth2::OAuth2Client>> {
+    let mut clients = HashMap::new();
+    for upstream in &gateway.upstreams {
+        if let Some(cfg) = &upstream.oauth2_client_credentials {
+            match crate::security::oauth2::OAuth2Client::build(cfg.clone()) {
+                Ok(client) => {
+                    clients.insert(upstream.name.clone(), client);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        code = "oauth2_client_disabled",
+                        upstream = %upstream.name,
+                        "oauth2 client-credentials disabled for upstream: {e}"
+                    );
+                }
+            }
+        }
+    }
+    clients
 }
 
 /// The proxy dataplane: reads config generations from [`ConfigState`] and
@@ -499,6 +549,13 @@ pub struct DataPlane {
     /// once per dataplane (per-instance in M2 — see the authn module's
     /// replay boundary note); the authenticator rebuild shares the Arc.
     nonce_cache: Arc<crate::security::authn::NonceCache>,
+    /// OAuth2 token cache (DW-035), carried ACROSS generation swaps
+    /// like `jwks_caches` and `nonce_cache`: a reload must never discard
+    /// a still-valid access token (that would re-fetch from the token
+    /// endpoint on every request after every reload). Per-upstream,
+    /// keyed by the token endpoint URL. The OAuth2 CLIENTS (with their
+    /// TLS config) are per-generation; the token CACHE is per-dataplane.
+    oauth2_token_cache: Arc<crate::security::oauth2::OAuth2TokenCache>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -728,8 +785,14 @@ impl DataPlane {
             &obs,
         );
         let (stream_tx, stream_anchor) = tokio::sync::watch::channel(stream_targets);
+        let oauth2_token_cache = Arc::new(crate::security::oauth2::OAuth2TokenCache::new());
+        let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let dp = DataPlane {
-            current: ArcSwap::from_pointee(Generation { snapshot, registry }),
+            current: ArcSwap::from_pointee(Generation {
+                snapshot,
+                registry,
+                oauth2_clients,
+            }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
             rate_limits: ArcSwap::from_pointee(rate_limits),
@@ -738,6 +801,7 @@ impl DataPlane {
             credential_pepper: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
+            oauth2_token_cache,
             obs: Arc::clone(&obs),
             events,
             webhook_targets: target_tx,
@@ -1025,8 +1089,12 @@ impl DataPlane {
         // old masking/transform/policy); unchanged routes stay warm.
         self.response_cache
             .note_generation(Some(previous.snapshot.as_ref()), &snapshot);
-        self.current
-            .store(Arc::new(Generation { snapshot, registry }));
+        let oauth2_clients = build_oauth2_clients(snapshot.gateway());
+        self.current.store(Arc::new(Generation {
+            snapshot,
+            registry,
+            oauth2_clients,
+        }));
         self.obs.set_config_generation(generation);
         // DW-052: the new generation's SLO set (plain targets, converted
         // here — observability takes primitives, not config types).
@@ -1074,6 +1142,14 @@ impl DataPlane {
     /// routes through the same generation the dataplane serves.
     pub(super) fn current(&self) -> Arc<Generation> {
         self.current.load_full()
+    }
+
+    /// The OAuth2 token cache (DW-035): per-dataplane, carried across
+    /// generation swaps so a reload never discards a still-valid token.
+    /// pub(super): the response cache's background revalidation (DW-037)
+    /// drives the same forward path and needs the token cache too.
+    pub(super) fn oauth2_token_cache(&self) -> &Arc<crate::security::oauth2::OAuth2TokenCache> {
+        &self.oauth2_token_cache
     }
 
     /// The per-priority admission/shed counters (DW-016). Metrics
@@ -2725,6 +2801,7 @@ where
                         rec,
                         &mut global_permit,
                         dp,
+                        client_cert.as_ref(),
                     )
                     .await
                 }
@@ -2759,6 +2836,7 @@ where
                 rec,
                 &mut global_permit,
                 dp,
+                client_cert.as_ref(),
             )
             .await
         }
@@ -3057,6 +3135,104 @@ fn strip_consumer_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// DW-035: strip any inbound headers with the configured `X-Client-Cert`
+/// prefix (case-insensitive) and inject the gateway's own
+/// `X-Client-Cert-{Fingerprint,Subject-CN,Issuer-CN,Not-After}` from
+/// the VERIFIED client certificate. Spoofing prevention: a client
+/// cannot claim certificate identity upstream — the gateway overwrites
+/// any inbound headers with the prefix. `Not-After` is formatted as an
+/// RFC 3339 timestamp (the conventional HTTP-date-adjacent format for
+/// certificate expiry); absent metadata is simply not injected (the
+/// upstream sees fewer headers, never an empty value).
+fn inject_client_cert_headers(
+    headers: &mut HeaderMap,
+    fwd: &crate::config::MtlsForwardHeaders,
+    cert: &crate::security::authn::ClientCertificate,
+) {
+    // Strip inbound headers with the configured prefix (case-insensitive
+    // match on the header name, per HTTP semantics).
+    let prefix_lower = fwd.prefix.to_ascii_lowercase();
+    let names: Vec<HeaderName> = headers
+        .keys()
+        .filter(|n| n.as_str().starts_with(&prefix_lower))
+        .cloned()
+        .collect();
+    for name in names {
+        headers.remove(&name);
+    }
+    // Inject the gateway-computed metadata. Each header is added only
+    // when the value is present and encodable.
+    let p = &fwd.prefix;
+    // Fingerprint (colon-separated hex, always present).
+    if let Ok(name) = HeaderName::from_str(&format!("{p}-Fingerprint")) {
+        if let Ok(v) = HeaderValue::from_str(cert.fingerprint_colon()) {
+            headers.insert(name, v);
+        }
+    }
+    // Subject CN (present when the certificate carries a decodable CN).
+    if let Some(cn) = cert.subject_cn() {
+        if let Ok(name) = HeaderName::from_str(&format!("{p}-Subject-CN")) {
+            if let Ok(v) = HeaderValue::from_str(cn) {
+                headers.insert(name, v);
+            }
+        }
+    }
+    // Issuer CN (DW-035).
+    if let Some(cn) = cert.issuer_cn() {
+        if let Ok(name) = HeaderName::from_str(&format!("{p}-Issuer-CN")) {
+            if let Ok(v) = HeaderValue::from_str(cn) {
+                headers.insert(name, v);
+            }
+        }
+    }
+    // Not-After as RFC 3339 timestamp (DW-035).
+    if let Some(secs) = cert.not_after() {
+        if let Ok(name) = HeaderName::from_str(&format!("{p}-Not-After")) {
+            if let Some(ts) = unix_secs_to_rfc3339(secs) {
+                if let Ok(v) = HeaderValue::from_str(&ts) {
+                    headers.insert(name, v);
+                }
+            }
+        }
+    }
+}
+
+/// Format a Unix epoch seconds value as an RFC 3339 timestamp (DW-035):
+/// `YYYY-MM-DDTHH:MM:SSZ` (UTC, the `Z` suffix). Returns `None` for
+/// values outside the representable range (before 1970 or after
+/// 9999-12-31T23:59:59Z). Hand-rolled to avoid pulling a datetime
+/// dependency — the calendar math is fixed and well-known.
+fn unix_secs_to_rfc3339(secs: i64) -> Option<String> {
+    if secs < 0 {
+        return None;
+    }
+    let secs = u64::try_from(secs).ok()?;
+    // Days since 1970-01-01 and seconds within the day.
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+    // Civil date from days since epoch (Howard Hinnant's algorithm,
+    // public domain — works for any non-negative day count).
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    if y > 9999 {
+        return None;
+    }
+    Some(format!(
+        "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
 /// The 429 response for a denied rate limit (DW-017) or a denied
 /// consumer request budget (DW-033 — same client-facing contract):
 /// `Retry-After` in whole seconds (already rounded up, minimum 1) plus
@@ -3347,6 +3523,8 @@ pub(super) async fn proxy_request<B>(
     rid: &str,
     rec: &mut AccessRecord,
     obs_arc: &Arc<Observability>,
+    client_cert: Option<&Arc<crate::security::authn::ClientCertificate>>,
+    oauth2_token_cache: &Arc<crate::security::oauth2::OAuth2TokenCache>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -3590,6 +3768,55 @@ where
     if let Some(identity) = identity {
         if let Ok(v) = HeaderValue::from_str(&identity.consumer_name) {
             parts.headers.insert(&X_CONSUMER_NAME, v);
+        }
+    }
+
+    // DW-035: X-Client-Cert-* identity-forwarding headers. When
+    // `mtls_forward_headers` is enabled and the connection presented a
+    // verified client certificate, the gateway STRIPS any inbound
+    // headers with the configured prefix (spoofing prevention) and
+    // injects its own `X-Client-Cert-{Fingerprint,Subject-CN,Issuer-CN,
+    // Not-After}`. The certificate is already verified at the TLS
+    // layer; these headers carry metadata the upstream uses for
+    // audit/logging, not for authentication (the gateway's authn
+    // already resolved the consumer).
+    if let Some(fwd) = gateway.mtls_forward_headers.as_ref().filter(|f| f.enabled) {
+        if let Some(cert) = &client_cert {
+            inject_client_cert_headers(&mut parts.headers, fwd, cert);
+        }
+    }
+
+    // DW-035: OAuth2 client-credentials Bearer token. When the resolved
+    // upstream has an `oauth2_client_credentials` block, the gateway
+    // obtains an access token and REPLACES any client-supplied
+    // `Authorization` header with `Bearer <token>` — the upstream sees
+    // the GATEWAY's token, not the client's. A token-endpoint failure
+    // surfaces as 502 `oauth2_token_unavailable` (never proxying
+    // unauthenticated). The token fetch is on the request path (first
+    // request / refresh); cached tokens return immediately.
+    if let Some(oauth2_client) = gen.oauth2_client(handle.name()) {
+        match oauth2_client.token(oauth2_token_cache).await {
+            Ok(token) => {
+                if let Ok(v) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                    parts.headers.insert(hyper::header::AUTHORIZATION, v);
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    code = "oauth2_token_unavailable",
+                    request_id = %rid,
+                    upstream = %handle.name(),
+                    "oauth2 token acquisition failed: {e}"
+                );
+                let mut resp = simple(
+                    StatusCode::BAD_GATEWAY,
+                    "oauth2_token_unavailable",
+                    "oauth2 token endpoint unavailable",
+                    rid,
+                );
+                stamp_security_headers(&mut resp, route);
+                return resp;
+            }
         }
     }
 
@@ -4471,6 +4698,7 @@ async fn dispatch_action<B>(
     rec: &mut AccessRecord,
     global_permit: &mut Option<OwnedSemaphorePermit>,
     dp: &Arc<DataPlane>,
+    client_cert: Option<&Arc<crate::security::authn::ClientCertificate>>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -4539,6 +4767,8 @@ where
                     rid,
                     rec,
                     &dp.observability_arc(),
+                    client_cert,
+                    dp.oauth2_token_cache(),
                 )
                 .await
             }

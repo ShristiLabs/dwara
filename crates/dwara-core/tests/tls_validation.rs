@@ -137,6 +137,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -153,6 +154,8 @@ fn base_gateway(listener: Listener) -> Gateway {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     }
 }
 

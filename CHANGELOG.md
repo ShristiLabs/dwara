@@ -9,6 +9,41 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- OAuth2 client-credentials proxying and mTLS consumer mapping (DW-035):
+  the gateway can obtain an access token from an external OAuth2 token
+  endpoint using the client-credentials grant (RFC 6749 section 4.4)
+  and forward it to an upstream as `Authorization: Bearer <token>`,
+  replacing any client-supplied `Authorization` header. Configured per
+  upstream via `oauth2_client_credentials` (token endpoint URL,
+  client_id, client_secret as inline or `${...}` reference, optional
+  scopes, optional `token_cache_ttl_s` override, optional `mtls` block
+  for RFC 8705 `tls_client_auth` to the token endpoint). Tokens are
+  cached per upstream (keyed by token endpoint URL) with a TTL of
+  `min(expires_in - 60s, token_cache_ttl_s)` clamped to 1s; refresh is
+  lazy (on the first request after expiry, no background task);
+  concurrent fetches coalesce into one token-endpoint POST (per-upstream
+  fetch lock). The token cache persists across config reloads. A
+  token-endpoint failure (network, non-2xx, malformed body) surfaces as
+  502 `oauth2_token_unavailable` (never proxying unauthenticated; the
+  error envelope never leaks the token endpoint's response). A new
+  gateway-level `mtls_consumer_mapping` block maps verified client
+  certificates to consumers by SHA-256 fingerprint (colon-separated hex)
+  or subject CommonName, independent of the per-consumer `mtls`
+  credential registry; when enabled with entries, an unmapped certificate
+  is rejected 401 `mtls_consumer_not_mapped` (the mapping is
+  authoritative, not falling through to the credential registry). A new
+  `mtls_forward_headers` block adds `X-Client-Cert-{Fingerprint,
+  Subject-CN, Issuer-CN, Not-After}` headers to the upstream request
+  from the verified client certificate, with inbound spoofing prevention
+  (any inbound headers with the configured prefix are stripped before
+  the gateway injects its own; prefix is configurable, default
+  `X-Client-Cert`). Certificate metadata extraction (subject CN, issuer
+  CN, not-after, fingerprint) is hand-rolled DER walking with no X.509
+  parser dependency. Zero new dependencies. New config structs:
+  `OAuth2ClientCredentials`, `OAuth2Mtls`, `MtlsConsumerMapping`,
+  `MtlsFingerprintMapping`, `MtlsForwardHeaders` (all
+  `deny_unknown_fields`).
+
 - Bounded admission queues and backpressure (DW-053): an optional
   `gateway.admission_queue` block makes the gateway concurrency cap
   degrade gracefully instead of the DW-016 cliff. When the cap is

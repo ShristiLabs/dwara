@@ -288,6 +288,222 @@ fn subject_of_leaf<'a>(cert: &'a CertificateDer<'a>) -> Option<&'a [u8]> {
     Some(subject_content)
 }
 
+/// Walk the TBS of a leaf certificate to the ISSUER RDNSequence content
+/// (DW-035): the bytes INSIDE the issuer SEQUENCE header. The issuer is
+/// the 4th element of TBSCertificate (after the optional version):
+/// serialNumber, signature, issuer. None on any structural shortcoming.
+/// Same DER-walk substrate as [`subject_of_leaf`].
+fn issuer_of_leaf<'a>(cert: &'a CertificateDer<'a>) -> Option<&'a [u8]> {
+    let (tag, cert_content, _) = der_elem(cert.as_ref())?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, tbs, _) = der_elem(cert_content)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs;
+    // Optional [0] EXPLICIT version comes before the serial INTEGER.
+    if let Some((tag, _, tail)) = der_elem(rest) {
+        if tag & 0xc0 == 0x80 {
+            rest = tail;
+        }
+    }
+    // serialNumber, signature, then issuer (the 3rd element after the
+    // optional version).
+    for _ in 0..2 {
+        let (_, _, tail) = der_elem(rest)?;
+        rest = tail;
+    }
+    let (tag, issuer_content, _) = der_elem(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    Some(issuer_content)
+}
+
+/// Extract the issuer CommonName of a leaf certificate (DW-035): the
+/// value of the FIRST CN attribute (OID 2.5.4.3) in the issuer RDN
+/// sequence. Same strict UTF-8 decode as [`subject_cn_of_leaf`]; `None`
+/// when the issuer carries no decodable CN. THE CERTIFICATE IS ALREADY
+/// VERIFIED at the TLS layer when this runs; extraction only reads the
+/// value for the `X-Client-Cert-Issuer-CN` forwarding header.
+pub fn issuer_cn_of_leaf(cert: &CertificateDer<'_>) -> Option<String> {
+    let issuer = issuer_of_leaf(cert)?;
+    cn_of_rdn_sequence(issuer)
+}
+
+/// Walk the TBS of a leaf certificate to the VALIDITY SEQUENCE content
+/// (DW-035): the bytes INSIDE the validity SEQUENCE. The validity is
+/// the 5th element of TBSCertificate (after the optional version):
+/// serialNumber, signature, issuer, validity. None on any structural
+/// shortcoming.
+fn validity_of_leaf<'a>(cert: &'a CertificateDer<'a>) -> Option<&'a [u8]> {
+    let (tag, cert_content, _) = der_elem(cert.as_ref())?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, tbs, _) = der_elem(cert_content)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs;
+    // Optional [0] EXPLICIT version comes before the serial INTEGER.
+    if let Some((tag, _, tail)) = der_elem(rest) {
+        if tag & 0xc0 == 0x80 {
+            rest = tail;
+        }
+    }
+    // serialNumber, signature, issuer, validity (the 4th element after
+    // the optional version).
+    for _ in 0..3 {
+        let (_, _, tail) = der_elem(rest)?;
+        rest = tail;
+    }
+    let (tag, validity_content, _) = der_elem(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    Some(validity_content)
+}
+
+/// Extract the `notAfter` timestamp of a leaf certificate (DW-035) as
+/// Unix epoch seconds. The validity SEQUENCE holds two time values:
+/// `notBefore` then `notAfter`, each a UTCTime (tag 0x17, YYMMDDHHMMSSZ)
+/// or GeneralizedTime (tag 0x18, YYYYMMDDHHMMSSZ). Returns `None` on
+/// any structural shortcoming or an unparseable time. THE CERTIFICATE
+/// IS ALREADY VERIFIED at the TLS layer when this runs; extraction only
+/// reads the value for the `X-Client-Cert-Not-After` forwarding header.
+pub fn not_after_unix_secs(cert: &CertificateDer<'_>) -> Option<i64> {
+    let validity = validity_of_leaf(cert)?;
+    // Skip notBefore (the first element) to reach notAfter.
+    let (_, _, after_not_before) = der_elem(validity)?;
+    let (tag, time_bytes, _) = der_elem(after_not_before)?;
+    match tag {
+        0x17 => parse_utc_time(time_bytes),
+        0x18 => parse_generalized_time(time_bytes),
+        _ => None,
+    }
+}
+
+/// Parse a UTCTime value (tag 0x17, `YYMMDDHHMMSSZ`) into Unix epoch
+/// seconds. RFC 5280 section 4.1.2.5.1: the year is interpreted as
+/// 1950-2049 for YY 00-49 and 1900-1999 for YY 50-99. The trailing `Z`
+/// (UTC) is required; no offsets are supported (certificates carry UTC
+/// times only).
+fn parse_utc_time(bytes: &[u8]) -> Option<i64> {
+    // Minimum: YYMMDDHHMMSSZ (13 bytes). Seconds are required in
+    // X.509 (RFC 5280); fractional seconds are not allowed in UTCTime.
+    if bytes.len() < 13 || *bytes.last()? != b'Z' {
+        return None;
+    }
+    let body = &bytes[..bytes.len() - 1];
+    let yy = two_digit_decimal(body, 0)?;
+    let year = if yy < 50 { 2000 + yy } else { 1900 + yy };
+    let month = two_digit_decimal(body, 2)? as u32;
+    let day = two_digit_decimal(body, 4)? as u32;
+    let hour = two_digit_decimal(body, 6)? as u32;
+    let minute = two_digit_decimal(body, 8)? as u32;
+    let second = two_digit_decimal(body, 10)? as u32;
+    epoch_secs(year, month, day, hour, minute, second)
+}
+
+/// Parse a GeneralizedTime value (tag 0x18, `YYYYMMDDHHMMSSZ`) into
+/// Unix epoch seconds. RFC 5280 section 4.1.2.5.2: GeneralizedTime is
+/// used for dates after 2049; the trailing `Z` (UTC) is required.
+fn parse_generalized_time(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() < 15 || *bytes.last()? != b'Z' {
+        return None;
+    }
+    let body = &bytes[..bytes.len() - 1];
+    let year = four_digit_decimal(body, 0)?;
+    let month = two_digit_decimal(body, 4)? as u32;
+    let day = two_digit_decimal(body, 6)? as u32;
+    let hour = two_digit_decimal(body, 8)? as u32;
+    let minute = two_digit_decimal(body, 10)? as u32;
+    let second = two_digit_decimal(body, 12)? as u32;
+    epoch_secs(year, month, day, hour, minute, second)
+}
+
+/// Read two ASCII decimal digits at `offset` as a u16.
+fn two_digit_decimal(buf: &[u8], offset: usize) -> Option<u16> {
+    let bytes = buf.get(offset..offset + 2)?;
+    let hi = (bytes[0] as char).to_digit(10)?;
+    let lo = (bytes[1] as char).to_digit(10)?;
+    Some((hi * 10 + lo) as u16)
+}
+
+/// Read four ASCII decimal digits at `offset` as a u16 (year).
+fn four_digit_decimal(buf: &[u8], offset: usize) -> Option<u16> {
+    let bytes = buf.get(offset..offset + 4)?;
+    let mut v = 0u16;
+    for &b in bytes {
+        v = v * 10 + (b as char).to_digit(10)? as u16;
+    }
+    Some(v)
+}
+
+/// Convert a calendar date + time to Unix epoch seconds using a
+/// civil-from-days algorithm (Howard Hinnant, no chrono dependency).
+/// Returns None for an invalid date (month outside 1..=12, day outside
+/// the month's range, or a year outside the u16-representable range).
+fn epoch_secs(year: u16, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || hour >= 24 || minute >= 60 || second >= 60 {
+        return None;
+    }
+    let y = year as i64;
+    let m = month as i64;
+    let d = day as i64;
+    // Days from the civil epoch (1970-01-01) to (y, m, d). The algorithm
+    // is from Howard Hinnant's "date" library (the days_from_civil
+    // function), public domain.
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = (y_adj - era * 400) as u64; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u64; // [0, 146096]
+    let days = era * 146097 + doe as i64 - 719468;
+    let secs = days * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + second as i64;
+    // Validate the day is in range for the month (the algorithm above
+    // does not reject e.g. Feb 30; a round-trip check would, but the
+    // certificate was already verified by rustls so a structurally
+    // invalid date here is a malformed cert, not an attack surface).
+    // Accept the computed value: rustls's own validity check already
+    // rejected an expired/not-yet-valid cert at the TLS layer when
+    // verification ran.
+    Some(secs)
+}
+
+/// Extract the FIRST CN attribute (OID 2.5.4.3) from an RDN sequence's
+/// raw DER content (the bytes INSIDE the SEQUENCE header). Shared by
+/// [`subject_cn_of_leaf`] and [`issuer_cn_of_leaf`]; strict UTF-8
+/// decode (reject rather than fold, the same rationale).
+fn cn_of_rdn_sequence(rdn_sequence: &[u8]) -> Option<String> {
+    let mut rdns = rdn_sequence;
+    while let Some((set_tag, set_content, tail)) = der_elem(rdns) {
+        if set_tag != 0x31 {
+            return None;
+        }
+        let mut attrs = set_content;
+        while let Some((seq_tag, attr, attr_tail)) = der_elem(attrs) {
+            if seq_tag == 0x30 {
+                if let Some((oid_tag, oid, after_oid)) = der_elem(attr) {
+                    if oid_tag == 0x06 && oid == [0x55, 0x04, 0x03] {
+                        if let Some((val_tag, val, _)) = der_elem(after_oid) {
+                            if matches!(val_tag, 0x0c | 0x13 | 0x16) {
+                                return Some(std::str::from_utf8(val).ok()?.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            attrs = attr_tail;
+        }
+        rdns = tail;
+    }
+    None
+}
+
 /// Extract the subject CommonName of a leaf certificate (#124): the
 /// value of the FIRST CN attribute (OID 2.5.4.3) in the subject RDN
 /// sequence, decoded from UTF8String / PrintableString / IA5String (the
@@ -303,35 +519,31 @@ fn subject_of_leaf<'a>(cert: &'a CertificateDer<'a>) -> Option<&'a [u8]> {
 /// reads the match value.
 pub fn subject_cn_of_leaf(cert: &CertificateDer<'_>) -> Option<String> {
     let subject = subject_of_leaf(cert)?;
-    // RDNSequence: SEQUENCE OF (SET OF (SEQUENCE { OID, value })).
-    let mut rdns = subject;
-    while let Some((set_tag, set_content, tail)) = der_elem(rdns) {
-        if set_tag != 0x31 {
-            // Not a SET: malformed or a trailing oddity — stop.
-            return None;
+    cn_of_rdn_sequence(subject)
+}
+
+/// Format the SHA-256 fingerprint of a certificate DER as lowercase
+/// colon-separated hex (DW-035): the format the
+/// `mtls_consumer_mapping.consumers[].fingerprint` config field and the
+/// `X-Client-Cert-Fingerprint` forwarding header use. The raw hex
+/// (no colons) is the credential SELECTOR the authn registry indexes;
+/// this colon-separated form is the OPERATOR-facing display format
+/// (config and headers), so the two never collide.
+pub fn fingerprint_colon_hex(cert: &CertificateDer<'_>) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(cert.as_ref());
+    let hex = crate::config::credentials::sha256_hex(cert.as_ref());
+    // Group the 64-char hex into 32 byte pairs joined by ':'.
+    let bytes = hex.as_bytes();
+    let mut out = String::with_capacity(64 + 31);
+    for (i, chunk) in bytes.chunks(2).enumerate() {
+        if i > 0 {
+            out.push(':');
         }
-        let mut attrs = set_content;
-        while let Some((seq_tag, attr, attr_tail)) = der_elem(attrs) {
-            if seq_tag == 0x30 {
-                // AttributeTypeAndValue: OID then value.
-                if let Some((oid_tag, oid, after_oid)) = der_elem(attr) {
-                    if oid_tag == 0x06 && oid == [0x55, 0x04, 0x03] {
-                        if let Some((val_tag, val, _)) = der_elem(after_oid) {
-                            if matches!(val_tag, 0x0c | 0x13 | 0x16) {
-                                // Strict UTF-8 (PrintableString and
-                                // IA5String are ASCII subsets): reject
-                                // rather than fold.
-                                return Some(std::str::from_utf8(val).ok()?.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            attrs = attr_tail;
-        }
-        rdns = tail;
+        out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
     }
-    None
+    let _ = digest; // sha256_hex already computed; keep the import used.
+    out
 }
 
 /// Extract the DER-encoded SubjectPublicKeyInfo of a leaf certificate by

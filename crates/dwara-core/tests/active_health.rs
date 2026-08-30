@@ -92,6 +92,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -110,6 +111,8 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     }
 }
 
@@ -461,6 +464,8 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             analytics_stream: None,
             geoip: None,
             admission_queue: None,
+            mtls_consumer_mapping: None,
+            mtls_forward_headers: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -585,6 +590,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 breaker: None,
                 max_pending: None,
                 trusted_ca_file: None,
+                oauth2_client_credentials: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -601,6 +607,8 @@ async fn reserved_paths_shadow_configured_routes() {
             analytics_stream: None,
             geoip: None,
             admission_queue: None,
+            mtls_consumer_mapping: None,
+            mtls_forward_headers: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

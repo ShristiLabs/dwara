@@ -126,6 +126,28 @@
       "format": "uint32",
       "minimum": 0
     },
+    "mtls_consumer_mapping": {
+      "description": "mTLS client-certificate consumer mapping (DW-035): maps a\nVERIFIED client certificate (its SHA-256 fingerprint or subject\nCN) to a consumer name, so a client presenting a valid mTLS\ncertificate is authenticated WITHOUT an API key, JWT, or other\nheader credential — the certificate IS the credential. The\ncertificate must still chain to a listener's `client_ca_file`\n(verified at the TLS layer); this mapping only resolves an\nALREADY-VERIFIED certificate to a consumer. Distinct from the\nper-consumer `mtls` credential (which binds a cert to ONE\nconsumer's credential list): this is a gateway-level table that\ncan map certificates independent of the consumer credential\nregistry. Absent (the default): mTLS certificates are matched\nonly through consumers' `mtls` credentials (the DW-019 path).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MtlsConsumerMapping"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mtls_forward_headers": {
+      "description": "Identity-forwarding headers (DW-035): when mTLS client auth is\nused, the gateway forwards client certificate metadata to the\nupstream as `X-Client-Cert-*` headers. These headers are\nGATEWAY-SET: any inbound headers with these names are STRIPPED\nfrom the client request before the gateway adds its own\n(spoofing prevention — the \"without headers spoofing\" part of\nthe done-when). Absent (the default): no `X-Client-Cert-*`\nheaders are forwarded.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MtlsForwardHeaders"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "policies": {
       "description": "Named reusable rule bundles.",
       "type": "array",
@@ -1635,6 +1657,65 @@
         "max_bytes"
       ]
     },
+    "MtlsConsumerMapping": {
+      "description": "mTLS client-certificate consumer mapping (DW-035,\n`gateway.mtls_consumer_mapping`).\n\nMaps a VERIFIED client certificate to a consumer name by its\nSHA-256 fingerprint (lowercase colon-separated hex of the DER) or\nby subject CommonName. When enabled and a client presents a\ncertificate that chains to a listener's `client_ca_file` but\nmatches NO entry in this table, the gateway returns 401\n`mtls_consumer_not_mapped` (the certificate was verified but is not\na known caller). A client that presents NO certificate on a\nlistener with this mapping enabled falls through to the other\nauthentication families (or 401 if the route requires auth and no\nfamily resolves).",
+      "type": "object",
+      "properties": {
+        "consumers": {
+          "description": "Fingerprint-to-consumer entries. Each `fingerprint` is the\nSHA-256 of the client certificate DER as lowercase\ncolon-separated hex (e.g. `ab:cd:ef:...`). The fingerprint is\nthe EXACT bytes the gateway computes from the presented\ncertificate, so a re-issued certificate needs a new entry.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MtlsFingerprintMapping"
+          }
+        },
+        "enabled": {
+          "description": "Master switch. Default false: the mapping is inert and mTLS\ncertificates are matched only through consumers' `mtls`\ncredentials (the DW-019 path).",
+          "type": "boolean"
+        },
+        "subject_cn_mapping": {
+          "description": "Subject-CN-to-consumer mapping (alternative to `consumers`):\nmaps the certificate's subject CommonName to a consumer name.\nBinding by subject CN survives certificate re-issue under the\nsame CN; the certificate must still chain to a listener's\n`client_ca_file`. Keys are exact, case-sensitive CN strings.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "MtlsFingerprintMapping": {
+      "description": "One fingerprint-to-consumer mapping entry (DW-035,\n`mtls_consumer_mapping.consumers[]`).",
+      "type": "object",
+      "properties": {
+        "consumer": {
+          "description": "The consumer name this certificate resolves to. Must reference\na consumer in the `consumers` list (validation rejects an\nunknown name).",
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "SHA-256 fingerprint of the client certificate DER as lowercase\ncolon-separated hex (e.g. `ab:cd:ef:...`). Validated to be\n64 hex digits with optional colon separators.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "fingerprint",
+        "consumer"
+      ]
+    },
+    "MtlsForwardHeaders": {
+      "description": "Identity-forwarding headers for mTLS client auth (DW-035,\n`gateway.mtls_forward_headers`).\n\nWhen enabled, the gateway adds `X-Client-Cert-*` headers to the\nupstream request carrying metadata from the VERIFIED client\ncertificate. These headers are GATEWAY-SET: any inbound headers\nwhose names match the configured prefix are STRIPPED from the\nclient request before the gateway adds its own, so a client cannot\nspoof certificate identity upstream.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default false: no `X-Client-Cert-*` headers are\nforwarded.",
+          "type": "boolean"
+        },
+        "prefix": {
+          "description": "Header name prefix (default `X-Client-Cert`). The gateway adds\n`<prefix>-Fingerprint`, `<prefix>-Subject-CN`, `<prefix>-Issuer-CN`,\nand `<prefix>-Not-After`. Inbound headers starting with this\nprefix (case-insensitive) are stripped before injection.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "NameValueMatch": {
       "description": "One query-parameter or cookie criterion: the parameter/cookie must be\npresent; when `value` is given it must equal that exact string.",
       "type": "object",
@@ -1653,6 +1734,76 @@
       "additionalProperties": false,
       "required": [
         "name"
+      ]
+    },
+    "OAuth2ClientCredentials": {
+      "description": "OAuth2 client-credentials configuration for an upstream (DW-035,\n`upstreams[].oauth2_client_credentials`).\n\nThe gateway obtains an access token from `token_endpoint` using the\nclient-credentials grant (RFC 6749 section 4.4) and forwards it to\nthe upstream as `Authorization: Bearer <token>`. The client\nauthenticates to the token endpoint with HTTP Basic auth\n(`client_id:client_secret`, RFC 6749 section 2.3.1). Tokens are\ncached per upstream (keyed by upstream name on the dataplane) and\nrefreshed lazily on the first request after expiry — no background\nrefresh task. An optional `mtls` block configures a client\ncertificate for the TLS handshake to the token endpoint itself\n(RFC 8705, the `tls_client_auth` method).",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "description": "The client identifier presented to the token endpoint\n(RFC 6749 section 2.2). Sent as the username of the HTTP Basic\nauth header.",
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "The client secret presented to the token endpoint (RFC 6749\nsection 2.3.1). Either the value INLINE (redacted in every\nconfig echo, DW-045) or a `${...}` secret reference (env or\nfile) resolved at config-compile time and re-read on every\nreload. Sent as the password of the HTTP Basic auth header.",
+          "type": "string"
+        },
+        "mtls": {
+          "description": "Optional mTLS client certificate for the TLS handshake to the\ntoken endpoint itself (RFC 8705 `tls_client_auth`). Absent: the\ntoken endpoint's TLS is negotiated with no client certificate\n(the default webpki root set, or a `trusted_ca_file` when the\ntoken endpoint is behind a private CA — note the token endpoint\ntrust is NOT the upstream's `trusted_ca_file`; the token\nendpoint is a separate entity).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OAuth2Mtls"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scopes": {
+          "description": "Optional scope string (RFC 6749 section 3.3): a space-delimited\nlist of requested scopes sent in the token request body. Absent\n= no scope parameter (the endpoint's default scopes apply).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_cache_ttl_s": {
+          "description": "Token cache TTL override in seconds. Absent (the default): use\nthe token's own `expires_in` (minus a refresh skew margin). When\nset, the cache TTL is `min(token_expires_in - skew,\ntoken_cache_ttl_s)` so a shorter override never extends a\ntoken's real lifetime. Must be > 0.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "token_endpoint": {
+          "description": "The token endpoint URL (RFC 6749 section 3.2). Must be an\nabsolute `http(s)://` URL; validation rejects anything else.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token_endpoint",
+        "client_id",
+        "client_secret"
+      ]
+    },
+    "OAuth2Mtls": {
+      "description": "mTLS client certificate for an OAuth2 token endpoint (DW-035,\n`oauth2_client_credentials.mtls`).",
+      "type": "object",
+      "properties": {
+        "client_cert": {
+          "description": "Path to a PEM file containing the client certificate chain.",
+          "type": "string"
+        },
+        "client_key": {
+          "description": "Path to a PEM file containing the matching private key.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "client_cert",
+        "client_key"
       ]
     },
     "OpenApiMeta": {
@@ -3173,6 +3324,17 @@
         },
         "name": {
           "type": "string"
+        },
+        "oauth2_client_credentials": {
+          "description": "OAuth2 client-credentials proxying (DW-035): the gateway acts as\nan OAuth2 client itself, obtaining an access token from an\nexternal token endpoint via the client-credentials flow and\nforwarding it to this upstream as a `Bearer` token (replacing\nany client-supplied `Authorization` header). For service-to-\nservice calls where the gateway authenticates to the upstream\nwith a token it obtains from an OAuth2 token endpoint. Absent\n(the default): no token acquisition; the upstream sees whatever\n`Authorization` the client sent (subject to the authn family's\npass-through rules). See the `security::oauth2` module docs for\nthe flow, caching, and the mTLS-to-the-token-endpoint option.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OAuth2ClientCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "protocol": {
           "description": "Protocol used toward upstream endpoints.",

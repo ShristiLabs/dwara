@@ -327,10 +327,14 @@ pub struct Identity {
 }
 
 /// The VERIFIED client certificate of a connection, as the authenticator
-/// consumes it (#124). Built by the TLS frontend from the certificate
-/// rustls already verified against the listener's `client_ca_file`; the
-/// match VALUES (subject CN, fingerprint) double as credential selectors,
-/// so `Debug` redacts them (the selector-redaction precedent).
+/// consumes it (#124, DW-035). Built by the TLS frontend from the
+/// certificate rustls already verified against the listener's
+/// `client_ca_file`; the match VALUES (subject CN, fingerprint) double
+/// as credential selectors, so `Debug` redacts them (the
+/// selector-redaction precedent). DW-035 extends it with the issuer CN,
+/// not-after timestamp, and colon-separated fingerprint needed for the
+/// `X-Client-Cert-*` forwarding headers and the gateway-level mTLS
+/// consumer mapping.
 #[derive(Clone)]
 pub struct ClientCertificate {
     /// Subject CommonName of the verified leaf certificate (first CN in
@@ -338,19 +342,60 @@ pub struct ClientCertificate {
     /// decodable CN — such a certificate can only match a
     /// by-fingerprint credential).
     pub(crate) subject_cn: Option<String>,
-    /// Lowercase hex of SHA-256 over the certificate DER.
+    /// Lowercase hex of SHA-256 over the certificate DER (the credential
+    /// SELECTOR the registry indexes — no colons).
     pub(crate) fingerprint: String,
+    /// Lowercase colon-separated hex of SHA-256 over the certificate DER
+    /// (DW-035): the OPERATOR-facing format the
+    /// `mtls_consumer_mapping.consumers[].fingerprint` config field and
+    /// the `X-Client-Cert-Fingerprint` header use.
+    pub(crate) fingerprint_colon: String,
+    /// Issuer CommonName of the verified leaf certificate (DW-035): the
+    /// first CN in the issuer RDN sequence; `None` when the issuer
+    /// carries no decodable CN. Forwarded as `X-Client-Cert-Issuer-CN`.
+    pub(crate) issuer_cn: Option<String>,
+    /// `notAfter` of the verified leaf certificate as Unix epoch seconds
+    /// (DW-035); `None` when the validity could not be decoded.
+    /// Forwarded as `X-Client-Cert-Not-After` (RFC 3339 timestamp).
+    pub(crate) not_after: Option<i64>,
 }
 
 impl ClientCertificate {
-    /// Extract the match values of a verified leaf certificate. Never
-    /// fails: an undecodable subject yields `subject_cn: None` and the
-    /// credential lookup falls back to the fingerprint selector alone.
+    /// Extract the match values and forwarding metadata of a verified
+    /// leaf certificate. Never fails: an undecodable subject yields
+    /// `subject_cn: None` and the credential lookup falls back to the
+    /// fingerprint selector alone.
     pub fn from_cert(cert: &CertificateDer<'_>) -> Self {
         ClientCertificate {
             subject_cn: crate::security::tls::subject_cn_of_leaf(cert),
             fingerprint: sha256_hex(cert.as_ref()),
+            fingerprint_colon: crate::security::tls::fingerprint_colon_hex(cert),
+            issuer_cn: crate::security::tls::issuer_cn_of_leaf(cert),
+            not_after: crate::security::tls::not_after_unix_secs(cert),
         }
+    }
+
+    /// The colon-separated SHA-256 fingerprint (DW-035): the
+    /// operator-facing format used in `X-Client-Cert-Fingerprint` and
+    /// matched against `mtls_consumer_mapping.consumers[].fingerprint`.
+    pub fn fingerprint_colon(&self) -> &str {
+        &self.fingerprint_colon
+    }
+
+    /// The subject CommonName (for `X-Client-Cert-Subject-CN`, DW-035).
+    pub fn subject_cn(&self) -> Option<&str> {
+        self.subject_cn.as_deref()
+    }
+
+    /// The issuer CommonName (DW-035), for `X-Client-Cert-Issuer-CN`.
+    pub fn issuer_cn(&self) -> Option<&str> {
+        self.issuer_cn.as_deref()
+    }
+
+    /// The `notAfter` as Unix epoch seconds (DW-035), for
+    /// `X-Client-Cert-Not-After`.
+    pub fn not_after(&self) -> Option<i64> {
+        self.not_after
     }
 }
 
@@ -1491,6 +1536,65 @@ pub fn parse_algorithms(names: &[String]) -> Option<Vec<Algorithm>> {
 /// cadence tightens the throttle too.
 const JWKS_FORCED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Gateway-level mTLS consumer mapping (DW-035): resolves a VERIFIED
+/// client certificate to a consumer name by fingerprint (colon-
+/// separated hex) or subject CommonName, independent of the
+/// per-consumer `mtls` credential registry. Built from
+/// [`crate::config::MtlsConsumerMapping`] at authenticator build time;
+/// the fingerprint map is keyed by the colon-separated hex form (the
+/// operator-facing config format, matching
+/// [`ClientCertificate::fingerprint_colon`]).
+struct MtlsConsumerMap {
+    /// Colon-separated fingerprint hex -> consumer name.
+    by_fingerprint: HashMap<String, String>,
+    /// Subject CommonName -> consumer name.
+    by_subject_cn: HashMap<String, String>,
+}
+
+impl MtlsConsumerMap {
+    /// Build the runtime map from config. Fingerprints are normalized
+    /// to lowercase (the config format is lowercase colon-separated
+    /// hex; validation already checked the grammar).
+    fn from_config(cfg: &crate::config::MtlsConsumerMapping) -> Self {
+        let mut by_fingerprint = HashMap::new();
+        for entry in &cfg.consumers {
+            by_fingerprint.insert(
+                entry.fingerprint.to_ascii_lowercase(),
+                entry.consumer.clone(),
+            );
+        }
+        let by_subject_cn = cfg
+            .subject_cn_mapping
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        MtlsConsumerMap {
+            by_fingerprint,
+            by_subject_cn,
+        }
+    }
+
+    /// Resolve a verified client certificate to a consumer name.
+    /// Checks the subject-CN map first (survives re-issue), then the
+    /// fingerprint map (exact DER match). Returns `None` when the
+    /// certificate matches no entry.
+    fn resolve(&self, cert: &ClientCertificate) -> Option<&str> {
+        if let Some(cn) = cert.subject_cn.as_deref() {
+            if let Some(consumer) = self.by_subject_cn.get(cn) {
+                return Some(consumer.as_str());
+            }
+        }
+        self.by_fingerprint
+            .get(cert.fingerprint_colon.as_str())
+            .map(|s| s.as_str())
+    }
+
+    /// Whether the map has any entries (fingerprints or subject CNs).
+    fn is_empty(&self) -> bool {
+        self.by_fingerprint.is_empty() && self.by_subject_cn.is_empty()
+    }
+}
+
 /// The gateway's single authenticator: dispatches on the request's
 /// credential shape (X-API-Key / Basic / Bearer / verified client
 /// certificate) and consults the credential registry plus the configured
@@ -1543,6 +1647,13 @@ pub struct CompositeAuthenticator {
     /// Per-instance by design in M2 (see the module docs' replay
     /// boundary note).
     nonce_cache: Arc<NonceCache>,
+    /// Gateway-level mTLS consumer mapping (DW-035): maps verified
+    /// client certificates to consumers by fingerprint or subject CN,
+    /// independent of the per-consumer `mtls` credential registry.
+    /// `None` when `mtls_consumer_mapping` is absent or disabled —
+    /// certificates are matched only through consumers' `mtls`
+    /// credentials (the DW-019 path).
+    mtls_consumer_map: Option<MtlsConsumerMap>,
     /// Whether ANY credential family is active; when false the composite
     /// is a no-op (pass-through mode).
     enabled: bool,
@@ -1564,6 +1675,7 @@ impl CompositeAuthenticator {
             hmac_keys: HashMap::new(),
             hmac_skew_secs: DEFAULT_HMAC_CLOCK_SKEW_SECS,
             nonce_cache: Arc::new(NonceCache::new()),
+            mtls_consumer_map: None,
             enabled: false,
         }
     }
@@ -1649,6 +1761,15 @@ impl CompositeAuthenticator {
             }
         }
         let enabled = !gateway.consumers.is_empty() || !jwt.is_empty();
+        // DW-035: gateway-level mTLS consumer mapping. Built when
+        // `mtls_consumer_mapping` is present and enabled; `None`
+        // otherwise (certificates matched only through per-consumer
+        // `mtls` credentials, the DW-019 path).
+        let mtls_consumer_map = gateway
+            .mtls_consumer_mapping
+            .as_ref()
+            .filter(|m| m.enabled)
+            .map(MtlsConsumerMap::from_config);
         Arc::new(CompositeAuthenticator {
             registry,
             jwt,
@@ -1663,6 +1784,7 @@ impl CompositeAuthenticator {
                 .as_ref()
                 .map_or(DEFAULT_HMAC_CLOCK_SKEW_SECS, |h| h.max_clock_skew_secs),
             nonce_cache,
+            mtls_consumer_map,
             enabled,
         })
     }
@@ -1748,17 +1870,56 @@ impl CompositeAuthenticator {
         Err(AuthError::Invalid("unknown api key or basic credentials"))
     }
 
-    /// mTLS family (#124): map a VERIFIED client certificate to a
-    /// consumer. The lookup consults BOTH selectors the certificate
-    /// offers (subject CN when present, fingerprint always); an `mtls`
-    /// credential found under either selector is a match because the
-    /// credential's selector IS its match value. A verified certificate
-    /// that matches no credential is a PRESENTED-but-rejected credential
-    /// (401), exactly like an unknown API key.
+    /// mTLS family (#124, DW-035): map a VERIFIED client certificate to
+    /// a consumer. Two resolution paths, in priority order:
+    ///
+    /// 1. **Gateway-level mapping** (DW-035): when
+    ///    `mtls_consumer_mapping` is enabled, the certificate's subject
+    ///    CN and colon-separated fingerprint are checked against the
+    ///    gateway-level table FIRST. A match resolves directly to the
+    ///    configured consumer (no credential registry lookup needed).
+    ///    When the mapping is enabled but the certificate matches NO
+    ///    entry, the request is rejected 401
+    ///    `mtls_consumer_not_mapped` — the certificate was verified but
+    ///    is not a known caller. This path does NOT fall through to the
+    ///    credential registry: the gateway-level mapping is authoritative
+    ///    when enabled.
+    /// 2. **Per-consumer credential** (#124): the credential registry
+    ///    is consulted by subject CN and fingerprint (the DW-019 path).
+    ///    An `mtls` credential found under either selector is a match
+    ///    because the credential's selector IS its match value. A
+    ///    verified certificate that matches no credential is a
+    ///    PRESENTED-but-rejected credential (401), exactly like an
+    ///    unknown API key.
     async fn authenticate_client_cert(
         &self,
         cert: &ClientCertificate,
     ) -> Result<Option<Identity>, AuthError> {
+        // DW-035: gateway-level mTLS consumer mapping takes priority
+        // when enabled. The mapping is authoritative — a non-matching
+        // certificate is rejected here, NOT falling through to the
+        // credential registry (the operator explicitly enabled the
+        // gateway-level table, so it is the source of truth).
+        if let Some(map) = &self.mtls_consumer_map {
+            if !map.is_empty() {
+                if let Some(consumer_name) = map.resolve(cert) {
+                    let groups = self.consumer_groups_of(consumer_name);
+                    return Ok(Some(Identity {
+                        consumer_name: consumer_name.to_string(),
+                        credential_kind: CredentialKind::Mtls,
+                        groups,
+                        claims: BTreeMap::new(),
+                        body_digest: None,
+                    }));
+                }
+                // Mapping enabled with entries but no match: the
+                // certificate was verified but is not a known caller.
+                return Err(AuthError::Invalid(
+                    "client certificate matches no mtls consumer mapping entry",
+                ));
+            }
+        }
+        // DW-019 path: per-consumer `mtls` credential registry.
         let mut selectors: Vec<&str> = Vec::with_capacity(2);
         if let Some(cn) = cert.subject_cn.as_deref() {
             selectors.push(cn);

@@ -391,6 +391,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        oauth2_client_credentials: None,
     }
 }
 
@@ -419,6 +420,8 @@ async fn dataplane_reload_changes_weights_without_restart() {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     };
     st.compile_and_publish(&g).expect("publish A");
     let dp = DataPlane::new(Arc::clone(&st));

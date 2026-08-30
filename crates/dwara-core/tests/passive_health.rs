@@ -597,6 +597,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -615,6 +616,8 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -788,6 +791,7 @@ fn upstream_cfg(
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        oauth2_client_credentials: None,
     }
 }
 
@@ -813,6 +817,8 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1053,6 +1059,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            oauth2_client_credentials: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -1071,6 +1078,8 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         analytics_stream: None,
         geoip: None,
         admission_queue: None,
+        mtls_consumer_mapping: None,
+        mtls_forward_headers: None,
     }
 }
 

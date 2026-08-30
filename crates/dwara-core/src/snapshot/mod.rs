@@ -142,6 +142,28 @@ fn issue(entity: &str, name: &str, field: &str, message: impl Into<String>) -> V
 /// while anchor USABILITY (a parseable certificate the root store
 /// rejects) stays enforced where the rustls root store lives, at
 /// registry build.
+/// Check that a file path is readable (DW-035): used for OAuth2 mTLS
+/// client cert/key files. Unlike `check_trusted_ca_file`, this does NOT
+/// parse the file contents — the OAuth2 client builder does that at
+/// build time and logs a disabling error on a parse failure (the
+/// upstream still proxies, just without the OAuth2 Bearer token).
+fn check_file_readable(
+    entity: &str,
+    name: &str,
+    field: &str,
+    path: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if !std::path::Path::new(path).is_file() {
+        issues.push(issue(
+            entity,
+            name,
+            field,
+            format!("{field} '{path}' is not a readable file"),
+        ));
+    }
+}
+
 fn check_trusted_ca_file(
     entity: &str,
     name: &str,
@@ -3404,6 +3426,159 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        // DW-035: OAuth2 client-credentials validation.
+        if let Some(o) = &u.oauth2_client_credentials {
+            // token_endpoint must be an absolute http(s) URL.
+            match o.token_endpoint.parse::<hyper::Uri>() {
+                Ok(uri) => {
+                    if !matches!(uri.scheme_str(), Some("http") | Some("https"))
+                        || uri.host().is_none()
+                    {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            "oauth2_client_credentials.token_endpoint",
+                            format!("'{}' must be an absolute http(s) URL", o.token_endpoint),
+                        ));
+                    }
+                }
+                Err(_) => issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "oauth2_client_credentials.token_endpoint",
+                    format!("'{}' is not a valid URL", o.token_endpoint),
+                )),
+            }
+            if o.client_id.is_empty() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "oauth2_client_credentials.client_id",
+                    "client_id must not be empty",
+                ));
+            }
+            if o.client_secret.is_empty() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "oauth2_client_credentials.client_secret",
+                    "client_secret must not be empty",
+                ));
+            }
+            if let Some(ttl) = o.token_cache_ttl_s {
+                if ttl == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "oauth2_client_credentials.token_cache_ttl_s",
+                        "token_cache_ttl_s must be > 0",
+                    ));
+                }
+            }
+            // mTLS cert/key files must exist and be readable at compile
+            // time (the same check as trusted_ca_file). A missing file
+            // disables the upstream's OAuth2 at build instead of failing
+            // every request.
+            if let Some(m) = &o.mtls {
+                check_file_readable(
+                    "upstream",
+                    &u.name,
+                    "oauth2_client_credentials.mtls.client_cert",
+                    &m.client_cert,
+                    &mut issues,
+                );
+                check_file_readable(
+                    "upstream",
+                    &u.name,
+                    "oauth2_client_credentials.mtls.client_key",
+                    &m.client_key,
+                    &mut issues,
+                );
+            }
+        }
+    }
+
+    // DW-035: mTLS consumer mapping validation.
+    if let Some(m) = &gateway.mtls_consumer_mapping {
+        if m.enabled {
+            let consumer_names: std::collections::BTreeSet<&str> =
+                gateway.consumers.iter().map(|c| c.name.as_str()).collect();
+            for (i, entry) in m.consumers.iter().enumerate() {
+                // Fingerprint grammar: 64 hex digits with optional colon
+                // separators (lowercase or uppercase; normalized at build).
+                let stripped = entry.fingerprint.replace(':', "");
+                if stripped.len() != 64 || !stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("mtls_consumer_mapping.consumers[{i}].fingerprint"),
+                        format!(
+                            "fingerprint '{}' must be 64 hex digits with optional ':' separators \
+                             (SHA-256 of the certificate DER)",
+                            entry.fingerprint
+                        ),
+                    ));
+                }
+                if !consumer_names.contains(entry.consumer.as_str()) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("mtls_consumer_mapping.consumers[{i}].consumer"),
+                        format!(
+                            "consumer '{}' is not defined in the consumers list",
+                            entry.consumer
+                        ),
+                    ));
+                }
+            }
+            for (cn, consumer) in &m.subject_cn_mapping {
+                if cn.is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "mtls_consumer_mapping.subject_cn_mapping",
+                        "subject CN key must not be empty",
+                    ));
+                }
+                if !consumer_names.contains(consumer.as_str()) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "mtls_consumer_mapping.subject_cn_mapping",
+                        format!("consumer '{consumer}' is not defined in the consumers list"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // DW-035: mTLS forward headers validation.
+    if let Some(f) = &gateway.mtls_forward_headers {
+        if f.enabled {
+            // Prefix must be a valid HTTP token (it becomes header
+            // names like `<prefix>-Fingerprint`).
+            let prefix = f.prefix.as_str();
+            if prefix.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "mtls_forward_headers.prefix",
+                    "prefix must not be empty",
+                ));
+            }
+            // Check that the derived header names are valid.
+            for suffix in &["Fingerprint", "Subject-CN", "Issuer-CN", "Not-After"] {
+                let name = format!("{prefix}-{suffix}");
+                if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "mtls_forward_headers.prefix",
+                        format!("'{name}' is not a valid HTTP header name"),
+                    ));
+                }
+            }
+        }
     }
 
     // DW-036: hmac key ids are the SELECTOR a signed request presents;
@@ -4129,6 +4304,8 @@ impl Snapshot {
                 analytics_stream: None,
                 geoip: None,
                 admission_queue: None,
+                mtls_consumer_mapping: None,
+                mtls_forward_headers: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }
