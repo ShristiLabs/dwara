@@ -334,3 +334,19 @@ issuers remove old keys while previously-issued tokens still carry
 them. An identical-kid re-fetch never extends the grace. Config-only
 deployments rotate by editing the config (two credential entries)
 and reloading.
+
+## GeoIP rules (DW-050)
+
+Source: `security/geoip.rs` + the authz geoip arm. Tests:
+`tests/unit/geoip.rs`, `authz` geoip e2e cases.
+
+`gateway.geoip: {path}` opens a MaxMind-format database (opened at
+startup, hot-reloaded by the dwara-bin mtime watcher via an atomic
+ArcSwap). Any authorization block may carry `geoip` rules
+(allowed/denied countries by ISO 3166-1 alpha-2, allowed/denied
+ASNs), evaluated against the EFFECTIVE client IP. UNKNOWN addresses
+(private, not-in-DB, no database) match neither side: deny-lists pass
+them, allow-lists reject them. A geo-only block admits anonymous
+traffic. Validation: geo rules require the database block; country
+codes are two ASCII letters. New deps: maxminddb (runtime),
+mmdb-writer (dev-only fixture generation).

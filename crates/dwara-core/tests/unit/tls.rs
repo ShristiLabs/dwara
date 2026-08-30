@@ -423,6 +423,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     };
     (gateway, tls)
 }

@@ -612,6 +612,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -807,6 +808,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1062,6 +1064,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     }
 }
 

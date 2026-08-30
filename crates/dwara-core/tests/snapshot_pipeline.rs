@@ -121,6 +121,7 @@ fn base_gateway() -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     }
 }
 
@@ -1330,6 +1331,7 @@ fn publish_failure_on_new_rule_violation_keeps_old_snapshot_and_generation() {
 /// mistake) plus optional consumer entries.
 fn empty_authz() -> dwara_core::config::Authz {
     dwara_core::config::Authz {
+        geoip: None,
         allowed_consumers: vec![],
         denied_consumers: vec![],
         allowed_groups: vec![],

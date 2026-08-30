@@ -1203,3 +1203,78 @@ upstreams:
         "the same block applies once a route resolved"
     );
 }
+
+// ---- GeoIP rules end to end (DW-050) ---------------------------------------
+
+use mmdb_writer::{Value, Writer};
+
+/// Write a fixture .mmdb mapping 1.1.1.0/24 to `country_code`.
+fn geo_fixture(dir: &std::path::Path, tag: &str, country_code: &str) -> std::path::PathBuf {
+    let mut w = Writer::new("GeoLite2-Country-Test");
+    w.insert_value(
+        "1.1.1.0/24".parse::<mmdb_writer::ipnet::IpNet>().unwrap(),
+        Value::map([(
+            "country",
+            Value::map([("iso_code", Value::from(country_code))]),
+        )]),
+    )
+    .unwrap();
+    let path = dir.join(format!("geo-{tag}.mmdb"));
+    std::fs::write(&path, w.to_bytes().unwrap()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn geoip_country_block_is_effective_on_the_effective_ip() {
+    // The done-when: a country block actually rejects, driven through
+    // the full authz chain with the XFF-resolved client address.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = geo_fixture(dir.path(), "e2e", "US");
+    let yaml = format!(
+        "trusted_proxies:\n  - 10.0.0.0/8\ngeoip:\n  path: {}\nlisteners: []\n\nroutes:\n  - name: r\n    service: svc\n    match:\n      path:\n        type: regex\n        value: /.*\n    action:\n      type: respond\n      status: 200\n    authorization:\n      geoip:\n        denied_countries: [KP]\n        allowed_countries: [US]\n\nservices:\n  - name: svc\n    upstream: pool\n\nupstreams:\n  - name: pool\n    endpoints:\n      - address: 127.0.0.1\n        port: 1\n",
+        db_path.display()
+    );
+    let dp = dataplane_from(&yaml);
+    let db = dwara_core::security::geoip::GeoipDb::open(db_path.to_str().unwrap()).unwrap();
+    dp.set_geoip(std::sync::Arc::new(db));
+
+    // US client (via the trusted proxy's XFF): allowed.
+    let (s, _, _) = send(&dp, vec![("x-forwarded-for", "1.1.1.1")]).await;
+    assert_eq!(s, StatusCode::OK);
+    // A client from a country neither allowed nor known: rejected by
+    // the allow list (allow-lists reject unknowns).
+    let (s, _, _) = send(&dp, vec![("x-forwarded-for", "4.4.4.4")]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn geoip_database_hot_reload_swaps_decisions_without_restart() {
+    // The done-when: the DB hot-reloads. The watcher in dwara-bin
+    // polls mtime and calls set_geoip; this test drives the SAME swap
+    // (open + set) the watcher performs, proving the decision flips
+    // on the live dataplane.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = geo_fixture(dir.path(), "hot", "US");
+    let yaml = format!(
+        "trusted_proxies:\n  - 10.0.0.0/8\ngeoip:\n  path: {}\nlisteners: []\n\nroutes:\n  - name: r\n    service: svc\n    match:\n      path:\n        type: regex\n        value: /.*\n    action:\n      type: respond\n      status: 200\n    authorization:\n      geoip:\n        allowed_countries: [US]\n\nservices:\n  - name: svc\n    upstream: pool\n\nupstreams:\n  - name: pool\n    endpoints:\n      - address: 127.0.0.1\n        port: 1\n",
+        db_path.display()
+    );
+    let dp = dataplane_from(&yaml);
+    dp.set_geoip(std::sync::Arc::new(
+        dwara_core::security::geoip::GeoipDb::open(db_path.to_str().unwrap()).unwrap(),
+    ));
+    let (s, _, _) = send(&dp, vec![("x-forwarded-for", "1.1.1.1")]).await;
+    assert_eq!(s, StatusCode::OK, "US passes with the v1 database");
+
+    // "Weekly GeoLite2 update" lands: the same network now maps CA.
+    let db_path2 = geo_fixture(dir.path(), "hot2", "CA");
+    dp.set_geoip(std::sync::Arc::new(
+        dwara_core::security::geoip::GeoipDb::open(db_path2.to_str().unwrap()).unwrap(),
+    ));
+    let (s, _, _) = send(&dp, vec![("x-forwarded-for", "1.1.1.1")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the SAME client address now rejects under the swapped reader"
+    );
+}

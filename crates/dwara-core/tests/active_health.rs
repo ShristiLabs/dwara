@@ -107,6 +107,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     }
 }
 
@@ -455,6 +456,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            geoip: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -582,6 +584,7 @@ async fn reserved_paths_shadow_configured_routes() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            geoip: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

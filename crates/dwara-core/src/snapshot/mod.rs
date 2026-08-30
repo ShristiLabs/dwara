@@ -215,14 +215,16 @@ fn validate_authz(
         && authz.denied_groups.is_empty()
         && authz.required_scopes.is_empty()
         && authz.required_claims.is_empty()
-        && authz.ip_acl.is_none();
+        && authz.ip_acl.is_none()
+        && authz.geoip.is_none();
     if empty {
         issues.push(issue(
             entity,
             name,
             "authorization",
-            "carries no rules (no consumers, groups, scopes, claims, or ip_acl) \
-             and is always a mistake: omit the authorization block entirely",
+            "carries no rules (no consumers, groups, scopes, claims, ip_acl, \
+             or geoip) and is always a mistake: omit the authorization block \
+             entirely",
         ));
     }
     for (side, entries) in [
@@ -1400,6 +1402,100 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// Validate GeoIP rules (DW-050): every `authorization.geoip`
+/// predicate anywhere in the config (gateway/listener/service/route/
+/// consumer — the five Authz attachment points) needs a
+/// `gateway.geoip` database (an unevaluable gate is an authoring
+/// error, never a silent pass), and country entries must be two ASCII
+/// letters.
+fn validate_geoip(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    fn check(a: Option<&crate::config::Authz>, where_: &str, issues: &mut Vec<ValidationIssue>) {
+        let Some(rules) = a.and_then(|a| a.geoip.as_ref()) else {
+            return;
+        };
+        for c in rules
+            .allowed_countries
+            .iter()
+            .chain(&rules.denied_countries)
+        {
+            if c.len() != 2 || !c.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                issues.push(issue(
+                    "gateway",
+                    where_,
+                    "authorization.geoip.countries",
+                    format!("country code '{c}' is not two ASCII letters (ISO 3166-1 alpha-2)"),
+                ));
+            }
+        }
+    }
+    let has_rules = |a: Option<&crate::config::Authz>| a.is_some_and(|a| a.geoip.is_some());
+    let any = gateway
+        .authorization
+        .as_ref()
+        .is_some_and(|a| has_rules(Some(a)))
+        || gateway
+            .listeners
+            .iter()
+            .any(|l| has_rules(l.authorization.as_ref()))
+        || gateway
+            .services
+            .iter()
+            .any(|s| has_rules(s.authorization.as_ref()))
+        || gateway
+            .routes
+            .iter()
+            .any(|r| has_rules(r.authorization.as_ref()))
+        || gateway
+            .consumers
+            .iter()
+            .any(|c| has_rules(c.authorization.as_ref()));
+    match &gateway.geoip {
+        None if any => issues.push(issue(
+            "gateway",
+            "(root)",
+            "geoip",
+            "authorization.geoip rules require a gateway.geoip database block \
+             (without one the gate cannot be evaluated)",
+        )),
+        Some(g) if g.path.trim().is_empty() => issues.push(issue(
+            "gateway",
+            "(root)",
+            "geoip.path",
+            "geoip.path is empty: name a real .mmdb file or remove the block",
+        )),
+        _ => {}
+    }
+    check(gateway.authorization.as_ref(), "(root)", issues);
+    for l in &gateway.listeners {
+        check(
+            l.authorization.as_ref(),
+            &format!("listeners[{}]", l.name),
+            issues,
+        );
+    }
+    for s in &gateway.services {
+        check(
+            s.authorization.as_ref(),
+            &format!("services[{}]", s.name),
+            issues,
+        );
+    }
+    for r in &gateway.routes {
+        check(
+            r.authorization.as_ref(),
+            &format!("routes[{}]", r.name),
+            issues,
+        );
+    }
+    for c in &gateway.consumers {
+        check(
+            c.authorization.as_ref(),
+            &format!("consumers[{}]", c.name),
+            issues,
+        );
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected — including `quota_near_limit`,
@@ -1624,6 +1720,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 
     // DW-043: the embedded analytics store block.
     validate_analytics(gateway, &mut issues);
+
+    // DW-050: geo rules need a database; countries must be alpha-2.
+    validate_geoip(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -3416,6 +3515,7 @@ impl Snapshot {
                 hmac_auth: None,
                 webhooks: Vec::new(),
                 analytics: None,
+                geoip: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

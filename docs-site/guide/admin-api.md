@@ -105,3 +105,31 @@ issuers remove old keys while previously-issued tokens still carry
 them. An identical-kid re-fetch never extends the grace. Config-only
 deployments rotate by editing the config (two credential entries)
 and reloading.
+
+## GeoIP rules (DW-050)
+
+Any [authorization](../reference/configuration-schema) block can gate
+on the client's COUNTRY or network (ASN), resolved from a MaxMind
+database:
+
+```yaml
+geoip:
+  path: /var/lib/dwara/GeoLite2-Country.mmdb
+
+routes:
+  - name: public
+    # ...
+    authorization:
+      geoip:
+        denied_countries: [KP, IR]   # reject these countries
+        allowed_countries: []        # empty = any not denied
+        denied_asns: [64512]         # reject this network
+```
+
+Rules evaluate the EFFECTIVE client IP (the `X-Forwarded-For`-resolved
+address behind trusted proxies — the same address IP ACLs use).
+Addresses the database cannot resolve (private ranges, not-in-DB)
+count as UNKNOWN: deny lists pass them, allow lists reject them. The
+database hot-reloads — replace the file and the watcher swaps the
+reader within a couple of seconds, no restart. Geo rules require the
+`geoip` block; validation rejects the predicate without one.

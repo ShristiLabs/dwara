@@ -500,6 +500,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         })
         .unwrap_or_default();
+
+    // DW-050: the GeoIP database — opened at startup when the config
+    // carries a `geoip` block (fail LOUD, serve geo-UNKNOWN without
+    // it), then a watcher polls the file's mtime and hot-swaps the
+    // reader (no restart). In-flight lookups keep the reader they
+    // loaded; the swap is atomic.
+    let geoip_task = state.snapshot().gateway().geoip.as_ref().map(|cfg| {
+        let path = cfg.path.clone();
+        match dwara_core::security::geoip::GeoipDb::open(&path) {
+            Ok(db) => {
+                dp.set_geoip(std::sync::Arc::new(db));
+                tracing::info!(
+                    code = "geoip_open",
+                    path = %path,
+                    "geoip database open; geo rules evaluating"
+                );
+            }
+            Err(e) => tracing::error!(
+                code = "geoip_open_failed",
+                path = %path,
+                "geoip database failed to open ({e}); geo lookups resolve UNKNOWN"
+            ),
+        }
+        let dp_geoip = Arc::clone(&dp);
+        let mut shutdown_geoip = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                        if mtime != last {
+                            last = mtime;
+                            match dwara_core::security::geoip::GeoipDb::open(&path) {
+                                Ok(db) => {
+                                    dp_geoip.set_geoip(Arc::new(db));
+                                    tracing::info!(
+                                        code = "geoip_reloaded",
+                                        path = %path,
+                                        "geoip database hot-reloaded"
+                                    );
+                                }
+                                Err(e) => tracing::warn!(
+                                    code = "geoip_reload_failed",
+                                    path = %path,
+                                    "geoip reload kept the previous reader ({e})"
+                                ),
+                            }
+                        }
+                    }
+                    _ = shutdown_geoip.changed() => return,
+                }
+            }
+        })
+    });
     let reload_task = tokio::spawn(async move {
         let mut probes = dwara_core::active::ActiveProbes::new();
         probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
@@ -617,6 +672,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     reload_task.abort();
     cert_task.abort();
     webhook_task.abort();
+    if let Some(t) = &geoip_task {
+        t.abort();
+    }
     // DW-043: analytics workers are NOT aborted — the shutdown watch
     // tells the writer to drain, flush, and take a final rollup/retention
     // pass (a clean restart loses nothing); give them a bounded moment

@@ -11,6 +11,7 @@ mod cache;
 mod config_source;
 mod credentials;
 mod extensions_error;
+mod geoip;
 mod hardening;
 mod health;
 mod migrations;

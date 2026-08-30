@@ -106,6 +106,10 @@ pub struct AuthzContext<'a> {
     /// The XFF-resolved client IP when the peer is a trusted proxy,
     /// else the peer (see [`effective_client_ip`]).
     pub effective_ip: IpAddr,
+    /// The GeoIP database handle when `gateway.geoip` is configured
+    /// (DW-050); `None` = every address is geo-UNKNOWN. Behind a
+    /// reference so evaluation never clones the reader.
+    pub geoip: Option<&'a crate::security::geoip::GeoipDb>,
 }
 
 /// Resolve the EFFECTIVE client IP (DW-009 trusted-proxy chain).
@@ -140,6 +144,51 @@ pub fn effective_client_ip(trusted: &[String], peer: IpAddr, xff: Option<&str>) 
         }
     }
     entries.iter().flatten().copied().next().unwrap_or(peer)
+}
+
+/// Evaluate one GeoIP rule set against the context's effective IP
+/// (DW-050). UNKNOWN (no database, unresolvable address) matches
+/// neither side, by the frozen semantics: deny-lists pass unknowns
+/// (geo blocking must not fail closed on infrastructure addresses),
+/// allow-lists reject them (an allow-list admitting unknowns would
+/// filter nothing).
+fn geoip_decision(rules: &crate::config::GeoipRules, ctx: &AuthzContext<'_>) -> Decision {
+    let (country, asn) = match ctx.geoip {
+        Some(db) => (db.country(ctx.effective_ip), db.asn(ctx.effective_ip)),
+        None => (None, None),
+    };
+    let country_hit = |list: &str| {
+        country
+            .as_ref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(list))
+    };
+    if rules.denied_countries.iter().any(|c| country_hit(c)) {
+        return Decision::Deny {
+            unauthenticated: false,
+            reason: "client country is denied",
+        };
+    }
+    if rules.denied_asns.iter().any(|a| asn == Some(*a)) {
+        return Decision::Deny {
+            unauthenticated: false,
+            reason: "client network (ASN) is denied",
+        };
+    }
+    let country_constrained = !rules.allowed_countries.is_empty();
+    let asn_constrained = !rules.allowed_asns.is_empty();
+    if country_constrained && !rules.allowed_countries.iter().any(|c| country_hit(c)) {
+        return Decision::Deny {
+            unauthenticated: false,
+            reason: "client country is not in the allowed list (or is unknown)",
+        };
+    }
+    if asn_constrained && !rules.allowed_asns.iter().any(|a| asn == Some(*a)) {
+        return Decision::Deny {
+            unauthenticated: false,
+            reason: "client network (ASN) is not in the allowed list (or is unknown)",
+        };
+    }
+    Decision::Allow
 }
 
 /// Evaluate one IP ACL against an IP. Deny list first (a deny match
@@ -185,12 +234,15 @@ fn has_identity_rules(authz: &Authz) -> bool {
 ///
 /// Public for testing the single-level authorization contract.
 pub fn evaluate_one(authz: &Authz, ctx: &AuthzContext<'_>) -> Option<Decision> {
-    if !has_identity_rules(authz) && authz.ip_acl.is_none() {
+    if !has_identity_rules(authz) && authz.ip_acl.is_none() && authz.geoip.is_none() {
         return None;
     }
     // IP gate first: a deny-list hit (or closed-default miss) rejects
     // before any identity consideration; an allow passes the gate and
-    // the identity rules (if any) still apply on top.
+    // the identity rules (if any) still apply on top. The GeoIP gate
+    // (DW-050) evaluates the same effective address: deny lists reject
+    // known matches, allow lists admit only known matches (UNKNOWN —
+    // unresolvable address or no database — matches neither side).
     if let Some(acl) = &authz.ip_acl {
         if let Decision::Deny { reason, .. } = ip_acl_decision(acl, ctx.effective_ip) {
             return Some(Decision::Deny {
@@ -199,8 +251,16 @@ pub fn evaluate_one(authz: &Authz, ctx: &AuthzContext<'_>) -> Option<Decision> {
             });
         }
     }
+    if let Some(rules) = &authz.geoip {
+        if let Decision::Deny { reason, .. } = geoip_decision(rules, ctx) {
+            return Some(Decision::Deny {
+                unauthenticated: false,
+                reason,
+            });
+        }
+    }
     if !has_identity_rules(authz) {
-        // ip_acl-only: the one anonymous-permitting shape.
+        // ip_acl/geoip-only: the anonymous-permitting shapes.
         return Some(Decision::Allow);
     }
     let Some(identity) = ctx.identity else {

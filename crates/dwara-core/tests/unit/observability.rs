@@ -125,6 +125,7 @@ fn render_contains_families() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            geoip: None,
         })
         .expect("publish");
     let registry =

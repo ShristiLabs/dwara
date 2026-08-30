@@ -212,6 +212,7 @@ fn empty_document_is_valid() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            geoip: None,
         }
     );
 }

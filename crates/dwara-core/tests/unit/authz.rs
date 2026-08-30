@@ -21,6 +21,7 @@ fn authz() -> Authz {
         required_scopes: vec![],
         required_claims: BTreeMap::new(),
         ip_acl: None,
+        geoip: None,
         dry_run: false,
     }
 }
@@ -44,6 +45,7 @@ fn ctx<'a>(
     effective_ip: IpAddr,
 ) -> AuthzContext<'a> {
     AuthzContext {
+        geoip: None,
         identity,
         consumer_groups: groups,
         peer_ip: ip(10, 0, 0, 1),

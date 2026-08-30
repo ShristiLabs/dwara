@@ -214,6 +214,12 @@ pub struct Gateway {
     /// reload can add or rename dimensions without a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analytics: Option<AnalyticsConfig>,
+    /// The GeoIP database (DW-050): MaxMind-format .mmdb file backing
+    /// `authorization.geoip` country/ASN predicates. Absent: geo rules
+    /// are rejected by validation (an unevaluable gate is an authoring
+    /// error, not a silent pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geoip: Option<GeoipConfig>,
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).
@@ -304,6 +310,45 @@ impl AnalyticsRetention {
             self.d1_ms.unwrap_or(d[4]).max(floors[4]),
         ]
     }
+}
+
+/// GeoIP allow/deny rules on the effective client IP (DW-050,
+/// `authorization.geoip`). Countries are ISO 3166-1 alpha-2 codes
+/// (case-insensitive in config, compared uppercase); ASNs are plain
+/// numbers. Evaluation mirrors `allowed_consumers`/`denied_consumers`:
+/// a denied match rejects (403) regardless of the allow lists; a
+/// NON-EMPTY allow list admits only matches; empty allow lists
+/// constrain nothing. The UNKNOWN case (unresolvable address, no
+/// database) matches neither side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeoipRules {
+    /// Countries allowed (empty = any not denied).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_countries: Vec<String>,
+    /// Countries rejected, even when otherwise allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_countries: Vec<String>,
+    /// Autonomous system numbers allowed (empty = any not denied).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_asns: Vec<u32>,
+    /// Autonomous system numbers rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_asns: Vec<u32>,
+}
+
+/// The GeoIP database config (DW-050, `gateway.geoip`). One MaxMind-
+/// format database serves both country and ASN predicates (a
+/// GeoLite2-Country, GeoLite2-ASN, or combined database — whichever
+/// subtrees it carries are the ones the rules can use). The file is
+/// opened at startup (a failed open is LOUD but non-fatal: the gateway
+/// serves with geo lookups resolving UNKNOWN) and hot-reloaded: the
+/// watcher swaps the reader when the file changes, with no restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeoipConfig {
+    /// Path to the .mmdb database file.
+    pub path: String,
 }
 
 /// One custom analytics dimension (DW-043,
@@ -1197,6 +1242,16 @@ pub struct Authz {
     /// IP allow/deny gate on the effective client IP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_acl: Option<IpAcl>,
+    /// GeoIP gate on the effective client IP (DW-050): country/ASN
+    /// allow and deny lists resolved through `gateway.geoip`'s
+    /// database. An address the database does not resolve (private
+    /// ranges, not-in-DB, no database loaded) is UNKNOWN and matches
+    /// NEITHER list: deny-lists keep passing unknowns, allow-lists
+    /// keep rejecting them. Requires a `gateway.geoip` block —
+    /// validation rejects the predicate without one. See
+    /// [`GeoipRules`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geoip: Option<GeoipRules>,
     /// Monitor mode (DW-041): evaluate this block's rules, LOG and count
     /// every would-be denial (the `dwara_policy_dry_run_total{phase=
     /// "authz"}` counter plus a `dwara::policy` warn event), but let the

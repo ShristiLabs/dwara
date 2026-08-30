@@ -27,6 +27,11 @@ hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", 
 # over already-buffered bytes; the async framing read, bounds, and the
 # fail-closed policy live in dwara-core's dataplane::proxy_proto.
 ppp = "2.3"
+# GeoIP database READER (DW-050): maxminddb is Apache-2.0 OR MIT
+# (allow-listed). The writer below is DEV-ONLY (tests generate their
+# own .mmdb fixtures — no binary test data committed to the repo).
+maxminddb = "0.30"
+mmdb-writer = "0.1.0"
 http-body-util = "0.1"
 bytes = "1"
 # hyper-util's legacy client is generic over tower Service connectors.

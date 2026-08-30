@@ -588,6 +588,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");
@@ -907,4 +908,47 @@ fn validation_rejects_bad_route_slo_blocks() {
         "target without threshold: {issues:?}"
     );
     let _ = base;
+}
+
+// --- GeoIP validation (DW-050) ---------------------------------------------
+
+#[test]
+fn validation_rejects_geoip_rules_without_a_database() {
+    let base = "listeners: []\nroutes:\n  - name: r\n    service: s\n    match:\n      path: { type: regex, value: /.* }\n    action: { type: respond, status: 200 }\n";
+    // Geo rules WITHOUT a gateway.geoip block: rejected (an
+    // unevaluable gate is an authoring error).
+    let gw = parse_ok(&format!(
+        "{base}    authorization: {{ geoip: {{ denied_countries: [KP] }} }}\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "geoip" && i.message.contains("require a gateway.geoip")),
+        "{issues:?}"
+    );
+    // With a database: clean.
+    let gw = parse_ok(&format!(
+        "geoip: {{ path: /tmp/x.mmdb }}\n{base}    authorization: {{ geoip: {{ denied_countries: [KP] }} }}\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.contains("geoip")),
+        "{issues:?}"
+    );
+    // Bad country code (not two letters).
+    let gw = parse_ok(&format!(
+        "geoip: {{ path: /tmp/x.mmdb }}\n{base}    authorization: {{ geoip: {{ denied_countries: [KPN] }} }}\n"
+    ));
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("not two ASCII letters")),
+        "{issues:?}"
+    );
+    // Empty path.
+    let gw = parse_ok("geoip: { path: ' ' }\nallow_empty_routes: true\n");
+    let issues = dwara_core::snapshot::validate(&gw);
+    assert!(issues.iter().any(|i| i.field == "geoip.path"), "{issues:?}");
 }

@@ -517,6 +517,12 @@ pub struct DataPlane {
     /// blocks); queries (admin endpoints) take the connection's mutex
     /// briefly behind the background writer's batched transactions.
     analytics: arc_swap::ArcSwapOption<crate::analytics::EmbeddedAnalytics>,
+    /// The GeoIP database (DW-050): opened at startup when
+    /// `gateway.geoip` is configured, hot-swapped by the dwara-bin
+    /// watcher when the file changes. ArcSwap: the authz path loads it
+    /// per request (an Arc bump), and in-flight lookups keep the
+    /// reader they loaded across a swap. None = geo-UNKNOWN.
+    geoip: arc_swap::ArcSwapOption<crate::security::geoip::GeoipDb>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -617,6 +623,7 @@ impl DataPlane {
             webhook_targets_anchor: target_anchor,
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             analytics: arc_swap::ArcSwapOption::empty(),
+            geoip: arc_swap::ArcSwapOption::empty(),
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -661,6 +668,18 @@ impl DataPlane {
     /// Admin surface seam.
     pub fn analytics(&self) -> Option<Arc<crate::analytics::EmbeddedAnalytics>> {
         self.analytics.load_full()
+    }
+
+    /// Attach/replace the GeoIP database (DW-050). dwara-bin opens it
+    /// at startup and the hot-reload watcher swaps it; the swap is
+    /// atomic and in-flight requests keep their loaded reader.
+    pub fn set_geoip(&self, db: std::sync::Arc<crate::security::geoip::GeoipDb>) {
+        self.geoip.store(Some(db));
+    }
+
+    /// The current GeoIP database, if one is loaded (DW-050).
+    pub fn geoip(&self) -> Option<std::sync::Arc<crate::security::geoip::GeoipDb>> {
+        self.geoip.load_full()
     }
 
     /// The request-completion analytics hook (DW-043): fire-and-forget
@@ -1518,7 +1537,12 @@ where
                 peer,
                 inbound_xff,
             );
+            // Hold the ArcSwap guard for the whole authz phase: the
+            // context borrows the reader, and the guard keeps it alive
+            // even across a concurrent hot swap.
+            let geoip_guard = dp.geoip.load();
             let authz_ctx = crate::security::authz::AuthzContext {
+                geoip: geoip_guard.as_ref().map(std::sync::Arc::as_ref),
                 identity: identity.as_ref(),
                 // Groups ride the identity (#124): config consumers from
                 // the config record, store-managed consumers from the

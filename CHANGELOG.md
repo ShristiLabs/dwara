@@ -9,6 +9,32 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- GeoIP ACL (DW-050): country/ASN authorization predicates backed by a
+  MaxMind-format database. `gateway.geoip: {path}` names the .mmdb file
+  (GeoLite2-Country, GeoLite2-ASN, or a combined DB — whichever
+  subtrees it carries are the ones rules can use); any authorization
+  block (gateway/listener/service/route/consumer) can carry
+  `geoip: {allowed_countries, denied_countries, allowed_asns,
+  denied_asns}` evaluated against the EFFECTIVE client IP (the same
+  XFF-resolved address ip_acl uses). Semantics frozen: a denied match
+  rejects (403); a non-empty allow list admits only matches; UNKNOWN
+  addresses (private ranges, not-in-DB, no database loaded) match
+  NEITHER side — deny-lists pass unknowns (geo blocking must not fail
+  closed on infrastructure addresses), allow-lists reject them (an
+  allow-list admitting unknowns would filter nothing). Country codes
+  compare case-insensitively (ISO 3166-1 alpha-2, validated);
+  `country` is preferred over `registered_country`. A geo-only
+  authorization block ADMITS anonymous traffic (the ip_acl-only shape
+  generalized), and geoip rules count as rules for the empty-block
+  validator. Validation rejects geo rules without a `gateway.geoip`
+  database. The database HOT-RELOADS: dwara-bin opens it at startup
+  (fail loud, serve geo-UNKNOWN without it) and a watcher swaps the
+  reader when the file changes — atomic ArcSwap; in-flight lookups
+  keep the reader they loaded; no restart. New deps: maxminddb
+  (Apache-2.0 OR MIT, allow-listed) and mmdb-writer (DEV-ONLY: tests
+  generate their own .mmdb fixtures at runtime — no binary test data
+  in the repo).
+
 - Key rotation workflows (DW-046): dual-validity windows for API keys
   and JWKS, admin lifecycle endpoints, and a zero-failure rotation
   runbook. API keys: the state store gains `credentials.retire_at`

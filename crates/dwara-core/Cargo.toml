@@ -30,6 +30,8 @@ hyper-util = { workspace = true }
 # DW-030: PROXY protocol v1/v2 header parsing on opt-in listeners
 # (dataplane::proxy_proto owns the framing/bounds/fail-closed policy).
 ppp = { workspace = true }
+# DW-050: GeoIP (MaxMind-format) database reading for geo rules.
+maxminddb = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower-service = { workspace = true }
@@ -83,6 +85,9 @@ tokio = { workspace = true }
 # Micro-benchmarks (DW-024): criterion is dev/bench-only; it never ships in
 # the gateway binary or library builds.
 criterion = { workspace = true }
+# DW-050 tests: generate .mmdb fixtures at runtime (dev-only;
+# Apache-2.0 OR MIT).
+mmdb-writer = { workspace = true }
 
 [[bench]]
 name = "micro"

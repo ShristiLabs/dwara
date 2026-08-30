@@ -48,6 +48,17 @@
         "$ref": "#/$defs/Consumer"
       }
     },
+    "geoip": {
+      "description": "The GeoIP database (DW-050): MaxMind-format .mmdb file backing\n`authorization.geoip` country/ASN predicates. Absent: geo rules\nare rejected by validation (an unevaluable gate is an authoring\nerror, not a silent pass).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GeoipConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "global_policies": {
       "description": "Gateway-level (global) policy attachment (#123): names of policies\nfrom the `policies` list that apply to EVERY request the gateway\nserves — the LEAST specific link of the frozen precedence chain\nconsumer > route > service > listener > global. Named\n`global_policies` (not `policies`, which is the policy REGISTRY at\nthis level) so the two roles cannot be confused. All applicable\nlevels' rules AND together (see the rate-limiter module docs), so a\nglobal policy is an additional constraint on every request, not a\ndefault that more specific levels replace. Global policies also\napply to UNROUTED traffic: a request whose path matches no route\nis rate-limited by them before the 404 is answered (the reserved\npaths /healthz, /readyz, and /metrics stay exempt).",
       "type": "array",
@@ -374,6 +385,17 @@
         "dry_run": {
           "description": "Monitor mode (DW-041): evaluate this block's rules, LOG and count\nevery would-be denial (the `dwara_policy_dry_run_total{phase=\n\"authz\"}` counter plus a `dwara::policy` warn event), but let the\nrequest PROCEED as if allowed. The flag is per ATTACHMENT and\nmutes only this block's OWN denials: a LIVE deny at any other\nlevel of the chain still enforces (dry run never makes\nenforcement more permissive — the resolver walks past a dry deny\nand stops only at a live one). Route `auth_required` is an\nauthentication-phase check, not an authorization rule, and is\nnever muted by this flag.",
           "type": "boolean"
+        },
+        "geoip": {
+          "description": "GeoIP gate on the effective client IP (DW-050): country/ASN\nallow and deny lists resolved through `gateway.geoip`'s\ndatabase. An address the database does not resolve (private\nranges, not-in-DB, no database loaded) is UNKNOWN and matches\nNEITHER list: deny-lists keep passing unknowns, allow-lists\nkeep rejecting them. Requires a `gateway.geoip` block —\nvalidation rejects the predicate without one. See\n[`GeoipRules`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoipRules"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "ip_acl": {
           "description": "IP allow/deny gate on the effective client IP.",
@@ -795,6 +817,59 @@
           "const": "sameorigin"
         }
       ]
+    },
+    "GeoipConfig": {
+      "description": "The GeoIP database config (DW-050, `gateway.geoip`). One MaxMind-\nformat database serves both country and ASN predicates (a\nGeoLite2-Country, GeoLite2-ASN, or combined database — whichever\nsubtrees it carries are the ones the rules can use). The file is\nopened at startup (a failed open is LOUD but non-fatal: the gateway\nserves with geo lookups resolving UNKNOWN) and hot-reloaded: the\nwatcher swaps the reader when the file changes, with no restart.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path to the .mmdb database file.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "GeoipRules": {
+      "description": "GeoIP allow/deny rules on the effective client IP (DW-050,\n`authorization.geoip`). Countries are ISO 3166-1 alpha-2 codes\n(case-insensitive in config, compared uppercase); ASNs are plain\nnumbers. Evaluation mirrors `allowed_consumers`/`denied_consumers`:\na denied match rejects (403) regardless of the allow lists; a\nNON-EMPTY allow list admits only matches; empty allow lists\nconstrain nothing. The UNKNOWN case (unresolvable address, no\ndatabase) matches neither side.",
+      "type": "object",
+      "properties": {
+        "allowed_asns": {
+          "description": "Autonomous system numbers allowed (empty = any not denied).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "allowed_countries": {
+          "description": "Countries allowed (empty = any not denied).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_asns": {
+          "description": "Autonomous system numbers rejected.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "denied_countries": {
+          "description": "Countries rejected, even when otherwise allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "HeaderOps": {
       "description": "Header manipulation ops (DW-028). Applied in ONE deterministic\norder regardless of YAML key order: `set` (replace all values of the\nname with one value), then `add` (append one value, keeping any\nexisting values), then `rename` (move every value of `from` to\n`to`), then `remove` (drop every value of the name) — so `remove`\ncan clean up what earlier ops placed, and `rename` sees both\nupstream and just-set values. Maps iterate in sorted key order\n(BTreeMap), making multi-entry application deterministic.\n\nThe block runs after hop-by-hop stripping on the request side and\nbefore the gateway's own policy stamps on the response side;\nframing and hop-by-hop header names are rejected by validation in\nBOTH directions (see `dataplane::transforms` module docs for the\nrationale).",

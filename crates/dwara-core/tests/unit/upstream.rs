@@ -48,6 +48,7 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -423,6 +424,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         hmac_auth: None,
         webhooks: Vec::new(),
         analytics: None,
+        geoip: None,
     });
     let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
     assert!(fields.contains(&"connection_cap"));
@@ -470,6 +472,7 @@ fn with_root_certificates_rejects_malformed_root() {
             hmac_auth: None,
             webhooks: Vec::new(),
             analytics: None,
+            geoip: None,
         })
         .expect("publish");
     let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate
