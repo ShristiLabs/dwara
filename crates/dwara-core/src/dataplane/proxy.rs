@@ -833,6 +833,13 @@ impl DataPlane {
         self.rebuild_authn();
     }
 
+    /// Publish the license status gauge (DW-032): 0 = no license (OSS),
+    /// 1 = valid, 2 = expired within grace, 3 = expired past grace.
+    /// Set once at startup and on every reload.
+    pub fn set_license_status(&self, status: i64) {
+        self.obs.set_license_status(status);
+    }
+
     /// The DWARA_STATE_DB store when one is attached (None = pure-config
     /// credentials). Admin surface seam (DW-022): `/stats` reports the
     /// store's schema version when present.

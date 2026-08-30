@@ -7,6 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# DW-032: the ent feature forwards to dwara-core's ent feature so the
+# binary's #[cfg(feature = "ent")] license-verification path compiles in.
 dwara-core = { path = "../dwara-core" }
 dwara-admin = { path = "../dwara-admin" }
 tokio = { workspace = true }
@@ -51,6 +53,12 @@ otlp = [
     "dep:http",
     "dep:bytes",
 ]
+# DW-032: Enterprise edition. Forwards to dwara-core's `ent` feature so
+# the binary's license-verification startup path compiles in. Default
+# OFF: OSS builds keep the license block inert (the gate is always
+# none()). Build with `cargo build --features ent` (or
+# `--features dwara-bin/ent`) to enable license verification.
+ent = ["dwara-core/ent"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

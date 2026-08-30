@@ -47,6 +47,9 @@ argon2 = { workspace = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
+# DW-032: license expiry / grace-period arithmetic (extensions/licensing).
+# MIT OR Apache-2.0; already in the tree via jsonwebtoken.
+chrono = { workspace = true }
 tracing = { workspace = true }
 prometheus = { workspace = true }
 # Local response cache backend (DW-037): see the workspace comment.
@@ -60,6 +63,15 @@ zstd = { workspace = true }
 # primitive swap in health.rs/breaker.rs/retries.rs and the rate
 # limiter's shard store (extensions/rate_limiter.rs, #122).
 loom = { version = "0.7", optional = true }
+# DW-032: Enterprise licensing primitives (optional, ent feature only).
+# licensing-core is BSL-1.1; see the workspace Cargo.toml comment and
+# deny.toml. Optional so OSS builds (the default) never pull it in. The
+# canonical source is the private git repo
+# (https://github.com/ShristiLabs/licensing.git); a path dependency is
+# used here so the local checkout resolves without git credentials. In a
+# CI/publish context that has git access, swap this for the git form:
+#   licensing-core = { git = "https://github.com/ShristiLabs/licensing.git", optional = true }
+licensing-core = { path = "../../../licensing/crates/licensing-core", optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -67,6 +79,11 @@ loom = { version = "0.7", optional = true }
 # enabled in production builds or the default test run; exercised by
 # `cargo test --features loom` and the fuzz.yml CI job.
 loom = ["dep:loom"]
+# DW-032: Enterprise edition features. When enabled, the gateway can
+# verify a ShristiLabs license file and gate enterprise features (Redis
+# rate limiter, config convergence, etc.) behind license claims. OSS
+# builds (the default) compile without the licensing-core dependency.
+ent = ["dep:licensing-core"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

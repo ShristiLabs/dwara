@@ -238,6 +238,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     }
 }
 

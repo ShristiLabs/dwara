@@ -9,6 +9,39 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Enterprise licensing gate (DW-032): a `LicenseGate` runtime value
+  that holds an optional verified license and gates enterprise features
+  behind feature-claim flags. The gate is the edition boundary as a
+  type boundary (per AGENTS.md): OSS builds (the default, no `ent`
+  cargo feature) compile a stub gate that is always `none()` and never
+  pull in the `licensing-core` dependency (BSL-1.1, allow-listed in
+  `deny.toml`); enterprise builds (`cargo build --features ent`) link
+  `licensing-core` and verify a license file at startup. The public key
+  is NEVER in the YAML config — it comes from the
+  `DWARA_LICENSE_PUBLIC_KEY` env var (or the compiled-in development
+  key when unset), so an operator cannot substitute their own key to
+  forge a license. The product ID is pinned to `"dwara"` so a license
+  issued for another ShristiLabs product cannot be replayed. A
+  configurable grace period (default 7 days, 0..=30) after expiry keeps
+  enterprise features working while the operator renews; after the
+  grace window the gate degrades to OSS gracefully (the done-when:
+  "Invalid/expired license degrades to OSS feature set gracefully"). A
+  new optional `gateway.license` config block carries the license file
+  path and grace period; when the `ent` feature is not compiled in the
+  block is accepted but inert. Startup behavior: no license = OSS mode
+  (log); valid = enterprise mode (log customer/plan/features); expired
+  within grace = enterprise mode with warning; expired past grace =
+  degrade to OSS with warning; invalid signature or file not found =
+  refuse to start (exit 1). A new `dwara_license_status` metric (gauge:
+  0 = no license, 1 = valid, 2 = expired within grace, 3 = expired past
+  grace) is exported on `/metrics`. The current enterprise features
+  (DW-031 Redis rate limiter, DW-054 config convergence) are not yet
+  implemented; the gate provides the check mechanism they will call.
+  New `ent` cargo feature on dwara-core and dwara-bin (forwards to
+  dwara-core/ent). New `chrono` workspace dependency (MIT OR
+  Apache-2.0, already in the tree via jsonwebtoken) for license
+  expiry/grace-period arithmetic.
+
 - OAuth2 client-credentials proxying and mTLS consumer mapping (DW-035):
   the gateway can obtain an access token from an external OAuth2 token
   endpoint using the client-credentials grant (RFC 6749 section 4.4)

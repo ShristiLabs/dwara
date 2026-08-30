@@ -124,6 +124,11 @@ Feature areas written up so far (M1 complete; M2 in progress):
   mapping by fingerprint or subject CN (independent of the per-consumer
   mtls credential), and X-Client-Cert-* identity-forwarding headers
   with inbound spoofing prevention (DW-035).
+- [Enterprise licensing gate](./features/licensing.md) — the
+  `LicenseGate` runtime value that holds an optional verified license
+  and gates enterprise features behind feature-claim flags; the `ent`
+  cargo feature, offline Ed25519 verification, the grace-period
+  degradation curve, and the `dwara_license_status` metric (DW-032).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

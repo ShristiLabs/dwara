@@ -60,6 +60,7 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -724,6 +725,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             admission_queue: None,
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
+            license: None,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert_eq!(fields, vec![field], "exactly {field} flagged");
@@ -781,6 +783,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     });
     assert!(issues.is_empty(), "positive values valid: {issues:?}");
 }

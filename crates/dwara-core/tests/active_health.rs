@@ -113,6 +113,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     }
 }
 
@@ -466,6 +467,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             admission_queue: None,
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
+            license: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -609,6 +611,7 @@ async fn reserved_paths_shadow_configured_routes() {
             admission_queue: None,
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
+            license: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

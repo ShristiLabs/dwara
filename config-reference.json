@@ -106,6 +106,17 @@
         "$ref": "#/$defs/JwtProvider"
       }
     },
+    "license": {
+      "description": "Enterprise license configuration (DW-032). Absent (the default):\nthe gateway runs in OSS mode — all features available are\nOSS-only and no license verification occurs. When present, the\ngateway verifies the license file at startup (if compiled with\nthe `ent` cargo feature) and gates enterprise features behind\nthe license's feature claims. The public key is NOT configured\nhere — it comes from the `DWARA_LICENSE_PUBLIC_KEY` env var (or\nthe compiled-in development key when unset), never\nuser-configurable, so an operator cannot substitute their own\nkey to forge a license. When the `ent` feature is NOT compiled\nin, the block is accepted but inert (the gate is always\n`LicenseGate::none()`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LicenseConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "listeners": {
       "description": "Entry points the gateway binds.",
       "type": "array",
@@ -1476,6 +1487,26 @@
       "required": [
         "name",
         "jwks_url"
+      ]
+    },
+    "LicenseConfig": {
+      "description": "Enterprise license configuration (DW-032, `gateway.license`).\n\nWhen present, the gateway verifies the license file at startup (if\ncompiled with the `ent` cargo feature) and gates enterprise features\nbehind the license's feature claims. The public key is NOT in this\nblock — it comes from the `DWARA_LICENSE_PUBLIC_KEY` env var (or the\ncompiled-in development key when unset), never user-configurable, so\nan operator cannot substitute their own key to forge a license. When\nthe `ent` feature is NOT compiled in, the block is accepted but inert\n(the gate is always `LicenseGate::none()`).",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Filesystem path of the license file (JSON: claims + Ed25519\nsignature). The file is read and verified at startup and on\nevery config reload. A missing file refuses to start at cold\nstart (exit 1); on reload, a missing file keeps the running\ngeneration serving.",
+          "type": "string"
+        },
+        "grace_period_days": {
+          "description": "Grace period in days after the license expires before the gate\ndegrades to OSS (default 7; validated to 0..=30). During the\ngrace window enterprise features still work and a warning is\nlogged. 0 means no grace (immediate degradation on expiry).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file"
       ]
     },
     "Listener": {

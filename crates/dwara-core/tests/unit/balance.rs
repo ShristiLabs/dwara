@@ -422,6 +422,7 @@ async fn dataplane_reload_changes_weights_without_restart() {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     };
     st.compile_and_publish(&g).expect("publish A");
     let dp = DataPlane::new(Arc::clone(&st));

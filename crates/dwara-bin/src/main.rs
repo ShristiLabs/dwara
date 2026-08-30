@@ -192,6 +192,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // DW-032: enterprise license gate. Built from the config's `license`
+    // block at startup; the gate controls access to enterprise features
+    // (Redis rate limiter, config convergence, etc. — not yet
+    // implemented; the gate provides the check mechanism). The public
+    // key is NEVER in the YAML — it comes from the
+    // DWARA_LICENSE_PUBLIC_KEY env var (or the compiled-in dev key when
+    // unset), so an operator cannot substitute their own key to forge a
+    // license. When the `ent` cargo feature is NOT compiled in, the
+    // block is accepted but inert (the gate is always none()).
+    let license_gate = build_license_gate(&gateway);
+
     // Credential pepper (#124): resolved through the SecretSource
     // extension seam BEFORE the state store is seeded (the pepper
     // selects the stored-hash format for config-seeded keys) and handed
@@ -416,6 +427,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(store) = &state_store {
         dp.set_state_store(Arc::clone(store));
     }
+    // DW-032: publish the license status metric once the dataplane
+    // (which owns the observability registry) is constructed.
+    dp.set_license_status(license_gate.status().as_metric());
 
     // Admin listener (DW-022): started ONLY when the config carries an
     // `admin` block (default: no admin block, no admin listener). The
@@ -750,4 +764,99 @@ fn config_dir(path: &Path) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Build the enterprise license gate from the config's `license` block
+/// (DW-032). Returns a `LicenseGate` reflecting the verification
+/// outcome. Startup behavior:
+///
+/// - No `license` block: OSS mode, logs "running in OSS mode".
+/// - `license` block + valid: enterprise mode, logs customer/plan/features.
+/// - `license` block + expired + within grace: enterprise mode, warns.
+/// - `license` block + expired + past grace: degrades to OSS, logs.
+/// - `license` block + invalid signature: refuses to start (exit 1).
+/// - `license` block + file not found: refuses to start (exit 1).
+///
+/// When the `ent` cargo feature is NOT compiled in, the block is
+/// accepted but inert (the gate is always `none()`); a present block
+/// logs a one-line notice that the ent feature is not compiled in.
+fn build_license_gate(
+    gateway: &dwara_core::config::Gateway,
+) -> dwara_core::extensions::licensing::LicenseGate {
+    use dwara_core::extensions::licensing::LicenseGate;
+
+    let Some(lic_cfg) = &gateway.license else {
+        tracing::info!(
+            code = "license_oss_mode",
+            "running in OSS mode (no license configured)"
+        );
+        return LicenseGate::none();
+    };
+
+    #[cfg(not(feature = "ent"))]
+    {
+        tracing::info!(
+            code = "license_block_inert",
+            file = %lic_cfg.file,
+            "license block present but the ent cargo feature is not compiled in; \
+             running in OSS mode (the block is accepted but inert)"
+        );
+        LicenseGate::none()
+    }
+
+    #[cfg(feature = "ent")]
+    {
+        use dwara_core::extensions::licensing::LicenseStatus;
+        let grace = lic_cfg.grace_period_days;
+        match LicenseGate::from_file(std::path::Path::new(&lic_cfg.file), grace) {
+            Ok(gate) => {
+                match gate.status() {
+                    LicenseStatus::Valid => {
+                        tracing::info!(
+                            code = "license_verified",
+                            customer = gate.customer().unwrap_or("?"),
+                            plan = gate.plan().unwrap_or("?"),
+                            features = ?gate.features(),
+                            "enterprise license verified: customer={}, plan={}, features={:?}",
+                            gate.customer().unwrap_or("?"),
+                            gate.plan().unwrap_or("?"),
+                            gate.features(),
+                        );
+                    }
+                    LicenseStatus::ExpiredWithinGrace => {
+                        tracing::warn!(
+                            code = "license_expired_within_grace",
+                            expires_at = gate.expires_at().as_deref().unwrap_or("?"),
+                            grace_period_days = grace,
+                            "license expired but within grace period (expires_at={}); \
+                             enterprise features still active — renew before the grace window ends",
+                            gate.expires_at().as_deref().unwrap_or("?"),
+                        );
+                    }
+                    LicenseStatus::ExpiredPastGrace => {
+                        tracing::warn!(
+                            code = "license_expired_past_grace",
+                            "license expired past grace period, degrading to OSS"
+                        );
+                    }
+                    LicenseStatus::NoLicense => {
+                        // Unreachable: from_file always sets a status
+                        // when it returns Ok. Defensive log.
+                        tracing::warn!(
+                            code = "license_unexpected_status",
+                            "license gate returned no-license status after from_file"
+                        );
+                    }
+                }
+                gate
+            }
+            Err(err) => {
+                tracing::error!(
+                    code = "license_load_failed",
+                    "license verification failed: {err}; refusing to start"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 }

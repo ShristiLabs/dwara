@@ -217,6 +217,7 @@ fn empty_document_is_valid() {
             admission_queue: None,
             mtls_consumer_mapping: None,
             mtls_forward_headers: None,
+            license: None,
         }
     );
 }

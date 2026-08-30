@@ -150,6 +150,10 @@ export default withMermaid(
                   text: "OAuth2 and mTLS",
                   link: "/guide/oauth2-mtls",
                 },
+                {
+                  text: "Enterprise licensing",
+                  link: "/guide/licensing",
+                },
               ],
             },
           ],

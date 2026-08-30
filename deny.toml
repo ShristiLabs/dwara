@@ -24,6 +24,10 @@ allow = [
   # foldhash (hasher pulled in by governor's keyed state, DW-017) is
   # Zlib-licensed: short permissive MIT-style license, not copyleft.
   "Zlib",
+  # licensing-core (optional ent-feature dependency) is BSL-1.1:
+  # the Business Source License allows non-production use and converts to
+  # Apache-2.0 after a change date. Acceptable for the optional ent dep.
+  "BSL-1.1",
 ]
 
 [bans]

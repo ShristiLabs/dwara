@@ -271,6 +271,20 @@ pub struct Gateway {
     /// headers are forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_forward_headers: Option<MtlsForwardHeaders>,
+    /// Enterprise license configuration (DW-032). Absent (the default):
+    /// the gateway runs in OSS mode — all features available are
+    /// OSS-only and no license verification occurs. When present, the
+    /// gateway verifies the license file at startup (if compiled with
+    /// the `ent` cargo feature) and gates enterprise features behind
+    /// the license's feature claims. The public key is NOT configured
+    /// here — it comes from the `DWARA_LICENSE_PUBLIC_KEY` env var (or
+    /// the compiled-in development key when unset), never
+    /// user-configurable, so an operator cannot substitute their own
+    /// key to forge a license. When the `ent` feature is NOT compiled
+    /// in, the block is accepted but inert (the gate is always
+    /// `LicenseGate::none()`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<LicenseConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -399,6 +413,44 @@ fn default_mtls_forward_prefix() -> String {
 
 fn is_default_mtls_forward_prefix(p: &str) -> bool {
     p == "X-Client-Cert"
+}
+
+/// Enterprise license configuration (DW-032, `gateway.license`).
+///
+/// When present, the gateway verifies the license file at startup (if
+/// compiled with the `ent` cargo feature) and gates enterprise features
+/// behind the license's feature claims. The public key is NOT in this
+/// block — it comes from the `DWARA_LICENSE_PUBLIC_KEY` env var (or the
+/// compiled-in development key when unset), never user-configurable, so
+/// an operator cannot substitute their own key to forge a license. When
+/// the `ent` feature is NOT compiled in, the block is accepted but inert
+/// (the gate is always `LicenseGate::none()`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LicenseConfig {
+    /// Filesystem path of the license file (JSON: claims + Ed25519
+    /// signature). The file is read and verified at startup and on
+    /// every config reload. A missing file refuses to start at cold
+    /// start (exit 1); on reload, a missing file keeps the running
+    /// generation serving.
+    pub file: String,
+    /// Grace period in days after the license expires before the gate
+    /// degrades to OSS (default 7; validated to 0..=30). During the
+    /// grace window enterprise features still work and a warning is
+    /// logged. 0 means no grace (immediate degradation on expiry).
+    #[serde(
+        default = "default_license_grace_period_days",
+        skip_serializing_if = "is_default_license_grace_period_days"
+    )]
+    pub grace_period_days: u32,
+}
+
+fn default_license_grace_period_days() -> u32 {
+    crate::config::limits::DEFAULT_LICENSE_GRACE_PERIOD_DAYS
+}
+
+fn is_default_license_grace_period_days(v: &u32) -> bool {
+    *v == crate::config::limits::DEFAULT_LICENSE_GRACE_PERIOD_DAYS
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).

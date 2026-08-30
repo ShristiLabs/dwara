@@ -118,6 +118,9 @@
 //!   immediately with 503).
 //! - `dwara_admission_queue_depth` gauge (DW-053) — current number of
 //!   requests waiting in the admission queue for a concurrency permit.
+//! - `dwara_license_status` gauge (DW-032) — 0 = no license (OSS mode),
+//!   1 = valid, 2 = expired within grace period, 3 = expired past grace
+//!   period (degraded to OSS). Set at startup and on reload; no labels.
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -455,6 +458,11 @@ pub struct Observability {
     /// (the request was allowed); `passed` = no match (counted once per
     /// inspected request, filter label `all`).
     waf_total: IntCounterVec,
+    /// DW-032: license status gauge — 0 = no license (OSS), 1 = valid,
+    /// 2 = expired within grace, 3 = expired past grace (degraded to
+    /// OSS). Set once at startup and on every reload; no labels (closed
+    /// four-value set, so cardinality is one series).
+    license_status: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -821,6 +829,13 @@ impl Observability {
             &["route", "filter", "outcome"],
         )
         .expect("valid metric definition");
+        let license_status = IntGauge::new(
+            "dwara_license_status",
+            "License status (DW-032): 0 = no license (OSS mode), 1 = valid, \
+             2 = expired within grace period, 3 = expired past grace period \
+             (degraded to OSS).",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -864,6 +879,7 @@ impl Observability {
             Box::new(admission_queued_total.clone()),
             Box::new(admission_queue_depth.clone()),
             Box::new(waf_total.clone()),
+            Box::new(license_status.clone()),
         ] {
             registry
                 .register(m)
@@ -911,6 +927,7 @@ impl Observability {
             admission_queued_total,
             admission_queue_depth,
             waf_total,
+            license_status,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1147,6 +1164,13 @@ impl Observability {
     /// Publish the current config generation number.
     pub fn set_config_generation(&self, generation: u64) {
         self.config_generation.set(generation as i64);
+    }
+
+    /// Set the `dwara_license_status` gauge (DW-032): 0 = no license
+    /// (OSS), 1 = valid, 2 = expired within grace, 3 = expired past
+    /// grace (degraded to OSS). Set once at startup and on every reload.
+    pub fn set_license_status(&self, status: i64) {
+        self.license_status.set(status);
     }
 
     /// Set the `breaker_state` gauge for one upstream (0 closed, 1 open,

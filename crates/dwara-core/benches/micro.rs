@@ -137,6 +137,7 @@ fn bench_gateway() -> Gateway {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     }
 }
 

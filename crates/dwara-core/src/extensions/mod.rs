@@ -26,6 +26,7 @@
 pub mod analytics;
 pub mod cache;
 pub mod config_source;
+pub mod licensing;
 pub mod rate_limiter;
 pub mod secrets;
 

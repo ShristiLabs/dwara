@@ -96,3 +96,16 @@ pub const MAX_STREAM_BATCH_RECORDS: u64 = 4_096;
 /// most an operator should need to allow (a chatty app ticks far
 /// below it; above it the policing itself becomes the load).
 pub const MAX_WEBSOCKET_FRAMES_PER_SEC: u64 = 100_000;
+
+/// Default grace period (days) after a license expires before the gate
+/// degrades to OSS (DW-032). Configurable via
+/// `gateway.license.grace_period_days`; 0 means no grace (immediate
+/// degradation on expiry). Lives in config (the lowest domain) so both
+/// extensions::licensing (the gate) and snapshot::validate (the bounds
+/// check) can read it without an upward import.
+pub const DEFAULT_LICENSE_GRACE_PERIOD_DAYS: u32 = 7;
+
+/// Maximum configurable grace period (days) after license expiry
+/// (DW-032). `gateway.license.grace_period_days` is validated to
+/// 0..=this.
+pub const MAX_LICENSE_GRACE_PERIOD_DAYS: u32 = 30;

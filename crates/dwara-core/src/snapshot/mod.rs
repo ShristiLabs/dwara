@@ -1584,6 +1584,38 @@ fn validate_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// Validate the `gateway.license` block (DW-032): the grace-period days
+/// must be in 0..=30, and the file path must be non-empty. The signature
+/// and expiry checks are NOT validation concerns — they run at startup
+/// in dwara-bin (where a missing or invalid file can exit 1), not in the
+/// compile pipeline (a license file's validity is a runtime property
+/// that can change between reloads without a config-schema change).
+fn validate_license(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(lic) = &gateway.license else {
+        return;
+    };
+    if lic.file.trim().is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "license.file",
+            "license.file must be a non-empty filesystem path",
+        ));
+    }
+    if lic.grace_period_days > crate::config::limits::MAX_LICENSE_GRACE_PERIOD_DAYS {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "license.grace_period_days",
+            format!(
+                "license.grace_period_days {} is out of range: must be 0..={}",
+                lic.grace_period_days,
+                crate::config::limits::MAX_LICENSE_GRACE_PERIOD_DAYS,
+            ),
+        ));
+    }
+}
+
 /// Validate the `gateway.webhooks` list (DW-044): every URL must be an
 /// absolute http(s) URL, every `events` entry must name an emitted kind
 /// (unknown spellings are rejected; `quota_near_limit` IS emitted since
@@ -2023,6 +2055,11 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 
     // DW-033: consumer request budgets.
     validate_quotas(gateway, &mut issues);
+
+    // DW-032: enterprise license block (grace-period bounds; the
+    // signature/expiry check is NOT validation — it runs at startup in
+    // dwara-bin, where a missing/invalid file can exit 1).
+    validate_license(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -4306,6 +4343,7 @@ impl Snapshot {
                 admission_queue: None,
                 mtls_consumer_mapping: None,
                 mtls_forward_headers: None,
+                license: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

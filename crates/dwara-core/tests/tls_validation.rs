@@ -156,6 +156,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         admission_queue: None,
         mtls_consumer_mapping: None,
         mtls_forward_headers: None,
+        license: None,
     }
 }
 

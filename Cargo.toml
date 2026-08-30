@@ -111,6 +111,11 @@ hmac = "0.12"
 argon2 = "0.5"
 base64 = "0.22"
 jsonwebtoken = "9"
+# DW-032: chrono for license expiry/grace-period arithmetic (ent feature
+# only, but declared as a regular dep so the licensing module compiles
+# cleanly under both feature sets). MIT OR Apache-2.0 (both allow-listed);
+# already in the tree via jsonwebtoken and (with ent) licensing-core.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Observability (DW-021): all MIT. tracing provides the span/event
 # substrate used across dwara-core; tracing-subscriber (binary/dev only)
 # renders JSON logs with env filtering; prometheus with default features
@@ -157,6 +162,15 @@ clap = { version = "4", features = ["derive"] }
 # use); cargo_bench_support keeps `--output-format bencher` for the
 # regression gate in .github/workflows/bench.yml.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# DW-032: Enterprise licensing primitives (optional, ent feature only).
+# licensing-core is BSL-1.1 (allow-listed in deny.toml): the Business Source
+# License allows non-production use and converts to Apache-2.0 after a change
+# date. It is a private dependency consumed only when the `ent` cargo feature
+# is enabled on dwara-core; OSS builds (the default) never pull it in. Declared
+# directly in dwara-core's Cargo.toml (workspace deps cannot be optional). The
+# canonical source is the private git repo; a path dependency is used in local
+# development where the repo is checked out alongside dwara.
+licensing-core = { git = "https://github.com/ShristiLabs/licensing.git" }
 
 [profile.release]
 lto = true
