@@ -1,20 +1,20 @@
 {
   "benches": {
-    "authn/apikey_verify_sha256_ct": 439.0,
-    "balancer/pick_ketama_5": 18.0,
-    "balancer/pick_wrr_5": 9.0,
-    "config/compile_100_routes": 703584.0,
-    "config/validate_100_routes": 21077.0,
-    "headers/strip_hop_by_hop_30": 3940.0,
-    "ratelimit/gcra_hit": 29.0,
-    "route/find_full_exact_param": 165.0,
-    "route/find_full_miss": 189.0,
-    "route/find_full_prefix_hit": 165.0,
-    "route/find_full_regex_hit": 90.0
+    "authn/apikey_verify_sha256_ct": 394.0,
+    "balancer/pick_ketama_5": 35.0,
+    "balancer/pick_wrr_5": 21.0,
+    "config/compile_100_routes": 1218883.0,
+    "config/validate_100_routes": 40696.0,
+    "headers/strip_hop_by_hop_30": 955.0,
+    "ratelimit/gcra_hit": 92.0,
+    "route/find_full_exact_param": 229.0,
+    "route/find_full_miss": 215.0,
+    "route/find_full_prefix_hit": 225.0,
+    "route/find_full_regex_hit": 128.0
   },
   "meta": {
-    "machine": "developer laptop, macOS arm64, 2026-08-24 (bench profile, unloaded)",
-    "note": "ns/iter, bencher format. DEV-MACHINE REFERENCE: captured on a macOS laptop, NOT on the CI runner. The CI gate (bench.yml micro job) skips cross-machine comparison and fails open while this baseline is in place; dispatch the baseline refresh once to capture an ubuntu-latest baseline (gh workflow run bench.yml --ref main -f job=baseline-refresh). Refresh with scripts/bench-baseline.py --write FILE --force --machine LABEL.",
+    "machine": "ubuntu-latest",
+    "note": "ns/iter, bencher format",
     "tolerance": 0.25
   }
 }
