@@ -15,6 +15,17 @@
         }
       ]
     },
+    "admission_queue": {
+      "description": "Bounded admission queues (DW-053): when the gateway concurrency\ncap (`max_concurrent_requests`) is saturated, requests WAIT for a\npermit up to `queue_timeout_ms` instead of being immediately\nshed. This produces a graceful degradation curve (latency rises\nbefore shedding begins) rather than the cliff of immediate\nshedding. Absent (the default): the DW-016 behavior stands —\nover-cap requests are shed immediately with 503. Requires\n`max_concurrent_requests` (validation rejects an enabled queue\non an uncapped gateway, the same rule as `load_shed_dry_run`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AdmissionQueue"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "allow_empty_routes": {
       "description": "Deliberate opt-in to running a gateway with ZERO routes (#129,\nmaintainer decision). Default false: validation rejects a\nroute-less config. An empty route set is schema-valid (every\ncollection defaults empty), and a truncated or torn config\nwrite (truncate-then-save, common in naive editors) is\nschema-valid too — publishing it would drop ALL routing\nmid-run (every request 404s while the file \"looks fine\"). The\nguard applies to cold start AND hot reload alike; a rejected\nreload keeps the running generation serving. Set this to true\nonly for deliberate route-less shapes (e.g. a gateway whose\nsole job is the admin API): with the flag set, unrouted\nrequests answer 404 after listener/global policy checks, per\nthe documented request-path order.",
       "type": "boolean"
@@ -252,6 +263,38 @@
         "cert_file",
         "key_file",
         "client_ca_file"
+      ]
+    },
+    "AdmissionQueue": {
+      "description": "Bounded admission queue config (DW-053, `gateway.admission_queue`).\n\nWhen enabled and the concurrency cap is full, requests wait for a\npermit up to `queue_timeout_ms` instead of being immediately shed.\nThe queue depth is bounded by `max_queue_size`; once full, further\nrequests are shed immediately with 503 (the `queue_full` outcome).\nPer-priority splitting (`per_priority: true`, the default) reserves\na fraction of queue capacity for high-priority requests so they are\nnot starved by a low-priority queue fill.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default false: the queue is inert and the\ngateway sheds immediately on cap saturation (DW-016 behavior).\nRequires `max_concurrent_requests` (validation rejects an\nenabled queue on an uncapped gateway).",
+          "type": "boolean"
+        },
+        "max_queue_size": {
+          "description": "Total number of requests that may wait for a permit across all\npriority classes (1..=10000). Once the queue is at capacity,\nfurther over-cap requests are shed immediately with 503\n(the `queue_full` outcome).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "per_priority": {
+          "description": "Split queue capacity across priority classes (default true).\nWhen true, a fraction of `max_queue_size` is reserved for\nhigh-priority requests (priority >= 8) so they are not starved\nby a low-priority queue fill. When false, the queue is a single\nshared pool (first-come-first-served).",
+          "type": "boolean",
+          "default": true
+        },
+        "queue_timeout_ms": {
+          "description": "Maximum time a request waits for a permit, in milliseconds\n(1..=10000). If the timeout expires before a permit becomes\navailable, the request is shed with 503 (the `timeout`\noutcome) and a `Retry-After` header.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_queue_size",
+        "queue_timeout_ms"
       ]
     },
     "AnalyticsConfig": {

@@ -247,9 +247,10 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use http_body_util::Full;
@@ -578,10 +579,45 @@ pub struct DataPlane {
 /// traffic; `reserved` (when carved) holds a small sub-allowance of the
 /// same cap usable ONLY by high-priority requests (>= [`HIGH_PRIORITY`])
 /// once the general allowance is full.
+///
+/// DW-053: when `admission_queue` is `Some`, over-cap requests WAIT for
+/// a permit up to `queue_timeout` instead of being immediately shed.
+/// `queue_depth` tracks the current number of waiting requests (an
+/// atomic on the dataplane, shared across generations so a reload never
+/// loses an in-flight waiter). `low_queue_limit` is the maximum queue
+/// depth low-priority requests may occupy (the high-priority reserve is
+/// `max_queue_size - low_queue_limit`); high-priority may queue up to
+/// `max_queue_size`.
 #[derive(Clone, Default)]
 struct GlobalCap {
     general: Option<Arc<Semaphore>>,
     reserved: Option<Arc<Semaphore>>,
+    /// DW-053: the admission queue config. `None` = queueing disabled
+    /// (immediate shed, the DW-016 behavior).
+    admission_queue: Option<AdmissionQueueState>,
+}
+
+/// DW-053: the runtime admission queue state carried on the GlobalCap.
+/// The queue depth atomic lives HERE (not on the dataplane) so it is
+/// rebuilt per generation — but a reload that changes the queue config
+/// simply swaps in a new state; in-flight waiters on the old semaphore
+/// complete normally (the permit they are waiting for is on the old
+/// `Arc<Semaphore>`, which stays alive until the last holder drops).
+#[derive(Clone)]
+struct AdmissionQueueState {
+    /// The queue timeout (from `admission_queue.queue_timeout_ms`).
+    queue_timeout: Duration,
+    /// The maximum total queue depth (from `admission_queue.max_queue_size`).
+    max_queue_size: u32,
+    /// The maximum queue depth low-priority requests may occupy. High-
+    /// priority requests may use the full `max_queue_size`; the reserve
+    /// (`max_queue_size - low_queue_limit`) is high-priority-only. When
+    /// `per_priority` is false, this equals `max_queue_size` (no reserve).
+    low_queue_limit: u32,
+    /// Current number of requests waiting in the queue. Incremented
+    /// before the timed acquire, decremented after (whether admitted or
+    /// timed out).
+    queue_depth: Arc<AtomicU32>,
 }
 
 /// Whether any ROUTE is high-priority (priority at or above
@@ -609,6 +645,11 @@ fn has_high_priority(gateway: &Gateway) -> bool {
 /// high-priority traffic configured, 10% of the cap (minimum 1, capped at
 /// the cap itself) is reserved: the general allowance shrinks to
 /// `cap - bucket` and high-priority requests may draw from either.
+///
+/// DW-053: when `admission_queue` is present and enabled, the cap carries
+/// the queue state (timeout, depth bounds, the depth atomic). The queue
+/// waits for a permit from the SAME semaphores — it is a timed acquire,
+/// not a separate data structure.
 fn global_cap_of(gateway: &Gateway) -> GlobalCap {
     let Some(cap) = gateway.max_concurrent_requests.filter(|c| *c > 0) else {
         return GlobalCap::default();
@@ -619,6 +660,28 @@ fn global_cap_of(gateway: &Gateway) -> GlobalCap {
     } else {
         0
     };
+    let admission_queue = gateway.admission_queue.as_ref().and_then(|aq| {
+        if !aq.enabled {
+            return None;
+        }
+        let max_queue_size = aq.max_queue_size;
+        // Per-priority split: reserve half the queue for high-priority
+        // (minimum 1 high-priority slot when the queue is non-empty and
+        // per_priority is true). Low-priority may occupy up to
+        // `low_queue_limit`; high-priority may occupy the full
+        // `max_queue_size`.
+        let low_queue_limit = if aq.per_priority {
+            max_queue_size / 2
+        } else {
+            max_queue_size
+        };
+        Some(AdmissionQueueState {
+            queue_timeout: Duration::from_millis(aq.queue_timeout_ms),
+            max_queue_size,
+            low_queue_limit,
+            queue_depth: Arc::new(AtomicU32::new(0)),
+        })
+    });
     GlobalCap {
         general: Some(Arc::new(Semaphore::new(cap - bucket))),
         reserved: if bucket > 0 {
@@ -626,6 +689,7 @@ fn global_cap_of(gateway: &Gateway) -> GlobalCap {
         } else {
             None
         },
+        admission_queue,
     }
 }
 
@@ -2236,11 +2300,12 @@ where
     }
 
     // Gateway concurrency cap with priority-aware load shedding
-    // (DW-015 + DW-016). Admission is two-tier: every request tries the
-    // general allowance; a request at or above HIGH_PRIORITY may then try
-    // the reserved bucket (when one is carved). No permits anywhere ->
-    // 503 "gateway saturated" immediately (no queueing, no Retry-After —
-    // see the module docs for the 503-vs-429 and header choices). The
+    // (DW-015 + DW-016) and bounded admission queues (DW-053). Admission
+    // is two-tier: every request tries the general allowance; a request
+    // at or above HIGH_PRIORITY may then try the reserved bucket (when
+    // one is carved). No permits anywhere -> either WAIT for a permit
+    // up to the queue timeout (DW-053, when admission_queue is enabled)
+    // or 503 "gateway saturated" immediately (DW-016, the default). The
     // permit lives until the response body completes: the proxy path
     // attaches it to the streaming body, and complete bodies (errors,
     // redirects, respond actions) release it when this scope ends.
@@ -2249,8 +2314,11 @@ where
     // the route's when the authenticated consumer declares one.
     let priority = resolve_priority(consumer_cfg, route);
     let cap = dp.global_cap.load_full();
-    // The admission phase span (DW-021); sync permit bookkeeping.
-    let mut global_permit = {
+    // The admission phase span (DW-021); permit bookkeeping. The sync
+    // try-acquire runs inside the span; the DW-053 queue path's timed
+    // acquire runs OUTSIDE the span guard (EnteredSpan is not Send, so
+    // holding it across an .await would make the future non-Send).
+    let global_permit = {
         let _admission_phase = tracing::info_span!("admission").entered();
         match &cap.general {
             None => {
@@ -2258,7 +2326,7 @@ where
                 // priority class (the counters describe traffic mix, not only
                 // capped traffic).
                 dp.priority_counters.record_admitted(priority);
-                None
+                AdmissionResult::Permit(None)
             }
             Some(general) => {
                 let admitted = Arc::clone(general).try_acquire_owned().ok().or_else(|| {
@@ -2278,49 +2346,107 @@ where
                 match admitted {
                     Some(permit) => {
                         dp.priority_counters.record_admitted(priority);
-                        Some(permit)
+                        AdmissionResult::Permit(Some(permit))
                     }
                     None => {
-                        // Monitor mode (DW-041): the would-shed is logged
-                        // and counted, and the request is admitted OVER
-                        // the cap (no permit) — the point is observing
-                        // what a cap would shed before enforcing it, so
-                        // over-admission is the documented trade, not an
-                        // accident.
-                        if gateway.load_shed_dry_run {
-                            dp.priority_counters.record_admitted(priority);
-                            dp.obs.record_policy_dry_run("load_shed", &route.name);
-                            dp.obs.emit_policy_dry_run(
-                                "load_shed",
-                                503,
-                                &route.name,
-                                identity.as_ref().map(|id| id.consumer_name.as_str()),
-                                rid,
-                                &format!(
-                                    "gateway concurrency cap saturated at priority {priority}; \
-                                     request would have been shed (dry-run) and is admitted \
-                                     over the cap"
-                                ),
-                            );
-                            None
+                        // DW-053: admission queue. When enabled, the
+                        // request waits for a permit up to the queue
+                        // timeout instead of being immediately shed.
+                        // The queue depth is bounded: once at capacity
+                        // (per-priority-aware), the request is shed
+                        // immediately with 503 (queue_full).
+                        if let Some(aq) = &cap.admission_queue {
+                            // Check queue capacity. High-priority may
+                            // queue up to max_queue_size; low-priority
+                            // up to low_queue_limit (the high-priority
+                            // reserve is max_queue_size - low_queue_limit).
+                            let depth = aq.queue_depth.load(Ordering::Relaxed);
+                            let limit = if priority >= HIGH_PRIORITY {
+                                aq.max_queue_size
+                            } else {
+                                aq.low_queue_limit
+                            };
+                            if depth >= limit {
+                                // Queue full: shed immediately.
+                                dp.obs.record_admission_queued("queue_full");
+                                handle_shed(
+                                    dp,
+                                    priority,
+                                    rec,
+                                    rid,
+                                    route,
+                                    Some(aq.queue_timeout),
+                                    gateway.load_shed_dry_run,
+                                    identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                )
+                            } else {
+                                // Reserve a queue slot. The timed acquire
+                                // runs outside the span guard (below).
+                                aq.queue_depth.fetch_add(1, Ordering::Relaxed);
+                                let depth = aq.queue_depth.load(Ordering::Relaxed);
+                                dp.obs.set_admission_queue_depth(depth as i64);
+                                AdmissionResult::Queue(
+                                    Arc::clone(general),
+                                    cap.reserved.clone(),
+                                    aq.queue_timeout,
+                                    aq.queue_depth.clone(),
+                                )
+                            }
                         } else {
-                            dp.priority_counters.record_shed(priority);
-                            rec.shed = true;
-                            dp.obs.record_shed(priority);
-                            tracing::warn!(
-                                code = "gateway_saturated",
-                                request_id = %rid,
-                                priority = priority,
-                                "gateway concurrency cap saturated; request shed"
-                            );
-                            let mut resp = simple(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "gateway_saturated",
-                                "gateway saturated",
+                            // DW-016: no queue — immediate shed (or
+                            // dry-run admit, DW-041).
+                            handle_shed(
+                                dp,
+                                priority,
+                                rec,
                                 rid,
-                            );
-                            stamp_security_headers(&mut resp, route);
-                            return resp;
+                                route,
+                                None,
+                                gateway.load_shed_dry_run,
+                                identity.as_ref().map(|id| id.consumer_name.as_str()),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    };
+    // Unpack the admission result: a shed response returns immediately;
+    // a permit (Some for admitted, None for dry-run-admitted-over-cap)
+    // continues the request path; a Queue result needs a timed acquire
+    // (DW-053) which runs here, outside the span guard.
+    let mut global_permit = match global_permit {
+        AdmissionResult::Permit(p) => p,
+        AdmissionResult::Shed(resp) => return resp,
+        AdmissionResult::Queue(general, reserved, timeout, queue_depth) => {
+            let acquired = try_acquire_queued(general, reserved, priority, timeout).await;
+            queue_depth.fetch_sub(1, Ordering::Relaxed);
+            let depth = queue_depth.load(Ordering::Relaxed);
+            dp.obs.set_admission_queue_depth(depth as i64);
+            match acquired {
+                Some(permit) => {
+                    dp.obs.record_admission_queued("admitted");
+                    dp.priority_counters.record_admitted(priority);
+                    Some(permit)
+                }
+                None => {
+                    // Timed out waiting for a permit.
+                    dp.obs.record_admission_queued("timeout");
+                    let result = handle_shed(
+                        dp,
+                        priority,
+                        rec,
+                        rid,
+                        route,
+                        Some(timeout),
+                        gateway.load_shed_dry_run,
+                        identity.as_ref().map(|id| id.consumer_name.as_str()),
+                    );
+                    match result {
+                        AdmissionResult::Permit(p) => p,
+                        AdmissionResult::Shed(resp) => return resp,
+                        AdmissionResult::Queue(..) => {
+                            unreachable!("handle_shed never returns Queue")
                         }
                     }
                 }
@@ -4237,6 +4363,141 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
             code, msg, rid,
         ))))
         .expect("static error body is valid")
+}
+
+/// The outcome of the gateway cap admission phase (DW-015 + DW-053):
+/// either a permit was acquired (Some) or the request was dry-run
+/// admitted over the cap (None), the request was shed and the 503
+/// response should be returned from `handle`, or the request needs to
+/// wait for a permit (DW-053 queue path — the timed acquire runs outside
+/// the span guard because `EnteredSpan` is not `Send`).
+enum AdmissionResult {
+    /// Admission succeeded: the permit is `Some` when a cap slot was
+    /// acquired, `None` when dry-run admitted over the cap (DW-041).
+    Permit(Option<OwnedSemaphorePermit>),
+    /// The request was shed: return this 503 response from `handle`.
+    Shed(Response<ProxyBody>),
+    /// DW-053: the request reserved a queue slot and needs a timed
+    /// acquire. Carries the semaphores, the timeout, and the queue
+    /// depth atomic (to decrement after the acquire completes).
+    Queue(
+        Arc<Semaphore>,
+        Option<Arc<Semaphore>>,
+        Duration,
+        Arc<AtomicU32>,
+    ),
+}
+
+/// The shed path for the gateway concurrency cap (DW-015 + DW-053).
+/// When `dry_run` is true (DW-041), the would-shed is logged and counted
+/// and the request is admitted over the cap (no permit) — the point is
+/// observing what a cap would shed before enforcing it. When `dry_run`
+/// is false, the request is shed with 503 "gateway saturated". When
+/// `retry_after` is `Some` (DW-053: the request was shed due to queue
+/// timeout or queue full), a `Retry-After` header is added to the 503.
+///
+/// Returns an [`AdmissionResult`]: `Permit(None)` for dry-run, `Shed`
+/// for the 503 response. The caller returns the `Shed` response from
+/// `handle` immediately.
+#[allow(clippy::too_many_arguments)]
+fn handle_shed(
+    dp: &Arc<DataPlane>,
+    priority: u8,
+    rec: &mut AccessRecord,
+    rid: &str,
+    route: &Route,
+    retry_after: Option<Duration>,
+    dry_run: bool,
+    consumer_name: Option<&str>,
+) -> AdmissionResult {
+    if dry_run {
+        dp.priority_counters.record_admitted(priority);
+        dp.obs.record_policy_dry_run("load_shed", &route.name);
+        dp.obs.emit_policy_dry_run(
+            "load_shed",
+            503,
+            &route.name,
+            consumer_name,
+            rid,
+            &format!(
+                "gateway concurrency cap saturated at priority {priority}; \
+                 request would have been shed (dry-run) and is admitted \
+                 over the cap"
+            ),
+        );
+        AdmissionResult::Permit(None)
+    } else {
+        dp.priority_counters.record_shed(priority);
+        rec.shed = true;
+        dp.obs.record_shed(priority);
+        tracing::warn!(
+            code = "gateway_saturated",
+            request_id = %rid,
+            priority = priority,
+            "gateway concurrency cap saturated; request shed"
+        );
+        let mut resp = simple(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway_saturated",
+            "gateway saturated",
+            rid,
+        );
+        // DW-053: a Retry-After header on queue-timeout and queue-full
+        // sheds (a small fixed value derived from the queue timeout, in
+        // whole seconds, minimum 1). The immediate-shed path (DW-016,
+        // no queue) carries no Retry-After — immediate re-dispatch
+        // under a saturated gateway is not advised.
+        if let Some(timeout) = retry_after {
+            let secs = timeout.as_secs().max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                resp.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+        }
+        stamp_security_headers(&mut resp, route);
+        AdmissionResult::Shed(resp)
+    }
+}
+
+/// DW-053: try to acquire a permit from the general semaphore (or the
+/// reserved bucket for high-priority) within the queue timeout. Returns
+/// `Some(permit)` if acquired, `None` if the timeout expired. This is a
+/// timed `acquire_owned` — the request parks on the semaphore's wait
+/// queue until a permit is released or the timeout fires.
+async fn try_acquire_queued(
+    general: Arc<Semaphore>,
+    reserved: Option<Arc<Semaphore>>,
+    priority: u8,
+    timeout: Duration,
+) -> Option<OwnedSemaphorePermit> {
+    // High-priority tries the general semaphore first, then the
+    // reserved bucket (same two-tier order as the immediate path).
+    let general_fut = general.acquire_owned();
+    let reserved_fut = reserved.map(|r| r.acquire_owned());
+    let result = tokio::time::timeout(timeout, async {
+        match general_fut.await {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                // The general semaphore was closed (should not happen
+                // in normal operation — the Arc keeps it alive). Try
+                // the reserved bucket as a fallback for high-priority.
+                if priority >= HIGH_PRIORITY {
+                    if let Some(fut) = reserved_fut {
+                        fut.await.ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    })
+    .await;
+    match result {
+        Ok(Some(permit)) => Some(permit),
+        Ok(None) => None,
+        Err(_) => None,
+    }
 }
 
 /// Header names always treated as hop-by-hop per RFC 7230 section 6.1

@@ -1,6 +1,7 @@
 //! Unit tests relocated from src (see AGENTS.md). One binary to keep
 //! link time bounded on CI runners.
 mod active;
+mod admission_queue;
 mod analytics;
 mod analytics_store;
 mod authn;

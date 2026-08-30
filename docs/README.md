@@ -26,6 +26,11 @@ Feature areas written up so far (M1 complete; M2 in progress):
   matching precedence, rewrites, streaming proxy semantics.
 - [Load balancing](./features/load-balancing.md) — the four
   algorithms, lock-free picks, slow start.
+- [Admission queues and backpressure](./features/admission-queue.md)
+  — bounded admission queues that make the gateway concurrency cap
+  degrade gracefully (latency rises before shedding begins) instead
+  of the DW-016 cliff; per-priority queue splitting, queue-timeout
+  and queue-full sheds with Retry-After (DW-053).
 - [Traffic splitting and sticky sessions](./features/canary-split.md)
   — service-level weighted splits across upstreams (canary releases,
   blue-green switches) with a stateless weighted-hash pick, and the

@@ -214,6 +214,7 @@ fn empty_document_is_valid() {
             analytics: None,
             analytics_stream: None,
             geoip: None,
+            admission_queue: None,
         }
     );
 }

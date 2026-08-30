@@ -127,6 +127,7 @@ fn render_contains_families() {
             analytics: None,
             analytics_stream: None,
             geoip: None,
+            admission_queue: None,
         })
         .expect("publish");
     let registry =

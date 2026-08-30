@@ -9,6 +9,28 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Bounded admission queues and backpressure (DW-053): an optional
+  `gateway.admission_queue` block makes the gateway concurrency cap
+  degrade gracefully instead of the DW-016 cliff. When the cap is
+  saturated and the queue is enabled, requests WAIT for a permit up to
+  `queue_timeout_ms` (1..=10000) instead of being immediately shed —
+  latency rises before shedding begins. The queue is bounded by
+  `max_queue_size` (1..=10000); once full, further requests are shed
+  immediately with 503 (the `queue_full` outcome). Per-priority
+  splitting (`per_priority: true`, the default) reserves half the
+  queue capacity for high-priority requests (>= 8) so they are not
+  starved by a low-priority queue fill. Queue-timeout and queue-full
+  sheds carry a `Retry-After` header (a small fixed value derived from
+  the queue timeout). The queue is opt-in (`enabled: false` by
+  default) and requires `max_concurrent_requests` (validation rejects
+  an enabled queue on an uncapped gateway, the same rule as
+  `load_shed_dry_run`). Dry-run interaction: `load_shed_dry_run: true`
+  + `admission_queue.enabled: true` admits over the cap on would-shed
+  (the queue timeout still fires, but no 503 is sent). Zero new
+  dependencies (hand-rolled with tokio semaphore + timeout). New
+  metrics: `dwara_admission_queued_total{outcome}` (admitted, timeout,
+  queue_full) and `dwara_admission_queue_depth` (gauge).
+
 - Traffic splitting and sticky sessions (DW-040): a service can
   dispatch across several upstreams by a weighted split
   (`services[].split.targets`, 2..=8 targets naming existing

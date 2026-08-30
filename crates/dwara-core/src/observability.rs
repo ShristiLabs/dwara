@@ -111,6 +111,13 @@
 //!   budget}` gauges (DW-033, scrape-time snapshots of the state
 //!   store's quota counters and the config caps — the same snapshot
 //!   gauge model as the rate-limiter live-keys gauge).
+//! - `dwara_admission_queued_total{outcome}` counter (DW-053) —
+//!   admission queue outcomes by closed set `admitted` (a permit was
+//!   acquired after queueing), `timeout` (the queue timeout expired;
+//!   shed with 503), `queue_full` (the queue was at capacity; shed
+//!   immediately with 503).
+//! - `dwara_admission_queue_depth` gauge (DW-053) — current number of
+//!   requests waiting in the admission queue for a concurrency permit.
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -432,6 +439,15 @@ pub struct Observability {
     /// DW-052: the SLO burn-rate collector (per-route windowed state
     /// plus the two exported families; values refresh at scrape time).
     slo: std::sync::Arc<SloState>,
+    /// DW-053: admission queue outcomes — a CLOSED label set
+    /// (`admitted`, `timeout`, `queue_full`), one increment per
+    /// request that was queued (or rejected at the queue door).
+    admission_queued_total: IntCounterVec,
+    /// DW-053: current number of requests waiting in the admission
+    /// queue for a concurrency permit. A gauge set from an atomic on
+    /// the dataplane (the hot path stays free of registry coupling,
+    /// the same model as the coalescing-waiters gauge).
+    admission_queue_depth: IntGauge,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -768,6 +784,24 @@ impl Observability {
         // the registered collector handle (the window state must be the
         // SAME object the completion path writes and the scrape reads).
         let slo = std::sync::Arc::new(SloState::new());
+        let admission_queued_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_admission_queued_total",
+                "Admission queue outcomes (DW-053). outcome: admitted (a \
+                 permit was acquired after queueing), timeout (the queue \
+                 timeout expired before a permit was available; the request \
+                 was shed with 503), queue_full (the queue was at capacity \
+                 and the request was shed immediately with 503).",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        let admission_queue_depth = IntGauge::new(
+            "dwara_admission_queue_depth",
+            "Current number of requests waiting in the admission queue for a \
+             concurrency permit (DW-053).",
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -808,6 +842,8 @@ impl Observability {
             Box::new(quota_used.clone()),
             Box::new(quota_limit.clone()),
             Box::new(SloCollectorHandle(std::sync::Arc::clone(&slo))),
+            Box::new(admission_queued_total.clone()),
+            Box::new(admission_queue_depth.clone()),
         ] {
             registry
                 .register(m)
@@ -852,6 +888,8 @@ impl Observability {
             quota_used,
             quota_limit,
             slo,
+            admission_queued_total,
+            admission_queue_depth,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -938,6 +976,25 @@ impl Observability {
         self.shed_total
             .with_label_values(&[&priority.to_string()])
             .inc();
+    }
+
+    /// Count one admission queue outcome (DW-053). `outcome` is one of
+    /// the closed set `admitted` (a permit was acquired after queueing),
+    /// `timeout` (the queue timeout expired; the request was shed with
+    /// 503), `queue_full` (the queue was at capacity; the request was
+    /// shed immediately with 503).
+    pub fn record_admission_queued(&self, outcome: &str) {
+        self.admission_queued_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// Set the current admission queue depth gauge (DW-053). Called from
+    /// the dataplane's atomic-backed depth counter (the hot path stays
+    /// free of registry coupling — the same gauge model as the
+    /// coalescing-waiters gauge).
+    pub fn set_admission_queue_depth(&self, depth: i64) {
+        self.admission_queue_depth.set(depth);
     }
 
     /// Count one dry-run (monitor) would-have-rejected observation

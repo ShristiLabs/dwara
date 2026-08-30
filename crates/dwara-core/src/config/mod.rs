@@ -235,6 +235,58 @@ pub struct Gateway {
     /// error, not a silent pass).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geoip: Option<GeoipConfig>,
+    /// Bounded admission queues (DW-053): when the gateway concurrency
+    /// cap (`max_concurrent_requests`) is saturated, requests WAIT for a
+    /// permit up to `queue_timeout_ms` instead of being immediately
+    /// shed. This produces a graceful degradation curve (latency rises
+    /// before shedding begins) rather than the cliff of immediate
+    /// shedding. Absent (the default): the DW-016 behavior stands —
+    /// over-cap requests are shed immediately with 503. Requires
+    /// `max_concurrent_requests` (validation rejects an enabled queue
+    /// on an uncapped gateway, the same rule as `load_shed_dry_run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_queue: Option<AdmissionQueue>,
+}
+
+/// Bounded admission queue config (DW-053, `gateway.admission_queue`).
+///
+/// When enabled and the concurrency cap is full, requests wait for a
+/// permit up to `queue_timeout_ms` instead of being immediately shed.
+/// The queue depth is bounded by `max_queue_size`; once full, further
+/// requests are shed immediately with 503 (the `queue_full` outcome).
+/// Per-priority splitting (`per_priority: true`, the default) reserves
+/// a fraction of queue capacity for high-priority requests so they are
+/// not starved by a low-priority queue fill.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionQueue {
+    /// Master switch. Default false: the queue is inert and the
+    /// gateway sheds immediately on cap saturation (DW-016 behavior).
+    /// Requires `max_concurrent_requests` (validation rejects an
+    /// enabled queue on an uncapped gateway).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Total number of requests that may wait for a permit across all
+    /// priority classes (1..=10000). Once the queue is at capacity,
+    /// further over-cap requests are shed immediately with 503
+    /// (the `queue_full` outcome).
+    pub max_queue_size: u32,
+    /// Maximum time a request waits for a permit, in milliseconds
+    /// (1..=10000). If the timeout expires before a permit becomes
+    /// available, the request is shed with 503 (the `timeout`
+    /// outcome) and a `Retry-After` header.
+    pub queue_timeout_ms: u64,
+    /// Split queue capacity across priority classes (default true).
+    /// When true, a fraction of `max_queue_size` is reserved for
+    /// high-priority requests (priority >= 8) so they are not starved
+    /// by a low-priority queue fill. When false, the queue is a single
+    /// shared pool (first-come-first-served).
+    #[serde(default = "default_true", skip_serializing_if = "is_false")]
+    pub per_priority: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).

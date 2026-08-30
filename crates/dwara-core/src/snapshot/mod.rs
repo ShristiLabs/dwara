@@ -1911,6 +1911,63 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // Admission queues (DW-053): an enabled queue requires a cap (the
+    // queue waits for a PERMIT from the cap's semaphore — no cap means
+    // no permits to wait for, so the queue would be a silent no-op).
+    // Bounds: max_queue_size 1..=10000, queue_timeout_ms 1..=10000.
+    if let Some(aq) = &gateway.admission_queue {
+        if aq.enabled && gateway.max_concurrent_requests.is_none() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "admission_queue.enabled",
+                "admission_queue.enabled requires max_concurrent_requests: the queue \
+                 waits for a cap permit, so an uncapped gateway has nothing to queue \
+                 for (set a cap, or omit the block)",
+            ));
+        }
+        if aq.max_queue_size == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "admission_queue.max_queue_size",
+                "admission_queue.max_queue_size must be > 0 (range 1..=10000)",
+            ));
+        }
+        if aq.max_queue_size > 10000 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "admission_queue.max_queue_size",
+                format!(
+                    "admission_queue.max_queue_size {} is out of range: must be \
+                     1..=10000",
+                    aq.max_queue_size
+                ),
+            ));
+        }
+        if aq.queue_timeout_ms == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "admission_queue.queue_timeout_ms",
+                "admission_queue.queue_timeout_ms must be > 0 (range 1..=10000)",
+            ));
+        }
+        if aq.queue_timeout_ms > 10000 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "admission_queue.queue_timeout_ms",
+                format!(
+                    "admission_queue.queue_timeout_ms {} is out of range: must be \
+                     1..=10000",
+                    aq.queue_timeout_ms
+                ),
+            ));
+        }
+    }
+
     // HMAC signing policy bounds (DW-036): a zero-second window rejects
     // every signed request with any clock drift at all, and an unbounded
     // one pins nonce-cache memory for the process lifetime (nonces are
@@ -3884,6 +3941,7 @@ impl Snapshot {
                 analytics: None,
                 analytics_stream: None,
                 geoip: None,
+                admission_queue: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

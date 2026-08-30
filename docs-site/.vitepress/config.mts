@@ -111,6 +111,10 @@ export default withMermaid(
                   link: "/guide/maintenance",
                 },
                 {
+                  text: "Admission queues",
+                  link: "/guide/admission-queue",
+                },
+                {
                   text: "Traffic splitting",
                   link: "/guide/traffic-splitting",
                 },

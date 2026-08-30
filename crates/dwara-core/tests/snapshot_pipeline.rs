@@ -126,6 +126,7 @@ fn base_gateway() -> Gateway {
         analytics: None,
         analytics_stream: None,
         geoip: None,
+        admission_queue: None,
     }
 }
 

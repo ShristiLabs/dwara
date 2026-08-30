@@ -425,6 +425,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         analytics: None,
         analytics_stream: None,
         geoip: None,
+        admission_queue: None,
     };
     (gateway, tls)
 }
