@@ -76,12 +76,13 @@ pub enum Action {
 impl Action {
     /// Whether this action implies another (Admin > Write > Read).
     pub fn implies(self, other: Action) -> bool {
-        match (self, other) {
-            (Action::Admin, _) => true,
-            (Action::Write, Action::Write) | (Action::Write, Action::Read) => true,
-            (Action::Read, Action::Read) => true,
-            _ => false,
-        }
+        matches!(
+            (self, other),
+            (Action::Admin, _)
+                | (Action::Write, Action::Write)
+                | (Action::Write, Action::Read)
+                | (Action::Read, Action::Read)
+        )
     }
 
     /// The string representation.

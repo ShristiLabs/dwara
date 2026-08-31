@@ -289,6 +289,10 @@ export default withMermaid(
                   text: "Cluster sync (GA)",
                   link: "/guide/cluster-sync",
                 },
+                {
+                  text: "CP/DP split",
+                  link: "/guide/cp-dp-split",
+                },
               ],
             },
           ],

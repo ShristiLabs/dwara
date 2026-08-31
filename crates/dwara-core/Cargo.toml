@@ -110,6 +110,22 @@ jsonschema = { workspace = true, optional = true }
 # k8s-openapi pins a specific Kubernetes API version (not `latest`).
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true, features = ["v1_32"] }
+# DW-066: gRPC transport for the CP/DP split (ent feature only). tonic is
+# MIT (allow-listed in deny.toml). Optional so OSS builds (the default)
+# never pull it in; enabled via the `ent` feature. default-features = false
+# + ["transport", "codegen"] avoids tonic's prost 0.13 -- we use the
+# workspace prost 0.14 for hand-written messages via a custom Codec impl.
+tonic = { workspace = true, optional = true }
+# DW-066: prost for hand-written protobuf wire messages in the CP/DP
+# transport layer (ent feature only). Already a workspace dep (0.14, used
+# by dwara-bin's OTLP metrics encoder); this makes it a direct dep of
+# dwara-core so the ent-gated cp_dp transport module can derive
+# prost::Message. MIT OR Apache-2.0 (both allow-listed).
+prost = { workspace = true, optional = true }
+# DW-066: tokio-stream for wrapping mpsc receivers as Stream items in the
+# CP/DP gRPC server-streaming transport (ent feature only). Already pulled
+# in transitively by tonic; this makes it a direct dep. MIT.
+tokio-stream = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -122,7 +138,7 @@ loom = ["dep:loom"]
 # rate limiter, config convergence, etc.) behind license claims. OSS
 # builds (the default) compile without the licensing-core or redis
 # dependencies.
-ent = ["dep:licensing-core", "dep:redis"]
+ent = ["dep:licensing-core", "dep:redis", "dep:tonic", "dep:prost", "dep:tokio-stream"]
 # DW-055: proxy-wasm host. When enabled, the gateway can load and run
 # proxy-wasm ABI filters (community Kong/Envoy filters run unmodified).
 # Default OFF: wasmtime + cranelift are significant binary size against

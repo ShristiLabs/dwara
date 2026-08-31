@@ -43,7 +43,7 @@ use super::ExtensionsError;
 /// Display). The source itself never logs resolved values.
 #[allow(dead_code)]
 pub struct VaultSecretSource {
-    /// The Vault server URL (e.g. "https://vault.example.com:8200").
+    /// The Vault server URL (e.g. <https://vault.example.com:8200>).
     url: String,
     /// The Vault token (used for authentication).
     token: String,
@@ -80,6 +80,7 @@ impl VaultSecretSource {
     }
 
     /// Store a secret in the cache.
+    #[cfg(test)]
     fn store_cached(&self, name: &str, secret: Secret) {
         let mut cache = self.cache.write().unwrap();
         cache.insert(name.to_string(), (secret, Instant::now()));
@@ -103,11 +104,13 @@ impl VaultSecretSource {
     }
 
     /// The Vault token (for testing).
+    #[cfg(test)]
     fn token(&self) -> &str {
         &self.token
     }
 
     /// The Vault URL (for testing).
+    #[cfg(test)]
     fn url(&self) -> &str {
         &self.url
     }
@@ -197,10 +200,15 @@ pub trait KmsProvider: Send + Sync {
     async fn decrypt(&self, key_id: &str, ciphertext: &[u8]) -> Result<String, ExtensionsError>;
 }
 
+/// The decryption function signature for [`MockKmsProvider`]:
+/// (key_id, ciphertext) -> plaintext.
+pub type KmsDecryptFn =
+    Box<dyn Fn(&str, &[u8]) -> Result<String, ExtensionsError> + Send + Sync>;
+
 /// A mock KMS provider for testing.
 pub struct MockKmsProvider {
     /// The decryption function: (key_id, ciphertext) -> plaintext.
-    decrypt_fn: Box<dyn Fn(&str, &[u8]) -> Result<String, ExtensionsError> + Send + Sync>,
+    decrypt_fn: KmsDecryptFn,
 }
 
 impl MockKmsProvider {

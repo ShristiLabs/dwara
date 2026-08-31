@@ -110,11 +110,73 @@ The `ent` cargo feature must be enabled. Without it, the module is
 not compiled and the gateway runs in embedded mode (the default OSS
 behavior).
 
+## gRPC transport (DW-066)
+
+The CP/DP split uses a tonic-based gRPC transport with hand-written
+prost wire messages (no protoc/build-script dependency). The transport
+layer lives in `crates/dwara-core/src/cp_dp/transport.rs` and provides:
+
+- `ControllerServer`: implements the `DwaraControlPlane` gRPC service.
+  Edges register via `stream_config_updates` (server-streaming) and
+  receive config updates; edges ack applied generations via `ack`
+  (unary). A broadcast channel fans out updates to all connected edges;
+  each edge's stream filters by `target_edges`.
+- `EdgeClient`: connects to the controller, registers, receives
+  updates, and sends acks. Reconnects with bounded backoff on
+  disconnect.
+- `ProstCodec`: a custom tonic `Codec` that uses the workspace prost
+  0.14 (avoids tonic's prost 0.13 duplicate-version dependency).
+
+### Running the controller
+
+```sh
+cargo run -p dwara-cli --bin dwara-controller --features ent -- \
+    --bind 127.0.0.1:50051 \
+    --config-source ./dwara.yaml \
+    --leader
+```
+
+Environment variables: `DWARA_CP_BIND`, `DWARA_CP_CONFIG_SOURCE`,
+`DWARA_CP_LEADER`, `DWARA_CP_POLL_INTERVAL_SECS`.
+
+### Running an edge
+
+```sh
+cargo run -p dwara-cli --bin dwara-edge --features ent -- \
+    --controller-endpoint http://127.0.0.1:50051 \
+    --edge-id edge-1 \
+    --config-output /etc/dwara/dwara.yaml
+```
+
+Environment variables: `DWARA_CP_CONTROLLER_ENDPOINT`,
+`DWARA_CP_EDGE_ID`, `DWARA_CP_EDGE_VERSION`, `DWARA_CP_CONFIG_OUTPUT`.
+
+### Wire protocol
+
+The gRPC service `dwara.ControlPlane` has two methods:
+
+- `StreamConfigUpdates` (server-streaming): the edge sends an
+  `EdgeRegistration`, the controller streams `ConfigUpdate` messages.
+- `Ack` (unary): the edge sends a `ConfigAck`, the controller responds
+  with an empty `AckResponse`.
+
+All wire messages are hand-written prost structs in `transport.rs`
+that mirror the domain types 1:1. Conversions happen in the
+transport layer; the domain types are unchanged.
+
+### TLS
+
+The current implementation uses plaintext gRPC (suitable for
+development and trusted-network deployments). mTLS support is a
+documented follow-up; the tonic transport layer supports it via
+`ServerTlsConfig` / `ClientTlsConfig` when the `tls` features are
+enabled.
+
 ## Not yet implemented
 
-- The actual gRPC transport (tonic-based streaming)
-- The controller's watch loop (file/etcd/Consul/K8s API watching)
-- The edge's reconnect logic
 - Production leader election (Redis/etcd distributed lock or Raft)
 - DW-074 (Cluster sync GA): conflict resolution, split-brain, version
   skew hardening
+- mTLS for the gRPC transport
+- Additional config sources (etcd, Consul, K8s API) beyond file
+  watching
