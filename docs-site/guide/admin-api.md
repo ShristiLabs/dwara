@@ -61,6 +61,10 @@ CA) fails the TLS handshake before any HTTP is exchanged.
 | `PATCH /config` | full-document YAML replacement (no partial merge); dry-run parsed/validated/compiled first — any issue returns 400 with every problem; on success, written atomically to the config file and published |
 | `GET /health` | readiness, current generation, per-upstream per-endpoint health labels |
 | `GET /stats` | store schema version, per-upstream breaker state, `active_requests`, config generation |
+| `GET /stats?format=prometheus` | full Prometheus text-format metric dump (DW-072) — the same output as the `/metrics` endpoint, reachable through the admin surface for Envoy-style tooling |
+| `GET /clusters` | Envoy-style cluster dump (DW-072): per upstream — algorithm, scheme, connection/request counters, breaker state, and per-endpoint health + inflight counts |
+| `GET /config_dump` | full published gateway config as redacted JSON with generation/hash headers (DW-072) — the structured equivalent of `GET /config` (which returns YAML) |
+| `GET /runtime_info` | process-level runtime info (DW-072): version, uptime, config generation, config hash, readiness |
 
 `PATCH /config` bodies over 4 MiB are rejected with 413; concurrent
 PATCHes are serialized. Errors use the same JSON error envelope as the

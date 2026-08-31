@@ -9,6 +9,13 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Envoy-style admin endpoints (DW-072): `GET /clusters` (per-upstream
+  algorithm, scheme, connection/request counters, breaker state,
+  per-endpoint health + inflight), `GET /config_dump` (full published
+  gateway config as redacted JSON with generation/hash headers),
+  `GET /runtime_info` (version, uptime, config generation, readiness),
+  and `GET /stats?format=prometheus` (full Prometheus text-format
+  metric dump through the admin surface).
 - Request hedging (DW-063): after `hedge_after_ms` without a response,
   a speculative duplicate request is sent to a different endpoint; the
   first response wins and the loser is cancelled. Cuts p99 tail

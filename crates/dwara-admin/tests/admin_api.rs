@@ -1139,6 +1139,37 @@ async fn get_config_redacts_secrets_canary_grep() {
     }
 }
 
+/// DW-072: GET /config_dump (the JSON structured dump) must also redact
+/// secrets — the inline canary must never appear in the JSON body, and
+/// the redacted placeholder must be present instead.
+#[tokio::test]
+async fn get_config_dump_redacts_secrets_canary_grep() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    publish_secrets_config(&server).await;
+    let (cert, key) = pki.issue("admin-client");
+    let cert_pem = pem(&cert);
+    let key_pem = pem(&key);
+
+    let (_, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&cert_pem, &key_pem)),
+        "GET /config_dump HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !body.contains(DW045_CANARY),
+        "the inline canary must never appear in /config_dump JSON: {body}"
+    );
+    assert!(
+        body.contains("${redacted:sha256:"),
+        "the inline key appears as the fingerprinted placeholder in /config_dump: {body}"
+    );
+}
+
 /// The GET-then-PATCH footgun, closed: a document carrying a redaction
 /// placeholder back through PATCH is REJECTED with a precise issue —
 /// placeholder bytes must never install as a live key, and nothing is
@@ -2267,4 +2298,171 @@ upstreams:
         Some(0),
         "no counters exist; no fabricated zeros"
     );
+}
+
+// --- DW-072: Envoy-style admin endpoints ----------------------------------
+
+#[tokio::test]
+async fn get_clusters_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /clusters HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let upstreams = &v["upstreams"];
+    assert!(upstreams.is_object());
+    let echo = &upstreams["echo"];
+    assert_eq!(echo["algorithm"], "round_robin");
+    assert_eq!(echo["scheme"], "http");
+    assert!(echo["connections_opened"].is_i64());
+    assert!(echo["requests_sent"].is_i64());
+    assert!(echo["connection_cap"].is_i64());
+    assert!(echo["max_pending"].is_i64());
+    // No breaker configured in the test config → "disabled".
+    assert_eq!(echo["breaker"], "disabled");
+    let endpoints = echo["endpoints"].as_array().unwrap();
+    assert!(!endpoints.is_empty());
+    assert_eq!(endpoints[0]["address"], "127.0.0.1");
+    assert_eq!(endpoints[0]["port"], 1);
+    assert_eq!(endpoints[0]["health"], "healthy");
+    assert!(endpoints[0]["inflight"].is_i64());
+}
+
+#[tokio::test]
+async fn get_config_dump_returns_json_with_generation_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, headers, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /config_dump HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/json"));
+    assert!(headers.contains("x-dwara-config-generation: "));
+    assert!(headers.contains("x-dwara-config-hash: "));
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // The config dump is the full gateway JSON — it has the upstream.
+    assert!(v["upstreams"].is_array());
+    assert!(v["upstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["name"] == "echo"));
+}
+
+#[tokio::test]
+async fn get_runtime_info_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /runtime_info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["version"].is_string());
+    assert!(v["uptime_seconds"].is_i64());
+    assert_eq!(v["ready"], true);
+    assert_eq!(v["config_generation"], 1);
+    assert!(v["config_hash"].is_string());
+}
+
+#[tokio::test]
+async fn get_stats_prometheus_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, headers, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /stats?format=prometheus HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(headers.contains("text/plain"));
+    // The Prometheus text format includes at least one metric family
+    // (requests_total is always present).
+    assert!(
+        body.contains("requests_total") || body.contains("dwara_"),
+        "prometheus output should contain metric families"
+    );
+}
+
+#[tokio::test]
+async fn get_stats_default_is_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, headers, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /stats HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/json"));
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // The default JSON shape has breakers and config_generation.
+    assert!(v["breakers"].is_object());
+    assert_eq!(v["config_generation"], 1);
+}
+
+#[tokio::test]
+async fn new_admin_endpoints_reject_wrong_method() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    for path in ["/clusters", "/config_dump", "/runtime_info"] {
+        let (status, _, body) = request(
+            server.addr,
+            &pki.ca_path(),
+            Some((&c.0, &c.1)),
+            &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 405, "POST {path} should be 405");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], "method_not_allowed");
+    }
 }

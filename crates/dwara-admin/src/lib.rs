@@ -102,12 +102,14 @@ const MAX_PURGE_BODY: usize = 4096;
 
 /// Everything the admin handlers need: the published-config state, the
 /// dataplane (for refresh/health/stats), the config file path (for
-/// atomic writes), and the write lock serializing PATCHes.
+/// atomic writes), the write lock serializing PATCHes, and the process
+/// start instant (for `/runtime_info` uptime, DW-072).
 pub struct AdminContext {
     state: Arc<ConfigState>,
     dp: Arc<DataPlane>,
     config_path: PathBuf,
     patch_lock: Arc<Mutex<()>>,
+    started: std::time::Instant,
 }
 
 impl AdminContext {
@@ -117,6 +119,7 @@ impl AdminContext {
             dp,
             config_path,
             patch_lock: Arc::new(Mutex::new(())),
+            started: std::time::Instant::now(),
         }
     }
 }
@@ -308,6 +311,122 @@ fn stats_body(ctx: &AdminContext) -> serde_json::Value {
             "entries": ctx.dp.response_cache().live_entries(),
             "purges": ctx.dp.response_cache().purge_count(),
         },
+    })
+}
+
+/// GET /stats?format=prometheus (DW-072): the full Prometheus text-format
+/// dump — every metric family in the registry, text-encoded. The default
+/// (no `format` param) returns the existing JSON shape (`stats_body`).
+fn stats_prometheus(ctx: &AdminContext) -> Response<AdminBody> {
+    let text = ctx.dp.observability().render();
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        .body(Full::new(Bytes::from(text)))
+        .expect("static response parts")
+}
+
+/// GET /clusters (DW-072): Envoy-style cluster dump. Per upstream: the
+/// load-balancer algorithm, scheme (http/https), connection/request
+/// counters, breaker state, and per-endpoint health + inflight counts.
+/// Everything here is live state from the registry — no config echo.
+fn clusters_body(ctx: &AdminContext) -> serde_json::Value {
+    let registry = ctx.dp.registry();
+    let now = now_ms();
+    let mut upstreams = serde_json::Map::new();
+    for name in registry.names() {
+        let Some(handle) = registry.get(name) else {
+            continue;
+        };
+        let lb = handle.lb();
+        let algo = match lb.algorithm() {
+            dwara_core::config::LoadBalancer::RoundRobin => "round_robin",
+            dwara_core::config::LoadBalancer::LeastRequests => "least_requests",
+            dwara_core::config::LoadBalancer::Random => "random",
+            dwara_core::config::LoadBalancer::IpHash => "ip_hash",
+        };
+        let breaker_state = if handle.breaker_params().is_none() {
+            serde_json::json!("disabled")
+        } else {
+            match handle.breaker().state() {
+                dwara_core::breaker::BreakerState::Closed { consecutive } => {
+                    serde_json::json!({
+                        "state": "closed",
+                        "consecutive_failures": consecutive,
+                    })
+                }
+                dwara_core::breaker::BreakerState::Open { until_ms } => {
+                    serde_json::json!({
+                        "state": "open",
+                        "until_ms": until_ms,
+                    })
+                }
+                dwara_core::breaker::BreakerState::HalfOpen { probes_left } => {
+                    serde_json::json!({
+                        "state": "half_open",
+                        "probes_left": probes_left,
+                    })
+                }
+            }
+        };
+        let mut endpoints = Vec::new();
+        for (i, (addr, port, health)) in lb.health_targets().iter().enumerate() {
+            let label = health
+                .as_ref()
+                .map(|h| h.state_label(now))
+                .unwrap_or("healthy");
+            endpoints.push(serde_json::json!({
+                "address": addr,
+                "port": port,
+                "health": label,
+                "inflight": lb.inflight(i),
+            }));
+        }
+        upstreams.insert(
+            name.to_string(),
+            serde_json::json!({
+                "algorithm": algo,
+                "scheme": handle.scheme(),
+                "connections_opened": handle.connections_opened(),
+                "requests_sent": handle.requests_sent(),
+                "connection_cap": handle.cap(),
+                "max_pending": handle.max_pending(),
+                "breaker": breaker_state,
+                "endpoints": endpoints,
+            }),
+        );
+    }
+    serde_json::json!({
+        "upstreams": upstreams,
+    })
+}
+
+/// GET /config_dump (DW-072): the full published gateway config as JSON
+/// (redacted — inline secrets become `${redacted:...}` placeholders),
+/// with generation and content-hash headers. The existing GET /config
+/// returns YAML; this endpoint returns JSON for tooling that consumes
+/// structured config dumps (Envoy's `/config_dump` is JSON).
+fn config_dump_body(ctx: &AdminContext) -> serde_json::Value {
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway().redacted();
+    serde_json::to_value(&gateway).unwrap_or_else(|_| {
+        serde_json::json!({
+            "error": "config serialization failed",
+            "generation": snapshot.generation(),
+        })
+    })
+}
+
+/// GET /runtime_info (DW-072): process-level runtime information —
+/// version, uptime, config generation, and dataplane readiness.
+fn runtime_info_body(ctx: &AdminContext) -> serde_json::Value {
+    let snapshot = ctx.state.snapshot();
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": ctx.started.elapsed().as_secs(),
+        "ready": ctx.dp.ready(),
+        "config_generation": snapshot.generation(),
+        "config_hash": format!("{:#x}", snapshot.content_hash()),
     })
 }
 
@@ -1001,7 +1120,40 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             patch_config(&ctx, body, &request_id).await
         }
         ("GET", "/health") => json_response(200, health_body(&ctx)),
-        ("GET", "/stats") => json_response(200, stats_body(&ctx)),
+        // GET /stats (DW-021): default JSON shape. The `format=prometheus`
+        // query param (DW-072) returns the full Prometheus text-format
+        // dump instead — the same output as the /metrics endpoint but
+        // reachable through the admin surface for Envoy-style tooling.
+        ("GET", "/stats") => {
+            let format = req
+                .uri()
+                .query()
+                .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("format=")))
+                .unwrap_or("");
+            if format == "prometheus" {
+                stats_prometheus(&ctx)
+            } else {
+                json_response(200, stats_body(&ctx))
+            }
+        }
+        // GET /clusters (DW-072): Envoy-style cluster dump — per upstream:
+        // algorithm, scheme, connection/request counters, breaker state,
+        // and per-endpoint health + inflight counts.
+        ("GET", "/clusters") => json_response(200, clusters_body(&ctx)),
+        // GET /config_dump (DW-072): the full published gateway config as
+        // redacted JSON with generation/hash headers (Envoy-style
+        // structured dump; the existing GET /config returns YAML).
+        ("GET", "/config_dump") => {
+            let snapshot = ctx.state.snapshot();
+            generation_headers(
+                json_response(200, config_dump_body(&ctx)),
+                snapshot.generation(),
+                snapshot.content_hash(),
+            )
+        }
+        // GET /runtime_info (DW-072): process-level runtime information —
+        // version, uptime, config generation, and readiness.
+        ("GET", "/runtime_info") => json_response(200, runtime_info_body(&ctx)),
         // POST /cache/purge (DW-037): O(1) epoch-advance invalidation;
         // see `purge_cache` for the body shape and the response that
         // names what was purged.
@@ -1139,6 +1291,9 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             "/config"
             | "/health"
             | "/stats"
+            | "/clusters"
+            | "/config_dump"
+            | "/runtime_info"
             | "/cache/purge"
             | "/analytics/dashboard"
             | "/analytics/top"
