@@ -12,7 +12,8 @@ policy is YAML config (see [Configuration](../guide/configuration)).
 | `DWARA_ADMIN_DEV` | unset | `1` = serve the admin API as plaintext on a loopback bind. Dev only — see [Admin API](../guide/admin-api#dev-fallback-never-in-production). |
 | `DWARA_LOG` | `dwara=info` | Log filter, `RUST_LOG` syntax. |
 | `DWARA_ACCESS_LOG_SAMPLE` | `1.0` | Fraction (0.0-1.0) of non-error access-log lines emitted; errors (5xx) always log. |
-| `DWARA_OTLP_ENDPOINT` | unset | Base OTLP collector endpoint (`http://` only). Only live in an `otlp`-feature build; reserved-but-inert otherwise. |
+| `DWARA_OTLP_ENDPOINT` | unset | Base OTLP collector endpoint (`http://` only). Only live in an `otlp`-feature build; reserved-but-inert otherwise. Exports traces to `/v1/traces` and metrics to `/v1/metrics` (DW-073). |
+| `DWARA_OTLP_METRICS_INTERVAL_SECS` | `15` | OTLP metrics export interval in seconds. Only live in an `otlp`-feature build with `DWARA_OTLP_ENDPOINT` set. |
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | Graceful-drain budget on `SIGTERM`/`SIGINT` (and the drain phase of a `SIGUSR2` upgrade). |
 | `DWARA_PID_FILE` | unset | Write the process PID here on startup. Read by `dwara-cli upgrade` to find the process to signal. The new process overwrites it after signaling READY. |
 | `DWARA_UPGRADE_BINARY` | current executable | Path to the new binary for a `SIGUSR2` zero-downtime upgrade. |

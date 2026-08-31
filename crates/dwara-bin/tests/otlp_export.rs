@@ -1122,3 +1122,111 @@ fn transient_collector_answers_are_retried_within_one_export() {
     assert!(status.success(), "clean exit after the retried exports");
     drop(guard);
 }
+
+// --- DW-073: OTLP metrics export ------------------------------------------
+
+/// The done-when: with the feature enabled and DWARA_OTLP_ENDPOINT set,
+/// metrics are exported to `/v1/metrics` on the collector. The periodic
+/// exporter uses a 1s interval (via DWARA_OTLP_METRICS_INTERVAL_SECS)
+/// so the test does not wait 15s; the shutdown flush also fires. The
+/// protobuf body must structurally decode as
+/// ExportMetricsServiceRequest with at least one metric and the
+/// `service.name` resource attribute.
+#[test]
+fn metrics_export_to_otlp_sink() {
+    let (sink_port, captured) = spawn_sink();
+    let (addr, mut guard, mut output) = spawn_gateway(
+        "metrics_export",
+        &[
+            (
+                "DWARA_OTLP_ENDPOINT",
+                &format!("http://127.0.0.1:{sink_port}"),
+            ),
+            // 1s interval so the periodic tick fires within the test
+            // budget (the shutdown flush also fires on SIGTERM).
+            ("DWARA_OTLP_METRICS_INTERVAL_SECS", "1"),
+        ],
+    );
+
+    // Drive a few requests so the metrics registry has nonzero values.
+    for _ in 0..3 {
+        let response = get(&addr);
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "gateway must serve normally: {response}"
+        );
+    }
+
+    // Wait for at least one metrics POST to arrive (periodic tick at 1s
+    // + jitter). The trace export also fires, so we filter for
+    // /v1/metrics specifically.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let metrics_post = loop {
+        if Instant::now() > deadline {
+            break None;
+        }
+        let all = captured.lock().unwrap().clone();
+        if let Some(post) = all
+            .iter()
+            .find(|c| c.request_line.starts_with("POST /v1/metrics "))
+        {
+            break Some(post.clone());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // SIGTERM: graceful drain + final metrics flush + exit.
+    kill_signal(guard.0.id(), "TERM");
+    let status = wait_exit(&mut guard.0, Duration::from_secs(20));
+    assert!(
+        status.success(),
+        "clean exit with OTLP metrics flush: {status}"
+    );
+    drop(guard);
+
+    let metrics_post = metrics_post.unwrap_or_else(|| {
+        // The periodic tick may have lost the race with SIGTERM; the
+        // shutdown flush should have produced a metrics POST. Check the
+        // full captured set now that the process has exited.
+        let all = captured.lock().unwrap().clone();
+        all.iter()
+            .find(|c| c.request_line.starts_with("POST /v1/metrics "))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no OTLP metrics export arrived; captured: {:?}",
+                    captured.lock().unwrap()
+                )
+            })
+    });
+
+    assert_eq!(metrics_post.request_line, "POST /v1/metrics HTTP/1.1");
+    assert_eq!(
+        metrics_post.content_type.as_deref(),
+        Some("application/x-protobuf"),
+        "protobuf content type: {:?}",
+        metrics_post.content_type
+    );
+    assert!(!metrics_post.body.is_empty(), "nonzero protobuf body");
+
+    // The `service.name` resource attribute ("dwara") and at least one
+    // metric name ride the wire as UTF-8 inside the protobuf encoding.
+    // dwara's metric names start with `dwara_` (e.g. dwara_requests_total).
+    // Search the raw bytes: protobuf stores strings as length-delimited
+    // UTF-8, so the fragment appears contiguously even though the overall
+    // body is not valid UTF-8 (varint fields break from_utf8).
+    let body = &metrics_post.body;
+    let needle = b"dwara";
+    assert!(
+        body.windows(needle.len()).any(|w| w == needle),
+        "service.name or metric name fragment 'dwara' missing from {}-byte protobuf body",
+        body.len()
+    );
+
+    // Startup logged the metrics wiring through the normal JSON pipeline.
+    let logs = output.read_all();
+    assert!(
+        logs.contains("otlp_metrics_export_enabled"),
+        "no metrics enable line: {logs}"
+    );
+}

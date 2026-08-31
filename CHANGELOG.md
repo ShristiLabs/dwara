@@ -9,6 +9,13 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- OTLP metrics export (DW-073): the `otlp` cargo feature now exports
+  metrics to `/v1/metrics` on the same `DWARA_OTLP_ENDPOINT` collector,
+  additive to the Prometheus `/metrics` default. The periodic exporter
+  gathers the prometheus registry, converts counters/gauges/histograms
+  to OTLP protobuf, and POSTs on a configurable interval
+  (`DWARA_OTLP_METRICS_INTERVAL_SECS`, default 15s). A final flush
+  fires on shutdown.
 - Mirroring and fault injection (DW-062): `routes[].mirror` sends
   fire-and-forget shadow traffic to a mirror upstream (sampled by
   percentage, zero latency impact on the primary); `routes[].fault_injection`

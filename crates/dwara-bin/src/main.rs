@@ -451,6 +451,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // (which owns the observability registry) is constructed.
     dp.set_license_status(license_gate.status().as_metric());
 
+    // DW-073: OTLP metrics export — spawn the periodic exporter when
+    // the otlp feature is compiled in and DWARA_OTLP_ENDPOINT is set.
+    // The exporter reads the observability registry on each tick and
+    // POSTs OTLP protobuf to /v1/metrics on the collector. Same env var
+    // as traces (one endpoint, two signals).
+    #[cfg(feature = "otlp")]
+    let otlp_metrics = otlp::OtlpMetrics::spawn(dp.observability_arc());
+
     // DW-031: distributed Redis rate limiter (ent feature only).
     // Activated when ALL three conditions hold:
     //   1. The `ent` cargo feature is compiled in.
@@ -978,6 +986,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(feature = "otlp")]
     otlp.shutdown(deadline.saturating_duration_since(tokio::time::Instant::now()))
         .await;
+
+    // DW-073: OTLP metrics exporter shutdown — signal the periodic task
+    // to stop and perform a final flush.
+    #[cfg(feature = "otlp")]
+    if let Some(metrics) = otlp_metrics {
+        metrics.shutdown();
+    }
 
     std::process::exit(0);
 }

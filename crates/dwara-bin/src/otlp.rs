@@ -228,6 +228,359 @@ impl Otlp {
     }
 }
 
+// --- DW-073: OTLP metrics export ------------------------------------------
+
+/// The OTLP signal path for metrics.
+const METRICS_PATH: &str = "/v1/metrics";
+
+/// Default export interval for the periodic metrics exporter.
+const DEFAULT_METRICS_EXPORT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Env var override for the metrics export interval (seconds). Tests
+/// use a short interval; production keeps the 15s default.
+const METRICS_INTERVAL_ENV: &str = "DWARA_OTLP_METRICS_INTERVAL_SECS";
+
+/// Resolve the metrics export interval from the env override or the
+/// default. An invalid value falls back to the default (with a warn).
+fn metrics_export_interval() -> Duration {
+    match std::env::var(METRICS_INTERVAL_ENV) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                tracing::warn!(
+                    code = "otlp_metrics_interval_invalid",
+                    value = %v,
+                    "invalid {METRICS_INTERVAL_ENV}; falling back to default"
+                );
+                DEFAULT_METRICS_EXPORT_INTERVAL
+            }
+        },
+        Err(_) => DEFAULT_METRICS_EXPORT_INTERVAL,
+    }
+}
+
+/// Resolve the operator-supplied BASE endpoint into the full metrics URL.
+fn metrics_endpoint(base: &str) -> String {
+    if base.ends_with(METRICS_PATH) {
+        base.to_string()
+    } else if base.ends_with('/') {
+        format!("{base}v1/metrics")
+    } else {
+        format!("{base}{METRICS_PATH}")
+    }
+}
+
+/// A handle to the periodic metrics export task (DW-073). The task
+/// gathers prometheus metric families from the observability registry,
+/// converts them to OTLP protobuf, and POSTs to the collector's
+/// `/v1/metrics` endpoint on a fixed interval. The task is detached;
+/// `shutdown` cancels it and performs one final flush.
+pub(crate) struct OtlpMetrics {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+impl OtlpMetrics {
+    /// Resolve `DWARA_OTLP_ENDPOINT` and spawn the periodic metrics
+    /// exporter. Returns `None` if the endpoint is not set (the same
+    /// env var as traces — one endpoint, two signals). The observability
+    /// handle is read on each tick.
+    pub(crate) fn spawn(
+        obs: std::sync::Arc<dwara_core::observability::Observability>,
+    ) -> Option<Self> {
+        let endpoint = std::env::var(ENDPOINT_ENV).ok().filter(|v| !v.is_empty())?;
+        let url = metrics_endpoint(&endpoint);
+        let interval = metrics_export_interval();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tracing::info!(
+            code = "otlp_metrics_export_enabled",
+            endpoint = %endpoint,
+            metrics_url = %url,
+            interval_secs = interval.as_secs(),
+            "exporting metrics over OTLP (base endpoint; /v1/metrics appended)"
+        );
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // The first tick fires immediately; skip it so the first
+            // export happens after one interval (the gateway may still
+            // be initializing).
+            ticker.tick().await;
+            let mut shutdown_rx = std::pin::pin!(shutdown_rx);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        // Final flush on shutdown.
+                        export_metrics_tick(&obs, &url).await;
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        export_metrics_tick(&obs, &url).await;
+                    }
+                }
+            }
+        });
+
+        Some(OtlpMetrics {
+            shutdown: shutdown_tx,
+        })
+    }
+
+    /// Signal the periodic exporter to stop and perform a final flush.
+    pub(crate) fn shutdown(self) {
+        let _ = self.shutdown.send(());
+    }
+}
+
+/// One metrics export tick: gather, convert, POST.
+async fn export_metrics_tick(
+    obs: &std::sync::Arc<dwara_core::observability::Observability>,
+    url: &str,
+) {
+    let families = obs.gather();
+    if families.is_empty() {
+        return;
+    }
+    let body = match encode_metrics_otlp(&families) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                code = "otlp_metrics_encode_failed",
+                error = %e,
+                "failed to encode metrics for OTLP export"
+            );
+            return;
+        }
+    };
+    match post_otlp(url, &body).await {
+        Ok(()) => {
+            tracing::debug!(
+                code = "otlp_metrics_exported",
+                bytes = body.len(),
+                families = families.len(),
+                "exported metrics over OTLP"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                code = "otlp_metrics_export_failed",
+                error = %e,
+                "OTLP metrics export failed (will retry next tick)"
+            );
+        }
+    }
+}
+
+/// POST an OTLP protobuf body to the given URL using the std-only HTTP
+/// client (the same client the trace exporter uses, but async-wrapped
+/// for the tokio context the metrics task runs in).
+async fn post_otlp(url: &str, body: &[u8]) -> Result<(), String> {
+    // Parse the URL.
+    let parsed = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("OTLP metrics endpoint must be http://, got: {url}"))?;
+    let (host_port, path) = parsed.split_once('/').unwrap_or((parsed, ""));
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    let host = host_port.to_string();
+    let body = body.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        let mut stream =
+            TcpStream::connect(&host).map_err(|e| format!("connect to {host}: {e}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(|e| format!("set_write_timeout: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| format!("set_read_timeout: {e}"))?;
+
+        let request = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/x-protobuf\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            len = body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| format!("write headers: {e}"))?;
+        stream
+            .write_all(&body)
+            .map_err(|e| format!("write body: {e}"))?;
+        stream.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // Read the response status line (we only care that it's 2xx).
+        let mut buf = [0u8; 1024];
+        let n = stream
+            .read(&mut buf)
+            .map_err(|e| format!("read response: {e}"))?;
+        let response = String::from_utf8_lossy(&buf[..n]);
+        let status_line = response.lines().next().unwrap_or("");
+        if !status_line.contains(" 2") {
+            return Err(format!("collector returned non-2xx: {status_line}"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// Encode prometheus MetricFamilies into OTLP protobuf
+/// (ExportMetricsServiceRequest). This is a minimal encoder that
+/// handles the three metric types dwara uses: counter (Sum with
+/// is_monotonic=true), gauge (Gauge), and histogram (Histogram).
+fn encode_metrics_otlp(families: &[prometheus::proto::MetricFamily]) -> Result<Vec<u8>, String> {
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::{
+        any_value::Value as AnyValueKind, AnyValue, KeyValue,
+    };
+    use opentelemetry_proto::tonic::metrics::v1::{
+        metric::Data as MetricData, number_data_point::Value as NumValue, Gauge, Histogram,
+        HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+
+    let resource = Resource {
+        attributes: vec![KeyValue {
+            key: "service.name".to_string(),
+            value: Some(AnyValue {
+                value: Some(AnyValueKind::StringValue("dwara".to_string())),
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let now = now_nanos();
+    let mut metrics: Vec<Metric> = Vec::new();
+    for fam in families {
+        let name = fam.name().to_string();
+        let help = fam.help().to_string();
+        let mtype = fam.get_field_type();
+
+        let mut otel_metric = Metric {
+            name,
+            description: help,
+            ..Default::default()
+        };
+
+        match mtype {
+            prometheus::proto::MetricType::COUNTER => {
+                let mut data_points = Vec::new();
+                for m in fam.get_metric() {
+                    let labels = convert_labels(m.get_label());
+                    let value = m.get_counter().get_value();
+                    data_points.push(NumberDataPoint {
+                        attributes: labels,
+                        time_unix_nano: now,
+                        value: Some(NumValue::AsDouble(value)),
+                        ..Default::default()
+                    });
+                }
+                otel_metric.data = Some(MetricData::Sum(Sum {
+                    data_points,
+                    is_monotonic: true,
+                    aggregation_temporality: 2, // CUMULATIVE
+                }));
+            }
+            prometheus::proto::MetricType::GAUGE => {
+                let mut data_points = Vec::new();
+                for m in fam.get_metric() {
+                    let labels = convert_labels(m.get_label());
+                    let value = m.get_gauge().get_value();
+                    data_points.push(NumberDataPoint {
+                        attributes: labels,
+                        time_unix_nano: now,
+                        value: Some(NumValue::AsDouble(value)),
+                        ..Default::default()
+                    });
+                }
+                otel_metric.data = Some(MetricData::Gauge(Gauge { data_points }));
+            }
+            prometheus::proto::MetricType::HISTOGRAM => {
+                let mut data_points = Vec::new();
+                for m in fam.get_metric() {
+                    let labels = convert_labels(m.get_label());
+                    let h = m.get_histogram();
+                    let explicit_bounds: Vec<f64> =
+                        h.get_bucket().iter().map(|b| b.upper_bound()).collect();
+                    let bucket_counts: Vec<u64> = h
+                        .get_bucket()
+                        .iter()
+                        .map(|b| b.cumulative_count())
+                        .collect();
+                    data_points.push(HistogramDataPoint {
+                        attributes: labels,
+                        time_unix_nano: now,
+                        count: h.get_sample_count(),
+                        sum: Some(h.get_sample_sum()),
+                        explicit_bounds,
+                        bucket_counts,
+                        ..Default::default()
+                    });
+                }
+                otel_metric.data = Some(MetricData::Histogram(Histogram {
+                    data_points,
+                    aggregation_temporality: 2, // CUMULATIVE
+                }));
+            }
+            // Untyped and summary are not used by dwara; skip them.
+            _ => continue,
+        }
+
+        metrics.push(otel_metric);
+    }
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(resource),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    use prost::Message;
+    Ok(request.encode_to_vec())
+}
+
+/// Convert prometheus label pairs to OTLP KeyValue attributes.
+fn convert_labels(
+    labels: &[prometheus::proto::LabelPair],
+) -> Vec<opentelemetry_proto::tonic::common::v1::KeyValue> {
+    use opentelemetry_proto::tonic::common::v1::{
+        any_value::Value as AnyValueKind, AnyValue, KeyValue,
+    };
+    labels
+        .iter()
+        .map(|lp: &prometheus::proto::LabelPair| KeyValue {
+            key: lp.name().to_string(),
+            value: Some(AnyValue {
+                value: Some(AnyValueKind::StringValue(lp.value().to_string())),
+            }),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Current time in Unix nanoseconds.
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// The OTLP signal path for traces (spec: exporter.md#endpoint-urls-for-
 /// otlphttp).
 const TRACE_PATH: &str = "/v1/traces";

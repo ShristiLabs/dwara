@@ -138,19 +138,26 @@ moka = { version = "0.12", default-features = false, features = ["sync", "atomic
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 brotli = "8"
 zstd = "0.13"
-# OTLP trace export (#126, default-off `otlp` feature on dwara-bin): the
-# whole stack is feature-gated because it weighs on the musl release
-# binary against the DW-026 25MB budget. opentelemetry-otlp carries ONLY
-# http/protobuf (http-proto; no tonic/grpc transport, no reqwest client —
-# dwara-bin ships a std-only exporter HTTP client, see its src/otlp.rs).
-# tracing-opentelemetry is the era-appropriate span bridge:
-# opentelemetry-appender-tracing has been logs-only since 0.28. All
-# Apache-2.0 except tracing-opentelemetry (MIT).
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+# OTLP trace + metrics export (#126, DW-073; default-off `otlp` feature
+# on dwara-bin): the whole stack is feature-gated because it weighs on
+# the musl release binary against the DW-026 25MB budget.
+# opentelemetry-otlp carries ONLY http/protobuf (http-proto; no
+# tonic/grpc transport, no reqwest client — dwara-bin ships a std-only
+# exporter HTTP client, see its src/otlp.rs). tracing-opentelemetry is
+# the era-appropriate span bridge: opentelemetry-appender-tracing has
+# been logs-only since 0.28. All Apache-2.0 except
+# tracing-opentelemetry (MIT).
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
 opentelemetry-http = { version = "0.32", default-features = false }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "trace", "metrics"] }
+opentelemetry-proto = { version = "0.32", default-features = false }
 tracing-opentelemetry = "0.33"
+# DW-073: protobuf encoding for OTLP metrics export. Already in the tree
+# transitively via opentelemetry-proto; this makes it a direct dep so
+# the metrics encoder in otlp.rs can call Message::encode_to_vec. MIT OR
+# Apache-2.0.
+prost = "0.14"
 serial_test = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 prometheus = { version = "0.14", default-features = false }

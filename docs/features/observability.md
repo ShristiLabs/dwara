@@ -71,6 +71,25 @@ default build, `DWARA_OTLP_ENDPOINT` is read and validated but stays
 inert; a build with the `otlp` feature wires the same spans to export
 over HTTP/protobuf.
 
+## OTLP metrics export (DW-073)
+
+The same `otlp` cargo feature and the same `DWARA_OTLP_ENDPOINT` env
+var additionally export metrics over OTLP (http/protobuf to
+`/v1/metrics`). This is additive to the Prometheus `/metrics` default
+(DW-021): Prometheus stays the default; OTLP metrics are opt-in for
+orgs standardized on OpenTelemetry.
+
+The periodic exporter gathers the prometheus registry on each tick,
+converts the metric families to OTLP protobuf (counters as monotonic
+Sums, gauges as Gauges, histograms as Histograms with explicit bounds),
+and POSTs to the collector. The export interval defaults to 15s;
+`DWARA_OTLP_METRICS_INTERVAL_SECS` overrides it (production keeps the
+default). On shutdown, a final flush fires before exit. The
+`service.name` resource attribute is set to `dwara` on every export.
+
+One endpoint, two signals: traces go to `/v1/traces`, metrics go to
+`/v1/metrics`, both from the same base endpoint.
+
 ## Sampling: why 5xx always bypasses it
 
 `DWARA_ACCESS_LOG_SAMPLE` (default 1.0) governs only **non-error**

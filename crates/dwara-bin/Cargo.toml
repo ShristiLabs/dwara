@@ -31,10 +31,17 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-http = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-proto = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+# DW-073: protobuf encoding for OTLP metrics export.
+prost = { workspace = true, optional = true }
+# DW-073: prometheus metric types for the OTLP metrics encoder. Already
+# a transitive dep via dwara-core; this makes it direct for the otlp
+# feature's encoder in src/otlp.rs.
+prometheus = { workspace = true, optional = true }
 # DW-031: Redis client for the distributed rate limiter connection
 # establishment at startup (ent feature only). Optional so OSS builds
 # never pull it in; enabled via the `ent` feature. Same workspace dep
@@ -58,10 +65,13 @@ otlp = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-http",
     "dep:opentelemetry-otlp",
+    "dep:opentelemetry-proto",
     "dep:tracing-opentelemetry",
     "dep:async-trait",
     "dep:http",
     "dep:bytes",
+    "dep:prost",
+    "dep:prometheus",
 ]
 # DW-032: Enterprise edition. Forwards to dwara-core's `ent` feature so
 # the binary's license-verification startup path compiles in. Default

@@ -1547,6 +1547,13 @@ impl Observability {
             .expect("text encoding of gathered families cannot fail");
         String::from_utf8(buf).expect("prometheus text format is ASCII")
     }
+
+    /// Gather the raw metric families (DW-073: OTLP metrics export).
+    /// Used by the OTLP metrics exporter to convert prometheus metric
+    /// families into OTLP protobuf for export to a collector.
+    pub fn gather(&self) -> Vec<prometheus::proto::MetricFamily> {
+        self.registry.gather()
+    }
 }
 
 /// Echo a request ID onto a response (insert, never append: exactly one
