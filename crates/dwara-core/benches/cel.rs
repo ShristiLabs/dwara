@@ -66,11 +66,25 @@ fn bench_cel(c: &mut Criterion) {
             let mut ctx = CelContext::new();
             let mut request: std::collections::HashMap<String, serde_json::Value> =
                 std::collections::HashMap::new();
-            request.insert("method".to_string(), serde_json::Value::String("GET".to_string()));
-            request.insert("path".to_string(), serde_json::Value::String("/api/v1/users".to_string()));
+            request.insert(
+                "method".to_string(),
+                serde_json::Value::String("GET".to_string()),
+            );
+            request.insert(
+                "path".to_string(),
+                serde_json::Value::String("/api/v1/users".to_string()),
+            );
             let mut headers = std::collections::HashMap::new();
             headers.insert("x-api-key", "abc123".to_string());
-            request.insert("headers".to_string(), serde_json::Value::Object(headers.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::String(v))).collect()));
+            request.insert(
+                "headers".to_string(),
+                serde_json::Value::Object(
+                    headers
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+                        .collect(),
+                ),
+            );
             ctx.add_var("request", &request).unwrap();
             prog_complex.evaluate(&ctx).unwrap()
         })

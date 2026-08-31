@@ -9,6 +9,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Cedar + OPA authorization (DW-060): the `cedar` cargo feature
+  enables fine-grained authorization via Cedar policies (AWS's
+  Rust-native policy language) and OPA (Open Policy Agent) HTTP
+  callouts with decision caching. Cedar policies are compiled once at
+  config publish time and evaluated on the request path (no FFI
+  boundary -- Cedar is Rust-native). The OPA client includes a
+  TTL-based decision cache to keep the HTTP callout inside the authz
+  latency budget. The API provides `CedarAuthorizer` (compiled policy
+  set + entity store), `CedarRequest` (principal/action/resource/
+  context), `CedarDecision` (Allow/Deny), and `OpaClient` (HTTP
+  callout with cache). Default OFF; build with
+  `cargo build --features cedar`.
 - CEL engine (DW-058): the `cel` cargo feature enables a Common
   Expression Language engine for compiling and evaluating CEL
   expressions. Expressions are compiled once at config publish time

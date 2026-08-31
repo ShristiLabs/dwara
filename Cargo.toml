@@ -178,6 +178,12 @@ serial_test = "3"
 # (354K downloads). Feature-gated behind the `cel` feature on
 # dwara-core so the default build never pulls it in.
 cel-interpreter = { version = "0.10", default-features = false }
+# DW-060: Cedar policy engine. cedar-policy is AWS's Rust-native
+# authorization policy language (Apache-2.0, allow-listed in
+# deny.toml). Version 4.12.0 published 2026-07-28, well-vetted
+# (8M downloads). Feature-gated behind the `cedar` feature on
+# dwara-core so the default build never pulls it in.
+cedar-policy = { version = "4.12", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 prometheus = { version = "0.14", default-features = false }
 # CLI argument parsing (DW-022): clap is MIT OR Apache-2.0; derive

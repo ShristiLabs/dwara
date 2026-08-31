@@ -93,6 +93,11 @@ wasmtime = { workspace = true, optional = true }
 # build never pulls it in; enabled via the `cel` feature. MIT
 # (allow-listed in deny.toml).
 cel-interpreter = { workspace = true, optional = true }
+# DW-060: Cedar policy engine. cedar-policy is AWS's Rust-native
+# authorization policy language. Optional so the default build never
+# pulls it in; enabled via the `cedar` feature. Apache-2.0
+# (allow-listed in deny.toml).
+cedar-policy = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -116,6 +121,11 @@ wasm = ["dep:wasmtime"]
 # request path). Default OFF: cel-interpreter adds binary size.
 # Build with `cargo build --features cel`.
 cel = ["dep:cel-interpreter"]
+# DW-060: Cedar + OPA authorization. When enabled, the gateway can
+# evaluate Cedar policies for fine-grained authorization and call out
+# to OPA via HTTP with a decision cache. Default OFF: cedar-policy
+# adds binary size. Build with `cargo build --features cedar`.
+cedar = ["dep:cedar-policy"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
