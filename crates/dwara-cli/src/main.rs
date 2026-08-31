@@ -81,6 +81,12 @@ enum Command {
         #[command(subcommand)]
         kind: ImportKind,
     },
+    /// Terraform-compatible state tool (DW-065): export/plan/apply
+    /// gateway config as Terraform state + HCL over the admin API.
+    Tf {
+        #[command(subcommand)]
+        kind: TfKind,
+    },
     /// Trigger a zero-downtime binary upgrade (sends SIGUSR2).
     Upgrade {
         /// PID of the running gateway to signal. If omitted, the PID is
@@ -128,6 +134,81 @@ enum ImportKind {
         /// Output path for the generated Dwara config (default: dwara.yaml).
         #[arg(long, default_value = "dwara.yaml")]
         output: String,
+    },
+    /// Import a Kong declarative config (decK YAML or JSON) and generate
+    /// a Dwara config (DW-065).
+    Kong {
+        /// Path to the Kong config file (.yaml, .yml, or .json).
+        config: String,
+        /// Output path for the generated Dwara config (default: dwara.yaml).
+        #[arg(long, default_value = "dwara.yaml")]
+        output: String,
+    },
+    /// Import an Envoy static config (YAML) and generate a Dwara config
+    /// (DW-065).
+    Envoy {
+        /// Path to the Envoy config file (.yaml or .yml).
+        config: String,
+        /// Output path for the generated Dwara config (default: dwara.yaml).
+        #[arg(long, default_value = "dwara.yaml")]
+        output: String,
+    },
+}
+
+/// Subcommands of `dwara tf` (DW-065).
+#[derive(Subcommand)]
+enum TfKind {
+    /// Export the running gateway's config as Terraform state + HCL
+    /// (state import: bring a running gateway under management).
+    Export {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019).
+        #[arg(long)]
+        admin: String,
+        /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
+        #[arg(long)]
+        ca: Option<String>,
+        /// Path to the client certificate for mTLS (follow-up).
+        #[arg(long)]
+        client_cert: Option<String>,
+        /// Path to the client key for mTLS (follow-up).
+        #[arg(long)]
+        client_key: Option<String>,
+        /// Output path for the tfstate JSON file (default: dwara.tfstate).
+        #[arg(long, default_value = "dwara.tfstate")]
+        out_state: String,
+        /// Output path for the HCL file (default: dwara.tf).
+        #[arg(long, default_value = "dwara.tf")]
+        out_hcl: String,
+    },
+    /// Compare local tfstate against the running gateway and print the
+    /// diff (plan). Exit 0 if no diff, 1 if diff.
+    Plan {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019).
+        #[arg(long)]
+        admin: String,
+        /// Path to the local tfstate JSON file.
+        #[arg(long)]
+        state: String,
+        /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
+        #[arg(long)]
+        ca: Option<String>,
+    },
+    /// Push the desired config to the gateway (apply). If `--config` is
+    /// given, use that YAML; otherwise derive the desired YAML from the
+    /// tfstate. Refreshes state from the gateway response.
+    Apply {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019).
+        #[arg(long)]
+        admin: String,
+        /// Path to the local tfstate JSON file.
+        #[arg(long)]
+        state: String,
+        /// Optional path to a desired config YAML file (overrides state).
+        #[arg(long)]
+        config: Option<String>,
+        /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
+        #[arg(long)]
+        ca: Option<String>,
     },
 }
 
@@ -316,7 +397,62 @@ fn main() {
                     }
                 },
             },
+            ImportKind::Kong { config, output } => match read(&config) {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok(text) => {
+                    let is_json =
+                        dwara_cli::import::is_json_spec(&text) || config.ends_with(".json");
+                    match dwara_cli::import_kong::import_kong(&text, is_json) {
+                        Ok(result) => match write_atomic(&output, &result.yaml) {
+                            Ok(()) => {
+                                println!(
+                                    "imported {} routes from {} -> {}",
+                                    result.route_count, config, output
+                                );
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("{e}");
+                                1
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("{e}");
+                            1
+                        }
+                    }
+                }
+            },
+            ImportKind::Envoy { config, output } => match read(&config) {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok(text) => match dwara_cli::import_envoy::import_envoy(&text) {
+                    Ok(result) => match write_atomic(&output, &result.yaml) {
+                        Ok(()) => {
+                            println!(
+                                "imported {} routes from {} -> {}",
+                                result.route_count, config, output
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            1
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+            },
         },
+        Command::Tf { kind } => run_tf(kind),
         Command::Upgrade { pid, pid_file } => run_upgrade(pid, pid_file),
         Command::Plugin { kind } => match kind {
             PluginKind::New { name, dir } => {
@@ -413,5 +549,99 @@ fn run_upgrade(pid: Option<u32>, pid_file: Option<String>) -> i32 {
         let err = std::io::Error::last_os_error();
         eprintln!("upgrade: failed to signal PID {pid}: {err}");
         1
+    }
+}
+
+/// DW-065: `dwara tf` subcommand dispatch. The tf tool exports/imports
+/// Terraform-compatible JSON state and generates HCL, performing
+/// plan/apply round-trips directly over the admin API. The HTTP client
+/// uses hyper (plaintext loopback — the dev admin is the primary
+/// target; mTLS is a documented follow-up via the same flags the admin
+/// client uses).
+fn run_tf(kind: TfKind) -> i32 {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("tf: cannot start tokio runtime: {e}");
+            return 1;
+        }
+    };
+    match kind {
+        TfKind::Export {
+            admin,
+            ca,
+            client_cert,
+            client_key,
+            out_state,
+            out_hcl,
+        } => match rt.block_on(dwara_cli::tf::export(
+            &admin,
+            ca.as_deref(),
+            client_cert.as_deref(),
+            client_key.as_deref(),
+        )) {
+            Ok((state_json, hcl)) => {
+                if let Err(e) = write_atomic(&out_state, &state_json) {
+                    eprintln!("tf export: cannot write state: {e}");
+                    return 1;
+                }
+                if let Err(e) = write_atomic(&out_hcl, &hcl) {
+                    eprintln!("tf export: cannot write HCL: {e}");
+                    return 1;
+                }
+                println!("tf export: wrote {out_state} and {out_hcl}");
+                0
+            }
+            Err(e) => {
+                eprintln!("tf export: {e}");
+                1
+            }
+        },
+        TfKind::Plan {
+            admin,
+            state,
+            ca: _,
+        } => match rt.block_on(dwara_cli::tf::plan(&admin, &state)) {
+            Ok((text, has_diff)) => {
+                print!("{text}");
+                if has_diff {
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(e) => {
+                eprintln!("tf plan: {e}");
+                1
+            }
+        },
+        TfKind::Apply {
+            admin,
+            state,
+            config,
+            ca: _,
+        } => {
+            let config_yaml = if let Some(path) = &config {
+                match read(path) {
+                    Ok(text) => Some(text),
+                    Err(e) => {
+                        eprintln!("tf apply: {e}");
+                        return 1;
+                    }
+                }
+            } else {
+                None
+            };
+            match rt.block_on(dwara_cli::tf::apply(&admin, &state, config_yaml.as_deref())) {
+                Ok(resp) => {
+                    println!("tf apply: {resp}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("tf apply: {e}");
+                    1
+                }
+            }
+        }
     }
 }
