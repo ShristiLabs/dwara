@@ -1791,6 +1791,21 @@ pub struct Route {
     /// routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi: Option<OpenApiMeta>,
+    /// Shadow traffic mirroring (DW-062): fire-and-forget duplicate
+    /// requests to a mirror upstream. The mirror response is discarded
+    /// and never impacts the primary request's latency. A percentage
+    /// controls sampling (0 = never, 100 = always). Absent (the
+    /// default): no mirroring. See [`MirrorConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<MirrorConfig>,
+    /// Fault injection (DW-062): percentage-based delays and aborts for
+    /// chaos testing. A delay injects a fixed latency before the
+    /// request is forwarded; an abort short-circuits with a configured
+    /// status without contacting the upstream. Both are sampled by
+    /// percentage (0 = never, 100 = always). Absent (the default): no
+    /// fault injection. See [`FaultInjection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_injection: Option<FaultInjection>,
 }
 
 /// OpenAPI import metadata attached to a route (DW-047). No runtime
@@ -1815,6 +1830,63 @@ pub struct OpenApiMeta {
     /// The path template from the source OpenAPI spec (e.g.
     /// `/pets/{id}`).
     pub path: String,
+}
+
+/// Shadow traffic mirroring configuration (DW-062,
+/// `routes[].mirror`). Fire-and-forget duplicate requests to a named
+/// mirror upstream; the mirror response is discarded and never impacts
+/// the primary request's latency. A percentage controls sampling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorConfig {
+    /// Name of the upstream to receive mirrored (shadow) requests. The
+    /// mirror upstream is separate from the route's service upstream —
+    /// it exists solely to receive shadow traffic. The upstream must
+    /// exist in the `upstreams` list.
+    pub upstream: String,
+    /// Percentage of requests to mirror (0..=100). 0 mirrors nothing;
+    /// 100 mirrors every request. The sampling is per-request (a
+    /// random draw against this percentage).
+    pub percentage: u8,
+}
+
+/// Fault injection configuration (DW-062, `routes[].fault_injection`).
+/// Percentage-based delays and aborts for chaos testing. A delay
+/// injects a fixed latency before the request is forwarded; an abort
+/// short-circuits with a configured status without contacting the
+/// upstream. Both may be present simultaneously — the abort is
+/// evaluated first, and if it does not fire, the delay is applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaultInjection {
+    /// Abort injection: return a configured status without forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort: Option<FaultAbort>,
+    /// Delay injection: inject a fixed delay before forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<FaultDelay>,
+}
+
+/// Abort fault injection (DW-062): short-circuit the request with a
+/// configured HTTP status, sampled by percentage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaultAbort {
+    /// Percentage of requests to abort (0..=100).
+    pub percentage: u8,
+    /// HTTP status code to return (100..=599).
+    pub status: u16,
+}
+
+/// Delay fault injection (DW-062): inject a fixed delay before
+/// forwarding the request, sampled by percentage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaultDelay {
+    /// Percentage of requests to delay (0..=100).
+    pub percentage: u8,
+    /// Fixed delay in milliseconds (1..=300000, i.e. up to 5 minutes).
+    pub fixed_ms: u64,
 }
 
 /// Route-scoped request-body validation (DW-047,

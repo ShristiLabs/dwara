@@ -1299,6 +1299,84 @@
         "port"
       ]
     },
+    "FaultAbort": {
+      "description": "Abort fault injection (DW-062): short-circuit the request with a\nconfigured HTTP status, sampled by percentage.",
+      "type": "object",
+      "properties": {
+        "percentage": {
+          "description": "Percentage of requests to abort (0..=100).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "status": {
+          "description": "HTTP status code to return (100..=599).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "percentage",
+        "status"
+      ]
+    },
+    "FaultDelay": {
+      "description": "Delay fault injection (DW-062): inject a fixed delay before\nforwarding the request, sampled by percentage.",
+      "type": "object",
+      "properties": {
+        "fixed_ms": {
+          "description": "Fixed delay in milliseconds (1..=300000, i.e. up to 5 minutes).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "percentage": {
+          "description": "Percentage of requests to delay (0..=100).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "percentage",
+        "fixed_ms"
+      ]
+    },
+    "FaultInjection": {
+      "description": "Fault injection configuration (DW-062, `routes[].fault_injection`).\nPercentage-based delays and aborts for chaos testing. A delay\ninjects a fixed latency before the request is forwarded; an abort\nshort-circuits with a configured status without contacting the\nupstream. Both may be present simultaneously — the abort is\nevaluated first, and if it does not fire, the delay is applied.",
+      "type": "object",
+      "properties": {
+        "abort": {
+          "description": "Abort injection: return a configured status without forwarding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FaultAbort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delay": {
+          "description": "Delay injection: inject a fixed delay before forwarding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FaultDelay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "FrameOptions": {
       "description": "The `X-Frame-Options` value (DW-028).",
       "oneOf": [
@@ -1825,6 +1903,28 @@
       "additionalProperties": false,
       "required": [
         "max_bytes"
+      ]
+    },
+    "MirrorConfig": {
+      "description": "Shadow traffic mirroring configuration (DW-062,\n`routes[].mirror`). Fire-and-forget duplicate requests to a named\nmirror upstream; the mirror response is discarded and never impacts\nthe primary request's latency. A percentage controls sampling.",
+      "type": "object",
+      "properties": {
+        "percentage": {
+          "description": "Percentage of requests to mirror (0..=100). 0 mirrors nothing;\n100 mirrors every request. The sampling is per-request (a\nrandom draw against this percentage).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "upstream": {
+          "description": "Name of the upstream to receive mirrored (shadow) requests. The\nmirror upstream is separate from the route's service upstream —\nit exists solely to receive shadow traffic. The upstream must\nexist in the `upstreams` list.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "upstream",
+        "percentage"
       ]
     },
     "MtlsConsumerMapping": {
@@ -2731,6 +2831,17 @@
             }
           ]
         },
+        "fault_injection": {
+          "description": "Fault injection (DW-062): percentage-based delays and aborts for\nchaos testing. A delay injects a fixed latency before the\nrequest is forwarded; an abort short-circuits with a configured\nstatus without contacting the upstream. Both are sampled by\npercentage (0 = never, 100 = always). Absent (the default): no\nfault injection. See [`FaultInjection`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FaultInjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "limits": {
           "description": "Route-scoped request size limits (DW-027, feature analysis 4.16):\nper-route body and header caps enforced after route resolution.\nOver-limit requests are rejected by the gateway with the JSON\nerror envelope (413 for bodies, 431 for headers) before any\nupstream contact when the size is declared up front\n(`Content-Length`); streaming bodies of unknown length are\naborted as soon as they cross the cap.",
           "anyOf": [
@@ -2773,6 +2884,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "mirror": {
+          "description": "Shadow traffic mirroring (DW-062): fire-and-forget duplicate\nrequests to a mirror upstream. The mirror response is discarded\nand never impacts the primary request's latency. A percentage\ncontrols sampling (0 = never, 100 = always). Absent (the\ndefault): no mirroring. See [`MirrorConfig`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MirrorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "name": {
           "type": "string"

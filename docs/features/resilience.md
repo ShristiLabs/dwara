@@ -243,3 +243,62 @@ the same: a reload changes *policy* (what the rules are) without
 resetting *observed reality* (what's actually been happening to this
 upstream), so a reload can never be used to "launder" a struggling
 upstream back to a clean slate.
+
+## Mirroring and fault injection (DW-062)
+
+Two route-scoped features for traffic testing that sit at the start of
+the proxy action, before any upstream contact:
+
+### Shadow traffic mirroring (`routes[].mirror`)
+
+Fire-and-forget duplicate requests to a named mirror upstream. The
+mirror response is discarded and the task is detached — it never
+impacts the primary request's latency. A percentage controls sampling
+(0 = never, 100 = always).
+
+```yaml
+routes:
+  - name: api
+    service: svc
+    match: { path: { type: prefix, value: /api } }
+    action: { type: proxy }
+    mirror:
+      upstream: shadow-upstream
+      percentage: 10   # 10% of requests are mirrored
+```
+
+For v1, the mirror carries the request shape (method, path, headers)
+but an empty body — this avoids body buffering entirely and has truly
+zero latency impact. The mirror upstream must exist in the `upstreams`
+list. The `dwara_mirror_sent_total{upstream}` counter tracks mirror
+copies sent.
+
+### Fault injection (`routes[].fault_injection`)
+
+Percentage-based delays and aborts for chaos testing:
+
+```yaml
+routes:
+  - name: api
+    service: svc
+    match: { path: { type: prefix, value: /api } }
+    action: { type: proxy }
+    fault_injection:
+      abort:
+        percentage: 5
+        status: 503       # 5% of requests get a 503
+      delay:
+        percentage: 10
+        fixed_ms: 500     # 10% of requests get a 500ms delay
+```
+
+- **Abort** short-circuits with the configured HTTP status (100-599)
+  without contacting the upstream. The abort is evaluated first; if it
+  does not fire, the delay is applied.
+- **Delay** injects a fixed latency (1-300000ms) before the request is
+  forwarded. The request still succeeds (the delay is not an abort).
+- Both are sampled by percentage (a random draw per request).
+- An aborted request is never mirrored (the abort runs before the
+  mirror spawn).
+- An empty `fault_injection` block (no `abort` and no `delay`) is
+  rejected by validation — omit the block instead.

@@ -182,6 +182,8 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
                 method: method.to_string(),
                 path: path.clone(),
             }),
+            mirror: None,
+            fault_injection: None,
         };
         routes.push(route);
     }

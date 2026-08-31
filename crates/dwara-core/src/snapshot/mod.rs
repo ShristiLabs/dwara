@@ -3404,6 +3404,90 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 &mut issues,
             );
         }
+        // DW-062: mirror validation.
+        if let Some(m) = &r.mirror {
+            if m.percentage > 100 {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "mirror.percentage",
+                    "percentage must be in [0, 100]",
+                ));
+            }
+            if m.upstream.trim().is_empty() {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "mirror.upstream",
+                    "mirror upstream name must not be empty",
+                ));
+            } else if !gateway.upstreams.iter().any(|u| u.name == m.upstream) {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "mirror.upstream",
+                    format!("mirror upstream '{}' not found in upstreams", m.upstream),
+                ));
+            }
+        }
+        // DW-062: fault injection validation.
+        if let Some(fi) = &r.fault_injection {
+            if let Some(a) = &fi.abort {
+                if a.percentage > 100 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "fault_injection.abort.percentage",
+                        "percentage must be in [0, 100]",
+                    ));
+                }
+                if a.status < crate::config::limits::MIN_FAULT_ABORT_STATUS
+                    || a.status > crate::config::limits::MAX_FAULT_ABORT_STATUS
+                {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "fault_injection.abort.status",
+                        format!(
+                            "status must be in [{}, {}]",
+                            crate::config::limits::MIN_FAULT_ABORT_STATUS,
+                            crate::config::limits::MAX_FAULT_ABORT_STATUS
+                        ),
+                    ));
+                }
+            }
+            if let Some(d) = &fi.delay {
+                if d.percentage > 100 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "fault_injection.delay.percentage",
+                        "percentage must be in [0, 100]",
+                    ));
+                }
+                if d.fixed_ms == 0 || d.fixed_ms > crate::config::limits::MAX_FAULT_DELAY_MS {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "fault_injection.delay.fixed_ms",
+                        format!(
+                            "fixed_ms must be in [1, {}]",
+                            crate::config::limits::MAX_FAULT_DELAY_MS
+                        ),
+                    ));
+                }
+            }
+            // An empty fault_injection block (no abort, no delay) is an
+            // authoring mistake — reject it.
+            if fi.abort.is_none() && fi.delay.is_none() {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "fault_injection",
+                    "fault_injection block must have at least one of abort or delay",
+                ));
+            }
+        }
     }
 
     for u in &gateway.upstreams {

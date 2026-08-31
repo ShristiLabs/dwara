@@ -56,6 +56,8 @@
 //! - `retries_total{upstream}` counter
 //! - `dwara_hedge_sent_total{upstream}` counter (DW-063) — speculative
 //!   hedge copies sent after the tail-latency timer fired
+//! - `dwara_mirror_sent_total{upstream}` counter (DW-062) — shadow
+//!   traffic mirror requests sent to a mirror upstream
 //! - `rate_limited_total{route}` counter
 //! - `shed_total{priority}` counter
 //! - `dwara_policy_dry_run_total{phase,route}` counter (DW-041) —
@@ -353,6 +355,8 @@ pub struct Observability {
     /// speculative duplicate the hedge timer fired, regardless of
     /// whether it won the race.
     hedge_sent_total: IntCounterVec,
+    /// DW-062: mirror (shadow traffic) requests sent, by upstream.
+    mirror_sent_total: IntCounterVec,
     rate_limited_total: IntCounterVec,
     shed_total: IntCounterVec,
     policy_dry_run_total: IntCounterVec,
@@ -572,6 +576,16 @@ impl Observability {
                 "Speculative hedge copies sent (DW-063), by upstream. Counts \
                  every duplicate the hedge timer fired, regardless of whether \
                  it won the race.",
+            ),
+            &["upstream"],
+        )
+        .expect("valid metric definition");
+        let mirror_sent_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_mirror_sent_total",
+                "Shadow traffic mirror requests sent (DW-062), by upstream. \
+                 Counts every fire-and-forget mirror copy dispatched to a \
+                 mirror upstream.",
             ),
             &["upstream"],
         )
@@ -959,6 +973,7 @@ impl Observability {
             Box::new(upstream_attempts_total.clone()),
             Box::new(retries_total.clone()),
             Box::new(hedge_sent_total.clone()),
+            Box::new(mirror_sent_total.clone()),
             Box::new(rate_limited_total.clone()),
             Box::new(shed_total.clone()),
             Box::new(policy_dry_run_total.clone()),
@@ -1016,6 +1031,7 @@ impl Observability {
             upstream_attempts_total,
             retries_total,
             hedge_sent_total,
+            mirror_sent_total,
             rate_limited_total,
             shed_total,
             policy_dry_run_total,
@@ -1116,6 +1132,11 @@ impl Observability {
     /// hedge timer fired. Called once per copy, not once per request.
     pub fn record_hedge_sent(&self, upstream: &str) {
         self.hedge_sent_total.with_label_values(&[upstream]).inc();
+    }
+
+    /// Count one mirror (shadow traffic) request sent (DW-062).
+    pub fn record_mirror_sent(&self, upstream: &str) {
+        self.mirror_sent_total.with_label_values(&[upstream]).inc();
     }
 
     /// Count one rate-limit denial (429).

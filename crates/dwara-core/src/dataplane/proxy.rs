@@ -5033,6 +5033,46 @@ where
             serve_mock(mock, gen.snapshot.route_table().mock_body(idx), rid).await
         }
         RouteAction::Proxy { .. } => {
+            // DW-062: fault injection — abort and delay are evaluated
+            // BEFORE any upstream contact. The abort short-circuits with
+            // a configured status; the delay injects a fixed latency.
+            // Both are sampled by percentage (a random draw per
+            // request). This runs before the body limit and digest
+            // checks because an aborted request never reaches the
+            // upstream and a delayed request waits before the forward
+            // path begins.
+            if let Some(fi) = &route.fault_injection {
+                if let Some(abort) = &fi.abort {
+                    if sample_percentage(abort.percentage) {
+                        tracing::info!(
+                            code = "fault_injection_abort",
+                            request_id = %rid,
+                            route = %route.name,
+                            status = abort.status,
+                            "fault injection: aborting request"
+                        );
+                        return simple(
+                            StatusCode::from_u16(abort.status)
+                                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                            "fault_injection_abort",
+                            "request aborted by fault injection",
+                            rid,
+                        );
+                    }
+                }
+                if let Some(delay) = &fi.delay {
+                    if sample_percentage(delay.percentage) {
+                        tracing::info!(
+                            code = "fault_injection_delay",
+                            request_id = %rid,
+                            route = %route.name,
+                            delay_ms = delay.fixed_ms,
+                            "fault injection: delaying request"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay.fixed_ms)).await;
+                    }
+                }
+            }
             // Streaming body limit (DW-027): the counting wrapper (a
             // thin passthrough when the route sets no cap; the
             // declared-length half was rejected above) guards requests
@@ -5054,7 +5094,55 @@ where
             // the family's 401 before the request is forwarded at
             // all. A correct empty digest forwards normally; unsigned
             // requests are unaffected.
+            //
+            // DW-062: shadow traffic mirroring. When the route has a
+            // mirror config and the percentage sample hits, spawn a
+            // fire-and-forget task that sends a copy of the request
+            // (same headers and path, empty body) to the mirror
+            // upstream. The mirror response is discarded and the task
+            // is detached — it never impacts the primary request's
+            // latency. The mirror runs AFTER fault injection (an
+            // aborted request is never mirrored). For v1 the mirror
+            // carries the request shape (method, path, headers) but an
+            // empty body — this avoids body buffering entirely and has
+            // truly zero latency impact. A future version may buffer
+            // the body for full shadow requests.
+            let mirror_cfg = route
+                .mirror
+                .as_ref()
+                .filter(|m| m.percentage > 0 && sample_percentage(m.percentage));
             let (parts, body) = req.into_parts();
+            // Spawn the mirror task (fire-and-forget) before the
+            // primary forward. The mirror gets a cloned request with
+            // an empty body.
+            if let Some(m) = mirror_cfg {
+                if let Some(mirror_handle) = dp.registry().get(&m.upstream) {
+                    let mirror_parts = parts.clone();
+                    let mirror_upstream_name = m.upstream.clone();
+                    let mirror_rid = rid.to_string();
+                    dp.observability_arc().record_mirror_sent(&m.upstream);
+                    tokio::spawn(async move {
+                        let mirror_req = Request::from_parts(mirror_parts, Full::new(Bytes::new()));
+                        let result = mirror_handle.send(mirror_req).await;
+                        if let Err(e) = result {
+                            tracing::debug!(
+                                code = "mirror_request_failed",
+                                request_id = %mirror_rid,
+                                upstream = %mirror_upstream_name,
+                                error = %e,
+                                "mirror request failed (best-effort, ignored)"
+                            );
+                        }
+                    });
+                    tracing::debug!(
+                        code = "mirror_sent",
+                        request_id = %rid,
+                        route = %route.name,
+                        upstream = %m.upstream,
+                        "sent mirror request to shadow upstream"
+                    );
+                }
+            }
             let digesting = crate::dataplane::hardening::DigestingBody::new(body, signed_digest);
             if digesting.eager_digest_mismatch() {
                 tracing::warn!(
@@ -5362,6 +5450,42 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
             code, msg, rid,
         ))))
         .expect("static error body is valid")
+}
+
+/// DW-062: sample a percentage (0..=100). Returns true with probability
+/// `percentage / 100`. A percentage of 0 always returns false; 100 always
+/// returns true. Uses a fast thread-local PRNG (no crypto strength needed
+/// — this is a sampling decision, not a security boundary).
+fn sample_percentage(percentage: u8) -> bool {
+    if percentage == 0 {
+        return false;
+    }
+    if percentage >= 100 {
+        return true;
+    }
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            // Seed from the system time — no crypto strength needed,
+            // just enough entropy to avoid correlated samples across
+            // threads. The xorshift step below scrambles it further.
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E3779B97F4A7C15);
+            if seed == 0 { 0x9E3779B97F4A7C15 } else { seed }
+        });
+    }
+    STATE.with(|state| {
+        let mut s = state.get();
+        // xorshift64 — fast, good enough for sampling.
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        state.set(s);
+        // Map to 0..=99 and compare.
+        (s % 100) < percentage as u64
+    })
 }
 
 /// The outcome of the gateway cap admission phase (DW-015 + DW-053):

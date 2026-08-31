@@ -9,6 +9,11 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Mirroring and fault injection (DW-062): `routes[].mirror` sends
+  fire-and-forget shadow traffic to a mirror upstream (sampled by
+  percentage, zero latency impact on the primary); `routes[].fault_injection`
+  injects percentage-based delays and aborts for chaos testing. New metric
+  `dwara_mirror_sent_total{upstream}`.
 - Envoy-style admin endpoints (DW-072): `GET /clusters` (per-upstream
   algorithm, scheme, connection/request counters, breaker state,
   per-endpoint health + inflight), `GET /config_dump` (full published

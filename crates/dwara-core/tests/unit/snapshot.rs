@@ -30,6 +30,8 @@ fn good_gateway() -> Gateway {
                 waf: None,
                 request_validation: None,
                 openapi: None,
+                mirror: None,
+                fault_injection: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -66,6 +68,8 @@ fn good_gateway() -> Gateway {
                 waf: None,
                 request_validation: None,
                 openapi: None,
+                mirror: None,
+                fault_injection: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {
@@ -102,6 +106,8 @@ fn good_gateway() -> Gateway {
                 waf: None,
                 request_validation: None,
                 openapi: None,
+                mirror: None,
+                fault_injection: None,
                 service: "users-api".into(),
                 r#match: RouteMatch {
                     path: PathMatch {

@@ -53,6 +53,8 @@ fn bench_gateway() -> Gateway {
                 waf: None,
                 request_validation: None,
                 openapi: None,
+                mirror: None,
+                fault_injection: None,
                 r#match: RouteMatch {
                     path: PathMatch { kind, value },
                     host: None,

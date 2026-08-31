@@ -46,6 +46,17 @@ pub const MAX_HEDGE_AFTER_MS: u64 = 300_000;
 /// amplification factor.
 pub const MAX_HEDGE_COPIES: u32 = 4;
 
+/// Validation bound on `routes[].fault_injection.delay.fixed_ms`
+/// (DW-062): the maximum injectable delay. Above 5 minutes the upstream
+/// is almost certainly dead and a timeout or breaker is the right tool,
+/// not a fault-injection delay.
+pub const MAX_FAULT_DELAY_MS: u64 = 300_000;
+
+/// Validation bound on `routes[].fault_injection.abort.status`
+/// (DW-062): the HTTP status range for abort injection.
+pub const MIN_FAULT_ABORT_STATUS: u16 = 100;
+pub const MAX_FAULT_ABORT_STATUS: u16 = 599;
+
 /// Runtime bound on the per-key GCRA state a rate-limiter window holds
 /// PER SHARD of its keyed store (see `extensions::rate_limiter`). Not a
 /// schema bound — no config value is checked against it — but a

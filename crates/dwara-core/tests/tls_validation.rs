@@ -83,6 +83,8 @@ fn base_gateway(listener: Listener) -> Gateway {
             waf: None,
             request_validation: None,
             openapi: None,
+            mirror: None,
+            fault_injection: None,
             r#match: RouteMatch {
                 path: PathMatch {
                     kind: PathMatchKind::Exact,

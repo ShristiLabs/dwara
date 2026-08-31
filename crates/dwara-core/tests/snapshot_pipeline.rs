@@ -42,6 +42,8 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         waf: None,
         request_validation: None,
         openapi: None,
+        mirror: None,
+        fault_injection: None,
         service: "svc".into(),
         r#match: RouteMatch {
             path: PathMatch {
