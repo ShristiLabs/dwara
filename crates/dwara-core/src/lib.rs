@@ -83,6 +83,10 @@ pub mod synthetic;
 // `aggregation` cargo feature (default OFF).
 #[cfg(feature = "aggregation")]
 pub mod aggregation;
+// DW-112: Agent-operable administration via MCP. Feature-gated
+// behind the `mcp` cargo feature (default OFF).
+#[cfg(feature = "mcp")]
+pub mod mcp;
 // DW-067: Workspaces + RBAC + audit (Enterprise). Feature-gated
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]

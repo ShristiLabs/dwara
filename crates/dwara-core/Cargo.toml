@@ -151,6 +151,12 @@ k8s = []
 # is an extension cost, never a tax on the zero-buffering proxy path.
 # Build with `cargo build --features aggregation`.
 aggregation = []
+# DW-112: Agent-operable administration via MCP. When enabled, the
+# admin API is exposed as an MCP server with tools for route/service/
+# policy CRUD, stats, and analytics queries. RBAC-scoped tool access
+# -- AI agents operate dwara. Default OFF. Build with
+# `cargo build --features mcp`.
+mcp = []
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

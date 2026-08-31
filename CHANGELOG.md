@@ -9,6 +9,22 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Agent-operable administration via MCP (DW-112): the `mcp` cargo
+  feature exposes the admin API as an MCP (Model Context Protocol)
+  server with tools for route/service/policy CRUD, stats, and
+  analytics queries. RBAC-scoped tool access -- AI agents operate
+  dwara. The API provides `McpServer` (the server: holds tool
+  definitions and executes tool calls with RBAC checks),
+  `ToolDefinition` (name, description, input JSON Schema, required
+  permission), `ToolCallRequest`/`ToolCallResponse` (MCP protocol
+  types), `Permission` (Read/Write/Admin), `AgentIdentity` (name +
+  permissions, with read_only/read_write/admin constructors),
+  `ToolHandler` trait (the caller implements this to execute tools),
+  and `MockToolHandler` (for testing). Standard tools: list_routes,
+  get_route, create_route, update_route, delete_route, list_services,
+  get_stats, get_health, get_config, purge_cache. All tool inputs and
+  outputs are JSON. Default OFF; build with
+  `cargo build --features mcp`.
 - API aggregation plugin pack (DW-061): the `aggregation` cargo
   feature enables KrakenD-style multi-upstream composition with
   JSONPath fragment shaping and per-fragment fail-open/closed. The
