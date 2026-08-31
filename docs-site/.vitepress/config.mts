@@ -111,6 +111,10 @@ export default withMermaid(
                   text: "Agent-operable administration",
                   link: "/guide/agent-operable-admin",
                 },
+                {
+                  text: "Terraform state tool",
+                  link: "/guide/terraform-state",
+                },
               ],
             },
             {
@@ -145,6 +149,10 @@ export default withMermaid(
                 {
                   text: "OpenAPI import and mock mode",
                   link: "/guide/openapi-import",
+                },
+                {
+                  text: "Config import (NGINX, Kong, Envoy)",
+                  link: "/guide/config-import",
                 },
                 {
                   text: "API aggregation",

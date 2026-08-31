@@ -25,9 +25,15 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod import;
 // DW-065: NGINX config import (migration lever).
 pub mod import_nginx;
+// DW-065: Kong declarative config import (migration lever).
+pub mod import_kong;
+// DW-065: Envoy static config import (migration lever).
+pub mod import_envoy;
 pub mod loadgen;
 // DW-057: Plugin scaffolding (`dwara plugin new`).
 pub mod plugin_scaffold;
+// DW-065: Terraform-compatible state tool (`dwara tf`).
+pub mod tf;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};

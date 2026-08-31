@@ -9,6 +9,42 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Terraform-compatible state tool (DW-065): a `dwara tf` CLI subcommand
+  that exports/imports Terraform-compatible JSON state and generates
+  HCL, performing plan/apply round-trips directly over the admin API.
+  Implemented as a CLI-based state tool (not a terraform-plugin-rs
+  provider -- the MPL-2.0 ecosystem is not in the project's license
+  allow list). No new external dependencies (hyper, serde_json,
+  serde_yaml_ng, serde, clap, tokio are all already workspace deps).
+  Subcommands: `dwara tf export` (GET /config -> tfstate JSON + HCL),
+  `dwara tf plan` (local tfstate vs GET /config -> diff, exit 0/1), and
+  `dwara tf apply` (PATCH /config with desired YAML, derived from
+  tfstate or a --config file). The tfstate follows Terraform's state
+  file structure (version 4, resources[] with mode/type/name/instances).
+  Dwara entities map to resource types: dwara_listener, dwara_route,
+  dwara_service, dwara_upstream, dwara_consumer. The state is
+  structurally Terraform-compatible so a future real provider or
+  `terraform import` could consume it; the Pulumi bridge path is open
+  via the HCL/tfstate interchange formats. The HTTP client targets the
+  dev admin (plaintext loopback, DWARA_ADMIN_DEV=1); mTLS flags
+  (--ca/--client-cert/--client-key) are reserved for a production admin
+  (documented follow-up).
+- Kong declarative config import (DW-065): `dwara import kong` reads a
+  Kong decK config (YAML or JSON) and generates a Dwara config YAML.
+  Maps Kong services -> dwara service+upstream, Kong routes -> dwara
+  route (paths/methods/hosts), Kong upstreams+targets -> dwara
+  upstream+endpoints, Kong consumers -> dwara consumer (name only).
+  Reports unsupported constructs (plugins, key-auth/jwt/hmac/basic
+  credentials, ACL groups, strip_path, certificates) as warnings
+  appended as comments. No new dependencies (serde_yaml_ng/serde_json
+  with minimal inline structs, mirroring import.rs).
+- Envoy static config import (DW-065): `dwara import envoy` reads an
+  Envoy static config (YAML) and generates a Dwara config YAML. Maps
+  Envoy listeners -> dwara listener, Envoy clusters -> dwara
+  upstream+endpoints, Envoy route_config routes -> dwara route. Reports
+  unsupported constructs (HTTP filters like ext_authz/ratelimit/RBAC,
+  network filters like tcp_proxy, TLS contexts, DNS-based cluster
+  discovery) as warnings. No new dependencies.
 - Native plugin filter trait + unified dispatch chain (DW-119): a
   compile-in `tower::Layer`-style extension trait (`NativeFilter`) for
   filters written in Rust and linked into the binary at build time --
