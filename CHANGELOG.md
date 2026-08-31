@@ -9,6 +9,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- CEL engine (DW-058): the `cel` cargo feature enables a Common
+  Expression Language engine for compiling and evaluating CEL
+  expressions. Expressions are compiled once at config publish time
+  (parse + type-check) and embedded in the snapshot as `CelProgram`
+  instances; the request path only evaluates (tree-walking
+  interpreter, ~100-500 ns/op for simple expressions). The API
+  provides `CelProgram::compile`, `CelProgram::evaluate`,
+  `CelContext` for variable bindings, and value converters. A
+  criterion benchmark (`--bench cel`) measures evaluator throughput
+  for arithmetic, variable comparison, string methods, ternary, and
+  complex multi-operation expressions. Default OFF; build with
+  `cargo build --features cel`.
 - proxy-wasm host (DW-055): the `wasm` cargo feature enables a
   wasmtime-based proxy-wasm ABI host, allowing community Kong/Envoy
   proxy-wasm filters to run unmodified. The host implements the HTTP

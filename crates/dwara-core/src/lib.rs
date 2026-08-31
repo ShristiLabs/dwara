@@ -56,6 +56,10 @@
 //! code (`dwara_core::dataplane::proxy`, `dwara_core::security::tls`).
 
 pub mod analytics;
+// DW-058: CEL engine. Feature-gated behind the `cel` cargo feature
+// (default OFF) because cel-interpreter adds binary size.
+#[cfg(feature = "cel")]
+pub mod cel;
 pub mod config;
 pub mod dataplane;
 pub mod error;

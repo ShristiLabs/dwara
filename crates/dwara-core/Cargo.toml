@@ -88,6 +88,11 @@ hickory-resolver = { workspace = true }
 # pulls it in; enabled via the `wasm` feature. Apache-2.0 WITH
 # LLVM-exception (allow-listed in deny.toml).
 wasmtime = { workspace = true, optional = true }
+# DW-058: CEL (Common Expression Language) engine. cel-interpreter
+# provides parse, type-check, and interpret. Optional so the default
+# build never pulls it in; enabled via the `cel` feature. MIT
+# (allow-listed in deny.toml).
+cel-interpreter = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -106,6 +111,11 @@ ent = ["dep:licensing-core", "dep:redis"]
 # Default OFF: wasmtime + cranelift are significant binary size against
 # the DW-026 25MB budget. Build with `cargo build --features wasm`.
 wasm = ["dep:wasmtime"]
+# DW-058: CEL engine. When enabled, the gateway can compile and
+# evaluate CEL expressions at config publish time (never on the
+# request path). Default OFF: cel-interpreter adds binary size.
+# Build with `cargo build --features cel`.
+cel = ["dep:cel-interpreter"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
@@ -138,3 +148,11 @@ wast = "258"
 [[bench]]
 name = "micro"
 harness = false
+
+# DW-058: CEL engine benchmark. Feature-gated behind `cel` — the bench
+# file uses `#![cfg(feature = "cel")]` so it compiles to an empty binary
+# without the feature.
+[[bench]]
+name = "cel"
+harness = false
+required-features = ["cel"]
