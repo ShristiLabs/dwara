@@ -9,6 +9,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- CP/DP split (DW-066, Enterprise): the `ent` cargo feature enables
+  the control plane / data plane split architecture. The API provides
+  `ControllerState` (the control plane state: tracks edges, config
+  generations, acks, and leader election), `EdgeState` (the data plane
+  state: caches the last received config for CP outage survival,
+  tracks controller connection), `ConfigGeneration` (a versioned
+  config snapshot), `ConfigUpdate` (a config push from controller to
+  edges), `ConfigAck` (an acknowledgment from edges to controller),
+  `EdgeRegistration` (sent when an edge connects), and `elect_leader`
+  (simple leader election for HA controller). Edges reject older
+  generations and targeted updates for other edges. The embedded mode
+  (single-process) stays first-class. Default OFF; build with
+  `cargo build --features ent`.
 - Kubernetes Gateway API translator (DW-064): the `k8s` cargo
   feature enables a translator from Gateway API v1 resources (Gateway,
   HTTPRoute, GatewayClass) into dwara's config model. The API provides

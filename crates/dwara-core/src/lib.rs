@@ -83,6 +83,10 @@ pub mod synthetic;
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]
 pub mod workspace;
+// DW-066: CP/DP split (Enterprise). Feature-gated behind the `ent`
+// cargo feature (default OFF).
+#[cfg(feature = "ent")]
+pub mod cp_dp;
 // DW-064: Kubernetes Gateway API translator. Feature-gated behind
 // the `k8s` cargo feature (default OFF).
 #[cfg(feature = "k8s")]
