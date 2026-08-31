@@ -177,6 +177,13 @@
         "$ref": "#/$defs/OidcProvider"
       }
     },
+    "plugins": {
+      "description": "Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases\nit declares. Routes reference plugins by name via their\n`plugins` field. The `wasm` cargo feature must be enabled for\nplugins to actually load and run; without it, the block is\naccepted but inert (plugins are not instantiated).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PluginConfig"
+      }
+    },
     "policies": {
       "description": "Named reusable rule bundles.",
       "type": "array",
@@ -2326,6 +2333,109 @@
         }
       ]
     },
+    "PluginConfig": {
+      "description": "A proxy-wasm plugin definition (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases it\ndeclares. Routes reference plugins by name.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Plugin-specific configuration, passed to the plugin's\n`proxy_on_configure` as a byte string. Typically a JSON or YAML\nblob the plugin parses itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "description": "Resource limits for this plugin (fuel, memory, time). Absent\nuses the defaults: 1M fuel, 32MB memory, 100ms timeout.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginLimitsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "Unique plugin name. Referenced by routes' `plugins` field.",
+          "type": "string"
+        },
+        "phases": {
+          "description": "Phases this plugin hooks. Must be a non-empty subset of:\n`request_headers`, `request_body`, `response_headers`,\n`response_body`. The host calls the plugin's corresponding\n`proxy_on_*` export at each declared phase.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PluginPhase"
+          }
+        },
+        "wasm": {
+          "description": "Path to the .wasm module file. Must be readable at startup.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "wasm"
+      ]
+    },
+    "PluginLimitsConfig": {
+      "description": "Resource limits for a proxy-wasm plugin (DW-055 decision 4; §9.3).",
+      "type": "object",
+      "properties": {
+        "fuel": {
+          "description": "Maximum fuel (wasmtime operations). Default: 1,000,000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memory_mb": {
+          "description": "Maximum linear memory in MB. Default: 32.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "description": "Maximum execution time in milliseconds. Default: 100.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginPhase": {
+      "description": "The phases a plugin can hook (DW-055, §9.3 phase contract).",
+      "oneOf": [
+        {
+          "description": "After route resolution, before authn.",
+          "type": "string",
+          "const": "request_headers"
+        },
+        {
+          "description": "After authn/authz/rate-limit, before upstream.",
+          "type": "string",
+          "const": "request_body"
+        },
+        {
+          "description": "After the upstream responds, before masking.",
+          "type": "string",
+          "const": "response_headers"
+        },
+        {
+          "description": "After masking, before compression.",
+          "type": "string",
+          "const": "response_body"
+        }
+      ]
+    },
     "Policy": {
       "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
       "type": "object",
@@ -2909,6 +3019,13 @@
               "type": "null"
             }
           ]
+        },
+        "plugins": {
+          "description": "Plugin names to run on this route (DW-055). Each name must\nreference a plugin defined in the top-level `plugins` list.\nPlugins run in declaration order at their declared phases. The\n`wasm` cargo feature must be enabled for plugins to load.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "policies": {
           "description": "Attached policy names. All applicable levels' rules AND together\n(see the rate-limiter module docs); the resolution order is\nconsumer > route > service > listener > global.",

@@ -158,6 +158,19 @@ tracing-opentelemetry = "0.33"
 # the metrics encoder in otlp.rs can call Message::encode_to_vec. MIT OR
 # Apache-2.0.
 prost = "0.14"
+# DW-055: proxy-wasm host runtime. wasmtime is the WebAssembly engine
+# that runs proxy-wasm filters. Apache-2.0 WITH LLVM-exception (allow-
+# listed in deny.toml). Feature-gated behind the `wasm` feature on
+# dwara-core so the default build never pulls it in — wasmtime + its
+# cranelift compiler are significant binary size against the DW-026
+# 25MB budget. Version 47.0.3 is the latest stable patch (published
+# 2026-07-31, well-vetted).
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "parallel-compilation",
+    "cache",
+    "runtime",
+] }
 serial_test = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 prometheus = { version = "0.14", default-features = false }

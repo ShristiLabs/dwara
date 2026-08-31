@@ -77,6 +77,7 @@ fn bench_gateway() -> Gateway {
                 transforms: None,
                 security_headers: None,
                 masking: None,
+                plugins: Vec::new(),
             });
         }
     }
@@ -144,6 +145,7 @@ fn bench_gateway() -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         config_convergence: None,
+        plugins: Vec::new(),
     }
 }
 

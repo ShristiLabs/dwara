@@ -542,6 +542,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             transforms: None,
             security_headers: None,
             masking: None,
+            plugins: Vec::new(),
         }],
         services: vec![],
         upstreams: vec![Upstream {
@@ -606,6 +607,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         config_convergence: None,
+        plugins: Vec::new(),
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");

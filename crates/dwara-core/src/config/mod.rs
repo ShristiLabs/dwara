@@ -330,6 +330,14 @@ pub struct Gateway {
     /// runs alone) and a one-line notice is logged at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_convergence: Option<ConfigConvergenceConfig>,
+    /// Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm
+    /// module loaded at startup and run on the request pipeline phases
+    /// it declares. Routes reference plugins by name via their
+    /// `plugins` field. The `wasm` cargo feature must be enabled for
+    /// plugins to actually load and run; without it, the block is
+    /// accepted but inert (plugins are not instantiated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -1806,6 +1814,12 @@ pub struct Route {
     /// fault injection. See [`FaultInjection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault_injection: Option<FaultInjection>,
+    /// Plugin names to run on this route (DW-055). Each name must
+    /// reference a plugin defined in the top-level `plugins` list.
+    /// Plugins run in declaration order at their declared phases. The
+    /// `wasm` cargo feature must be enabled for plugins to load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<String>,
 }
 
 /// OpenAPI import metadata attached to a route (DW-047). No runtime
@@ -4079,4 +4093,64 @@ pub fn gateway_to_yaml(gateway: &Gateway) -> Result<String, serde_yaml_ng::Error
 /// Build the JSON Schema for the root [`Gateway`] type.
 pub fn json_schema() -> schemars::Schema {
     schemars::schema_for!(Gateway)
+}
+
+// --- DW-055: proxy-wasm plugin config -------------------------------------
+
+/// A proxy-wasm plugin definition (DW-055). Each plugin is a .wasm
+/// module loaded at startup and run on the request pipeline phases it
+/// declares. Routes reference plugins by name.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfig {
+    /// Unique plugin name. Referenced by routes' `plugins` field.
+    pub name: String,
+    /// Path to the .wasm module file. Must be readable at startup.
+    pub wasm: String,
+    /// Phases this plugin hooks. Must be a non-empty subset of:
+    /// `request_headers`, `request_body`, `response_headers`,
+    /// `response_body`. The host calls the plugin's corresponding
+    /// `proxy_on_*` export at each declared phase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PluginPhase>,
+    /// Plugin-specific configuration, passed to the plugin's
+    /// `proxy_on_configure` as a byte string. Typically a JSON or YAML
+    /// blob the plugin parses itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Resource limits for this plugin (fuel, memory, time). Absent
+    /// uses the defaults: 1M fuel, 32MB memory, 100ms timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<PluginLimitsConfig>,
+}
+
+/// The phases a plugin can hook (DW-055, §9.3 phase contract).
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPhase {
+    /// After route resolution, before authn.
+    RequestHeaders,
+    /// After authn/authz/rate-limit, before upstream.
+    RequestBody,
+    /// After the upstream responds, before masking.
+    ResponseHeaders,
+    /// After masking, before compression.
+    ResponseBody,
+}
+
+/// Resource limits for a proxy-wasm plugin (DW-055 decision 4; §9.3).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginLimitsConfig {
+    /// Maximum fuel (wasmtime operations). Default: 1,000,000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel: Option<u64>,
+    /// Maximum linear memory in MB. Default: 32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<usize>,
+    /// Maximum execution time in milliseconds. Default: 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }

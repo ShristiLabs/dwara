@@ -110,6 +110,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             transforms: None,
             security_headers: None,
             masking: None,
+            plugins: Vec::new(),
         }],
         services: vec![Service {
             name: "svc".into(),
@@ -163,6 +164,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         config_convergence: None,
+        plugins: Vec::new(),
     }
 }
 

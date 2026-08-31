@@ -9,6 +9,17 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- proxy-wasm host (DW-055): the `wasm` cargo feature enables a
+  wasmtime-based proxy-wasm ABI host, allowing community Kong/Envoy
+  proxy-wasm filters to run unmodified. The host implements the HTTP
+  filter subset of the proxy-wasm ABI: header inspection/modification,
+  body read/write, response short-circuit, logging, shared data,
+  metrics, and the standard memory allocation pattern. Each plugin
+  gets a fuel budget (default 1M operations), a memory cap (default
+  32MB), and a time cap (default 100ms via epoch interruption).
+  Plugins are configured via the top-level `plugins` list and attached
+  to routes via the `plugins` field. Default OFF (wasmtime + cranelift
+  are significant binary size); build with `cargo build --features wasm`.
 - OTLP metrics export (DW-073): the `otlp` cargo feature now exports
   metrics to `/v1/metrics` on the same `DWARA_OTLP_ENDPOINT` collector,
   additive to the Prometheus `/metrics` default. The periodic exporter

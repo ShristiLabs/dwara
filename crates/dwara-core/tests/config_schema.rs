@@ -221,6 +221,7 @@ fn empty_document_is_valid() {
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
             config_convergence: None,
+            plugins: Vec::new(),
         }
     );
 }

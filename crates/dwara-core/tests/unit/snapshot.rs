@@ -58,6 +58,7 @@ fn good_gateway() -> Gateway {
                 transforms: None,
                 security_headers: None,
                 masking: None,
+                plugins: Vec::new(),
             },
             Route {
                 name: "static".into(),
@@ -96,6 +97,7 @@ fn good_gateway() -> Gateway {
                 transforms: None,
                 security_headers: None,
                 masking: None,
+                plugins: Vec::new(),
             },
             Route {
                 name: "legacy".into(),
@@ -134,6 +136,7 @@ fn good_gateway() -> Gateway {
                 transforms: None,
                 security_headers: None,
                 masking: None,
+                plugins: Vec::new(),
             },
         ],
         services: vec![Service {
@@ -188,6 +191,7 @@ fn good_gateway() -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         config_convergence: None,
+        plugins: Vec::new(),
     }
 }
 

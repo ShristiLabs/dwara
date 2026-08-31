@@ -70,6 +70,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         transforms: None,
         security_headers: None,
         masking: None,
+        plugins: Vec::new(),
     }
 }
 
@@ -140,6 +141,7 @@ fn base_gateway() -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         config_convergence: None,
+        plugins: Vec::new(),
     }
 }
 

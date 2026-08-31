@@ -67,6 +67,11 @@ pub mod security;
 pub mod snapshot;
 pub mod state;
 pub mod supervision;
+// DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
+// feature (default OFF) because wasmtime + cranelift are significant
+// binary size against the DW-026 25MB budget.
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 // Path-compatibility aliases: these re-exports keep the historical
 // top-level module paths (`dwara_core::proxy`, `dwara_core::tls`, ...)
