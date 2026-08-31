@@ -91,6 +91,24 @@ enum Command {
         #[arg(long)]
         pid_file: Option<String>,
     },
+    /// Plugin scaffolding and management (DW-057).
+    Plugin {
+        #[command(subcommand)]
+        kind: PluginKind,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginKind {
+    /// Scaffold a new proxy-wasm plugin project (Rust -> wasm32-wasip1).
+    New {
+        /// The plugin name (used for the crate name and directory).
+        name: String,
+        /// The parent directory; the scaffold is created in `<dir>/<name>/`.
+        /// Defaults to the current directory.
+        #[arg(long, short = 'o', default_value = ".")]
+        dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -300,6 +318,31 @@ fn main() {
             },
         },
         Command::Upgrade { pid, pid_file } => run_upgrade(pid, pid_file),
+        Command::Plugin { kind } => match kind {
+            PluginKind::New { name, dir } => {
+                match dwara_cli::plugin_scaffold::scaffold(&name, &dir) {
+                    Ok(result) => {
+                        println!(
+                            "created plugin '{}' in {} ({} files)",
+                            result.name,
+                            result.dir,
+                            result.files.len()
+                        );
+                        println!();
+                        println!("next steps:");
+                        println!("  cd {}", result.dir);
+                        println!("  rustup target add wasm32-wasip1");
+                        println!("  cargo build --release --target wasm32-wasip1");
+                        println!("  dwara run --config dwara.yaml");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin new: {e}");
+                        1
+                    }
+                }
+            }
+        },
     };
     std::process::exit(code);
 }

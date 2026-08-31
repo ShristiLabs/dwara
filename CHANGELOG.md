@@ -9,6 +9,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Plugin SDK + scaffolding (DW-057): the `dwara plugin new` command
+  generates a new proxy-wasm plugin project from a template (Rust ->
+  wasm32-wasip1). The scaffold includes Cargo.toml (targeting
+  wasm32-wasip1, depending on proxy-wasm), src/lib.rs (a minimal
+  proxy-wasm filter with phase callbacks), dwara.yaml (a minimal
+  gateway config that loads the plugin), README.md (build + run
+  instructions), and .gitignore. The plugin name is validated (must
+  start with a letter or underscore, contain only letters/digits/
+  underscores/hyphens, max 64 chars). Author docs in
+  docs/features/plugin-sdk.md cover the quick start (new plugin from
+  scaffold to running < 30 min), phase contract, plugin config,
+  resource limits, and failure isolation.
 - Plugin lifecycle (DW-056): the `wasm` cargo feature enables plugin
   lifecycle management: loading from config (path + checksums),
   hot-swap on reload (recompiles only changed plugins), config schema

@@ -26,6 +26,8 @@ pub mod import;
 // DW-065: NGINX config import (migration lever).
 pub mod import_nginx;
 pub mod loadgen;
+// DW-057: Plugin scaffolding (`dwara plugin new`).
+pub mod plugin_scaffold;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};
