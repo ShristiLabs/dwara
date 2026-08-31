@@ -53,9 +53,13 @@ jobs:
       # DW-032: the ent feature (off by default) pulls in licensing-core
       # from the private ShristiLabs/licensing repo. cargo metadata (run by
       # cargo fmt) resolves optional deps, so git must authenticate even
-      # though the feature is not enabled in CI.
-      - name: Configure git for private deps
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ShristiLabs/".insteadOf "https://github.com/ShristiLabs/"
+      # though the feature is not enabled in CI. The automatic GITHUB_TOKEN
+      # cannot access other private repos -- use the LICENSING_TOKEN secret
+      # (fine-grained PAT with Contents:read on ShristiLabs/licensing).
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -91,8 +95,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
-      - name: Configure git for private deps
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ShristiLabs/".insteadOf "https://github.com/ShristiLabs/"
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # pinned: v2 @ fcf5432d

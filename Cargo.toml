@@ -163,14 +163,17 @@ clap = { version = "4", features = ["derive"] }
 # regression gate in .github/workflows/bench.yml.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 # DW-032: Enterprise licensing primitives (optional, ent feature only).
-# licensing-core is BSL-1.1 (allow-listed in deny.toml): the Business Source
+# licensing-core is BUSL-1.1 (allow-listed in deny.toml): the Business Source
 # License allows non-production use and converts to Apache-2.0 after a change
 # date. It is a private dependency consumed only when the `ent` cargo feature
 # is enabled on dwara-core; OSS builds (the default) never pull it in. Declared
 # directly in dwara-core's Cargo.toml (workspace deps cannot be optional). The
 # canonical source is the private git repo; a path dependency is used in local
-# development where the repo is checked out alongside dwara.
-licensing-core = { git = "https://github.com/ShristiLabs/licensing.git" }
+# development where the repo is checked out alongside dwara. CI fetches it via
+# the LICENSING_TOKEN secret (fine-grained PAT with Contents:read on
+# ShristiLabs/licensing) -- the automatic GITHUB_TOKEN cannot access other
+# private repos.
+licensing-core = { git = "https://github.com/ShristiLabs/licensing.git", rev = "62ce280" }
 # DW-031: Redis client for the distributed rate limiter (ent feature only).
 # redis is BSD-3-Clause (allow-listed in deny.toml). Optional so OSS builds
 # (the default) never pull it in; enabled via the `ent` feature on dwara-core.
