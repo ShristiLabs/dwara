@@ -37,6 +37,9 @@
 //! | `state` | `config` |
 //! | `security` | `config`, `state`, `observability` |
 //! | `resilience` | `config`, `snapshot`, `extensions`, `observability`, `events` |
+//! | `plugins` | `config` (native filter trait + unified dispatch chain;
+//!   the `wasm` domain bridges its instances in via a generic adapter,
+//!   so `plugins` never imports `wasm` — see DW-119) |
 //! | `dataplane` | all of the above |
 //! | `supervision` | (nothing — pure task plumbing, no domain imports) |
 //!
@@ -66,6 +69,12 @@ pub mod error;
 pub mod events;
 pub mod extensions;
 pub mod observability;
+// DW-119: native plugin filter trait + unified dispatch chain.
+// Feature-gated behind the `plugins` cargo feature (default OFF)
+// because it is the compile-in extension path (compiled-in Rust
+// filters); the proxy-wasm host (DW-055) is the portable ABI path.
+#[cfg(feature = "plugins")]
+pub mod plugins;
 // DW-070: OpenAPI response validation. Feature-gated behind the
 // `openapi_validation` cargo feature (default OFF).
 #[cfg(feature = "openapi_validation")]

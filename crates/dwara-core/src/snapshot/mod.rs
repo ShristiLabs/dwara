@@ -1584,6 +1584,50 @@ fn validate_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// Validate the `gateway.plugins` list (DW-055 / DW-119): each plugin
+/// must set exactly one of `wasm` or `native` (mutually exclusive), and
+/// must declare a non-empty `phases` list. Duplicate plugin names are
+/// flagged. A `native` plugin requires the `plugins` cargo feature at
+/// build time (enforced by the feature gate on the registry; validation
+/// only checks the config shape). A `wasm` plugin's file existence is
+/// checked by the WASM lifecycle manager at load time, not here (the
+/// file may not be present in the validation environment).
+fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let mut seen = std::collections::BTreeSet::new();
+    for p in &gateway.plugins {
+        if !seen.insert(p.name.as_str()) {
+            issues.push(issue("plugin", &p.name, "name", "duplicate plugin name"));
+        }
+        let has_wasm = p.wasm.is_some();
+        let has_native = p.native.is_some();
+        if !has_wasm && !has_native {
+            issues.push(issue(
+                "plugin",
+                &p.name,
+                "wasm",
+                "plugin must set exactly one of `wasm` or `native` (both are absent)",
+            ));
+        }
+        if has_wasm && has_native {
+            issues.push(issue(
+                "plugin",
+                &p.name,
+                "native",
+                "plugin must set exactly one of `wasm` or `native` (both are set)",
+            ));
+        }
+        if p.phases.is_empty() {
+            issues.push(issue(
+                "plugin",
+                &p.name,
+                "phases",
+                "phases must be a non-empty subset of request_headers, \
+                 request_body, response_headers, response_body",
+            ));
+        }
+    }
+}
+
 /// Validate the `gateway.license` block (DW-032): the grace-period days
 /// must be in 0..=30, and the file path must be non-empty. The signature
 /// and expiry checks are NOT validation concerns — they run at startup
@@ -2399,6 +2443,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             .collect(),
     );
 
+    // DW-055/DW-119: plugin definitions -- exactly one of wasm/native,
+    // non-empty phases, duplicate names.
+    validate_plugins(gateway, &mut issues);
+
     // JWT providers (DW-019): url shape, algorithm allowlist, refresh
     // cadence, and consumer references are compile-time checked — a
     // gateway must not boot (or reload) into an unverifiable provider.
@@ -2781,6 +2829,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         .iter()
         .flat_map(|c| c.groups.iter().map(String::as_str))
         .collect();
+    // DW-055/DW-119: plugin names for route reference validation.
+    let plugin_names: std::collections::BTreeSet<&str> =
+        gateway.plugins.iter().map(|p| p.name.as_str()).collect();
 
     for l in &gateway.listeners {
         // Listener policy attachment (#123): same resolution rule as
@@ -3011,6 +3062,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     &r.name,
                     "policies",
                     format!("references unknown policy '{p}'"),
+                ));
+            }
+        }
+        // DW-055/DW-119: route plugin references must name a plugin
+        // defined in the top-level `plugins` list.
+        for p in &r.plugins {
+            if !plugin_names.contains(p.as_str()) {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "plugins",
+                    format!("references unknown plugin '{p}'"),
                 ));
             }
         }

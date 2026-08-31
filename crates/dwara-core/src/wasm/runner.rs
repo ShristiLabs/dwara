@@ -58,12 +58,19 @@ impl PluginRunner {
         let mut modules = HashMap::new();
 
         for plugin in plugins {
-            let wasm_bytes = match std::fs::read(&plugin.wasm) {
+            // DW-119: a plugin is either `wasm:` or `native:`. The
+            // runner only compiles WASM plugins; native filters are
+            // handled by the unified plugin chain (plugins domain).
+            let wasm_path = match &plugin.wasm {
+                Some(p) => p,
+                None => continue,
+            };
+            let wasm_bytes = match std::fs::read(wasm_path) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     tracing::warn!(
                         plugin = %plugin.name,
-                        path = %plugin.wasm,
+                        path = %wasm_path,
                         error = %e,
                         "DW-055: failed to read plugin wasm file; skipping"
                     );

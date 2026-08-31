@@ -117,6 +117,11 @@ crates/dwara-core/src/
   dataplane/          proxy, upstream, balance, hardening, cors,
                       compression, and active.rs (probe loops drive
                       the registry — dataplane lifecycle)
+  plugins/           native filter trait + unified dispatch chain
+                      (DW-119): NativeFilter, NativeRegistry,
+                      PluginChain, WasmDispatch. Feature-gated behind
+                      the `plugins` cargo feature. The wasm domain
+                      bridges its instances in via WasmChainAdapter.
 ```
 
 Dependency direction is strictly downward and **enforced in CI** by
@@ -132,6 +137,11 @@ state           <- config
 analytics       <- config, observability, extensions
 security        <- config, state, observability
 resilience      <- config, snapshot, extensions, observability, events
+plugins         <- config (native filter trait + unified dispatch chain;
+                 the wasm domain bridges its instances in via a generic
+                 adapter, so plugins never imports wasm -- see DW-119)
+wasm            <- config, plugins (proxy-wasm host; the adapter
+                 implements plugins::WasmDispatch)
 dataplane       <- all of the above
 bin/admin/cli   <- dwara-core (presentation layer)
 ```

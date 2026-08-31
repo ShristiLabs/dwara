@@ -121,6 +121,14 @@ ent = ["dep:licensing-core", "dep:redis"]
 # Default OFF: wasmtime + cranelift are significant binary size against
 # the DW-026 25MB budget. Build with `cargo build --features wasm`.
 wasm = ["dep:wasmtime"]
+# DW-119: native plugin filter trait + unified dispatch chain. When
+# enabled, the gateway can run compile-in Rust filters (linked into the
+# binary at build time) alongside proxy-wasm plugins, selected by config
+# with no dataplane-visible difference in attachment semantics. Default
+# OFF: it is the convenience/performance extension path, not the
+# portable ABI. Build with `cargo build --features plugins` (combine
+# with `wasm` for both). The trait + registry are dependency-free.
+plugins = []
 # DW-058: CEL engine. When enabled, the gateway can compile and
 # evaluate CEL expressions at config publish time (never on the
 # request path). Default OFF: cel-interpreter adds binary size.

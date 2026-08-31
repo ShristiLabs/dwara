@@ -204,6 +204,10 @@ export default withMermaid(
                   link: "/guide/proxy-wasm-plugins",
                 },
                 {
+                  text: "Native plugin filters",
+                  link: "/guide/native-plugins",
+                },
+                {
                   text: "Plugin lifecycle",
                   link: "/guide/plugin-lifecycle",
                 },

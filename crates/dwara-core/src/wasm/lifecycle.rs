@@ -81,9 +81,16 @@ impl PluginLifecycle {
         let mut plugins = HashMap::new();
 
         for config in configs {
+            // DW-119: a plugin is either `wasm:` or `native:`. The
+            // lifecycle manager only loads WASM plugins here; native
+            // filters are registered with the NativeRegistry and
+            // dispatched by the unified plugin chain (plugins domain).
+            let wasm_path = match &config.wasm {
+                Some(p) => p.clone(),
+                None => continue,
+            };
             // Read the .wasm file and compute checksum.
-            let wasm_path = &config.wasm;
-            let wasm_bytes = std::fs::read(wasm_path).map_err(|e| LoadError::FileRead {
+            let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| LoadError::FileRead {
                 plugin: config.name.clone(),
                 path: wasm_path.clone(),
                 error: e.to_string(),
@@ -233,10 +240,17 @@ impl PluginLifecycle {
     }
 
     /// Validate a plugin config: check that the .wasm file exists,
-    /// phases are non-empty, and limits are within bounds.
+    /// phases are non-empty, and limits are within bounds. Only
+    /// validates WASM plugins (those with `wasm` set); native filters
+    /// are validated by the snapshot pipeline (exactly-one-of
+    /// wasm/native, phases non-empty) and the registry at startup.
     pub fn validate_config(config: &PluginConfig) -> Result<(), ValidationError> {
-        // Check .wasm path is non-empty.
-        if config.wasm.is_empty() {
+        // Check .wasm path is non-empty (only for WASM plugins).
+        let wasm_path = match &config.wasm {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if wasm_path.is_empty() {
             return Err(ValidationError::EmptyWasmPath {
                 plugin: config.name.clone(),
             });
@@ -275,10 +289,10 @@ impl PluginLifecycle {
         }
 
         // Check .wasm file exists (last -- the other checks are cheaper).
-        if !Path::new(&config.wasm).exists() {
+        if !Path::new(wasm_path).exists() {
             return Err(ValidationError::WasmNotFound {
                 plugin: config.name.clone(),
-                path: config.wasm.clone(),
+                path: wasm_path.clone(),
             });
         }
 
@@ -426,7 +440,8 @@ mod tests {
     fn make_plugin_config(name: &str, wasm: &str) -> PluginConfig {
         PluginConfig {
             name: name.to_string(),
-            wasm: wasm.to_string(),
+            wasm: Some(wasm.to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: None,
@@ -446,7 +461,8 @@ mod tests {
     fn validate_empty_wasm_path() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "".to_string(),
+            wasm: Some("".to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: None,
@@ -459,7 +475,8 @@ mod tests {
     fn validate_wasm_not_found() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "/nonexistent/path.wasm".to_string(),
+            wasm: Some("/nonexistent/path.wasm".to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: None,
@@ -472,7 +489,8 @@ mod tests {
     fn validate_no_phases() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "/tmp/test.wasm".to_string(),
+            wasm: Some("/tmp/test.wasm".to_string()),
+            native: None,
             phases: vec![],
             config: None,
             limits: None,
@@ -485,7 +503,8 @@ mod tests {
     fn validate_zero_fuel() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "/tmp/test.wasm".to_string(),
+            wasm: Some("/tmp/test.wasm".to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: Some(PluginLimitsConfig {
@@ -502,7 +521,8 @@ mod tests {
     fn validate_zero_memory() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "/tmp/test.wasm".to_string(),
+            wasm: Some("/tmp/test.wasm".to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: Some(PluginLimitsConfig {
@@ -519,7 +539,8 @@ mod tests {
     fn validate_zero_timeout() {
         let config = PluginConfig {
             name: "test".to_string(),
-            wasm: "/tmp/test.wasm".to_string(),
+            wasm: Some("/tmp/test.wasm".to_string()),
+            native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
             limits: Some(PluginLimitsConfig {
@@ -723,7 +744,8 @@ mod tests {
             "plugin-a".to_string(),
             PluginConfig {
                 name: "plugin-a".to_string(),
-                wasm: "/tmp/a.wasm".to_string(),
+                wasm: Some("/tmp/a.wasm".to_string()),
+                native: None,
                 phases: vec![PluginPhase::RequestHeaders, PluginPhase::ResponseBody],
                 config: None,
                 limits: None,
@@ -733,7 +755,8 @@ mod tests {
             "plugin-b".to_string(),
             PluginConfig {
                 name: "plugin-b".to_string(),
-                wasm: "/tmp/b.wasm".to_string(),
+                wasm: Some("/tmp/b.wasm".to_string()),
+                native: None,
                 phases: vec![PluginPhase::RequestHeaders, PluginPhase::RequestBody],
                 config: None,
                 limits: None,
@@ -763,7 +786,8 @@ mod tests {
             "plugin-a".to_string(),
             PluginConfig {
                 name: "plugin-a".to_string(),
-                wasm: "/tmp/a.wasm".to_string(),
+                wasm: Some("/tmp/a.wasm".to_string()),
+                native: None,
                 phases: vec![PluginPhase::ResponseHeaders],
                 config: None,
                 limits: None,
