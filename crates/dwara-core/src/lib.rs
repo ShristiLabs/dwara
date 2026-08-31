@@ -80,8 +80,8 @@ pub mod supervision;
 // webhooks.
 pub mod synthetic;
 // DW-067: Workspaces + RBAC + audit (Enterprise). Feature-gated
-// behind the `enterprise` cargo feature (default OFF).
-#[cfg(feature = "enterprise")]
+// behind the `ent` cargo feature (default OFF).
+#[cfg(feature = "ent")]
 pub mod workspace;
 // DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
 // feature (default OFF) because wasmtime + cranelift are significant

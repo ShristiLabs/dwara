@@ -39,6 +39,10 @@ pub mod rate_limiter;
 // builds never pull in the redis dependency.
 #[cfg(feature = "ent")]
 pub mod redis_rate_limiter;
+// DW-068: Redis-backed distributed cache (Enterprise). Feature-gated
+// behind the `ent` cargo feature (default OFF).
+#[cfg(feature = "ent")]
+pub mod redis_cache;
 pub mod secrets;
 
 /// Shared error type for all extension traits.

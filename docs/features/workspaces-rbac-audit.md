@@ -11,7 +11,7 @@ feature, feature-gated behind the `enterprise` cargo feature.
 Build with the `enterprise` feature:
 
 ```sh
-cargo build --features enterprise
+cargo build --features ent
 ```
 
 ## Workspaces

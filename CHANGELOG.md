@@ -9,9 +9,22 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
-- Workspaces + RBAC + audit (DW-067, Enterprise): the `enterprise`
-  cargo feature enables tenant namespaces (workspaces), admin RBAC
-  roles, and immutable audit log shipping. The API provides
+- Distributed cache (DW-068, Enterprise): the `ent` cargo feature
+  enables a Redis-backed `CacheStore` with coordinated invalidation
+  across instances. The API provides `RedisCacheStore` (a
+  `CacheStore` implementation backed by Redis with key prefixing and
+  Pub/Sub invalidation), `CoordinatedCache` (a two-tier cache: local
+  + Redis, with read-through and write-through), and
+  `InvalidationListener` (subscribes to the Redis Pub/Sub invalidation
+  channel for cross-instance purge propagation). When a key is
+  deleted, an invalidation message is published to the
+  `dwara:cache:invalidate` channel so other instances can evict their
+  local copies. Implements the same `CacheStore` trait DW-037's OSS
+  moka implementation defines -- no dataplane fork. Default OFF;
+  build with `cargo build --features ent`.
+- Workspaces + RBAC + audit (DW-067, Enterprise): the `ent` cargo
+  feature enables tenant namespaces (workspaces), admin RBAC roles,
+  and immutable audit log shipping. The API provides
   `WorkspaceManager` (the coordinator holding workspaces, roles,
   principals, and the audit log), `Workspace` (a tenant namespace
   with name/description/active), `Role` (a named set of permissions),
@@ -24,7 +37,7 @@ the project follows semantic versioning once 1.0 is reached.
   audit log is append-only/immutable with monotonically assigned
   sequence numbers. The default workspace ("default") always exists
   and cannot be deleted. Default OFF; build with
-  `cargo build --features enterprise`.
+  `cargo build --features ent`.
 - NGINX config import (DW-065): `dwara import nginx <config>` reads
   an NGINX config file and generates a Dwara config YAML with routes
   derived from the NGINX `location` blocks. This is a switching-cost
