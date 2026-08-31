@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Cluster sync GA (Ent) (DW-074): hardened convergence for the CP/DP
+  split control plane -- conflict resolution, split-brain guards,
+  version skew tolerance (section 5-Platform). Feature-gated behind
+  the `ent` cargo feature (builds on the DW-066 cp_dp module). The
+  API provides `ConflictResolution` (HighestGeneration/MostRecentTimestamp/
+  LeaderWins, default: HighestGeneration), `resolve_conflict` (resolve
+  a conflict between two generations), `SplitBrainDetector` (tracks
+  active controllers and their last-seen times; detects split-brain
+  when more than one controller is active beyond the lease timeout),
+  `VersionSkewPolicy` (Allow/AllowMinorSkew/RequireExact, default:
+  AllowMinorSkew), `SemVer` (parsed semantic version), `check_version_skew`
+  (check if an edge's version is compatible with the controller's),
+  `VersionSkewError` (MajorSkew/MinorSkewTooLarge/ExactMismatch/
+  InvalidVersion), `ConvergenceState` (tracks whether the fleet has
+  converged on a generation: total/acked/pending edges, converged
+  flag, acked_percentage), `ChaosScenario` (Partition/SlowMember/
+  Rollback), and `run_chaos_scenario` (run a chaos scenario against a
+  convergence state and return the final state).
 - Web console v1 (read-only, OSS) (DW-117): the `dwara-console` crate
   provides a static SPA served from the mTLS admin listener at
   `/console/`. The SPA is embedded at compile time via

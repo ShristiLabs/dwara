@@ -43,6 +43,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+// DW-074: Cluster sync GA -- hardened convergence (conflict
+// resolution, split-brain guards, version skew tolerance). Builds on
+// this module's CP/DP split types.
+pub mod cluster_sync;
+
 // ---------------------------------------------------------------------------
 // Protocol types (xDS-inspired)
 // ---------------------------------------------------------------------------
