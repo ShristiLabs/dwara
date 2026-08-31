@@ -1,17 +1,27 @@
 # OAuth2 client-credentials and mTLS consumer mapping
 
-The gateway can authenticate to an upstream with an OAuth2 access token
+The gateway can authenticate to an upstream with an [OAuth2](https://en.wikipedia.org/wiki/OAuth) (an authorization framework) access token
 it obtains itself (the client-credentials grant), and it can map a
-client's mTLS certificate to a consumer at the gateway level without an
+client's [mTLS](https://en.wikipedia.org/wiki/Mutual_authentication) (mutual TLS — both sides present certificates) certificate to a consumer at the gateway level without an
 API key or JWT. Together these cover two service-to-service patterns:
 the gateway as an OAuth2 client to the upstream, and the certificate as
 the credential.
+
+## When to use this
+
+Two patterns are covered here. OAuth2 client-credentials is for when
+an upstream requires a [Bearer token](https://www.rfc-editor.org/rfc/rfc6750) (a token presented in the Authorization header) the gateway must obtain itself
+(service-to-service), and mTLS consumer mapping is for when a client's
+certificate should identify the consumer at the gateway without a
+separate API key or JWT. Use the former when the upstream speaks
+OAuth2; use the latter when your clients already present client
+certificates and you want the cert to be the credential.
 
 ## OAuth2 client-credentials proxying
 
 Add an `oauth2_client_credentials` block to an upstream. The gateway
 obtains an access token from the token endpoint using the
-client-credentials grant (RFC 6749 section 4.4) and forwards it to the
+client-credentials grant ([RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) [section 4.4](https://www.rfc-editor.org/rfc/rfc6749#section-4.4) (a grant where a machine client gets a token using its own credentials, no user)) and forwards it to the
 upstream as `Authorization: Bearer <token>`, replacing any
 client-supplied `Authorization` header:
 
@@ -30,7 +40,7 @@ upstreams:
 ```
 
 The client authenticates to the token endpoint with HTTP Basic auth
-(`client_id:client_secret`, RFC 6749 section 2.3.1). The secret may be
+(`client_id:client_secret`, [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) section 2.3.1). The secret may be
 inline or a `${...}` reference (see [Secrets](./secrets)).
 
 ### Token caching
@@ -48,7 +58,7 @@ fetch-storm.
 
 ### mTLS to the token endpoint
 
-If the token endpoint requires a client certificate (RFC 8705
+If the token endpoint requires a client certificate ([RFC 8705](https://www.rfc-editor.org/rfc/rfc8705) (OAuth 2.0 mTLS)
 `tls_client_auth`), add an `mtls` block:
 
 ```yaml
@@ -76,7 +86,7 @@ token endpoint's body or headers.
 
 A listener with `client_ca_file` verifies client certificates at the
 TLS layer. By default, a verified certificate is matched to a consumer
-through that consumer's `mtls` credential (by subject CN or
+through that consumer's `mtls` credential (by subject CN ([CommonName](https://en.wikipedia.org/wiki/X.509) (the subject name field of a certificate)) or
 fingerprint). The gateway-level `mtls_consumer_mapping` is an
 alternative: a single table that maps certificates to consumers
 independent of the per-consumer credential registry.
@@ -94,10 +104,10 @@ mtls_consumer_mapping:
 Two mapping strategies, checked in order:
 
 1. **Subject CN** (`subject_cn_mapping`): maps the certificate's subject
-   CommonName to a consumer. Binding by subject CN survives certificate
+   [CommonName](https://en.wikipedia.org/wiki/X.509) (the subject name field of a certificate) to a consumer. Binding by subject CN survives certificate
    re-issue under the same CN.
-2. **Fingerprint** (`consumers[].fingerprint`): the SHA-256 of the
-   certificate DER as lowercase colon-separated hex. An exact DER match
+2. **Fingerprint** (`consumers[].fingerprint`): the [SHA-256](https://en.wikipedia.org/wiki/SHA-2) of the
+   certificate [DER](https://en.wikipedia.org/wiki/X.690#DER_encoding) (a binary encoding of an X.509 certificate) as lowercase colon-separated hex. An exact DER match
    — a re-issued certificate needs a new entry.
 
 When the mapping is enabled with entries but a verified certificate
@@ -126,9 +136,9 @@ The gateway adds four headers from the verified client certificate:
 
 | Header | Content |
 |---|---|
-| `X-Client-Cert-Fingerprint` | SHA-256 of the cert DER, colon-separated hex |
-| `X-Client-Cert-Subject-CN` | Subject CommonName |
-| `X-Client-Cert-Issuer-CN` | Issuer CommonName |
+| `X-Client-Cert-Fingerprint` | [SHA-256](https://en.wikipedia.org/wiki/SHA-2) of the cert DER, colon-separated hex |
+| `X-Client-Cert-Subject-CN` | Subject [CommonName](https://en.wikipedia.org/wiki/X.509) (the subject name field of a certificate) |
+| `X-Client-Cert-Issuer-CN` | Issuer [CommonName](https://en.wikipedia.org/wiki/X.509) (the subject name field of a certificate) |
 | `X-Client-Cert-Not-After` | Certificate expiry as an RFC 3339 timestamp |
 
 Absent metadata (e.g. a certificate with no decodable CN) is simply not

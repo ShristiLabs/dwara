@@ -3,9 +3,20 @@
 dwara includes a lightweight web application filter (WAF-lite) that
 inspects incoming requests for common attack signatures: SQL injection,
 XSS, and path traversal. It is a heuristic pattern-matching filter, not
-a full WAF — it catches obvious attack payloads before they reach your
+a full [WAF](https://en.wikipedia.org/wiki/Web_application_firewall) (Web Application Firewall) — it catches obvious attack payloads before they reach your
 upstream, with a bounded inspection cost and a dry-run mode for safe
 rollout.
+
+## When to use this
+
+WAF-lite is a first-line defense that catches obvious attack payloads
+([SQL injection](https://owasp.org/www-community/attacks/SQL_Injection) (an attack that injects SQL via user input),
+[XSS](https://owasp.org/www-community/attacks/xss/) (Cross-Site Scripting — injecting browser-executed script), and
+[path traversal](https://owasp.org/www-community/attacks/Path_Traversal) (escaping a directory with `../` sequences)) before they reach the
+upstream, with a dry-run mode for safe rollout. It is NOT a full WAF —
+pair it with upstream input validation. It is per-route opt-in, so you
+can enable it on the routes that accept untrusted input and leave it
+off elsewhere.
 
 ## Enabling the WAF
 
@@ -23,7 +34,7 @@ routes:
 With just `enabled: true`, all three filter categories run on every
 matching request, inspecting the path, query string, selected headers
 (User-Agent, Referer, Cookie, X-Forwarded-For), and body (when JSON or
-form-urlencoded, up to 128 KiB). A match returns `403 waf_blocked`.
+[form-urlencoded](https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/POST) (application/x-www-form-urlencoded, the default web form format), up to 128 KiB). A match returns `403 waf_blocked`.
 
 ## Filter categories
 
@@ -83,7 +94,7 @@ bounded inspection cost.
 
 ## Custom patterns
 
-Add your own regex patterns alongside the built-in signatures:
+Add your own [regex](https://en.wikipedia.org/wiki/Regular_expression) (a pattern-matching language) patterns alongside the built-in signatures:
 
 ```yaml
     waf:

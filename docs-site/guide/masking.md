@@ -2,9 +2,14 @@
 
 Dwara can redact named fields from a route's responses before anything
 else touches the body: every [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)
-pointer you list is replaced with the fixed string `"***"`, per
+JSON pointer (a string syntax for pointing at a field inside a JSON document)
+you list is replaced with the fixed string `"***"`, per
 consumer group. A field named here never reaches the client, whatever
 the upstream put in it.
+
+## When to use this
+
+Masking is for redacting sensitive fields (emails, card numbers, internal margins) from API responses before they reach the client, per consumer group. It is a compliance and least-privilege tool: one route can serve multiple consumer tiers, each seeing only the fields they should. It is fail-closed — a response the gateway cannot mask is refused, never leaked.
 
 ```yaml
 routes:
@@ -28,7 +33,7 @@ responses untouched.
 
 ## The sentinel
 
-Masked fields become the JSON string `"***"` — fixed, not configurable,
+Masked fields become the JSON string `"***"` — a sentinel (a fixed placeholder value that marks a redacted field), fixed, not configurable,
 identical on every route, so clients and audit tooling can rely on the
 exact shape. If you need a different shape on one route, combine
 masking with a [response body transform](./transforms), which runs

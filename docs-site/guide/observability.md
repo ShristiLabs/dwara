@@ -5,8 +5,8 @@ can correlate any client complaint to exactly one gateway request.
 
 ## Logs
 
-The binary emits structured JSON on stdout, filtered by `DWARA_LOG`
-(`RUST_LOG` syntax, default `dwara=info`). One access-log line per
+The binary emits [structured JSON](https://en.wikipedia.org/wiki/JSON_streaming#Line-delimited_JSON) on stdout (one JSON object per log line, easy to parse by log aggregators), filtered by `DWARA_LOG`
+(`RUST_LOG` syntax — a filter syntax like `dwara=info,debug`, default `dwara=info`). One access-log line per
 completed request carries: timestamp, `request_id`, `method`, `path`,
 `status`, `duration_ms`, `route`, `consumer`, `upstream`, `endpoint`,
 `attempts`, and `rate_limited`/`broken`/`shed` flags. `route` is
@@ -21,7 +21,7 @@ so a broken knob can never silence error visibility.
 **Redaction is exhaustive:** logged paths never include the query
 string, and no credential material (`Authorization`,
 `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-API-Key` values, keys,
-JWKS bodies) is ever logged.
+[JWKS](https://www.rfc-editor.org/rfc/rfc7517) bodies (a JSON document of signing keys)) is ever logged.
 
 ## Request IDs
 
@@ -34,20 +34,20 @@ reports, gateway logs, and (if enabled) traces.
 
 ## Metrics
 
-`/metrics` serves Prometheus text format, reserved on every terminate
+`/metrics` serves [Prometheus](https://en.wikipedia.org/wiki/Prometheus_(software)) text format (a plain-text metrics format Prometheus scrapes — Prometheus is a monitoring system that scrapes metrics endpoints), reserved on every terminate
 and cleartext listener just like `/healthz` (see
 [Operations](./operations#health-endpoints)).
 
 | Metric | Type | Labels |
 | --- | --- | --- |
-| `requests_total` | counter | `route`, `listener`, `status_class` |
-| `request_duration_seconds` | histogram | `route` |
+| `requests_total` | counter (a value that only goes up) | `route`, `listener`, `status_class` |
+| `request_duration_seconds` | histogram (counts observations into buckets for percentiles) | `route` |
 | `upstream_attempts_total` | counter | `upstream`, `endpoint`, `status_class` |
 | `retries_total` | counter | `upstream` |
 | `rate_limited_total` | counter | `route` |
 | `shed_total` | counter | `priority` |
 | `dwara_policy_dry_run_total` | counter | `phase`, `route` |
-| `breaker_state` | gauge (0/1/2 = closed/open/half-open) | `upstream` |
+| `breaker_state` | gauge (0/1/2 = closed/open/half-open; a gauge is a value that can go up or down, like a queue depth) | `upstream` |
 | `endpoint_health` | gauge (1/0 = available/ejected) | `upstream`, `endpoint` |
 | `upstream_fail_open_picks` | gauge | `upstream` |
 | `active_requests` | gauge | — |
@@ -64,7 +64,7 @@ and cleartext listener just like `/healthz` (see
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are
 aggregate/unlabeled even though the engine tracks many per-key cells
-internally. The SLO series (`dwara_slo_*`, DW-052) exist only for
+internally. The SLO series (`dwara_slo_*`) exist only for
 routes carrying an [`slo` block](#slos-and-error-budgets):
 `dwara_slo_burn_rate` is the bad-request fraction over a 5m or 1h
 process-local sliding window divided by the allowed fraction — 1.0
@@ -94,7 +94,7 @@ logs and traces.
 
 ## Distributed tracing (OTLP)
 
-Trace export over OTLP requires a build with the `otlp` cargo feature
+Trace export over [OTLP](https://opentelemetry.io/docs/specs/otlp/) (OpenTelemetry Protocol — the standard for exporting traces) requires a build with the `otlp` cargo feature
 (off by default to keep the release binary small):
 
 ```sh
@@ -109,8 +109,8 @@ unless the binary was built with the feature.
 
 ## SLOs and error budgets
 
-Routes can declare service-level objectives (DW-052); the gateway
-exports them as burn-rate metrics for multiwindow alerting:
+Routes can declare [service-level objectives](https://en.wikipedia.org/wiki/Service-level_objective) (SLOs — a Service Level Objective is a target like 99.9% availability); the gateway
+exports them as [burn-rate](https://en.wikipedia.org/wiki/Service-level_objective) metrics (how fast you are consuming the error budget your SLO allows) for multiwindow alerting:
 
 ```yaml
 routes:

@@ -12,6 +12,14 @@ up, commit to a pipeline, or paste into an issue.
 Inline values keep working, but they are never echoed back: see
 [Reading `GET /config`](#reading-get-config) below.
 
+## When to use this
+
+Secret references keep secret bytes out of the config file entirely,
+so the config is safe to back up, commit to a pipeline, or share in a
+code review without leaking credentials. Use references for any
+production credential; inline values are accepted but never echoed
+back, so a config dump never exposes them either.
+
 ## Referencing a secret
 
 Two reference forms are supported, written as the field's entire
@@ -37,7 +45,7 @@ consumers:
   trailing newline is trimmed (`\n` or `\r\n`), matching how Docker,
   Kubernetes, and systemd write mounted secret files; anything else,
   including interior newlines, is used verbatim. The file must exist,
-  be valid UTF-8, be non-empty, and be no larger than 1 MiB at
+  be valid [UTF-8](https://en.wikipedia.org/wiki/UTF-8), be non-empty, and be no larger than 1 MiB at
   config-load time.
 - **`${ENV_NAME}`** — an environment variable of the gateway process
   (`[A-Za-z_][A-Za-z0-9_]*`, any case). The variable must be set,
@@ -89,7 +97,7 @@ consumers:
         key: ${redacted:sha256:9f86d081}
 ```
 
-The fingerprint (the first 8 hex characters of the key's SHA-256) lets
+The fingerprint (a short, stable summary of a key that identifies it without revealing it — the first 8 hex characters of the key's [SHA-256](https://en.wikipedia.org/wiki/SHA-2) (a cryptographic hash function)) lets
 you tell *which* key a generation carries — the same key always
 produces the same fingerprint, a different key a different one —
 without the key itself ever leaving the gateway.

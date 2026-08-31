@@ -4,10 +4,20 @@ Two operational levers, both configured in YAML and both applied by
 [reloading config](./operations#reload) — no restart,
 no separate API.
 
+## When to use this
+
+Maintenance mode takes a route down gracefully — during a database
+migration or a backend deploy — without removing it from the config, so
+the route's shape and policies stay intact and you bring it back by
+deleting one block and reloading. Dry-run lets you observe what a policy
+would reject (rate limits, size limits, authz, load shedding) before you
+enforce it, so you can size thresholds against real traffic instead of
+guessing. Both are applied by reloading config, with no restart.
+
 ## Taking a route down for maintenance
 
 Add a `maintenance` block to a route and every matched request is
-answered by the gateway itself with `503`, a `Retry-After` header,
+answered by the gateway itself with `503`, a [`Retry-After`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Retry-After) header,
 and the standard JSON error envelope (`code: "maintenance"`):
 
 ```yaml
@@ -29,7 +39,7 @@ Behavior details worth knowing before you rely on it:
   contacted; the route's size limits and authentication are not
   evaluated either — a request in maintenance is told "we're down,"
   not "your headers are too big."
-- **CORS preflights still answer 204** on CORS-configured routes.
+- **CORS preflights** ([a browser's pre-flight OPTIONS check](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS#preflighted_requests)) still answer 204 on CORS-configured routes.
   A preflight is a browser protocol handshake about cross-origin
   policy, not a real request; failing it would show up in browsers
   as an opaque CORS error. The actual request gets the 503 — and it

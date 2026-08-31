@@ -9,6 +9,10 @@ reusable `policies` attachment like retries or rate limiting. For the
 exhaustive field list see the
 [configuration schema](../reference/configuration-schema).
 
+## When to use this
+
+[CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS) (Cross-Origin Resource Sharing — how browsers allow a page on one origin to call an API on another) is for browser-facing APIs: any route called from a web app on a different origin needs a `cors` block or the browser blocks the response. Compression cuts bandwidth on large text and JSON responses. Request limits protect upstreams against oversized payloads. All three are off by default and configured per route.
+
 ## CORS
 
 ```yaml
@@ -32,7 +36,7 @@ routes:
       max_age_secs: 600
 ```
 
-**Preflight requests need `OPTIONS` in `match.methods`.** The method
+**[Preflight](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS#preflighted_requests) requests (a browser's pre-flight OPTIONS check before the real request) need `OPTIONS` in `match.methods`.** The method
 list is part of route matching, which runs before any CORS logic — a
 route whose method list excludes `OPTIONS` never matches a preflight
 and the browser gets a 404.
@@ -52,7 +56,7 @@ With a `cors` block on the matched route:
   `Access-Control-Allow-Origin` (the echoed request origin, or `*`
   under a wildcard policy), `Access-Control-Allow-Credentials: true`
   when configured, `Access-Control-Expose-Headers` when configured,
-  and `Vary: Origin`. Requests whose `Origin` is not allowed get no
+  and [`Vary: Origin`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary) (tells caches to key on the Origin header). Requests whose `Origin` is not allowed get no
   CORS headers — the response passes through unchanged.
 
 Origins match exactly, after normalization: scheme and host are
@@ -63,7 +67,7 @@ compared case-insensitively and a default port (`:443` on https,
 them. Subdomains are NOT
 matched implicitly — list each origin. The single entry `*` allows
 any origin, but validation rejects combining `*` (origins or
-headers) with `allow_credentials: true`, per the Fetch spec.
+headers) with `allow_credentials: true`, per the [Fetch spec](https://fetch.spec.whatwg.org/).
 
 One debugging note: responses the gateway generates itself before the
 route's action runs — a 401 from authentication, a 429 from rate
@@ -75,7 +79,7 @@ log for the real status.
 ## Response compression
 
 Compression is opt-in per route. When enabled, the gateway negotiates
-against the request's `Accept-Encoding` and compresses the response:
+against the request's [`Accept-Encoding`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Encoding) and compresses the response:
 
 ```yaml
     compression:
@@ -86,13 +90,13 @@ against the request's `Accept-Encoding` and compresses the response:
       excluded_content_types: [text/event-stream]
 ```
 
-- `algorithms` is a **preference order**: the first entry the client
+- `algorithms` (compression algorithms) is a **preference order**: the first entry the client
   accepts wins. Clients that accept nothing the route offers (or send
   no `Accept-Encoding` at all) get the body untouched — the gateway
   never errors over compression. Note the config spelling is the
   algorithm name (`brotli`), not the wire token (`br`).
 - `level` is one value across all algorithms and is clamped per
-  algorithm at encode time (gzip 0-9, brotli 0-11, zstd 0-22).
+  algorithm at encode time (gzip 0-9, [brotli](https://en.wikipedia.org/wiki/Brotli) 0-11, [zstd](https://en.wikipedia.org/wiki/Zstandard) 0-22).
   Omitted: per-algorithm defaults tuned for a proxy hot path.
 - `min_size` (default 1024) skips responses whose known size is below
   it — a declared `Content-Length`, or the exact size of bodies the
@@ -103,11 +107,11 @@ against the request's `Accept-Encoding` and compresses the response:
   prefixes (empty = every type); `excluded_content_types` is checked
   after it and wins.
 
-Never compressed: responses that already carry a `Content-Encoding`,
+Never compressed: responses that already carry a [`Content-Encoding`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding),
 body-less statuses (1xx/204/304), zero-length bodies, and `101`
 protocol upgrades (WebSocket tunnels). Compression is streaming-safe:
 the body is compressed and flushed chunk-by-chunk and never buffered
-whole, so Server-Sent Events and slow streams reach the client as
+whole, so [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) and slow streams reach the client as
 they arrive. Every response on a compression route that is not
 already encoded carries `Vary: Accept-Encoding`, compressed or not,
 so shared caches key it correctly.

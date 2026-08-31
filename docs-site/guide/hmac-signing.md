@@ -1,14 +1,24 @@
 # HMAC request signing
 
-HMAC signing is a credential family for machine-to-machine traffic:
+[HMAC](https://en.wikipedia.org/wiki/HMAC) (Hash-based Message Authentication Code — a signature keyed with a shared secret) signing is a credential family for machine-to-machine traffic:
 instead of presenting a static secret (an API key) that a network
 observer could capture and reuse, the client signs every request with
 a shared secret. The gateway verifies that the request — method, path,
 query, and body — was constructed by the holder of the secret at the
-stated time, and rejects anything modified in transit or replayed.
+stated time, and rejects anything modified in transit or [replayed](https://en.wikipedia.org/wiki/Replay_attack) (re-sending a captured valid request).
 Use it when a calling service can keep a secret and generate
 signatures, and you want request integrity rather than just
 identification.
+
+## When to use this
+
+HMAC signing is for machine-to-machine traffic where a static API key
+is too risky (a network observer could capture and reuse it) and you
+want request integrity — the gateway verifies the request was signed
+by the secret holder and rejects anything modified in transit or
+replayed. Use it when a calling service can keep a secret and generate
+signatures; it is not the right choice for browser clients or any
+caller that cannot safely hold a shared secret.
 
 ## Configuring the gateway
 
@@ -29,7 +39,7 @@ The secret accepts the same forms as an API key: inline (accepted but
 redacted in every config echo) or a `${...}` reference to an
 environment variable or secret file — references are recommended, see
 [Secrets](./secrets). The secret can never be stored hashed (the
-gateway needs the raw bytes to recompute the MAC), so it is always
+gateway needs the raw bytes to recompute the MAC (message authentication code)), so it is always
 config-served and held only in gateway memory.
 
 One optional gateway block tunes the verification window:
@@ -53,9 +63,9 @@ whenever `X-Dwara-Signature` is present:
 | Header | Content |
 | --- | --- |
 | `X-Dwara-Key-Id` | the credential's `key_id` (1..=128 bytes, visible ASCII) |
-| `X-Dwara-Timestamp` | Unix time in seconds, taken when signing (digits only) |
-| `X-Dwara-Nonce` | a random value unique per request, 16..=256 bytes, visible ASCII (use at least 128 bits of entropy) |
-| `X-Dwara-Body-Sha256` | lowercase hex SHA-256 of the request body; for an empty body, the SHA-256 of the empty string, `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `X-Dwara-Timestamp` | [Unix time](https://en.wikipedia.org/wiki/Unix_time) (seconds since 1970-01-01) in seconds, taken when signing (digits only) |
+| `X-Dwara-Nonce` | a [nonce](https://en.wikipedia.org/wiki/Cryptographic_nonce) (a one-time random value that prevents replay), 16..=256 bytes, visible ASCII (use at least 128 bits of [entropy](https://en.wikipedia.org/wiki/Entropy_(information_theory)) (randomness, measured in bits)) |
+| `X-Dwara-Body-Sha256` | lowercase hex [SHA-256](https://en.wikipedia.org/wiki/SHA-2) of the request body; for an empty body, the SHA-256 of the empty string, `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | `X-Dwara-Signature` | lowercase hex HMAC-SHA256 of the canonical string below, keyed with the secret |
 
 ## How to sign a request
@@ -77,7 +87,7 @@ whenever `X-Dwara-Signature` is present:
 dwara-hmac-v1
 <key id>
 <METHOD>            uppercase, e.g. GET, POST
-<path>              exactly as sent — percent-encoding preserved, never normalized
+<path>              exactly as sent — [percent-encoding](https://developer.mozilla.org/en-US/docs/Glossary/percent-encoding) preserved, never normalized
 <query>             exactly as sent, without the leading '?'; empty line if none
 <timestamp>
 <nonce>
@@ -174,7 +184,7 @@ body-digest check does not run for them.
 trade-off between clock-drift tolerance and the replay window: a
 timestamp is acceptable for at most one full window, and nonces are
 retained for twice that. Tighten it when your signers' clocks are
-well-synchronized (same NTP fleet) and you want a shorter exposure
+well-synchronized (same [NTP](https://en.wikipedia.org/wiki/Network_Time_Protocol) (Network Time Protocol — clock synchronization) fleet) and you want a shorter exposure
 window; loosen it for signers with unreliable clocks. Values below a
 few seconds will reject requests from any host with modest drift.
 

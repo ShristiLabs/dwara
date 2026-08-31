@@ -1,8 +1,8 @@
 # Dynamic Upstream Discovery (DNS)
 
-DW-042 adds DNS-based dynamic upstream discovery to dwara. When an
+Dwara supports [DNS](https://en.wikipedia.org/wiki/Domain_Name_System)-based dynamic upstream discovery. When an
 upstream configures `dns_discovery`, a background task resolves the
-hostname via DNS, watches the record TTL, and re-resolves when the TTL
+hostname via DNS, watches the record [TTL](https://en.wikipedia.org/wiki/Time_to_live) (how long a DNS record may be cached), and re-resolves when the TTL
 expires (or at `refresh_interval_s`, whichever comes first), updating
 the upstream's endpoint set live -- without a restart.
 
@@ -52,13 +52,13 @@ upstreams:
 
 ### A records
 
-A records are the simplest: the gateway resolves the hostname to one or
+[A records](https://en.wikipedia.org/wiki/List_of_DNS_record_types#A) (a DNS record mapping a name to an IPv4 address) are the simplest: the gateway resolves the hostname to one or
 more IPv4 addresses and pairs each with the configured `port`. Use this
 when all instances share a single port.
 
 ### SRV records
 
-SRV records carry their own port, so the `port` field is ignored. The
+[SRV records](https://en.wikipedia.org/wiki/SRV_record) (a DNS record that also carries a port) carry their own port, so the `port` field is ignored. The
 gateway resolves each SRV target to an IPv4 address via a separate A
 lookup. Use SRV when instances may listen on different ports.
 

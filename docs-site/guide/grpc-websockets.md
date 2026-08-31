@@ -1,21 +1,25 @@
 # gRPC and WebSockets
 
-The gateway proxies gRPC and WebSocket traffic on the same listeners
+The gateway proxies [gRPC](https://en.wikipedia.org/wiki/GRPC) (a high-performance RPC framework over HTTP/2) and [WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) traffic on the same listeners
 as everything else — no special mode, no separate port. This page
 covers what the gateway does for each protocol and the one
 WebSocket-specific setting.
 
+## When to use this
+
+The gateway proxies both protocols on the same listeners with no special config — point a gRPC client or WebSocket app at the gateway as you would any upstream. The WebSocket-specific settings (origin allowlist, frame-rate cap) are for restricting which sites may open connections and protecting a backend from a flooding client.
+
 ## gRPC
 
 A gRPC client (grpcurl, grpc-go, and friends) points at the gateway
-like any upstream: TLS listeners serve gRPC via h2 ALPN, and cleartext
-listeners serve it via h2c prior knowledge. Nothing is configured per
+like any upstream: TLS listeners serve gRPC via [h2 ALPN](https://en.wikipedia.org/wiki/Application-Layer_Protocol_Negotiation) (HTTP/2 negotiated over TLS via ALPN), and cleartext
+listeners serve it via h2c prior knowledge (HTTP/2 over cleartext, where the client assumes h2 without negotiation). Nothing is configured per
 protocol — routes match gRPC paths (`/package.Service/Method`) like
 any path.
 
 Two gRPC specifics are handled for you:
 
-- **Trailers pass through.** gRPC carries its status in HTTP trailers
+- **Trailers pass through.** gRPC carries its status in HTTP [trailers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Trailer) (headers sent after the body, used by gRPC to carry its status)
   (`grpc-status`); the gateway forwards them untouched, so a failed
   RPC surfaces as `DEADLINE_EXCEEDED`/`UNAVAILABLE` in your client,
   not a proxy error.
@@ -32,7 +36,7 @@ model as any https upstream.
 
 ## WebSocket origin allowlists
 
-By default a WebSocket upgrade is transparent: the gateway relays the
+By default a WebSocket [upgrade](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/101) (Switching Protocols — the handshake response that upgrades to WebSocket) is transparent: the gateway relays the
 handshake and splices the connection. To restrict which sites may
 open connections, add a `websocket` block to the route:
 
@@ -57,7 +61,7 @@ block (or leave the list empty) to allow every origin.
 
 ## WebSocket rate policing
 
-To protect a backend from a flooding client, cap the frame rate on
+To protect a backend from a flooding client, cap the frame (a WebSocket message unit) rate on
 the upgraded connection:
 
 ```yaml

@@ -1,4 +1,4 @@
-# Admission queues and backpressure
+# Admission queues and [backpressure](https://en.wikipedia.org/wiki/Backpressure) (the pressure from a slow system back toward the source of work)
 
 When the gateway concurrency cap (`max_concurrent_requests`) is
 saturated, the default behavior is to shed the next request
@@ -7,6 +7,17 @@ throughput is at the cap one moment, then every request over the cap
 is shed the next. An admission queue makes the cap degrade
 gracefully — requests wait for a permit up to a timeout, so latency
 rises before shedding begins.
+
+## When to use this
+
+The admission queue is for traffic that spikes past the concurrency
+cap, where you would rather have a request wait briefly (rising
+latency) than be shed immediately with a 503 — for example, a
+checkout API under a flash sale, where a short queue wait is far
+cheaper than a dropped purchase. It is not a good fit for backends
+that cannot tolerate any added latency (real-time or
+latency-sensitive paths), since queued requests wait up to
+`queue_timeout_ms` before they are admitted.
 
 ## Enabling the queue
 
@@ -28,8 +39,8 @@ for, so validation rejects an enabled queue without a cap.
 
 ## What happens when the cap is full
 
-1. The request tries to acquire a permit immediately (same as
-   DW-016).
+1. The request tries to acquire a permit immediately (same as the
+   base concurrency cap).
 2. If the cap is full and the queue is enabled, the request checks
    the queue depth. If the queue is at capacity, the request is shed
    immediately with 503 (no waiting).
@@ -59,9 +70,9 @@ Set `per_priority: false` for a single shared pool
 
 | Knob | Trade |
 | --- | --- |
-| `max_queue_size` | Larger = more requests absorb into latency before shedding. But each queued request holds a connection, so memory and file-descriptor usage scale with the queue depth. |
+| `max_queue_size` | Larger = more requests absorb into latency before shedding. But each queued request holds a connection, so memory and [file-descriptor](https://en.wikipedia.org/wiki/File_descriptor) (an OS handle for an open connection) usage scale with the queue depth. |
 | `queue_timeout_ms` | Longer = more chance a queued request gets a permit (fewer sheds). But the client is waiting the whole time, so latency rises. Shorter = sheds sooner, lower latency for shed requests. |
-| `per_priority` | `true` (default) protects high-priority traffic from low-priority queue fill. `false` is simpler (FIFO) but high-priority can be starved. |
+| `per_priority` | `true` (default) protects high-priority traffic from low-priority queue fill. `false` is simpler ([FIFO](https://en.wikipedia.org/wiki/FIFO_(computing_and_electronics)) (first-in-first-out)) but high-priority can be starved. |
 
 A common starting point: `max_queue_size` at 2x the cap,
 `queue_timeout_ms` at 50-100ms (short enough that a shed request's
@@ -77,7 +88,7 @@ Watch these on `/metrics` to see the degradation curve:
   timeout), `queue_full` (shed because the queue was at capacity).
 - `dwara_admission_queue_depth` — gauge: current number of requests
   waiting in the queue.
-- `shed_total{priority}` — the existing DW-016 counter; still counts
+- `shed_total{priority}` — the base shed counter; still counts
   every shed, including queue-timeout and queue-full sheds.
 
 Rising `admitted` means the queue is absorbing load. Rising `timeout`

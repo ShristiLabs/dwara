@@ -1,7 +1,7 @@
 # Configuration
 
 Dwara is configured from a single strict YAML file: unknown fields are
-rejected, and every error names the path of the offending node. This
+rejected (`deny_unknown_fields` — serde rejects any field not in the schema), and every error names the path of the offending node. This
 page covers the concepts; the exhaustive field list is the generated
 [configuration schema](../reference/configuration-schema).
 
@@ -11,7 +11,7 @@ Configuration is built from a fixed, frozen set of concepts:
 
 **Listener** → **Route** → **Service** → **Upstream** → **Endpoint**,
 plus **Consumer**, **Credential**, **Policy**, and **Workspace**. A
-published, compiled configuration is a **Snapshot**.
+published, compiled configuration is a **Snapshot** (an immutable, compiled view of the config the gateway serves from).
 
 ## A minimal config
 
@@ -71,7 +71,7 @@ A request path resolves to **at most one** route. Within path matching,
 three kinds are checked in a fixed cross-kind order regardless of
 declaration order or how specific a pattern looks:
 
-1. **Exact** — radix-tree template match; static segments beat path
+1. **Exact** — [radix-tree](https://en.wikipedia.org/wiki/Radix_tree) (a sorted prefix tree) template match; static segments beat path
    parameters (`/users/active` before `/users/{id}`).
 2. **Regex** — first-declared match wins among several matching regex
    routes.
@@ -101,8 +101,8 @@ through to another candidate route — it is answered `404`.
 ## Proxying semantics
 
 Proxying is end-to-end streaming: neither request nor response bodies
-are buffered by the gateway, so Server-Sent Events and large bodies
-pass through with natural backpressure. Hop-by-hop headers are stripped
+are buffered by the gateway, so [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) and large bodies
+pass through with natural [backpressure](https://en.wikipedia.org/wiki/Backpressure). [Hop-by-hop headers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers) (headers meant for a single transport connection, not forwarded) are stripped
 in both directions, and the outbound `Host` header is set to the
 upstream endpoint's authority. Protocol upgrades (e.g. WebSocket) are
 tunneled generically once the upstream answers `101` — both connections
@@ -142,8 +142,8 @@ The per-route `maintenance` block (answer 503 + `Retry-After` without
 touching the upstream), the `transforms` block (header, query, and
 size-capped JSON-body manipulation on the route's traffic), the
 `masking` block (fail-closed redaction of response fields, per
-consumer group), the `security_headers` block (HSTS, nosniff, CSP,
-X-Frame-Options stamped on every route response), and the `dry_run`
+consumer group), the `security_headers` block ([HSTS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security), nosniff, [CSP](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP),
+[X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options) stamped on every route response), and the `dry_run`
 monitor flags — on request limits, on any `authorization` block, on a
 rate-limit policy bundle, and on load shedding — are likewise
 route/gateway-level blocks; see
@@ -157,7 +157,7 @@ route/gateway-level blocks; see
 ## Authentication and authorization
 
 Consumers authenticate via API key, HTTP Basic, JWT Bearer (verified
-against a JWKS endpoint), an mTLS client certificate, or per-request
+against a [JWKS](https://www.rfc-editor.org/rfc/rfc7517) endpoint (a JSON document listing the keys used to sign tokens)), an [mTLS](https://en.wikipedia.org/wiki/Mutual_authentication) client certificate (mutual TLS, where the client also presents a certificate), or per-request
 HMAC signatures (see [HMAC signing](./hmac-signing)); authorization
 is IP-ACL and consumer/route/service/listener/global policy attachment,
 evaluated in that same precedence order. Consumer secrets — API keys

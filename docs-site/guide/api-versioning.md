@@ -2,7 +2,7 @@
 
 Dwara has no version knob: API versions are expressed with routing,
 and the gateway adds two aids on top — a `match.accept` criterion that
-selects a route by media type, and a per-route `deprecation` block
+selects a route by [media type](https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types) (a label like application/json describing the body's format), and a per-route `deprecation` block
 that announces the retirement of an API version with the standard
 response headers. This page shows the four versioning patterns and how
 to deprecate a version clients can read. For the exhaustive field
@@ -87,7 +87,7 @@ routes:
 ```
 
 Omit `value` to match on presence only. Values compare on the raw
-bytes (no percent-decoding).
+bytes (no [percent-decoding](https://developer.mozilla.org/en-US/docs/Glossary/percent-encoding)).
 
 ### Media types (`Accept: application/vnd.acme.v2+json`)
 
@@ -118,7 +118,7 @@ How `accept` matches:
 
 - **Any list entry wins.** `Accept: application/json;q=0.8,
   Application/VND.Acme.V2+JSON` selects the route — matching is
-  case-insensitive, and parameters and q-values on the request side
+  case-insensitive, and parameters and [q-values](https://developer.mozilla.org/en-US/docs/Web/HTTP/Content_negotiation) (a quality preference 0-1 in the Accept header) on the request side
   are ignored (a client naming the type with `q=0` still selects it).
 - **Wildcards and a missing `Accept` header never match.** `Accept:
   */*` is the most common Accept there is; version selection requires
@@ -132,7 +132,7 @@ How `accept` matches:
   (validation rejects them). Case and surrounding whitespace in the
   configured value don't matter — it is normalized when the config
   compiles.
-- **Every response of a matched route carries `Vary: Accept`**, folded
+- **Every response of a matched route carries [`Vary: Accept`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary)**, folded
   into one line with any `Vary: Origin` (CORS) and `Vary:
   Accept-Encoding` (compression) the response already has, so shared
   caches key on the negotiated representation.
@@ -181,8 +181,8 @@ Content-Type: application/json
 ```
 
 `@1704067200` is `Mon, 01 Jan 2024 00:00:00 GMT` as Unix seconds —
-the RFC 9745 structured-date form of the `Deprecation` header.
-`Sunset` is the RFC 8594 header and keeps the configured date
+the [RFC 9745](https://www.rfc-editor.org/rfc/rfc9745) structured-date form of the `Deprecation` header.
+[`Sunset`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Sunset) is the [RFC 8594](https://www.rfc-editor.org/rfc/rfc8594) header and keeps the configured date
 verbatim.
 
 Three rules govern the headers' relationship to what the upstream
@@ -204,9 +204,7 @@ removing them is a config publish (see below).
 ### Date validation and reload behavior
 
 Dates must be written in the one HTTP-date form HTTP generators are
-required to send — **IMF-fixdate**: `Sun, 06 Nov 1994 08:49:37 GMT`
-(weekday and GMT are mandatory; a weekday that disagrees with the date
-is rejected as a typo). Validation also rejects:
+required to send — **[IMF-fixdate](https://www.rfc-editor.org/rfc/rfc9110#section-5.6.7)** (the fixed-format HTTP date, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`; weekday and GMT are mandatory; a weekday that disagrees with the date is rejected as a typo). Validation also rejects:
 
 - a `sunset` in the past — remove the route or extend the date, don't
   advertise a removal that already happened;

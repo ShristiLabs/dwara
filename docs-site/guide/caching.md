@@ -5,6 +5,10 @@ identical requests, cutting upstream load and tail latency. Caching is
 off by default: a route opts in with a `cache` block, and only requests
 Dwara can key safely are ever cached.
 
+## When to use this
+
+Caching is for read-heavy GET endpoints where identical requests can be replayed (catalog lookups, config endpoints, public APIs) to cut upstream load and tail latency. Only safe, uncredentialed GETs are ever cached — anything with a body, an Authorization header, or a cookie always goes upstream.
+
 ```yaml
 routes:
   - name: catalog
@@ -28,8 +32,8 @@ request is a plain `GET` — no body, no `Authorization` header, no
 fetches, WebSockets handshakes) always goes upstream.
 
 A response is stored only when it is safe to replay: status 200, no
-`Set-Cookie`, no `Cache-Control: no-store` / `private` / `no-cache`,
-not content-encoded, and its `Vary` only names dimensions the route
+`Set-Cookie`, no [Cache-Control](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control): no-store / `private` / `no-cache`,
+not content-encoded, and its [`Vary`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary) (tells caches which request headers affect the response) only names dimensions the route
 keys on. Responses larger than `max_body_bytes` stream through unstored.
 
 Every cached entry is keyed by route, consumer, path, query, and the
@@ -47,23 +51,23 @@ answer before the cache and carry no stamp):
 | `hit` | served from a fresh cached entry |
 | `stale` | the entry expired but served inside the stale window while a background refresh runs |
 | `miss` | fetched from the upstream |
-| `revalidated` | the upstream confirmed the cached body unchanged (ETag / 304) |
+| `revalidated` | the upstream confirmed the cached body unchanged ([ETag](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag) (a response's version fingerprint) / [304](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/304)) |
 | `bypass` | this request shape is never cached |
 
 Freshness is `ttl_secs`, always — the origin's own `max-age` does not
 extend it (only the storage vetoes above are honored). Inside
-`stale_while_revalidate_secs` after expiry, clients keep getting
+`stale_while_revalidate_secs` (serve a cached entry past its freshness while refreshing it in the background) after expiry, clients keep getting
 instant answers while one background request refreshes the entry. Past
 the window the next request revalidates conditionally: if the upstream
-answers `304 Not Modified`, the stored body re-serves without
-re-sending it. A client that sends a matching `If-None-Match` on a
+answers [304 Not Modified](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/304), the stored body re-serves without
+re-sending it. A client that sends a matching [`If-None-Match`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-None-Match) on a
 fresh entry gets an immediate `304`.
 
 ## Request coalescing
 
 When N identical cacheable GETs miss at the same moment (a cache-cold
 route, a burst after a deploy), only the FIRST should pay for the
-upstream call. Adding a `coalescing` block to the route's `cache`
+upstream call. Adding a `coalescing` block (collapsing identical concurrent cache misses into one upstream call) to the route's `cache`
 enables exactly that: the first miss (the leader) fetches upstream
 while the rest (followers) wait — bounded by `wait_ms` (default 5 s)
 — and then receive the leader's stored answer (`x-cache: hit`), like

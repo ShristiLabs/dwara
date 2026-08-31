@@ -81,7 +81,7 @@ be noise).
 dwara-cli schema
 ```
 
-Prints the JSON Schema of the gateway config to stdout (deterministic
+Prints the [JSON Schema](https://json-schema.org/) (a standard for describing a JSON document's shape) of the gateway config to stdout (deterministic
 for a given build). This is what generates the committed
 `config-reference.json` — see
 [Generating the config schema reference](./deployment#generating-the-config-schema-reference).
@@ -94,7 +94,7 @@ dwara-cli upgrade --pid 12345
 dwara-cli upgrade --pid-file /run/dwara.pid
 ```
 
-Sends `SIGUSR2` to a running gateway to trigger a zero-downtime binary
+Sends `SIGUSR2` (a Unix signal that triggers a zero-downtime upgrade) to a running gateway to trigger a zero-downtime binary
 upgrade. The PID is read from `--pid`, else the PID file (`--pid-file`
 or the `DWARA_PID_FILE` env var). The gateway must have been started
 with `DWARA_PID_FILE` set (or the PID supplied explicitly). See

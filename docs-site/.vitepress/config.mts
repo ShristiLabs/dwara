@@ -81,13 +81,38 @@ export default withMermaid(
         sidebar: {
           "/guide/": [
             {
-              text: "Guide",
+              text: "Getting started",
+              link: "/guide/getting-started",
               items: [
                 { text: "Getting started", link: "/guide/getting-started" },
                 { text: "Installation", link: "/guide/installation" },
                 { text: "Configuration", link: "/guide/configuration" },
+              ],
+            },
+            {
+              text: "Deployment and operations",
+              link: "/guide/deployment-operations",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/deployment-operations" },
+                { text: "Deployment", link: "/guide/deployment" },
+                { text: "Operations", link: "/guide/operations" },
                 {
-                  text: "CORS, compression, limits",
+                  text: "Zero-downtime upgrade",
+                  link: "/guide/zero-downtime-upgrade",
+                },
+                { text: "CLI", link: "/guide/cli" },
+                { text: "Admin API", link: "/guide/admin-api" },
+              ],
+            },
+            {
+              text: "Routing and request handling",
+              link: "/guide/routing",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/routing" },
+                {
+                  text: "CORS, compression, and request limits",
                   link: "/guide/edge-policies",
                 },
                 {
@@ -98,81 +123,87 @@ export default withMermaid(
                   text: "Response field masking",
                   link: "/guide/masking",
                 },
+                { text: "Response caching", link: "/guide/caching" },
+                { text: "API versioning", link: "/guide/api-versioning" },
                 {
-                  text: "Response caching",
-                  link: "/guide/caching",
-                },
-                {
-                  text: "API versioning",
-                  link: "/guide/api-versioning",
-                },
-                {
-                  text: "Maintenance and dry-run",
-                  link: "/guide/maintenance",
-                },
-                {
-                  text: "Admission queues",
-                  link: "/guide/admission-queue",
-                },
-                {
-                  text: "WAF-lite filtering",
-                  link: "/guide/waf-lite",
-                },
-                {
-                  text: "Traffic splitting",
+                  text: "Traffic splitting and sticky sessions",
                   link: "/guide/traffic-splitting",
                 },
+                { text: "gRPC and WebSockets", link: "/guide/grpc-websockets" },
                 {
-                  text: "gRPC and WebSockets",
-                  link: "/guide/grpc-websockets",
+                  text: "Dynamic upstream discovery",
+                  link: "/guide/dynamic-discovery",
                 },
                 {
-                  text: "Alert webhooks",
-                  link: "/guide/webhooks",
+                  text: "OpenAPI import and mock mode",
+                  link: "/guide/openapi-import",
                 },
+              ],
+            },
+            {
+              text: "Traffic policy and resilience",
+              link: "/guide/traffic-policy",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/traffic-policy" },
+                {
+                  text: "Maintenance mode and dry-run",
+                  link: "/guide/maintenance",
+                },
+                { text: "Admission queues", link: "/guide/admission-queue" },
+                { text: "WAF-lite filtering", link: "/guide/waf-lite" },
+              ],
+            },
+            {
+              text: "Security and authentication",
+              link: "/guide/security",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/security" },
+                { text: "Secrets", link: "/guide/secrets" },
+                {
+                  text: "HMAC request signing",
+                  link: "/guide/hmac-signing",
+                },
+                { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
+                { text: "OpenID Connect", link: "/guide/oidc" },
+              ],
+            },
+            {
+              text: "Observability and analytics",
+              link: "/guide/observability-analytics",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/observability-analytics" },
+                { text: "Observability", link: "/guide/observability" },
                 { text: "Analytics", link: "/guide/analytics" },
                 {
                   text: "Analytics stream",
                   link: "/guide/analytics-stream",
                 },
-                { text: "Secrets", link: "/guide/secrets" },
                 {
-                  text: "HMAC signing",
-                  link: "/guide/hmac-signing",
+                  text: "Alert and event webhooks",
+                  link: "/guide/webhooks",
                 },
-                { text: "Deployment", link: "/guide/deployment" },
-                { text: "Operations", link: "/guide/operations" },
-                { text: "Observability", link: "/guide/observability" },
-                { text: "Admin API", link: "/guide/admin-api" },
-                { text: "CLI", link: "/guide/cli" },
-                {
-                  text: "Zero-downtime upgrade",
-                  link: "/guide/zero-downtime-upgrade",
-                },
-                { text: "OpenAPI import and mock mode", link: "/guide/openapi-import" },
-                {
-                  text: "OAuth2 and mTLS",
-                  link: "/guide/oauth2-mtls",
-                },
-                {
-                  text: "OpenID Connect",
-                  link: "/guide/oidc",
-                },
+              ],
+            },
+            {
+              text: "Enterprise features",
+              link: "/guide/enterprise",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/enterprise" },
                 {
                   text: "Enterprise licensing",
                   link: "/guide/licensing",
                 },
                 {
-                  text: "Redis rate limiter",
+                  text: "Distributed Redis rate limiter",
                   link: "/guide/redis-rate-limiter",
                 },
                 {
                   text: "Config convergence",
                   link: "/guide/config-convergence",
-                },
-                {
-                  text: "Dynamic upstream discovery",
-                  link: "/guide/dynamic-discovery",
                 },
               ],
             },

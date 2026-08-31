@@ -1,8 +1,15 @@
 # Enterprise licensing
 
-Dwara is open-core: the default build is the OSS edition (Apache-2.0),
+Dwara is [open-core](https://en.wikipedia.org/wiki/Open-core_model) (a model where the core is open source and some features are proprietary): the default build is the OSS edition ([Apache-2.0](https://en.wikipedia.org/wiki/Apache_License), a permissive open-source license),
 and enterprise features are gated behind a license. This page covers
 how to configure and operate the license gate.
+
+## When to use this
+
+The license gate is only relevant if you build with the `ent` cargo
+feature (a compile-time switch that includes or excludes code) and use
+enterprise features (distributed rate limiting, config convergence).
+OSS builds ignore it entirely.
 
 ## OSS vs enterprise
 
@@ -27,9 +34,9 @@ gateway:
     grace_period_days: 7  # optional, default 7, range 0..=30
 ```
 
-- `file` — path to the license file (JSON: claims + Ed25519 signature).
+- `file` — path to the license file (JSON: claims + [Ed25519](https://en.wikipedia.org/wiki/EdDSA#Ed25519) signature (a fast, secure digital-signature algorithm)).
 - `grace_period_days` — days after expiry before the gate degrades to
-  OSS. Default 7. During the grace window enterprise features still
+  OSS. Default 7. During the grace window (a buffer after expiry during which enterprise features still work) enterprise features still
   work and a warning is logged. 0 means no grace (immediate
   degradation on expiry).
 
@@ -92,5 +99,5 @@ cargo build --release
 cargo build --release --features ent
 ```
 
-The `ent` feature pulls in `licensing-core` (BSL-1.1). OSS builds never
+The `ent` feature pulls in `licensing-core` ([BSL-1.1](https://en.wikipedia.org/wiki/Business_Source_License), Business Source License — a source-available license that converts to open source after a delay). OSS builds never
 link it.

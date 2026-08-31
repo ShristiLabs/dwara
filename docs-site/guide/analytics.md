@@ -2,9 +2,17 @@
 
 Observability answers *"is it healthy right now"* (see
 [Operations](./operations)); analytics answers *"what happened over
-time, to whom, and why"*. The embedded analytics store (DW-043) gives
+time, to whom, and why"*. The embedded analytics store gives
 a single-instance gateway a durable, queryable traffic history with
 zero external dependencies and bounded disk usage.
+
+## When to use this
+
+The embedded analytics store gives a single-instance gateway a durable,
+queryable traffic history with zero external dependencies — useful for
+usage reporting, billing, and post-incident review. For multi-instance
+fleets or warehouses that want the raw firehose, use the
+[analytics stream](./analytics-stream) instead.
 
 ## Enabling
 
@@ -26,7 +34,7 @@ analytics:
       header: x-plan
 ```
 
-The database is a separate SQLite file from the state store
+The database is a separate [SQLite](https://en.wikipedia.org/wiki/SQLite) file (an embedded SQL database stored as a single file) from the state store
 (`DWARA_STATE_DB`) on purpose: retention deletes and vacuum churn
 never touch the identity store. Without the block, the gateway runs
 exactly as before — the admin analytics endpoints answer 404, and
@@ -48,12 +56,12 @@ Dimensions never appear in the access log.
 ## The rollup model
 
 Raw records live briefly (default 24 h) and feed a fixed cascade of
-pre-aggregated rollups — 1 minute, 5 minutes, 1 hour, 1 day — each
+pre-aggregated rollups (pre-aggregated summaries at fixed time granularities) — 1 minute, 5 minutes, 1 hour, 1 day — each
 holding request/error/rate-limit/shed counts, duration sum/max, and a
-13-bucket latency histogram per dimension tuple. Because every stored
+13-bucket latency histogram (counts observations into buckets for percentile estimation) per dimension tuple. Because every stored
 number is additive, any time range at any granularity merges exactly,
-and percentiles are estimated from the merged histogram. Retention is
-enforced per granularity with incremental vacuum, so disk usage is
+and [percentiles](https://en.wikipedia.org/wiki/Percentile) (e.g. p95 = the latency 95% of requests are under) are estimated from the merged histogram. Retention is
+enforced per granularity with incremental vacuum (SQLite's space-reclaim operation), so disk usage is
 bounded by configuration, not by traffic.
 
 ## Querying
@@ -84,7 +92,7 @@ GET /analytics/top?kind=slowest&from_ms=...&to_ms=...&n=10
 `rate_limited`.
 
 **Structured query** — a closed JSON grammar translated to
-parameterized SQL (SQL text is never accepted):
+[parameterized SQL](https://en.wikipedia.org/wiki/Prepared_statement) (SQL with placeholders, never string-interpolated — injection-safe) (SQL text is never accepted):
 
 ```json
 POST /analytics/query
@@ -128,7 +136,7 @@ re-run. A background worker checks every 30 seconds and exports each
 closed window about 5 minutes after it closes (so rollups settle);
 after a restart it backfills missed windows oldest-first. Reloads
 apply live. Validation rejects an empty directory and duplicated
-formats — an omitted or empty format list simply means both; Parquet
+formats — an omitted or empty format list simply means both; [Parquet](https://en.wikipedia.org/wiki/Apache_Parquet) (a columnar storage format for analytics)
 is not offered yet.
 
 The statement's numbers are the query API's numbers: the export runs

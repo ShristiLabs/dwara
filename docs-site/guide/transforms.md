@@ -5,6 +5,10 @@ a route, and stamp standard security headers on every response it
 emits — configured as two optional blocks on the route. Both are
 off by default: a route without them forwards traffic untouched.
 
+## When to use this
+
+Transforms shape what the upstream sees (injecting headers, dropping consumer identity) and what the client sees (rewriting response JSON, stamping security headers). Use them when an upstream needs a header the client does not send, when consumer identity must be stripped before the upstream, or when every response from a route should carry standard security hardening. Both transform blocks are off by default.
+
 ```yaml
 routes:
   - name: api
@@ -68,14 +72,14 @@ in one fixed order regardless of how you order them in YAML:
 On the request side the operations run after Dwara adds its own
 `X-Forwarded-*` and consumer-identity headers, so you can `remove` or
 `rename` those — useful when an upstream must not see consumer
-identity. Some names are never yours to set: framing and hop-by-hop
-headers (`content-length`, `transfer-encoding`, `connection`,
+identity. Some names are never yours to set: framing headers (headers that describe the body's boundaries, like Content-Length) and [hop-by-hop headers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers#hop-by-hop_headers) (headers meant for one connection, not forwarded)
+(`content-length`, `transfer-encoding`, `connection`,
 `keep-alive`, `te`, `trailer`, `upgrade`, `proxy-connection`,
 `proxy-authenticate`, `proxy-authorization`) are rejected by
 validation in both directions, plus `host` on requests (Dwara names
 the origin it dials) and `content-encoding` on responses (the
 [compression pipeline](./edge-policies) owns it). This is a
-request-smuggling guard, not a convenience: a config that forced a
+[request-smuggling](https://owasp.org/www-community/attacks/HTTP_Request_Smuggling) (an attack that desyncs how two proxies parse a request) guard, not a convenience: a config that forced a
 framing header disagreeing with the actual body would corrupt the hop.
 
 Response header operations apply to upstream answers (and `respond` /
@@ -95,7 +99,7 @@ changed by the route's `rewrite`, not here.
 ## JSON body transforms
 
 `request.body.json` and `response.body.json` apply a list of
-[RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) pointer operations,
+[RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON pointer (a string syntax for pointing at a field inside a JSON document) operations,
 in order, to JSON bodies:
 
 - `op: set` writes any JSON value at `path` (an empty path `""`
@@ -142,19 +146,19 @@ source of truth. (The two responses emitted before a route is matched
 
 | Field | Header emitted |
 | --- | --- |
-| `hsts_max_age_secs: <n>` | `Strict-Transport-Security: max-age=<n>` (RFC 6797) |
+| `hsts_max_age_secs: <n>` | [Strict-Transport-Security](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security): max-age=`<n>` (RFC 6797) |
 | `hsts_include_subdomains: true` | appends `; includeSubDomains` to HSTS |
 | `hsts_preload: true` | appends `; preload` to HSTS |
-| `nosniff: true` | `X-Content-Type-Options: nosniff` |
-| `content_security_policy: <policy>` | `Content-Security-Policy: <policy>` verbatim |
-| `frame_options: deny \| sameorigin` | `X-Frame-Options: DENY` / `SAMEORIGIN` |
+| `nosniff: true` | [X-Content-Type-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options): nosniff |
+| `content_security_policy: <policy>` | [Content-Security-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP): `<policy>` verbatim |
+| `frame_options: deny \| sameorigin` | [X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options): DENY / `SAMEORIGIN` |
 
 Validation rules: the block must enable at least one header (omit the
 block to disable injection); `hsts_max_age_secs` must be non-zero
 (`max-age=0` is the spec's "delete this policy" signal — delete the
 field instead); `hsts_include_subdomains` and `hsts_preload` require
 `hsts_max_age_secs`; `hsts_preload` additionally requires
-`hsts_include_subdomains` (the HSTS preload list rejects entries
+`hsts_include_subdomains` (the [HSTS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security) preload list rejects entries
 without it); `content_security_policy` must be non-empty.
 
 ## Where transforms run

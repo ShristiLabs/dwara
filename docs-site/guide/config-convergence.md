@@ -1,19 +1,26 @@
 # Config convergence
 
 By default each gateway instance serves only its local config
-generation: the file watcher (DW-006) reloads on a local file change,
+generation: the file watcher reloads on a local file change,
 and the new generation is published to the in-process snapshot. Two or
 more instances behind a load balancer do not share config state -- a
 reload on one is invisible to the others until each independently
 reloads.
 
-Config convergence (DW-054, enterprise feature) shares config
-generation state across instances via a backend (Redis in v1; etcd and
-Consul are deferred behind the `ConfigConvergenceBackend` trait). Each
+Config convergence (an enterprise feature) shares config
+generation state across instances via a backend ([Redis](https://en.wikipedia.org/wiki/Redis_(software)) (an in-memory data store) in v1; [etcd](https://en.wikipedia.org/wiki/Etcd) (a distributed key-value store) and
+[Consul](https://en.wikipedia.org/wiki/Consul_(software)) (a service-mesh and key-value store) are deferred behind the `ConfigConvergenceBackend` trait). Each
 instance publishes its current generation to the backend and polls for
-generations published by other instances, converging to the highest
-generation within the configured poll interval. A drift report is
+generations published by other instances, converging (all instances reaching the same config generation) to the highest
+generation within the configured poll interval. A drift (instances serving different configs) report is
 emitted when instances diverge.
+
+## When to use this
+
+Config convergence is for a fleet of two or more gateway instances that
+must share config state, so a reload on one converges to all within the
+poll interval — instead of each instance reloading independently. For a
+single instance, the local file watcher is sufficient.
 
 ## Requirements
 
@@ -66,7 +73,7 @@ flow for a config change is:
    instance's record (instance id, generation, config hash, timestamp)
    and stores the config body (normalized YAML) for that generation.
 3. **Poll.** Every `poll_interval_ms`, the coordinator re-publishes its
-   current generation (refreshing the record's TTL) and reads every
+   current generation (refreshing the record's [TTL](https://en.wikipedia.org/wiki/Time_to_live) (how long a record lives before expiring)) and reads every
    other instance's record. If another instance published a higher
    generation with a different config hash, the coordinator loads that
    generation's config body from the backend.
@@ -83,7 +90,7 @@ flow for a config change is:
 
 The done-when target is sub-second convergence: with
 `poll_interval_ms = 100`, an instance detects and converges to a remote
-change within 100 ms plus one Redis round-trip.
+change within 100 ms plus one Redis round-trip (one request and its response).
 
 ## Fail-open behavior
 

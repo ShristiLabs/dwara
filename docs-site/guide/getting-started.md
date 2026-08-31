@@ -1,6 +1,6 @@
 # Getting started
 
-Dwara is a reverse-proxy API gateway configured from a single YAML file.
+Dwara is a [reverse-proxy](https://en.wikipedia.org/wiki/Reverse_proxy) [API gateway](https://en.wikipedia.org/wiki/API_gateway) configured from a single YAML file.
 This page gets a gateway running locally in under a minute; see
 [Installation](./installation) for binaries/Docker/build-from-source, and
 [Deployment](./deployment) for a full TLS demo.
@@ -53,7 +53,7 @@ routes:
 curl http://127.0.0.1:8080/v1/
 ```
 
-The request is streamed to the backend unbuffered, and the response
+The request is streamed (the gateway forwards bytes as they arrive rather than holding the whole body in memory) to the backend unbuffered, and the response
 streams back the same way — Dwara does not buffer request or response
 bodies by default. A path with no matching route returns `404`; a dead
 backend returns `502` (or `504` on connect timeout). Stop the gateway
@@ -67,7 +67,7 @@ with `Ctrl-C` — it drains in-flight requests before exiting (see
   at once (not just the first).
 - It bound the `http` listener and started routing traffic per the
   `routes` list.
-- The proxy is streaming: nothing about the request or response is
+- The proxy is streaming (the gateway forwards bytes as they arrive rather than holding the whole body in memory): nothing about the request or response is
   buffered in memory beyond what the OS socket buffers require.
 
 ## Next steps

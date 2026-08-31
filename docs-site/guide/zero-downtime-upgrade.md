@@ -1,15 +1,28 @@
 # Zero-downtime binary upgrade
 
 Dwara supports swapping the gateway binary under load with zero failed
-requests and zero reset connections. The mechanism is a SO_REUSEPORT
-hand-off triggered by `SIGUSR2`: the old process spawns a new copy of
+requests and zero reset connections. The mechanism is a [SO_REUSEPORT](https://en.wikipedia.org/wiki/Berkeley_sockets#Socket_options) (a socket option that lets two processes bind the same port simultaneously)
+hand-off triggered by `SIGUSR2` (a Unix signal used here to trigger the upgrade): the old process spawns a new copy of
 itself, both bind the same ports, the new process starts accepting, and
 the old process drains and exits.
+
+## When to use this
+
+Use this when you need to swap the gateway binary under live traffic
+without a single failed request — for example during security patching
+or version upgrades on a production gateway where even a brief blip is
+unacceptable. The alternative is a normal `SIGTERM` restart with a load
+balancer in front doing health-check-based drain: the balancer stops
+sending traffic to the old instance once `/readyz` goes 503, then you
+restart. That is simpler and good enough when a few seconds of
+downtime-per-instance is tolerable; the zero-downtime upgrade is for
+single-instance deployments or cases where no fronting balancer can
+absorb the hand-off.
 
 ## How it works
 
 1. Every listening socket is bound with `SO_REUSEPORT` (in addition to
-   `SO_REUSEADDR`). This allows a second process to bind the same port
+   `SO_REUSEADDR` (allows rebinding a port in TIME_WAIT)). This allows a second process to bind the same port
    while the first is still listening. On Linux the kernel
    load-balances accepts across both sockets; on macOS both sockets may
    accept (the hand-off still works).
@@ -19,7 +32,7 @@ the old process drains and exits.
    same listeners.
 3. The new process binds its listeners (SO_REUSEPORT lets it bind
    alongside the old), spawns its accept tasks, then signals `READY` to
-   the old process over a Unix domain socket.
+   the old process over a [Unix domain socket](https://en.wikipedia.org/wiki/Unix_domain_socket).
 4. The old process receives `READY` and runs the same drain sequence as
    `SIGTERM`: stop accepting, flush kernel backlogs, drain HTTP
    connections within the shutdown budget, exit 0. Because the new

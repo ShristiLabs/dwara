@@ -4,12 +4,20 @@ The [embedded analytics store](./analytics) keeps traffic history on
 the gateway itself. The analytics stream is the opt-in way OUT: every
 completed request's record — one per request, not rollups — is
 streamed to an external HTTP collector in your own infrastructure,
-for warehouses and SIEMs that want the raw firehose. The two are
+for warehouses and [SIEMs](https://en.wikipedia.org/wiki/Security_information_and_event_management) (Security Information and Event Management — a log-analysis system) that want the raw firehose. The two are
 independent: run either, both, or neither.
 
-The stream is fire-and-forget end to end. A slow or dead collector
+The stream is fire-and-forget (the gateway sends and moves on — it never waits on the collector) end to end. A slow or dead collector
 can never slow the gateway: records queue in a bounded buffer, and a
 full buffer drops and counts rather than blocking a request.
+
+## When to use this
+
+The stream is the opt-in way to send every completed request's record
+to an external HTTP collector (a warehouse, SIEM, or custom ingest) —
+for when the embedded store is not enough or you run multiple instances.
+It never blocks the gateway: a slow collector drops records, never
+slows a request.
 
 ## Enabling
 
@@ -32,7 +40,7 @@ analytics_stream:
 ```
 
 `type: webhook` is the one sink today. The sink set is closed so a
-future sink (a Kafka producer is the planned second slot) is an
+future sink (a [Kafka](https://en.wikipedia.org/wiki/Apache_Kafka) producer (a distributed log/streaming platform) is the planned second slot) is an
 additive config change, never a silent behavior change.
 
 Reloads are live: changing the sink URL, the cadence, or removing the
@@ -43,7 +51,7 @@ boots). A block ADDED by reload arms the stream immediately.
 ## What the collector receives
 
 One `POST` per flushed batch, body one JSON object per line
-(newline-delimited JSON, `content-type: application/x-ndjson`), one
+([newline-delimited JSON](https://en.wikipedia.org/wiki/JSON_streaming#Line-delimited_JSON), one JSON object per line, `content-type: application/x-ndjson`), one
 line per completed request — including unrouted 404s (every completed
 request means exactly that):
 
@@ -66,7 +74,7 @@ comes first, then the flusher moves to the next batch.
 
 Answer `2xx` to accept a batch. Transient failures (transport
 errors, 429, 502, 503, 504) are retried inside the batch's total
-`timeout_ms` budget with exponential backoff (a seconds-form
+`timeout_ms` budget with [exponential backoff](https://en.wikipedia.org/wiki/Exponential_backoff) (waiting longer between each retry) (a seconds-form
 `Retry-After` is honored); anything else fails the batch without
 retry. A failed batch is counted and the stream moves on — the
 gateway is not a durable queue, and delivery never blocks traffic.

@@ -1,16 +1,23 @@
 # Distributed Redis rate limiter
 
-The default rate limiter is local and in-memory: each gateway instance
+The default [rate limiting](https://en.wikipedia.org/wiki/Rate_limiting) (capping how many requests a client may make in a window) limiter is local and in-memory: each gateway instance
 keeps its own per-key GCRA buckets. This is correct for a single
 instance, but two or more instances behind a load balancer each get
 their own independent budget, so the effective limit is multiplied by
 the instance count.
 
-The distributed Redis rate limiter (DW-031, enterprise feature) moves
+The distributed [Redis](https://en.wikipedia.org/wiki/Redis_(software)) (an in-memory data store often used for shared state) rate limiter (an enterprise feature) moves
 the bucket state to Redis so every instance shares one limit. The same
-GCRA algorithm runs, but the theoretical arrival time (TAT) for each
-key lives in Redis and is updated atomically via a Lua script in a
-single round-trip.
+[GCRA](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) (Generic Cell Rate Algorithm — a rate-limiting algorithm that models a virtual queue) algorithm runs, but the theoretical arrival time (TAT) (the time the next request is allowed — the state GCRA tracks per key) for each
+key lives in Redis and is updated atomically via a [Lua script](https://en.wikipedia.org/wiki/Lua_(programming_language)) (a script run atomically inside Redis) in a
+single round-trip (one request and its response).
+
+## When to use this
+
+The distributed limiter is for a fleet of two or more gateway instances
+behind a load balancer that must share one rate-limit budget (so the
+effective limit is not multiplied by the instance count). For a single
+instance, the local in-memory limiter is correct and needs no Redis.
 
 ## Requirements
 
@@ -54,7 +61,8 @@ local limiter. For each rate-limit check:
 
 1. The key is built from the policy's selectors (e.g. `ip`,
    `ip+route`, `consumer+route`) exactly as the local limiter does.
-2. A Lua script runs atomically in Redis: it reads the key's TAT,
+2. A Lua script runs atomically in Redis: it reads the key's TAT
+   (theoretical arrival time — the time the next request is allowed),
    computes the new TAT, and writes it back in a single round-trip.
 3. The script returns whether the request is allowed, the remaining
    budget, and the retry-after duration.
@@ -83,7 +91,7 @@ At startup, if the Redis connection cannot be established:
 
 ## Key expiry
 
-Each rate-limit key in Redis carries a TTL so stale keys
+Each rate-limit key in Redis carries a [TTL](https://en.wikipedia.org/wiki/Time_to_live) (how long a record lives before expiring) so stale keys
 auto-expire. The Lua script sets an EXPIRE based on the burst
 tolerance (the time it takes a fully-spent bucket to refill); the
 `key_ttl_s` config value is a floor that ensures cleanup even for
@@ -92,7 +100,7 @@ long-burst windows.
 ## Connection pooling
 
 The limiter uses `redis::aio::ConnectionManager` -- a multiplexed
-connection that clones cheaply (Arc-based) and reconnects
+connection (one TCP connection carrying many logical requests) that clones cheaply (Arc-based) and reconnects
 automatically on failure. The connection is established once at
 startup and cloned per-rule at engine compile time. Reloads recompile
 the rate-limit engine with the same connection.

@@ -4,6 +4,14 @@ The admin API is a separate, small operator surface. It is
 **default-off**: no `admin` block in the config means no admin listener
 starts at all.
 
+## When to use this
+
+Use the admin API for live inspection and patching of a running gateway
+without a restart — rotating credentials, purging cache, checking
+health, and patching config in a managed deployment. It is default-off
+and [mutual TLS](https://en.wikipedia.org/wiki/Mutual_authentication) (mTLS) (both sides present certificates) only, so enable it only on
+hosts where an operator can present a signed client certificate.
+
 ```yaml
 admin:
   bind: 127.0.0.1:2019     # default; loopback-only out of the box
@@ -16,7 +24,7 @@ admin:
 ## Authentication: mutual TLS only
 
 The admin listener always terminates TLS and **requires** a client
-certificate chaining to `client_ca_file` — there is no token/password
+certificate (an X.509 certificate the operator presents to prove identity) chaining to `client_ca_file` — there is no token/password
 layer. Possession of a valid client certificate is the authorization.
 All three TLS files are mandatory; a config with an `admin` block
 missing `client_ca_file` is rejected rather than silently serving
@@ -77,16 +85,12 @@ to start unless the admin bind is loopback. It exists purely so you can
 certificates. It removes the admin surface's only authentication —
 never set it in production or on a shared host.
 
-## Key rotation workflows (DW-046)
-
-Source: state store schema v5 + `security::authn` + the admin
-credential endpoints. Tests: `authn` rotation cases, `store`
-retirement lifecycle, `admin_api` credential endpoints.
+## Key rotation workflows
 
 The frozen rotation procedure (zero failed requests mid-window):
 
 1. **Issue** `POST /consumers/{name}/credentials {"key": "<new>"}` —
-   hashed with the dataplane's pepper state (16..=512 bytes enforced).
+   hashed with the dataplane's pepper (a deployment-wide secret mixed into stored credential hashes) state (16..=512 bytes enforced).
    The dual-validity window OPENS: old and new keys authenticate
    simultaneously from the next request.
 2. **Switch clients** to the new key at your leisure. Both keys work.
@@ -98,18 +102,18 @@ The frozen rotation procedure (zero failed requests mid-window):
    `GET /consumers/{name}/credentials` lists rows with lifecycle
    stamps only (never selector/hash material).
 
-JWKS rotation is bridged by `retired_key_grace_secs` (default 24 h,
-0 disables, capped 7 days): when a fetch delivers a changed kid set,
+[JWKS](https://www.rfc-editor.org/rfc/rfc7517) (a JSON document of signing keys) rotation is bridged by `retired_key_grace_secs` (default 24 h,
+0 disables, capped 7 days): when a fetch delivers a changed kid (key id — the label that picks which signing key to use) set,
 the superseded set keeps verifying dropped kids through the grace —
 issuers remove old keys while previously-issued tokens still carry
 them. An identical-kid re-fetch never extends the grace. Config-only
 deployments rotate by editing the config (two credential entries)
 and reloading.
 
-## GeoIP rules (DW-050)
+## GeoIP rules
 
 Any [authorization](../reference/configuration-schema) block can gate
-on the client's COUNTRY or network (ASN), resolved from a MaxMind
+on the client's COUNTRY or network ([ASN](https://en.wikipedia.org/wiki/Autonomous_system_(Internet)) (Autonomous System Number — identifies a network)), resolved from a [MaxMind](https://en.wikipedia.org/wiki/MaxMind) (a geo-IP database vendor)
 database:
 
 ```yaml
@@ -126,7 +130,7 @@ routes:
         denied_asns: [64512]         # reject this network
 ```
 
-Rules evaluate the EFFECTIVE client IP (the `X-Forwarded-For`-resolved
+Rules evaluate the EFFECTIVE client IP (the [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For)-resolved
 address behind trusted proxies — the same address IP ACLs use).
 Addresses the database cannot resolve (private ranges, not-in-DB)
 count as UNKNOWN: deny lists pass them, allow lists reject them. The

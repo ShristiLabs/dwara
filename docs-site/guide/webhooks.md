@@ -5,6 +5,13 @@ gateway state changes: circuit breakers trip, endpoints leave and
 re-enter rotation, and config generations publish or get rejected.
 Point one at your incident tool, a chat relay, or your own collector.
 
+## When to use this
+
+Webhooks push a small JSON notification to your endpoints when gateway
+state changes (a breaker trips, an endpoint is ejected, a config is
+published or rejected) — point one at an incident tool, a chat relay,
+or your own collector for real-time alerting.
+
 ```yaml
 webhooks:
   - url: https://hooks.example.com/alerts
@@ -21,7 +28,7 @@ webhooks:
 
 | Kind | When | Payload fields |
 | --- | --- | --- |
-| `breaker_opened` | an upstream's circuit breaker trips | `upstream`, `detail` (the rule: `consecutive_failures`, `error_ratio`, or `half_open_probe_failed`) |
+| `breaker_opened` | an upstream's [circuit breaker](https://en.wikipedia.org/wiki/Circuit_breaker_design_pattern) trips (a resilience pattern that stops sending traffic to a failing upstream) | `upstream`, `detail` (the rule: `consecutive_failures`, `error_ratio`, or `half_open_probe_failed`) |
 | `breaker_half_open` | the cooling-off elapsed; the next request becomes a probe | `upstream` |
 | `breaker_closed` | a half-open probe succeeded | `upstream`, `detail` (`half_open_probe_succeeded`) |
 | `endpoint_ejected` | passive or active health removed an endpoint from rotation | `upstream`, `endpoint` |
@@ -36,7 +43,7 @@ quota support, not yet in this milestone).
 ## The envelope
 
 Every delivery is one POST with `Content-Type: application/json` and a
-`User-Agent: dwara-webhook` header:
+[`User-Agent`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent): `dwara-webhook` header:
 
 ```json
 {
@@ -49,9 +56,9 @@ Every delivery is one POST with `Content-Type: application/json` and a
 ```
 
 - `id` is unique per gateway process and monotonically increasing — use
-  it to deduplicate (delivery is at-least-once: a target that accepts a
+  it to deduplicate (delivery is [at-least-once](https://en.wikipedia.org/wiki/Reliability_(computer_networking)#Delivery_guarantees): a delivery may be retried, so a target can see the same event twice — deduplicate by id; a target that accepts a
   POST but drops the connection is retried).
-- `timestamp` is RFC 3339 UTC with millisecond precision.
+- `timestamp` is [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) UTC with millisecond precision.
 - `gateway` identifies the emitting process (`dwara-<pid>-<boot time>`)
   so a fleet can tell instances apart.
 - `payload` carries only bounded labels and numbers — never request
@@ -64,8 +71,7 @@ The path and query of the configured URL are preserved, so
 ## Delivery behavior
 
 - **Retries.** Transport failures and the statuses 429, 502, 503, and
-  504 are retried up to `max_attempts` total attempts with exponential
-  backoff (`backoff_base_ms`, doubling, capped at `backoff_cap_ms`). A
+  504 are retried up to `max_attempts` total attempts with [exponential backoff](https://en.wikipedia.org/wiki/Exponential_backoff) (waiting longer between each retry) (`backoff_base_ms`, doubling, capped at `backoff_cap_ms`). A
   seconds-form `Retry-After` header replaces the computed backoff for
   that wait. Any other non-2xx answer (4xx, 500, redirects — they are
   not followed) fails the delivery immediately.
@@ -100,7 +106,7 @@ secrets — the config file then never holds the bytes.
 
 Webhook URLs are operator configuration, like upstream endpoints: the
 gateway dials exactly what the config names, and there is no
-private-address egress filter (an internal alerting listener on
+private-address egress (outbound network traffic from the gateway) filter (an internal alerting listener on
 `127.0.0.1` or `10/8` is a normal shape). `https://` targets verify
 against the public CA root set; private-CA webhook targets are not
 supported in this milestone.

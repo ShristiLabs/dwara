@@ -3,7 +3,7 @@
 ## Reload
 
 The config file's directory is watched (so atomic write-temp-then-rename
-replacement is observed, and events are debounced), and `SIGHUP` also
+replacement is observed, and events are [debounced](https://en.wikipedia.org/wiki/Debounce) (rapid repeated events collapse into one)), and `SIGHUP` (a Unix signal that here means "reload config") also
 triggers a reload:
 
 ```mermaid
@@ -33,7 +33,7 @@ The route table and upstream connection pools hot-swap together in one
 atomic publish, so a new route table is never paired with stale pools.
 The listener bind set (addresses/ports, and each listener's
 `proxy_protocol` flag) is fixed at startup — adding, removing, or
-moving listeners — or toggling PROXY protocol acceptance — requires a
+moving listeners — or toggling [PROXY protocol](https://www.haproxy.org/download/2.4/doc/proxy-protocol.txt) (a protocol that conveys the real client IP through a load balancer) acceptance — requires a
 restart; only route/policy content and certificate material reload
 live.
 
@@ -55,7 +55,7 @@ and cleartext listener, served **before** route resolution:
 | --- | --- |
 | `/healthz` | 200 whenever the process is up (liveness) |
 | `/readyz` | 200 once a config generation has published successfully, 503 before that (readiness) |
-| `/metrics` | Prometheus text format, see [Observability](./observability) |
+| `/metrics` | [Prometheus text format](https://en.wikipedia.org/wiki/Prometheus_(software)) (a plain-text metrics format Prometheus scrapes), see [Observability](./observability) |
 
 These paths are not routable: a configured route matching one of them
 is permanently shadowed by the reserved handler. TLS-passthrough
@@ -63,8 +63,8 @@ listeners never serve them (they don't speak HTTP).
 
 ## Shutdown
 
-`SIGTERM`/`SIGINT` stop accepting new connections, drain live
-connections (including ones still in the kernel accept backlog) within
+`SIGTERM`/`SIGINT` (graceful-shutdown signals) stop accepting new connections, drain live
+connections (including ones still in the kernel [accept backlog](https://en.wikipedia.org/wiki/Network_socket#Listen) (the kernel's queue of not-yet-accepted connections)) within
 `DWARA_SHUTDOWN_TIMEOUT_SECS` (default 10), then exit 0. Anything still
 draining past the budget is force-closed. TLS-passthrough splices are
 not drained on shutdown — they run until the process exits.
@@ -91,16 +91,16 @@ of the parser, not of a route.
 | --- | --- | --- |
 | `DWARA_HTTP1_MAX_HEADERS` | 100 | header-count bombs |
 | `DWARA_HTTP1_MAX_BUF_KIB` | 64 | oversized header/line bombs |
-| `DWARA_HTTP1_HEADER_TIMEOUT_MS` | 10000 | slowloris (headers trickling in) |
+| `DWARA_HTTP1_HEADER_TIMEOUT_MS` | 10000 | [slowloris](https://en.wikipedia.org/wiki/Slowloris_(cyberattack)) (a slow-header attack that ties up connections) (headers trickling in) |
 | `DWARA_H2_MAX_CONCURRENT_STREAMS` | 128 | HTTP/2 stream floods |
 | `DWARA_H2_STREAM_WINDOW_KIB` | 1024 | per-stream h2 receive buffering |
 | `DWARA_H2_CONNECTION_WINDOW_KIB` | 4096 | connection-wide h2 receive buffering |
 | `DWARA_H2_MAX_SEND_BUF_KIB` | 1024 | outbound h2 send buffer / write amplification |
 | `DWARA_REQUEST_BODY_TIMEOUT_MS` | 30000 (`0` disables) | slow-body attacks (inactivity gap between body frames, not total upload time) |
 
-A request head carrying **both** `Content-Length` and
-`Transfer-Encoding` is rejected with a bare `400` before parsing and the
-connection is closed — the classic CL+TE smuggling vector. This only
+A request head carrying **both** [`Content-Length`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Length) and
+[`Transfer-Encoding`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Transfer-Encoding) is rejected with a bare `400` before parsing and the
+connection is closed — the classic [CL+TE smuggling](https://owasp.org/www-community/attacks/HTTP_Request_Smuggling) (an attack that desyncs how two proxies parse a request) vector. This only
 needs to inspect the first request head on a connection: every
 forwarded request is rebuilt from parsed parts, so framing cannot
 desync through the gateway on later keep-alive requests.
