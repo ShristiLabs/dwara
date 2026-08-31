@@ -30,17 +30,17 @@ use dwara_core::snapshot::{self, ConfigState};
 use hickory_resolver::proto::rr::{
     rdata::SOA, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey,
 };
-use hickory_server::authority::{Catalog, ZoneType};
-use hickory_server::server::ServerFuture;
-use hickory_server::store::in_memory::InMemoryAuthority;
+use hickory_server::server::Server;
+use hickory_server::store::in_memory::InMemoryZoneHandler;
+use hickory_server::zone_handler::{Catalog, ZoneType};
 use tokio::net::UdpSocket;
 
 /// A mock DNS server serving A records for `svc.test.` at the given IPs
 /// with the given TTL. Binds to `127.0.0.1:0` (OS-assigned port); the
 /// port is available via `addr()`. Dropping it cancels the background
-/// tasks (ServerFuture's Drop cancels the shutdown token).
+/// tasks (Server's Drop cancels the shutdown token).
 struct MockDnsServer {
-    _server: Option<ServerFuture<Catalog>>,
+    _server: Option<Server<Catalog>>,
     addr: std::net::SocketAddr,
 }
 
@@ -51,9 +51,9 @@ impl MockDnsServer {
         let zone_name: Name = Name::parse("svc.test.", None).unwrap();
         let mut records: BTreeMap<RrKey, RecordSet> = BTreeMap::new();
 
-        // SOA record (required by InMemoryAuthority).
+        // SOA record (required by InMemoryZoneHandler).
         let soa_key = RrKey::new(zone_name.clone().into(), RecordType::SOA);
-        let mut soa_rset = RecordSet::new(&zone_name, RecordType::SOA, 0);
+        let mut soa_rset = RecordSet::new(zone_name.clone(), RecordType::SOA, 0);
         let soa = SOA::new(
             Name::parse("ns.svc.test.", None).unwrap(),    // mname
             Name::parse("admin.svc.test.", None).unwrap(), // rname
@@ -71,7 +71,7 @@ impl MockDnsServer {
 
         // Build the A record set for `svc.test.`
         let a_key = RrKey::new(zone_name.clone().into(), RecordType::A);
-        let mut a_rset = RecordSet::new(&zone_name, RecordType::A, 0);
+        let mut a_rset = RecordSet::new(zone_name.clone(), RecordType::A, 0);
         for ip in ips {
             let ip_addr: IpAddr = ip.parse().unwrap();
             let rdata = match ip_addr {
@@ -83,17 +83,27 @@ impl MockDnsServer {
         }
         records.insert(a_key, a_rset);
 
+        // hickory-server 0.26: InMemoryAuthority -> InMemoryZoneHandler.
+        // The constructor takes (origin, records, zone_type, axfr_policy).
+        // The default TokioRuntimeProvider is used.
         let authority =
-            InMemoryAuthority::new(zone_name.clone(), records, ZoneType::Primary, false).unwrap();
+            InMemoryZoneHandler::<hickory_server::net::runtime::TokioRuntimeProvider>::new(
+                zone_name.clone(),
+                records,
+                ZoneType::Primary,
+                hickory_server::zone_handler::AxfrPolicy::Deny,
+            )
+            .unwrap();
 
         let mut catalog = Catalog::new();
-        catalog.upsert(LowerName::from(&zone_name), Box::new(Arc::new(authority)));
+        // hickory-server 0.26: upsert takes Vec<Arc<dyn ZoneHandler>>.
+        catalog.upsert(LowerName::from(&zone_name), vec![Arc::new(authority)]);
 
         // Use tokio::net::UdpSocket (register_socket expects it).
         let udp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = udp_socket.local_addr().unwrap();
 
-        let mut server = ServerFuture::new(catalog);
+        let mut server = Server::new(catalog);
         server.register_socket(udp_socket);
 
         Self {

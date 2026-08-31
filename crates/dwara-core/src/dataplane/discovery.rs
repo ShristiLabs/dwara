@@ -45,9 +45,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::lookup::Lookup;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use tokio::task::JoinSet;
 
 use crate::config::{DnsDiscovery, Endpoint};
@@ -63,13 +64,13 @@ use crate::observability::Observability;
 /// once `system-config` support is added (a follow-up).
 const DEFAULT_NAMESERVERS: &[&str] = &["8.8.8.8:53", "8.8.4.4:53"];
 
-/// A TTL-aware DNS resolver wrapping `hickory_resolver::TokioAsyncResolver`.
+/// A TTL-aware DNS resolver wrapping `hickory_resolver::TokioResolver`.
 ///
 /// Configured with explicit name servers (the system resolver is not
 /// used by default). `resolve_a` returns `(IpAddr, ttl)` pairs; `resolve_srv`
 /// returns `(IpAddr, port, ttl)` triples.
 pub struct DnsResolver {
-    inner: TokioAsyncResolver,
+    inner: TokioResolver,
 }
 
 impl DnsResolver {
@@ -77,7 +78,7 @@ impl DnsResolver {
     /// (e.g. `["127.0.0.1:5353"]`). An empty list falls back to the
     /// default public resolvers.
     pub fn new(name_servers: &[String]) -> Self {
-        let mut config = ResolverConfig::new();
+        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
         let servers: Vec<String> = if name_servers.is_empty() {
             DEFAULT_NAMESERVERS.iter().map(|s| s.to_string()).collect()
         } else {
@@ -87,13 +88,15 @@ impl DnsResolver {
             let socket_addr: std::net::SocketAddr = addr
                 .parse()
                 .unwrap_or_else(|_| panic!("invalid DNS name server address: {addr}"));
-            config.add_name_server(NameServerConfig {
-                socket_addr,
-                protocol: Protocol::Udp,
-                tls_dns_name: None,
-                trust_negative_responses: false,
-                bind_addr: None,
-            });
+            // hickory 0.26: NameServerConfig takes an IpAddr and a vec of
+            // ConnectionConfig. The port is on ConnectionConfig, not on
+            // NameServerConfig (it defaulted to 53 in ::udp()). Set it
+            // explicitly so non-53 ports (e.g. mock DNS servers in tests)
+            // work. UDP-only is sufficient for discovery; the resolver
+            // falls back to TCP for truncated responses automatically.
+            let mut conn = hickory_resolver::config::ConnectionConfig::udp();
+            conn.port = socket_addr.port();
+            config.add_name_server(NameServerConfig::new(socket_addr.ip(), false, vec![conn]));
         }
         // Disable the resolver's own cache so the discovery task controls
         // refresh timing via TTL. The resolver's LRU cache would serve
@@ -102,9 +105,12 @@ impl DnsResolver {
         // predictable in tests. With caching disabled, every lookup hits
         // the name server, and the discovery task's sleep governs the
         // cadence.
-        let mut opts = ResolverOpts::default();
-        opts.cache_size = 0;
-        let inner = TokioAsyncResolver::tokio(config, opts);
+        let mut builder =
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+        builder.options_mut().cache_size = 0;
+        let inner = builder
+            .build()
+            .expect("failed to build TokioResolver (invalid name server config)");
         Self { inner }
     }
 
@@ -113,26 +119,21 @@ impl DnsResolver {
     /// earliest-expiring record governs the refresh interval). Returns an
     /// empty vec if the hostname resolves to no A records.
     pub async fn resolve_a(&self, hostname: &str) -> Result<Vec<(IpAddr, u32)>, String> {
-        let ipv4_lookup = self
+        let lookup: Lookup = self
             .inner
             .ipv4_lookup(hostname)
             .await
             .map_err(|e| format!("DNS A lookup for '{hostname}' failed: {e}"))?;
-        if ipv4_lookup.iter().next().is_none() {
+        if lookup.answers().is_empty() {
             return Ok(Vec::new());
         }
-        let lookup: Lookup = ipv4_lookup.into();
-        let ttl = lookup.records().iter().map(|r| r.ttl()).min().unwrap_or(60);
-        // Re-iterate the original lookup for IPs (converting to Lookup
-        // consumes the iterator's source; the records are shared via
-        // Arc so this is cheap).
+        let ttl = lookup.answers().iter().map(|r| r.ttl).min().unwrap_or(60);
         let addrs: Vec<(IpAddr, u32)> = lookup
-            .records()
+            .answers()
             .iter()
-            .filter_map(|r| {
-                r.data()
-                    .and_then(|d| d.as_a())
-                    .map(|a| (IpAddr::V4(a.0), ttl))
+            .filter_map(|r| match r.data {
+                hickory_resolver::proto::rr::RData::A(a) => Some((IpAddr::V4(a.0), ttl)),
+                _ => None,
             })
             .collect();
         Ok(addrs)
@@ -144,34 +145,34 @@ impl DnsResolver {
     /// returned records. Returns an empty vec if the hostname resolves
     /// to no SRV records.
     pub async fn resolve_srv(&self, hostname: &str) -> Result<Vec<(IpAddr, u16, u32)>, String> {
-        let srv_lookup = self
+        let lookup: Lookup = self
             .inner
             .srv_lookup(hostname)
             .await
             .map_err(|e| format!("DNS SRV lookup for '{hostname}' failed: {e}"))?;
-        if srv_lookup.iter().next().is_none() {
+        if lookup.answers().is_empty() {
             return Ok(Vec::new());
         }
-        let ttl = srv_lookup
-            .as_lookup()
-            .records()
-            .iter()
-            .map(|r| r.ttl())
-            .min()
-            .unwrap_or(60);
+        let ttl = lookup.answers().iter().map(|r| r.ttl).min().unwrap_or(60);
         // Pair each SRV record's port with the resolved IPs. For each
         // SRV record, resolve the target hostname to IPv4 addresses via
         // a separate A lookup so each (IP, port) pair is precise.
         let mut endpoints = Vec::new();
         let mut seen: std::collections::HashSet<(IpAddr, u16)> = std::collections::HashSet::new();
-        for srv in srv_lookup.iter() {
-            let port = srv.port();
-            let target = srv.target();
-            if let Ok(target_lookup) = self.inner.ipv4_lookup(target.clone()).await {
-                for ip in target_lookup.iter() {
-                    let ip = IpAddr::V4(ip.0);
-                    if seen.insert((ip, port)) {
-                        endpoints.push((ip, port, ttl));
+        for record in lookup.answers() {
+            let srv = match &record.data {
+                hickory_resolver::proto::rr::RData::SRV(srv) => srv,
+                _ => continue,
+            };
+            let port = srv.port;
+            let target = srv.target.clone();
+            if let Ok(target_lookup) = self.inner.ipv4_lookup(target).await {
+                for record in target_lookup.answers() {
+                    if let hickory_resolver::proto::rr::RData::A(a) = record.data {
+                        let ip = IpAddr::V4(a.0);
+                        if seen.insert((ip, port)) {
+                            endpoints.push((ip, port, ttl));
+                        }
                     }
                 }
             }

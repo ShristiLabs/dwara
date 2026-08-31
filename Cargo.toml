@@ -182,15 +182,17 @@ licensing-core = { git = "https://github.com/ShristiLabs/licensing.git", rev = "
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # DW-042: DNS-based dynamic upstream discovery (hickory-resolver for
 # TTL-aware A/SRV resolution). MIT OR Apache-2.0 (both allow-listed in
-# deny.toml). The `tokio` feature enables the async TokioAsyncResolver
+# deny.toml). The `tokio` feature enables the async TokioResolver
 # used by the discovery background tasks; `system-config` is OFF so the
 # resolver never reads /etc/resolv.conf — the gateway configures the
 # name servers explicitly (system config is a follow-up if needed).
-hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime"] }
+# Upgraded from 0.24 to 0.26 to fix RUSTSEC-2026-0119 (O(n^2) name
+# compression DoS in hickory-proto).
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio"] }
 # DW-042 tests: an in-process DNS authority/server for deterministic
 # discovery tests (no external DNS dependency). MIT OR Apache-2.0.
 # Dev/bench-only — never ships in the gateway binary or library.
-hickory-server = { version = "0.24", default-features = false }
+hickory-server = { version = "0.26", default-features = false }
 # DW-049 zero-downtime binary upgrade: socket2 sets SO_REUSEPORT on the
 # listening sockets so a new process can bind the same port during the
 # hand-off window (the kernel load-balances accepts across both). Already
