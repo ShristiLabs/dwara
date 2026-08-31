@@ -124,7 +124,7 @@ use crate::config::{Timeouts, Upstream, UpstreamProtocol};
 use crate::observability::Observability;
 use crate::resilience::breaker::{Breaker, BreakerParams, BreakerState};
 use crate::resilience::health::HealthDispatch;
-use crate::resilience::retries::{RetryBudget, RetryParams};
+use crate::resilience::retries::{HedgeParams, RetryBudget, RetryParams};
 use crate::snapshot::Snapshot;
 
 /// Default connection cap when `connection_cap` is absent.
@@ -835,6 +835,9 @@ pub struct UpstreamHandle {
     /// Resolved retry parameters (`upstreams[].retries`; DW-014).
     /// `attempts == 0` means retries off.
     retries: RetryParams,
+    /// Resolved hedge parameters (DW-063); extracted from `retries.hedge`
+    /// for convenience. `hedge_after == ZERO` means hedging is disabled.
+    hedge: HedgeParams,
     /// Rolling-window retry budget, carried across reloads like the
     /// balancer.
     retry_budget: Arc<RetryBudget>,
@@ -918,6 +921,11 @@ impl UpstreamHandle {
     /// Resolved retry parameters (DW-014). `attempts == 0` = retries off.
     pub fn retry_params(&self) -> &RetryParams {
         &self.retries
+    }
+
+    /// Resolved hedge parameters (DW-063).
+    pub fn hedge_params(&self) -> &HedgeParams {
+        &self.hedge
     }
 
     /// This upstream's rolling-window retry budget (DW-014).
@@ -1313,6 +1321,7 @@ fn build_handle(
         read_timeout: effective_read_timeout(u),
         write_timeout: effective_write_timeout(u),
         retries: RetryParams::from_config(u.retries.as_ref()),
+        hedge: HedgeParams::from_config(u.retries.as_ref().and_then(|r| r.hedge.as_ref())),
         retry_budget,
         max_pending: u.max_pending.unwrap_or(0),
         breaker,

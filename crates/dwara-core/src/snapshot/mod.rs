@@ -3770,6 +3770,44 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+            // DW-063: hedge validation.
+            if let Some(h) = &r.hedge {
+                if h.hedge_after_ms < crate::config::limits::MIN_HEDGE_AFTER_MS
+                    || h.hedge_after_ms > crate::config::limits::MAX_HEDGE_AFTER_MS
+                {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "retries.hedge.hedge_after_ms",
+                        format!(
+                            "hedge_after_ms must be in [{}, {}]",
+                            crate::config::limits::MIN_HEDGE_AFTER_MS,
+                            crate::config::limits::MAX_HEDGE_AFTER_MS
+                        ),
+                    ));
+                }
+                if h.hedge_max == 0 || h.hedge_max > crate::config::limits::MAX_HEDGE_COPIES {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "retries.hedge.hedge_max",
+                        format!(
+                            "hedge_max must be in [1, {}]",
+                            crate::config::limits::MAX_HEDGE_COPIES
+                        ),
+                    ));
+                }
+                // Hedging requires a replayable body.
+                if r.buffer_max_bytes == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "retries.hedge",
+                        "hedging requires retries.buffer_max_bytes > 0 (the body must be \
+                         replayable to send a hedge copy)",
+                    ));
+                }
+            }
         }
         // DW-035: OAuth2 client-credentials validation.
         if let Some(o) = &u.oauth2_client_credentials {

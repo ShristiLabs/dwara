@@ -767,6 +767,7 @@ dependencies = [
  "hickory-resolver",
  "hickory-server",
  "hmac",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",

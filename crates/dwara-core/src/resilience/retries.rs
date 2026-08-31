@@ -58,6 +58,46 @@ pub const RETRY_BUDGET_WINDOW_MS: u64 = 10_000;
 /// Default retry statuses (`502, 503, 504`).
 pub const DEFAULT_RETRY_STATUSES: [u16; 3] = [502, 503, 504];
 
+/// Resolved (validated) hedge parameters for one upstream (DW-063).
+/// `hedge_after` is `None` when hedging is disabled (no `hedge` block or
+/// `hedge_after_ms == 0`). When enabled, a speculative duplicate is sent
+/// after `hedge_after` without a response; at most `hedge_max` copies
+/// per request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HedgeParams {
+    /// Tail-latency threshold before a hedge copy is sent.
+    pub hedge_after: Duration,
+    /// Maximum speculative copies per request.
+    pub hedge_max: u32,
+}
+
+impl Default for HedgeParams {
+    fn default() -> Self {
+        HedgeParams {
+            hedge_after: Duration::ZERO,
+            hedge_max: 1,
+        }
+    }
+}
+
+impl HedgeParams {
+    /// Whether hedging is enabled for this upstream.
+    pub fn enabled(&self) -> bool {
+        self.hedge_after > Duration::ZERO
+    }
+
+    /// Resolve from the config form; `None` yields the disabled default.
+    pub fn from_config(cfg: Option<&crate::config::HedgeConfig>) -> Self {
+        match cfg {
+            None => HedgeParams::default(),
+            Some(c) => HedgeParams {
+                hedge_after: Duration::from_millis(c.hedge_after_ms),
+                hedge_max: c.hedge_max,
+            },
+        }
+    }
+}
+
 /// Resolved (validated) retry parameters for one upstream. `attempts == 0`
 /// disables retries entirely — the single-attempt path then performs no
 /// body buffering and no extra per-request work (the budget denominator is
@@ -82,6 +122,8 @@ pub struct RetryParams {
     pub budget_percent: u32,
     /// Request-body buffering cap in bytes.
     pub buffer_max_bytes: u64,
+    /// Request hedging parameters (DW-063).
+    pub hedge: HedgeParams,
 }
 
 impl Default for RetryParams {
@@ -95,6 +137,7 @@ impl Default for RetryParams {
             retry_transport: true,
             budget_percent: 10,
             buffer_max_bytes: 0,
+            hedge: HedgeParams::default(),
         }
     }
 }
@@ -114,6 +157,7 @@ impl RetryParams {
                 retry_transport: c.retry_transport,
                 budget_percent: c.budget_percent,
                 buffer_max_bytes: c.buffer_max_bytes,
+                hedge: HedgeParams::from_config(c.hedge.as_ref()),
             },
         }
     }

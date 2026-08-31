@@ -3281,6 +3281,17 @@ pub struct RetryConfig {
     /// within this cap; larger bodies stream and are never retried.
     #[serde(default)]
     pub buffer_max_bytes: u64,
+    /// Request hedging (DW-063): after `hedge_after_ms` milliseconds
+    /// without a response, a speculative duplicate request is sent to a
+    /// different endpoint; the first response wins and the loser is
+    /// cancelled. Requires `buffer_max_bytes > 0` (the body must be
+    /// replayable to send a hedge copy) and idempotent methods (GET,
+    /// HEAD, OPTIONS, TRACE, PUT) — POST is hedged only when
+    /// `retry_post` is also true. Absent (or `hedge_after_ms` = 0)
+    /// disables hedging. At most `hedge_max` speculative copies are
+    /// sent per request (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge: Option<HedgeConfig>,
 }
 
 impl Default for RetryConfig {
@@ -3294,8 +3305,36 @@ impl Default for RetryConfig {
             retry_transport: default_retry_transport(),
             budget_percent: default_retry_budget_percent(),
             buffer_max_bytes: 0,
+            hedge: None,
         }
     }
+}
+
+/// Request hedging configuration (DW-063, `upstreams[].retries.hedge`).
+///
+/// After `hedge_after_ms` without a response, a speculative duplicate
+/// request is sent to a different endpoint. The first response (headers
+/// resolved) wins; the loser is cancelled. Hedging requires a replayable
+/// body (`buffer_max_bytes > 0`) and idempotent semantics (POST is hedged
+/// only when `retry_post` is true).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HedgeConfig {
+    /// Milliseconds to wait before sending a hedge copy (the "tail
+    /// latency" threshold). Must be > 0. A typical value is the p90
+    /// latency of the upstream — requests slower than this get a
+    /// speculative parallel copy.
+    pub hedge_after_ms: u64,
+    /// Maximum number of speculative hedge copies per request (default
+    /// 1). Must be in [1, 4]. Hedge copies are NOT charged against the
+    /// retry budget — the budget prevents retry storms after failures,
+    /// while hedging is a proactive performance optimization.
+    #[serde(default = "default_hedge_max")]
+    pub hedge_max: u32,
+}
+
+fn default_hedge_max() -> u32 {
+    1
 }
 
 fn default_retry_attempts() -> u32 {

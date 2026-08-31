@@ -32,6 +32,20 @@ pub const MAX_HAPPY_EYEBALLS_MS: u64 = 600_000;
 /// Validation bound on `retries.attempts` (mirrored in `snapshot::validate`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 
+/// Validation bounds on `retries.hedge.hedge_after_ms` (DW-063): the
+/// tail-latency threshold before a speculative copy is sent. Below 1 ms
+/// is pointless (the copy would race immediately); above 5 minutes the
+/// upstream is almost certainly dead and a retry or breaker is the
+/// right tool, not a hedge.
+pub const MIN_HEDGE_AFTER_MS: u64 = 1;
+pub const MAX_HEDGE_AFTER_MS: u64 = 300_000;
+
+/// Validation bound on `retries.hedge.hedge_max` (DW-063): at most this
+/// many speculative copies per request. Each copy consumes an
+/// endpoint slot and a retry-budget charge, so the cap bounds the
+/// amplification factor.
+pub const MAX_HEDGE_COPIES: u32 = 4;
+
 /// Runtime bound on the per-key GCRA state a rate-limiter window holds
 /// PER SHARD of its keyed store (see `extensions::rate_limiter`). Not a
 /// schema bound — no config value is checked against it — but a

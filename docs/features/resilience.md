@@ -112,6 +112,73 @@ to `attempts * (read_ms + backoff_cap_ms)` to one request's total
 latency — there is no overall budget that trims a chain of retries
 short of exhausting all of them.
 
+## Request hedging (DW-063)
+
+Hedging sends a **speculative duplicate** request to a different
+endpoint after a tail-latency threshold, racing the primary and the
+hedge copy; the first response (headers resolved) wins and the loser is
+cancelled. This cuts p99 latency at the cost of bounded extra upstream
+load — the hedge only fires when the primary is already slower than
+expected, and at most `hedge_max` copies (default 1) are sent per
+request.
+
+```yaml
+upstreams:
+  - name: up
+    endpoints:
+      - address: 127.0.0.1
+        port: 8080
+      - address: 127.0.0.1
+        port: 8081
+    retries:
+      buffer_max_bytes: 65536
+      hedge:
+        hedge_after_ms: 50
+        hedge_max: 1
+```
+
+**How it works:**
+
+1. The primary request is sent to the load balancer's pick.
+2. A timer fires after `hedge_after_ms`. If the primary has already
+   resolved (success or error), no hedge is sent.
+3. If the timer fires first, up to `hedge_max` hedge copies are spawned
+   (each to an independently-picked endpoint) and raced against the
+   primary in a `JoinSet`.
+4. The first `Ok` (headers resolved) wins; the remaining tasks are
+   aborted. If all hedges error, the primary is awaited directly.
+
+**Requirements and constraints:**
+
+- **Replayable body:** hedging requires `buffer_max_bytes > 0` so the
+  request body can be replayed to the hedge copy. Over-cap bodies that
+  can't be buffered disable hedging for that request (the primary
+  streams normally, no hedge).
+- **Idempotent methods only:** GET, HEAD, OPTIONS, TRACE, PUT are
+  hedged unconditionally; POST is hedged only when `retry_post` is also
+  true (the same semantics as retries — a hedge is a replay, and
+  replaying a non-idempotent side-effecting request is unsafe).
+- **Not charged against the retry budget:** the budget prevents retry
+  storms after failures; hedging is a proactive performance
+  optimization that runs on every slow request. The `hedge_max` config
+  alone bounds the amplification factor.
+- **First attempt only:** hedging runs on the initial attempt
+  (`done_tries == 0`). Retried attempts (after a failure) do not hedge
+  — a retry is already a second chance, and hedging a retry would
+  compound the amplification.
+
+**Validation:**
+
+- `hedge_after_ms` must be in `[1, MAX_HEDGE_AFTER_MS]` (default upper
+  bound 60000ms).
+- `hedge_max` must be in `[1, MAX_HEDGE_COPIES]` (default upper bound 4).
+- A `hedge` block with `buffer_max_bytes == 0` is rejected — hedging
+  requires a replayable body.
+
+**Metric:** `dwara_hedge_sent_total{upstream}` counts every hedge copy
+sent (not every hedged request) — use it to monitor the extra load
+hedging generates.
+
 ## Circuit breaking
 
 The breaker gates an **entire upstream** (not one endpoint) when it's

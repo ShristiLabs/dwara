@@ -1402,6 +1402,29 @@
       },
       "additionalProperties": false
     },
+    "HedgeConfig": {
+      "description": "Request hedging configuration (DW-063, `upstreams[].retries.hedge`).\n\nAfter `hedge_after_ms` without a response, a speculative duplicate\nrequest is sent to a different endpoint. The first response (headers\nresolved) wins; the loser is cancelled. Hedging requires a replayable\nbody (`buffer_max_bytes > 0`) and idempotent semantics (POST is hedged\nonly when `retry_post` is true).",
+      "type": "object",
+      "properties": {
+        "hedge_after_ms": {
+          "description": "Milliseconds to wait before sending a hedge copy (the \"tail\nlatency\" threshold). Must be > 0. A typical value is the p90\nlatency of the upstream — requests slower than this get a\nspeculative parallel copy.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "hedge_max": {
+          "description": "Maximum number of speculative hedge copies per request (default\n1). Must be in [1, 4]. Hedge copies are NOT charged against the\nretry budget — the budget prevents retry storms after failures,\nwhile hedging is a proactive performance optimization.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "hedge_after_ms"
+      ]
+    },
     "HmacAuth": {
       "description": "Gateway-wide HMAC request-signing policy (DW-036). The credential\nitself (key id + secret) lives on a consumer\n(`credentials: [{type: hmac, ...}]`); this block carries the\nVERIFICATION policy that applies to every signed request.",
       "type": "object",
@@ -2604,6 +2627,17 @@
           "format": "uint64",
           "default": 0,
           "minimum": 0
+        },
+        "hedge": {
+          "description": "Request hedging (DW-063): after `hedge_after_ms` milliseconds\nwithout a response, a speculative duplicate request is sent to a\ndifferent endpoint; the first response wins and the loser is\ncancelled. Requires `buffer_max_bytes > 0` (the body must be\nreplayable to send a hedge copy) and idempotent methods (GET,\nHEAD, OPTIONS, TRACE, PUT) — POST is hedged only when\n`retry_post` is also true. Absent (or `hedge_after_ms` = 0)\ndisables hedging. At most `hedge_max` speculative copies are\nsent per request (default 1).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HedgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "retry_post": {
           "description": "Retry non-idempotent POST requests. Default false: POST is never\nretried unless an operator explicitly opts in here (a retried POST\nmay replay a body the upstream already partially processed).",

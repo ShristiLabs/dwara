@@ -54,6 +54,8 @@
 //! - `request_duration_seconds{route}` histogram
 //! - `upstream_attempts_total{upstream,endpoint,status_class}` counter
 //! - `retries_total{upstream}` counter
+//! - `dwara_hedge_sent_total{upstream}` counter (DW-063) — speculative
+//!   hedge copies sent after the tail-latency timer fired
 //! - `rate_limited_total{route}` counter
 //! - `shed_total{priority}` counter
 //! - `dwara_policy_dry_run_total{phase,route}` counter (DW-041) —
@@ -347,6 +349,10 @@ pub struct Observability {
     request_duration: HistogramVec,
     upstream_attempts_total: IntCounterVec,
     retries_total: IntCounterVec,
+    /// DW-063: hedge copies sent (label: upstream). Counts every
+    /// speculative duplicate the hedge timer fired, regardless of
+    /// whether it won the race.
+    hedge_sent_total: IntCounterVec,
     rate_limited_total: IntCounterVec,
     shed_total: IntCounterVec,
     policy_dry_run_total: IntCounterVec,
@@ -557,6 +563,16 @@ impl Observability {
         .expect("valid metric definition");
         let retries_total = IntCounterVec::new(
             Opts::new("retries_total", "Retried upstream attempts, by upstream."),
+            &["upstream"],
+        )
+        .expect("valid metric definition");
+        let hedge_sent_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_hedge_sent_total",
+                "Speculative hedge copies sent (DW-063), by upstream. Counts \
+                 every duplicate the hedge timer fired, regardless of whether \
+                 it won the race.",
+            ),
             &["upstream"],
         )
         .expect("valid metric definition");
@@ -942,6 +958,7 @@ impl Observability {
             Box::new(request_duration.clone()),
             Box::new(upstream_attempts_total.clone()),
             Box::new(retries_total.clone()),
+            Box::new(hedge_sent_total.clone()),
             Box::new(rate_limited_total.clone()),
             Box::new(shed_total.clone()),
             Box::new(policy_dry_run_total.clone()),
@@ -998,6 +1015,7 @@ impl Observability {
             request_duration,
             upstream_attempts_total,
             retries_total,
+            hedge_sent_total,
             rate_limited_total,
             shed_total,
             policy_dry_run_total,
@@ -1092,6 +1110,12 @@ impl Observability {
     /// Count one retry (a send attempt after the first).
     pub fn record_retry(&self, upstream: &str) {
         self.retries_total.with_label_values(&[upstream]).inc();
+    }
+
+    /// Count one hedge copy sent (DW-063): a speculative duplicate the
+    /// hedge timer fired. Called once per copy, not once per request.
+    pub fn record_hedge_sent(&self, upstream: &str) {
+        self.hedge_sent_total.with_label_values(&[upstream]).inc();
     }
 
     /// Count one rate-limit denial (429).

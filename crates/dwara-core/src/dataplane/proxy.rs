@@ -4046,6 +4046,19 @@ where
         && !wants_upgrade
         && (idempotent || (rp.retry_post && out_req_parts.method == hyper::Method::POST));
 
+    // DW-063: request hedging. A hedge copy is a speculative duplicate
+    // sent to a different endpoint after `hedge_after` without a
+    // response; the first response wins, the loser is cancelled. Hedging
+    // requires a replayable body and idempotent semantics (POST only
+    // when `retry_post` is true), and is disabled for upgrade requests.
+    // Evaluated here (before body buffering) because hedging requires
+    // the body to be buffered — the buffering condition below includes
+    // `hedge_eligible`.
+    let hedge = handle.hedge_params();
+    let hedge_eligible = hedge.enabled()
+        && !wants_upgrade
+        && (idempotent || (rp.retry_post && out_req_parts.method == hyper::Method::POST));
+
     let budget = handle.retry_budget();
     // Per-upstream circuit breaker (DW-015): evaluated BEFORE the endpoint
     // pick and before every (re)attempt — an open breaker means NO attempts
@@ -4067,7 +4080,10 @@ where
         // the TRANSFORMED bytes.
         replay = Some(bytes.clone());
         AttemptBody::Replay(bytes)
-    } else if retries_enabled {
+    } else if retries_enabled || hedge_eligible {
+        // DW-014/DW-063: buffer the request body so it can be replayed
+        // on retry or sent as a hedge copy. Hedging requires a
+        // replayable body even when retries are off (attempts == 0).
         match buffer_request_body(
             body_rest.take().expect("untransformed body present"),
             rp.buffer_max_bytes,
@@ -4101,6 +4117,11 @@ where
 
     let mut first_body = Some(first_body);
     let mut done_tries: u32 = 0;
+    // DW-063: hedge is enabled if the hedge block is present, the method
+    // is idempotent (or POST with retry_post), and the body was buffered
+    // (replay is available). Over-cap bodies that couldn't be buffered
+    // disable hedging.
+    let hedge_enabled = hedge_eligible && replay.is_some();
     loop {
         // Breaker admission (DW-015) precedes every attempt: endpoint
         // pick, dial, and any remaining retries. Checked per iteration so
@@ -4158,42 +4179,62 @@ where
         let send = handle
             .send_with_hash_key_observed(out_req, Some(dispatch_hash_key), &mut picked)
             .instrument(attempt_span);
-        let result = match grpc_deadline {
-            Some(deadline) => match tokio::time::timeout(
-                deadline.saturating_duration_since(std::time::Instant::now()),
+
+        // DW-063: request hedging. On the first attempt, if the hedge
+        // timer fires before the primary responds, spawn a speculative
+        // duplicate to a different endpoint. Race the primary and all
+        // hedge copies; the first response (headers resolved) wins.
+        let result = if hedge_enabled && done_tries == 0 {
+            hedge_race(
                 send,
+                hedge,
+                &handle,
+                &out_req_parts,
+                replay.as_ref().expect("hedge requires replay"),
+                dispatch_hash_key,
+                rid,
+                handle.name(),
+                obs_arc,
             )
             .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    // The deadline expired before headers resolved: for a
-                    // gRPC caller the answer carries grpc-status 4
-                    // (DEADLINE_EXCEEDED) in the headers — the
-                    // trailers-only shape — plus the standard envelope
-                    // body for non-gRPC tooling.
-                    tracing::warn!(
-                        code = "grpc_deadline_exceeded",
-                        request_id = %rid,
-                        upstream = handle.name(),
-                        "grpc-timeout expired before the upstream answered"
-                    );
-                    if let Some(ep) = &picked {
-                        rec.endpoint = Some(ep.clone());
+        } else {
+            match grpc_deadline {
+                Some(deadline) => match tokio::time::timeout(
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                    send,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // The deadline expired before headers resolved: for a
+                        // gRPC caller the answer carries grpc-status 4
+                        // (DEADLINE_EXCEEDED) in the headers — the
+                        // trailers-only shape — plus the standard envelope
+                        // body for non-gRPC tooling.
+                        tracing::warn!(
+                            code = "grpc_deadline_exceeded",
+                            request_id = %rid,
+                            upstream = handle.name(),
+                            "grpc-timeout expired before the upstream answered"
+                        );
+                        if let Some(ep) = &picked {
+                            rec.endpoint = Some(ep.clone());
+                        }
+                        rec.attempts = done_tries + 1;
+                        let mut resp = simple(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            "grpc_deadline_exceeded",
+                            "grpc-timeout expired",
+                            rid,
+                        );
+                        let v = HeaderValue::from_static("4");
+                        resp.headers_mut().insert("grpc-status", v);
+                        return resp;
                     }
-                    rec.attempts = done_tries + 1;
-                    let mut resp = simple(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "grpc_deadline_exceeded",
-                        "grpc-timeout expired",
-                        rid,
-                    );
-                    let v = HeaderValue::from_static("4");
-                    resp.headers_mut().insert("grpc-status", v);
-                    return resp;
-                }
-            },
-            None => send.await,
+                },
+                None => send.await,
+            }
         };
         rec.attempts = done_tries + 1;
         if let Some(ep) = &picked {
@@ -4347,6 +4388,145 @@ where
             }
         }
     }
+}
+
+/// DW-063: inline hedge helper. Races the primary send future against a
+/// hedge timer; if the timer fires first, spawns up to `hedge_max`
+/// speculative copies and races all of them. First Ok wins; losers are
+/// aborted. Returns the winning result (or the last error if all fail).
+#[allow(clippy::too_many_arguments)]
+async fn hedge_race(
+    primary_send: impl std::future::Future<
+        Output = Result<
+            Response<crate::dataplane::upstream::UpstreamBody>,
+            crate::dataplane::upstream::UpstreamError,
+        >,
+    >,
+    hedge: &crate::resilience::retries::HedgeParams,
+    handle: &Arc<crate::dataplane::upstream::UpstreamHandle>,
+    out_req_parts: &http::request::Parts,
+    replay: &Bytes,
+    dispatch_hash_key: &str,
+    rid: &str,
+    upstream_name: &str,
+    obs: &Arc<Observability>,
+) -> Result<
+    Response<crate::dataplane::upstream::UpstreamBody>,
+    crate::dataplane::upstream::UpstreamError,
+> {
+    use crate::dataplane::upstream::UpstreamBody;
+    use tokio::task::JoinSet;
+    use tracing::{info, warn};
+
+    let hedge_after = hedge.hedge_after;
+    let hedge_max = hedge.hedge_max;
+
+    // Phase 1: race the primary send against the hedge timer. If the
+    // primary resolves first (Ok or Err), no hedge is needed — return it.
+    tokio::pin!(primary_send);
+    let timer = tokio::time::sleep(hedge_after);
+    tokio::pin!(timer);
+
+    tokio::select! {
+        biased;
+        result = &mut primary_send => {
+            return result;
+        }
+        _ = &mut timer => {
+            // Timer fired — enter the hedge phase.
+            warn!(
+                code = "hedge_timer_fired",
+                request_id = %rid,
+                upstream = upstream_name,
+                "hedge timer fired after {}ms; sending speculative copies",
+                hedge_after.as_millis()
+            );
+        }
+    }
+
+    // Phase 2: spawn hedge copies into a JoinSet. The primary is kept
+    // as a pinned local future (not spawned) to avoid the 'static bound;
+    // we race it alongside the JoinSet using a select loop.
+    let mut set: JoinSet<Result<Response<UpstreamBody>, UpstreamError>> = JoinSet::new();
+
+    // Spawn up to hedge_max hedge copies. The `hedge_max` config bounds
+    // the amplification factor (at most N speculative copies per request).
+    // Hedge copies are NOT charged against the retry budget — the budget
+    // prevents retry storms after failures, while hedging is a proactive
+    // performance optimization that runs on every slow request.
+    let mut hedges_spawned: u32 = 0;
+    for _ in 0..hedge_max {
+        let body: AttemptBody<Full<Bytes>> = AttemptBody::Replay(replay.clone());
+        let hedge_req = Request::from_parts(out_req_parts.clone(), body);
+        let handle_clone = Arc::clone(handle);
+        let hash_key = dispatch_hash_key.to_string();
+        let obs_clone = Arc::clone(obs);
+        let upstream_name_clone = upstream_name.to_string();
+        set.spawn(async move {
+            let mut ep: Option<String> = None;
+            let result = handle_clone
+                .send_with_hash_key_observed(hedge_req, Some(&hash_key), &mut ep)
+                .await;
+            if let Ok(ref resp) = result {
+                obs_clone.record_upstream_attempt(
+                    &upstream_name_clone,
+                    ep.as_deref().unwrap_or("unpicked"),
+                    resp.status().as_u16(),
+                );
+            }
+            result
+        });
+        hedges_spawned += 1;
+        obs.record_hedge_sent(upstream_name);
+    }
+
+    info!(
+        code = "hedge_sent",
+        request_id = %rid,
+        upstream = upstream_name,
+        copies = hedges_spawned,
+        "sent {} hedge copies",
+        hedges_spawned
+    );
+
+    // Race the primary (local pinned future) against the hedge JoinSet.
+    // First Ok wins; on a hedge Ok the primary is dropped (its connection
+    // is abandoned — the upstream response body is not consumed). If the
+    // primary resolves first (Ok or Err), hedges are aborted.
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut primary_send => {
+                set.abort_all();
+                return result;
+            }
+            joined = set.join_next(), if !set.is_empty() => {
+                match joined {
+                    Some(Ok(Ok(resp))) => {
+                        // First hedge success wins. Drop the primary
+                        // (its upstream connection is abandoned).
+                        set.abort_all();
+                        return Ok(resp);
+                    }
+                    Some(Ok(Err(_))) => {
+                        // Hedge errored — continue racing the primary
+                        // against remaining hedges.
+                    }
+                    Some(Err(_)) => {
+                        // Hedge task panicked — treat as errored.
+                    }
+                    None => {
+                        // All hedges completed (errored). Fall through
+                        // to await the primary directly.
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // All hedges errored — await the primary directly.
+    primary_send.await
 }
 
 /// The fail-fast response for an open circuit (DW-015): 503 with the

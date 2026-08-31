@@ -9,6 +9,14 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Request hedging (DW-063): after `hedge_after_ms` without a response,
+  a speculative duplicate request is sent to a different endpoint; the
+  first response wins and the loser is cancelled. Cuts p99 tail
+  latency at the cost of bounded extra upstream load. Configured via
+  `upstreams[].retries.hedge` (`hedge_after_ms`, `hedge_max`). Requires
+  `buffer_max_bytes > 0` (replayable body) and idempotent methods
+  (POST hedged only with `retry_post`). New metric
+  `dwara_hedge_sent_total{upstream}`.
 - Config convergence (DW-054, enterprise feature): two or more gateway
   instances now share config generation state via a backend (Redis in
   v1; etcd and Consul are deferred behind the
