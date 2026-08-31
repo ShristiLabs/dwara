@@ -9,6 +9,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Vault/KMS SecretSource (DW-069, Enterprise): the `ent` cargo
+  feature enables Vault KV v2 and KMS-backed secret sources. The API
+  provides `VaultSecretSource` (a `SecretSource` implementation that
+  reads from Vault's KV v2 engine with a configurable cache TTL for
+  rotation without restart), `KmsSecretSource` (a `SecretSource` that
+  decrypts ciphertext via a pluggable `KmsProvider` trait), `KmsProvider`
+  trait (for AWS KMS, GCP KMS, Azure Key Vault, etc. implementations),
+  `MockKmsProvider` (for testing), and `LeaseManager` (tracks active
+  leases for dynamic secrets and renews them). Resolved values are
+  wrapped in `Secret` (redacted Debug, no Display) -- they are never
+  logged or echoed back, per section 13.3's blanket secret-redaction
+  requirement. Default OFF; build with `cargo build --features ent`.
 - Distributed cache (DW-068, Enterprise): the `ent` cargo feature
   enables a Redis-backed `CacheStore` with coordinated invalidation
   across instances. The API provides `RedisCacheStore` (a

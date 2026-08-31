@@ -43,7 +43,11 @@ pub mod redis_rate_limiter;
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]
 pub mod redis_cache;
+// DW-069: Vault/KMS SecretSource (Enterprise). Feature-gated
+// behind the `ent` cargo feature (default OFF).
 pub mod secrets;
+#[cfg(feature = "ent")]
+pub mod vault_secrets;
 
 /// Shared error type for all extension traits.
 ///
