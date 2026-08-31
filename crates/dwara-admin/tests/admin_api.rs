@@ -2186,7 +2186,10 @@ upstreams:
         .map(|d| d.as_secs())
         .unwrap();
     assert!(daily["reset_epoch_s"].as_u64().unwrap() > now);
-    assert!(monthly["reset_epoch_s"].as_u64().unwrap() > daily["reset_epoch_s"].as_u64().unwrap());
+    // On the last day of a month, the daily and monthly reset epochs
+    // are the same (both are midnight on the 1st of the next month),
+    // so use >= rather than >.
+    assert!(monthly["reset_epoch_s"].as_u64().unwrap() >= daily["reset_epoch_s"].as_u64().unwrap());
 
     // The consumer filter narrows; an unknown name is a named 400.
     let (status, text) = plaintext_request(
