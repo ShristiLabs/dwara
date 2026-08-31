@@ -98,6 +98,11 @@ cel-interpreter = { workspace = true, optional = true }
 # pulls it in; enabled via the `cedar` feature. Apache-2.0
 # (allow-listed in deny.toml).
 cedar-policy = { workspace = true, optional = true }
+# DW-070: OpenAPI response validation. jsonschema is a JSON Schema
+# validator. Optional so the default build never pulls it in; enabled
+# via the `openapi_validation` feature. MIT (allow-listed in
+# deny.toml).
+jsonschema = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -126,6 +131,12 @@ cel = ["dep:cel-interpreter"]
 # to OPA via HTTP with a decision cache. Default OFF: cedar-policy
 # adds binary size. Build with `cargo build --features cedar`.
 cedar = ["dep:cedar-policy"]
+# DW-070: OpenAPI response validation. When enabled, the gateway
+# validates upstream responses against the OpenAPI spec's response
+# schemas and flags drift (optionally returning 502). Default OFF:
+# jsonschema adds binary size. Build with
+# `cargo build --features openapi_validation`.
+openapi_validation = ["dep:jsonschema"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

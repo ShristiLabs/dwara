@@ -66,6 +66,10 @@ pub mod error;
 pub mod events;
 pub mod extensions;
 pub mod observability;
+// DW-070: OpenAPI response validation. Feature-gated behind the
+// `openapi_validation` cargo feature (default OFF).
+#[cfg(feature = "openapi_validation")]
+pub mod openapi;
 pub mod resilience;
 pub mod security;
 pub mod snapshot;

@@ -9,6 +9,17 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- OpenAPI response validation (DW-070): the `openapi_validation` cargo
+  feature enables validation of upstream responses against the OpenAPI
+  spec's response schemas. When a response violates the spec, it is
+  flagged as drift (with validation error details) and optionally
+  returned as a 502 to the client. The API provides
+  `ResponseValidator` (compiled JSON Schema validators per
+  path/method/status triple), `ResponseToValidate` (the response to
+  check), and `ValidationResult` (Valid/Invalid/NoSchema). Schemas are
+  compiled once at config publish time from the OpenAPI document and
+  evaluated on the request path. Default OFF; build with
+  `cargo build --features openapi_validation`.
 - Cedar + OPA authorization (DW-060): the `cedar` cargo feature
   enables fine-grained authorization via Cedar policies (AWS's
   Rust-native policy language) and OPA (Open Policy Agent) HTTP
