@@ -103,6 +103,14 @@ export default withMermaid(
                 },
                 { text: "CLI", link: "/guide/cli" },
                 { text: "Admin API", link: "/guide/admin-api" },
+                {
+                  text: "Web console",
+                  link: "/guide/web-console",
+                },
+                {
+                  text: "Agent-operable administration",
+                  link: "/guide/agent-operable-admin",
+                },
               ],
             },
             {
@@ -138,6 +146,18 @@ export default withMermaid(
                   text: "OpenAPI import and mock mode",
                   link: "/guide/openapi-import",
                 },
+                {
+                  text: "API aggregation",
+                  link: "/guide/api-aggregation",
+                },
+                {
+                  text: "OpenAPI response validation",
+                  link: "/guide/openapi-response-validation",
+                },
+                {
+                  text: "CEL expressions",
+                  link: "/guide/cel-expressions",
+                },
               ],
             },
             {
@@ -152,6 +172,14 @@ export default withMermaid(
                 },
                 { text: "Admission queues", link: "/guide/admission-queue" },
                 { text: "WAF-lite filtering", link: "/guide/waf-lite" },
+                {
+                  text: "Request hedging",
+                  link: "/guide/request-hedging",
+                },
+                {
+                  text: "Mirroring and fault injection",
+                  link: "/guide/mirroring-fault-injection",
+                },
               ],
             },
             {
@@ -167,6 +195,22 @@ export default withMermaid(
                 },
                 { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
                 { text: "OpenID Connect", link: "/guide/oidc" },
+                {
+                  text: "Cedar and OPA authorization",
+                  link: "/guide/cedar-opa-authz",
+                },
+                {
+                  text: "Proxy-Wasm plugins",
+                  link: "/guide/proxy-wasm-plugins",
+                },
+                {
+                  text: "Plugin lifecycle",
+                  link: "/guide/plugin-lifecycle",
+                },
+                {
+                  text: "Plugin SDK",
+                  link: "/guide/plugin-sdk",
+                },
               ],
             },
             {
@@ -184,6 +228,14 @@ export default withMermaid(
                 {
                   text: "Alert and event webhooks",
                   link: "/guide/webhooks",
+                },
+                {
+                  text: "OTel metrics export",
+                  link: "/guide/otel-metrics-export",
+                },
+                {
+                  text: "Synthetic monitoring",
+                  link: "/guide/synthetic-monitoring",
                 },
               ],
             },
@@ -204,6 +256,22 @@ export default withMermaid(
                 {
                   text: "Config convergence",
                   link: "/guide/config-convergence",
+                },
+                {
+                  text: "Distributed cache",
+                  link: "/guide/distributed-cache",
+                },
+                {
+                  text: "Vault and KMS secrets",
+                  link: "/guide/vault-kms-secrets",
+                },
+                {
+                  text: "Workspaces, RBAC, and audit",
+                  link: "/guide/workspaces-rbac-audit",
+                },
+                {
+                  text: "Cluster sync (GA)",
+                  link: "/guide/cluster-sync",
                 },
               ],
             },

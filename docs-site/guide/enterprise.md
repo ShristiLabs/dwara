@@ -17,3 +17,14 @@ gate; the remaining pages cover each gated feature.
   bucket state to Redis so every instance shares one limit.
 - [Config convergence](./config-convergence) - share config generation
   state across instances via a backend so a reload converges everywhere.
+- [Distributed cache](./distributed-cache) - two-tier response caching
+  with a shared Redis backend across all instances.
+- [Vault and KMS secrets](./vault-kms-secrets) - resolve secrets at
+  request time from HashiCorp Vault or a KMS provider.
+- [Workspaces, RBAC, and audit](./workspaces-rbac-audit) - multi-tenant
+  isolation with role-based access control and an append-only audit log.
+- [Cluster sync (GA)](./cluster-sync) - hardened convergence for the
+  CP/DP split control plane: conflict resolution, split-brain guards,
+  and version skew tolerance.
+- [Cedar and OPA authorization](./cedar-opa-authz) - external policy
+  engines for fine-grained, attribute-based access control.
