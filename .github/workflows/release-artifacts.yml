@@ -47,7 +47,7 @@ jobs:
       # cross-compilation, which is acceptable here only because this
       # workflow runs on version tags. (The images job no longer needs
       # QEMU since #127: it only COPYs prebuilt static binaries.)
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # pinned: v3 @ c7c53464
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # pinned: v3 @ c7c53464
 
       - name: Build in rust:1.94-alpine (musl, static)
         run: |
