@@ -83,6 +83,10 @@ pub mod synthetic;
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]
 pub mod workspace;
+// DW-064: Kubernetes Gateway API translator. Feature-gated behind
+// the `k8s` cargo feature (default OFF).
+#[cfg(feature = "k8s")]
+pub mod k8s_gateway;
 // DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
 // feature (default OFF) because wasmtime + cranelift are significant
 // binary size against the DW-026 25MB budget.

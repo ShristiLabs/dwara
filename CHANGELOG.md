@@ -9,6 +9,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Kubernetes Gateway API translator (DW-064): the `k8s` cargo
+  feature enables a translator from Gateway API v1 resources (Gateway,
+  HTTPRoute, GatewayClass) into dwara's config model. The API provides
+  the Gateway API v1 resource types (Gateway, GatewayClass, HttpRoute,
+  GatewayListener, ListenerTlsConfig, etc.) and a `translate` function
+  that maps Gateway listeners to dwara Listeners, HTTPRoute rules to
+  dwara Routes, and HTTPRoute backendRefs to dwara Services + Upstreams
+  + Endpoints. Supports HTTP/HTTPS/TLS protocols, Terminate/Passthrough
+  TLS modes, Exact/PathPrefix path matches, and route attachment via
+  parentRefs. This is the core translation layer; the actual K8s
+  controller wiring (kube-rs, informers) is a separate effort that
+  composes on top of this translator. Default OFF; build with
+  `cargo build --features k8s`.
 - Vault/KMS SecretSource (DW-069, Enterprise): the `ent` cargo
   feature enables Vault KV v2 and KMS-backed secret sources. The API
   provides `VaultSecretSource` (a `SecretSource` implementation that
