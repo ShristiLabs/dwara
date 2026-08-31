@@ -60,6 +60,13 @@ ALLOWED = {
     "analytics": {"config", "observability", "extensions"},
     "security": {"config", "state", "observability"},
     "resilience": {"config", "snapshot", "extensions", "observability", "events"},
+    # DW-119: native filter trait + unified dispatch chain. Depends on
+    # config only; the wasm domain bridges its instances in via a
+    # generic adapter so plugins never imports wasm (downward only).
+    "plugins": {"config"},
+    # DW-055: proxy-wasm host. Depends on config (plugin config types)
+    # and plugins (the wasm adapter implements plugins::WasmDispatch).
+    "wasm": {"config", "plugins"},
     "dataplane": {
         "config",
         "extensions",
@@ -70,6 +77,8 @@ ALLOWED = {
         "analytics",
         "security",
         "resilience",
+        "plugins",
+        "wasm",
     },
 }
 

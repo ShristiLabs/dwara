@@ -46,6 +46,13 @@ pub mod abi;
 pub mod host;
 pub mod lifecycle;
 pub mod runner;
+// DW-119: the WASM-to-unified-chain adapter. Gated behind both the
+// `wasm` and `plugins` features: it bridges the proxy-wasm host's
+// per-request instances into the unified plugin chain (plugins domain)
+// so native filters and WASM plugins share the same phase slot. When
+// only `wasm` is on, the adapter is absent (the chain uses NoWasm).
+#[cfg(feature = "plugins")]
+pub mod adapter;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};
 pub use host::{

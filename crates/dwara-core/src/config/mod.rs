@@ -4097,36 +4097,60 @@ pub fn json_schema() -> schemars::Schema {
 
 // --- DW-055: proxy-wasm plugin config -------------------------------------
 
-/// A proxy-wasm plugin definition (DW-055). Each plugin is a .wasm
-/// module loaded at startup and run on the request pipeline phases it
-/// declares. Routes reference plugins by name.
+/// A plugin definition (DW-055 / DW-119). Each plugin is either a
+/// proxy-wasm `.wasm` module loaded at startup (`wasm`) or a compiled-in
+/// native Rust filter (`native`), run on the request pipeline phases it
+/// declares. Routes reference plugins by name. Exactly one of `wasm` or
+/// `native` must be set (validation enforces this).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     /// Unique plugin name. Referenced by routes' `plugins` field.
     pub name: String,
     /// Path to the .wasm module file. Must be readable at startup.
-    pub wasm: String,
+    /// Mutually exclusive with `native`; exactly one of the two must be
+    /// set. Absent when this is a native filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    /// Registered native filter implementation name (DW-119). The
+    /// `plugins` cargo feature must be enabled and a factory registered
+    /// under this name at startup. Mutually exclusive with `wasm`;
+    /// exactly one of the two must be set. Absent when this is a WASM
+    /// plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<String>,
     /// Phases this plugin hooks. Must be a non-empty subset of:
     /// `request_headers`, `request_body`, `response_headers`,
     /// `response_body`. The host calls the plugin's corresponding
-    /// `proxy_on_*` export at each declared phase.
+    /// `proxy_on_*` export at each declared phase (WASM) or the
+    /// `NativeFilter` trait method (native).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<PluginPhase>,
     /// Plugin-specific configuration, passed to the plugin's
-    /// `proxy_on_configure` as a byte string. Typically a JSON or YAML
-    /// blob the plugin parses itself.
+    /// `proxy_on_configure` as a byte string (WASM) or to the native
+    /// filter's factory (native). Typically a JSON or YAML blob the
+    /// plugin parses itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
     /// Resource limits for this plugin (fuel, memory, time). Absent
-    /// uses the defaults: 1M fuel, 32MB memory, 100ms timeout.
+    /// uses the defaults: 1M fuel, 32MB memory, 100ms timeout. Only
+    /// meaningful for WASM plugins (native filters run in-process and
+    /// are bounded by the gateway's own resource limits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<PluginLimitsConfig>,
 }
 
 /// The phases a plugin can hook (DW-055, §9.3 phase contract).
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    std::hash::Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPhase {

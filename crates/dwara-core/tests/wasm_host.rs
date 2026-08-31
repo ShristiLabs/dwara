@@ -460,7 +460,8 @@ limits:
 "#;
     let config: PluginConfig = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(config.name, "my-filter");
-    assert_eq!(config.wasm, "/opt/plugins/my-filter.wasm");
+    assert_eq!(config.wasm.as_deref(), Some("/opt/plugins/my-filter.wasm"));
+    assert_eq!(config.native, None);
     assert_eq!(config.phases.len(), 2);
     assert_eq!(config.phases[0], PluginPhase::RequestHeaders);
     assert_eq!(config.phases[1], PluginPhase::ResponseHeaders);

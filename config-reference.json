@@ -2334,18 +2334,18 @@
       ]
     },
     "PluginConfig": {
-      "description": "A proxy-wasm plugin definition (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases it\ndeclares. Routes reference plugins by name.",
+      "description": "A plugin definition (DW-055 / DW-119). Each plugin is either a\nproxy-wasm `.wasm` module loaded at startup (`wasm`) or a compiled-in\nnative Rust filter (`native`), run on the request pipeline phases it\ndeclares. Routes reference plugins by name. Exactly one of `wasm` or\n`native` must be set (validation enforces this).",
       "type": "object",
       "properties": {
         "config": {
-          "description": "Plugin-specific configuration, passed to the plugin's\n`proxy_on_configure` as a byte string. Typically a JSON or YAML\nblob the plugin parses itself.",
+          "description": "Plugin-specific configuration, passed to the plugin's\n`proxy_on_configure` as a byte string (WASM) or to the native\nfilter's factory (native). Typically a JSON or YAML blob the\nplugin parses itself.",
           "type": [
             "string",
             "null"
           ]
         },
         "limits": {
-          "description": "Resource limits for this plugin (fuel, memory, time). Absent\nuses the defaults: 1M fuel, 32MB memory, 100ms timeout.",
+          "description": "Resource limits for this plugin (fuel, memory, time). Absent\nuses the defaults: 1M fuel, 32MB memory, 100ms timeout. Only\nmeaningful for WASM plugins (native filters run in-process and\nare bounded by the gateway's own resource limits).",
           "anyOf": [
             {
               "$ref": "#/$defs/PluginLimitsConfig"
@@ -2359,22 +2359,31 @@
           "description": "Unique plugin name. Referenced by routes' `plugins` field.",
           "type": "string"
         },
+        "native": {
+          "description": "Registered native filter implementation name (DW-119). The\n`plugins` cargo feature must be enabled and a factory registered\nunder this name at startup. Mutually exclusive with `wasm`;\nexactly one of the two must be set. Absent when this is a WASM\nplugin.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "phases": {
-          "description": "Phases this plugin hooks. Must be a non-empty subset of:\n`request_headers`, `request_body`, `response_headers`,\n`response_body`. The host calls the plugin's corresponding\n`proxy_on_*` export at each declared phase.",
+          "description": "Phases this plugin hooks. Must be a non-empty subset of:\n`request_headers`, `request_body`, `response_headers`,\n`response_body`. The host calls the plugin's corresponding\n`proxy_on_*` export at each declared phase (WASM) or the\n`NativeFilter` trait method (native).",
           "type": "array",
           "items": {
             "$ref": "#/$defs/PluginPhase"
           }
         },
         "wasm": {
-          "description": "Path to the .wasm module file. Must be readable at startup.",
-          "type": "string"
+          "description": "Path to the .wasm module file. Must be readable at startup.\nMutually exclusive with `native`; exactly one of the two must be\nset. Absent when this is a native filter.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "wasm"
+        "name"
       ]
     },
     "PluginLimitsConfig": {

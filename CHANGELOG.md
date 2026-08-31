@@ -9,6 +9,29 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Native plugin filter trait + unified dispatch chain (DW-119): a
+  compile-in `tower::Layer`-style extension trait (`NativeFilter`) for
+  filters written in Rust and linked into the binary at build time --
+  the convenience/performance path, explicitly NOT the portability ABI
+  (DW-055's proxy-wasm host). A native filter and a WASM plugin occupy
+  the same phase slot on the same route, selected by config, with no
+  dataplane-visible difference in attachment semantics. The `plugins`
+  domain provides `NativeFilter` (dyn-compatible trait mirroring the
+  WASM runner's phase methods), `FilterOutcome` (Continue/LocalResponse/
+  Error, mirroring `PhaseOutcome`), `LocalResponse` (the shared
+  short-circuit shape), `NativeRegistry` (implementation name -> factory,
+  dependency-free, `Send + Sync`), `PluginChain` (the unified per-request
+  dispatch chain combining native filters and WASM instances in
+  deterministic phase order), and `WasmDispatch`/`NoWasm` (the generic
+  WASM adapter interface so `plugins` never imports `wasm`). The `wasm`
+  domain provides `WasmChainAdapter` (gated behind `wasm` + `plugins`)
+  bridging `PluginInstances` into the unified chain. Config: `PluginConfig`
+  gains an optional `native: <name>` field and `wasm` becomes
+  `Option<String>` (mutually exclusive; validation enforces exactly one).
+  Feature-gated behind the new `plugins` cargo feature (default OFF).
+  Dependency direction: `plugins` depends on `config` only; `wasm`
+  depends on `config` + `plugins` (downward only, enforced by
+  `scripts/check_deps.py`).
 - Cluster sync GA (Ent) (DW-074): hardened convergence for the CP/DP
   split control plane -- conflict resolution, split-brain guards,
   version skew tolerance (section 5-Platform). Feature-gated behind
