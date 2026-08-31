@@ -1232,6 +1232,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dwara-console"
+version = "0.1.0"
+
+[[package]]
 name = "dwara-core"
 version = "0.1.0"
 dependencies = [

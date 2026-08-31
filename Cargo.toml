@@ -5,6 +5,7 @@ members = [
     "crates/dwara-bin",
     "crates/dwara-admin",
     "crates/dwara-cli",
+    "crates/dwara-console",
 ]
 
 [workspace.package]

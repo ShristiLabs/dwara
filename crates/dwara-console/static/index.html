@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>dwara console</title>
+  <link rel="stylesheet" href="/console/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <h1>dwara</h1>
+    <nav id="nav">
+      <button data-view="overview" class="nav-btn active">Overview</button>
+      <button data-view="routes" class="nav-btn">Routes</button>
+      <button data-view="upstreams" class="nav-btn">Upstreams</button>
+      <button data-view="health" class="nav-btn">Health</button>
+      <button data-view="analytics" class="nav-btn">Analytics</button>
+      <button data-view="config" class="nav-btn">Config</button>
+    </nav>
+    <div id="status-badge">connecting...</div>
+  </header>
+
+  <main id="content">
+    <div id="loading">Loading...</div>
+  </main>
+
+  <footer id="footer">
+    <span>dwara console v1 (read-only)</span>
+    <span id="last-refresh"></span>
+  </footer>
+
+  <script src="/console/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[package]
+name = "dwara-console"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "dwara web console v1 (read-only, OSS) -- a static SPA served from the mTLS admin listener"
+publish = false
+
+[dependencies]

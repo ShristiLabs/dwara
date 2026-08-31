@@ -9,6 +9,23 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Web console v1 (read-only, OSS) (DW-117): the `dwara-console` crate
+  provides a static SPA served from the mTLS admin listener at
+  `/console/`. The SPA is embedded at compile time via
+  `include_str!`/`include_bytes!` (no runtime file system
+  dependency, no external crate needed). Views: Overview (gateway
+  status, active requests, uptime, config epoch, route/listener
+  counts), Routes (route table: name, path, service, methods),
+  Upstreams (upstream/service health table: service, address, health,
+  requests, errors), Health (raw health JSON), Analytics (Top-N),
+  Config (current config YAML dump). The SPA fetches from the admin
+  API endpoints (/health, /stats, /config, /config_dump,
+  /analytics/top) on the same origin. Auto-refreshes every 5 seconds.
+  Read-only: no PATCH/POST/PUT/DELETE. Dark theme. No dataplane deps
+  (SPA is static). The API provides `resolve(path)` (resolve a
+  console path to a StaticFile), `is_console_path(path)` (check if a
+  path is a console path), `file_paths()` (list embedded file paths),
+  and `FILE_COUNT` (number of embedded files).
 - Agent-operable administration via MCP (DW-112): the `mcp` cargo
   feature exposes the admin API as an MCP (Model Context Protocol)
   server with tools for route/service/policy CRUD, stats, and
