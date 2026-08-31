@@ -262,6 +262,10 @@ export default withMermaid(
               items: [
                 { text: "Overview", link: "/guide/enterprise" },
                 {
+                  text: "Editions: OSS vs Enterprise",
+                  link: "/guide/editions",
+                },
+                {
                   text: "Enterprise licensing",
                   link: "/guide/licensing",
                 },

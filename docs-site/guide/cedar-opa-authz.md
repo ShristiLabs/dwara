@@ -9,8 +9,10 @@ Dwara supports two external policy engines for authorization:
   a general-purpose policy engine with Rego policies, queried over
   HTTP.
 
-Both are feature-gated enterprise extensions that complement the
-built-in authz (consumer/route/service policies).
+Both are compile-time feature packs (default OFF, no license) that
+complement the built-in authz (consumer/route/service policies). See
+[Editions: OSS vs Enterprise](./editions) for how feature packs differ
+from enterprise features.
 
 ## When to use this
 
@@ -28,10 +30,10 @@ that.
 
 ## Enabling
 
-Cedar and OPA support are feature-gated. Build with the `ent` feature:
+Cedar and OPA support are feature-gated. Build with the `cedar` feature:
 
 ```sh
-cargo build --features ent
+cargo build --features cedar
 ```
 
 ## Cedar

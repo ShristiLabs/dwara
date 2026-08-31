@@ -7,7 +7,33 @@ rules, implementation rationale), see the
 [developer documentation](https://github.com/shristilabs/dwara/tree/main/docs)
 in the repository.
 
-## Components
+## Editions at a glance
+
+Dwara ships in two editions from one codebase:
+
+- The **OSS edition** (the default build, Apache-2.0) is a single,
+  self-contained gateway binary. One process owns routing, policy,
+  TLS, and its own config file — everything needed to run a gateway,
+  including a fleet of independent instances behind one load balancer.
+- The **Enterprise edition** (built with the `ent` cargo feature and
+  activated by a license) adds the features that span *multiple*
+  instances or need external infrastructure: a control plane / data
+  plane split, shared Redis-backed rate limiting and caching, config
+  convergence across a fleet, Vault/KMS secrets, multi-tenant
+  workspaces with RBAC and audit, and external policy engines.
+
+The request path is identical in both editions — enterprise features
+extend how instances are *managed* and *coordinated*, never how a
+request is proxied. See
+[Editions: OSS vs Enterprise](../guide/editions) for the complete
+feature-by-feature comparison and how the license gate works.
+
+## Software components
+
+### The OSS gateway: one process
+
+The default deployment is a single `dwara` process in *embedded mode*:
+data plane, admin surface, and state all live in one binary.
 
 ```mermaid
 flowchart LR
@@ -18,23 +44,83 @@ flowchart LR
         Admin[Admin listener\nmTLS-only, opt-in] <--> Snapshot
         Reload[File watcher / SIGHUP] --> Snapshot
         Store[(SQLite state store\noptional)] <--> Dataplane
+        Analytics[(Embedded analytics\noptional)] <--> Dataplane
     end
     Dataplane -->|load balanced| Upstream1[Upstream endpoint]
     Dataplane -->|load balanced| Upstream2[Upstream endpoint]
 ```
 
-- **Listeners** accept connections and either terminate TLS (per-SNI
-  certificates) or splice a TLS-passthrough connection straight to an
-  upstream.
-- The **dataplane** resolves a route, applies policy, and proxies to an
-  upstream endpoint.
-- All of that runs against an immutable, atomically-swapped
-  **Snapshot** — routes, upstream pools, TLS material, and auth state
-  all swap together on a successful config publish.
-- The **admin listener** is a separate, optional, mTLS-only surface for
-  inspecting and patching the live config (see [Admin API](../guide/admin-api)).
-- An optional **SQLite state store** persists things like stored
-  credentials across restarts.
+| Component | What it is | Notes |
+|---|---|---|
+| `dwara` | The gateway binary | Listeners, dataplane, snapshot, admin listener in one process |
+| Listeners | Connection acceptors | TLS terminate (per-SNI certificates) or SNI-passthrough splice |
+| Dataplane | The proxy engine | Route resolution, policy chain, streaming proxy — buffers nothing by default |
+| Snapshot | Immutable config state | Routes, upstream pools, TLS material, and auth state swap atomically behind an `ArcSwap` |
+| Admin listener | mTLS-only management surface | Optional; `GET`/`PATCH /config`, `/health`, `/stats` |
+| SQLite state store | Durable identity state | Optional; stored consumers, credentials, quota counters |
+| Embedded analytics | Request records + rollups | Optional; its own SQLite file, bounded disk |
+| `dwara` CLI | Operator tooling | `validate`, `fmt`, `diff`, `lint`, `schema`, `import`, `upgrade` — plus the `dwara-loadgen` load-generator rig |
+
+An OSS fleet is simply N independent `dwara` processes with the same
+config file (or one per team/service). Nothing coordinates them — that
+is what the enterprise edition adds.
+
+### The Enterprise topology: control plane + data planes
+
+With the `ent` feature, two more binaries are compiled and the
+topology gains a management layer:
+
+```mermaid
+flowchart TB
+    Op[Operator] -->|config| CTL
+    subgraph CP [Control plane -- ent]
+        CTL[dwara-controller\nleader-elected] -->|gRPC stream\nconfig generations| EDGES
+        LIC[License gate\nEd25519-verified] -.activates.-> CTL
+    end
+    subgraph Fleet [Data plane fleet]
+        EDGES[dwara-edge 1..N\ncaches last generation]
+        EDGEA[embedded dwara\noptional, same pipeline]
+    end
+    Redis[(Redis\nshared rate-limit buckets,\ndistributed cache, convergence)]
+    CTL <--> Redis
+    EDGES <--> Redis
+    EDGES --> Upstream[Upstreams]
+    EDGEA --> Upstream
+```
+
+| Component | Edition | Role |
+|---|---|---|
+| `dwara-controller` | Enterprise | The control plane: watches config sources, compiles generations, pushes them to edges over a gRPC stream (xDS-inspired). Multiple controllers run HA with leader election |
+| `dwara-edge` | Enterprise | A data-plane instance that subscribes to the controller's stream and applies config updates without restart. Caches the last received generation, so the fleet keeps serving through a controller outage |
+| License gate | Enterprise | Verifies the signed license at startup and activates enterprise features per claim; a degraded license falls back to OSS behavior |
+| Redis backend | Enterprise | Shared GCRA rate-limit buckets, the two-tier distributed cache, and config-convergence generation state |
+| `dwara` (embedded) | Both | The embedded mode remains first-class in enterprise builds — the controller and an embedded gateway run the *same* compile-and-publish pipeline, just without the gRPC transport |
+
+The key property: an edge applies a config generation through the same
+`validate -> compile -> atomic publish` pipeline as an embedded
+gateway, so behavior is identical whether config arrives from a file,
+the admin API, or the controller's stream.
+
+### Compile-time feature packs
+
+Both editions keep heavy optional features behind cargo feature flags
+(default OFF) so the base binary stays small. These are OSS — no
+license involved:
+
+| Flag | Adds |
+|---|---|
+| `wasm` | proxy-wasm host (run community Kong/Envoy filters unmodified) |
+| `plugins` | native Rust filter chain (compile-in extensions) |
+| `cel` | CEL expression evaluation in policies |
+| `cedar` | Cedar policy + OPA callout authorization |
+| `openapi_validation` | upstream response validation against OpenAPI schemas |
+| `k8s` | Kubernetes Gateway API / Ingress translation and controller |
+| `aggregation` | multi-upstream response composition (KrakenD-style) |
+| `mcp` | agent-operable administration via MCP |
+
+See [Editions: OSS vs Enterprise](../guide/editions) for the full
+matrix, including which optional packs belong to which edition and how
+each is gated.
 
 ## Request pipeline
 
@@ -114,6 +200,11 @@ paired with stale upstream pools. See [Operations](../guide/operations)
 for the full mechanics (debouncing, `SIGHUP`, certificate rotation,
 listener-bind-set limitations).
 
+In the enterprise topology the same pipeline runs on the controller,
+and a successful publish becomes a generation pushed to every edge; an
+edge that fails to compile a generation keeps serving its cached one
+and reports the failure back.
+
 ## TLS: terminate vs. passthrough
 
 ```mermaid
@@ -136,6 +227,8 @@ original, untouched TLS session.
 
 ## Where to go next
 
+- [Editions: OSS vs Enterprise](../guide/editions) — which features
+  ship in which edition and how the license gate works.
 - [Getting started](../guide/getting-started) — run a gateway locally.
 - [Configuration](../guide/configuration) — the YAML shape and concepts.
 - [Operations](../guide/operations) — reload, shutdown, health, hardening.
