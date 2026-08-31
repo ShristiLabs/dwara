@@ -9,6 +9,29 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Kubernetes Gateway API controller + Ingress controller (DW-064): a
+  kube-rs based controller that reconciles Gateway API v1 resources
+  (Gateway, HTTPRoute, GatewayClass) and standard Ingress/IngressClass
+  resources into dwara's config model. The translator covers the
+  standard-channel v1.5 feature set: path matches (Exact/PathPrefix/
+  RegularExpression), header matches (Exact), query param matches
+  (Exact), HTTPRoute filters (RequestRedirect, RequestHeaderModifier,
+  ResponseHeaderModifier, URLRewrite), TLS modes (Terminate/Passthrough/
+  Reencrypt), multiple matches per rule, hostname matching, and backend
+  port by number. The Ingress translator maps Ingress rules, TLS, and
+  defaultBackend with unsupported-annotation warnings. The Reconciler
+  (pure core, testable without a cluster) computes GatewayClass
+  acceptance, Gateway status (Accepted/Programmed), and HTTPRoute status
+  (Accepted/ResolvedRefs). The Controller (kube-rs) sets up watchers and
+  publishes config via file-write. A `dwara-k8s-controller` binary
+  (feature-gated behind `k8s`) runs the controller. A `dwara k8s
+  conformance-report` CLI subcommand emits the upstream conformance
+  report YAML. New dependencies: kube-rs 4.2.0 (Apache-2.0, allow-listed)
+  and k8s-openapi 0.28.0 (Apache-2.0 OR MIT, allow-listed), both
+  feature-gated behind the `k8s` cargo feature (default OFF). Deployment
+  manifests in deploy/k8s/ (namespace, RBAC, GatewayClass, ConfigMap,
+  Deployment). Conformance self-test suite (20 tests) + controller
+  Reconciler tests (8 tests), all deterministic and cluster-free.
 - Terraform-compatible state tool (DW-065): a `dwara tf` CLI subcommand
   that exports/imports Terraform-compatible JSON state and generates
   HCL, performing plan/apply round-trips directly over the admin API.

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dwara-system
+  labels:
+    app.kubernetes.io/name: dwara
+    app.kubernetes.io/part-of: dwara
