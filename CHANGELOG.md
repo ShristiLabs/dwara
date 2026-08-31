@@ -9,6 +9,17 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- NGINX config import (DW-065): `dwara import nginx <config>` reads
+  an NGINX config file and generates a Dwara config YAML with routes
+  derived from the NGINX `location` blocks. This is a switching-cost
+  lever for teams migrating off NGINX. Supported: `server` blocks
+  with `listen`/`server_name`, `location` blocks with `proxy_pass`,
+  location match modifiers (exact `=`, prefix, regex `~`/`~*`), and
+  `upstream` blocks with `server` directives. Unsupported constructs
+  (rewrite, auth_basic, limit_req, try_files, if, custom modules,
+  etc.) are reported as warnings in the generated config so the
+  operator knows what to review manually. The generated config
+  round-trips through `dwara validate`.
 - Synthetic monitoring (DW-071): built-in probes per route that
   measure latency and uptime, feeding results into analytics and
   webhooks. Each route can have a synthetic probe configured: a

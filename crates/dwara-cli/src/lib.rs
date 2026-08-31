@@ -23,6 +23,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod import;
+// DW-065: NGINX config import (migration lever).
+pub mod import_nginx;
 pub mod loadgen;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};

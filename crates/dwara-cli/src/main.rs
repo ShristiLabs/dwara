@@ -24,6 +24,10 @@
 //! - `import openapi <spec> [--output dwara.yaml]` — read an OpenAPI
 //!   3.x spec (YAML or JSON) and generate a Dwara config with routes
 //!   derived from the spec's paths and methods (DW-047).
+//! - `import nginx <config> [--output dwara.yaml]` — read an NGINX
+//!   config and generate a Dwara config with routes derived from the
+//!   NGINX location blocks (DW-065). Unsupported constructs are
+//!   reported as warnings in the generated config.
 //! - `upgrade [--pid <N> | --pid-file <path>]` — send SIGUSR2 to a
 //!   running gateway to trigger a zero-downtime binary upgrade (DW-049).
 //!   The PID is read from `--pid` or from the PID file (`--pid-file` or
@@ -95,6 +99,14 @@ enum ImportKind {
     Openapi {
         /// Path to the OpenAPI spec (.yaml, .yml, or .json).
         spec: String,
+        /// Output path for the generated Dwara config (default: dwara.yaml).
+        #[arg(long, default_value = "dwara.yaml")]
+        output: String,
+    },
+    /// Import an NGINX config and generate a Dwara config (DW-065).
+    Nginx {
+        /// Path to the NGINX config file.
+        config: String,
         /// Output path for the generated Dwara config (default: dwara.yaml).
         #[arg(long, default_value = "dwara.yaml")]
         output: String,
@@ -260,6 +272,31 @@ fn main() {
                         }
                     }
                 }
+            },
+            ImportKind::Nginx { config, output } => match read(&config) {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok(text) => match dwara_cli::import_nginx::import_nginx(&text) {
+                    Ok(result) => match write_atomic(&output, &result.yaml) {
+                        Ok(()) => {
+                            println!(
+                                "imported {} routes from {} -> {}",
+                                result.route_count, config, output
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            1
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
             },
         },
         Command::Upgrade { pid, pid_file } => run_upgrade(pid, pid_file),
