@@ -9,6 +9,17 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Plugin lifecycle (DW-056): the `wasm` cargo feature enables plugin
+  lifecycle management: loading from config (path + checksums),
+  hot-swap on reload (recompiles only changed plugins), config schema
+  validation, and failure isolation. The API provides `PluginLifecycle`
+  (the lifecycle manager: tracks loaded plugins, their health, and
+  which routes use them), `PluginHealth` (Healthy/Crashed/Disabled),
+  `LoadedPlugin` (config + checksum + health), `LoadError` and
+  `ValidationError` (typed errors), and `phase_order` (deterministic
+  phase ordering, not load-order-dependent). A crashed plugin returns
+  500 on affected routes only, never gateway-wide. Default OFF; build
+  with `cargo build --features wasm`.
 - CP/DP split (DW-066, Enterprise): the `ent` cargo feature enables
   the control plane / data plane split architecture. The API provides
   `ControllerState` (the control plane state: tracks edges, config

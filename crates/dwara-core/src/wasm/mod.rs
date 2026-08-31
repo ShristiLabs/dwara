@@ -44,6 +44,7 @@
 
 pub mod abi;
 pub mod host;
+pub mod lifecycle;
 pub mod runner;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};
@@ -51,4 +52,5 @@ pub use host::{
     LocalResponse, PhaseResult, PluginContext, PluginInstance, PluginLimits, PluginMetric,
     PluginMetricType, PluginModule, WasmEngine,
 };
+pub use lifecycle::{LoadError, LoadedPlugin, PluginHealth, PluginLifecycle, ValidationError};
 pub use runner::{PhaseOutcome, PluginInstances, PluginRunner};
