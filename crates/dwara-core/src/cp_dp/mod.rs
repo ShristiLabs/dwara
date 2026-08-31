@@ -47,6 +47,13 @@ use serde::{Deserialize, Serialize};
 // resolution, split-brain guards, version skew tolerance). Builds on
 // this module's CP/DP split types.
 pub mod cluster_sync;
+// DW-066: gRPC transport (tonic-based streaming) for the CP/DP split.
+// Hand-written prost messages + a custom Codec (no protoc/build-script
+// dependency). Feature-gated behind `ent` (the tonic/prost deps are
+// optional and only compiled in with the `ent` feature).
+pub mod controller;
+pub mod edge;
+pub mod transport;
 
 // ---------------------------------------------------------------------------
 // Protocol types (xDS-inspired)

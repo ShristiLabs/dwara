@@ -71,6 +71,12 @@ ALLOWED = {
     # config only (the translator maps K8s resources to dwara config types;
     # the kube-rs controller wiring is feature-gated behind `k8s`).
     "k8s_gateway": {"config"},
+    # DW-066: CP/DP split (Enterprise). The core state machine and
+    # protocol types depend on nothing (they are pure domain types).
+    # The controller watch loop compiles configs via snapshot, so the
+    # domain may depend on config and snapshot. The gRPC transport
+    # (tonic) is feature-gated behind `ent`.
+    "cp_dp": {"config", "snapshot"},
     "dataplane": {
         "config",
         "extensions",

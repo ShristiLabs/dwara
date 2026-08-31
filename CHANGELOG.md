@@ -9,6 +9,28 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- CP/DP split gRPC transport (DW-066, Enterprise): a tonic-based gRPC
+  transport for the control plane / data plane split. The
+  `ControllerServer` implements the `DwaraControlPlane` service: edges
+  register via server-streaming `StreamConfigUpdates` and receive config
+  updates; edges ack applied generations via unary `Ack`. A broadcast
+  channel fans out updates to all connected edges; each edge's stream
+  filters by `target_edges`. The `EdgeClient` connects to the controller,
+  registers, receives updates, and sends acks, with bounded backoff
+  reconnect on CP outage. The `ControllerRuntime` runs the gRPC server +
+  a config-source file watch loop (compiles configs via the snapshot
+  pipeline on change, publishes new generations, broadcasts to edges).
+  The `EdgeRuntime` caches received configs, applies them (writes to a
+  local config file the gateway file-watcher picks up), and survives CP
+  outage by serving from cache. Hand-written prost wire messages + a
+  custom `ProstCodec` (no protoc/build-script dependency; uses the
+  workspace prost 0.14, not tonic's prost 0.13). New dependencies:
+  tonic 0.12.3 (MIT, allow-listed) and tokio-stream 0.1 (MIT), both
+  feature-gated behind the `ent` cargo feature (default OFF). Two new
+  binaries: `dwara-controller` and `dwara-edge` (feature-gated behind
+  `ent`). Integration tests (4 tests): rolling edge fleet update, edge
+  survives CP outage, older generation rejected, targeted update -- all
+  deterministic (ephemeral ports, bounded polls, 3x re-runs).
 - Kubernetes Gateway API controller + Ingress controller (DW-064): a
   kube-rs based controller that reconciles Gateway API v1 resources
   (Gateway, HTTPRoute, GatewayClass) and standard Ingress/IngressClass

@@ -49,6 +49,11 @@ libc = { workspace = true }
 # are compiled. Default OFF: kube-rs + k8s-openapi add significant binary
 # size. Build with `cargo build --features k8s`.
 k8s = ["dwara-core/k8s"]
+# DW-066: CP/DP split (Enterprise). When enabled, the
+# `dwara-controller` and `dwara-edge` binaries are compiled. Default
+# OFF: tonic + prost add binary size. Build with
+# `cargo build --features ent`.
+ent = ["dwara-core/ent"]
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]
@@ -61,3 +66,17 @@ path = "src/bin/loadgen.rs"
 name = "dwara-k8s-controller"
 path = "src/bin/k8s_controller.rs"
 required-features = ["k8s"]
+
+# DW-066: CP/DP split controller binary (Enterprise). Feature-gated
+# behind the `ent` feature so the default build never pulls in tonic.
+[[bin]]
+name = "dwara-controller"
+path = "src/bin/dwara_controller.rs"
+required-features = ["ent"]
+
+# DW-066: CP/DP split edge binary (Enterprise). Feature-gated behind
+# the `ent` feature so the default build never pulls in tonic.
+[[bin]]
+name = "dwara-edge"
+path = "src/bin/dwara_edge.rs"
+required-features = ["ent"]

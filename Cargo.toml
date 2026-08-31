@@ -257,6 +257,23 @@ kube = { version = "4.0", default-features = false, features = [
     "derive",
 ] }
 k8s-openapi = { version = "0.28", default-features = false }
+# DW-066: gRPC transport for the CP/DP split (ent feature only). tonic is
+# MIT (allow-listed in deny.toml). Feature-gated behind the `ent` feature
+# on dwara-core so OSS builds never pull it in. Version 0.12.3 published
+# 2025-02-07, well-vetted. default-features = false + ["transport",
+# "codegen"] avoids pulling in tonic's prost 0.13 (we use the workspace
+# prost 0.14 for hand-written messages via a custom Codec impl -- no
+# protoc/build-script dependency). TLS is optional (tls-* features off by
+# default); plaintext gRPC for the dev/test path, mTLS documented as
+# follow-up.
+tonic = { version = "0.12", default-features = false, features = [
+    "transport",
+    "codegen",
+] }
+# DW-066: tokio-stream for wrapping mpsc receivers as Stream items in the
+# CP/DP gRPC server-streaming transport (ent feature only). Already pulled
+# in transitively by tonic; this makes it a direct dep. MIT.
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [profile.release]
 lto = true
