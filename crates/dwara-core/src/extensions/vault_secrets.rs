@@ -202,8 +202,7 @@ pub trait KmsProvider: Send + Sync {
 
 /// The decryption function signature for [`MockKmsProvider`]:
 /// (key_id, ciphertext) -> plaintext.
-pub type KmsDecryptFn =
-    Box<dyn Fn(&str, &[u8]) -> Result<String, ExtensionsError> + Send + Sync>;
+pub type KmsDecryptFn = Box<dyn Fn(&str, &[u8]) -> Result<String, ExtensionsError> + Send + Sync>;
 
 /// A mock KMS provider for testing.
 pub struct MockKmsProvider {
