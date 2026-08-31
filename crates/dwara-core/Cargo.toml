@@ -137,6 +137,12 @@ cedar = ["dep:cedar-policy"]
 # jsonschema adds binary size. Build with
 # `cargo build --features openapi_validation`.
 openapi_validation = ["dep:jsonschema"]
+# DW-067: Workspaces + RBAC + audit (Enterprise). When enabled, the
+# gateway supports tenant namespaces (workspaces), admin RBAC roles,
+# and immutable audit log shipping. Default OFF: this is an
+# Enterprise feature. Build with
+# `cargo build --features enterprise`.
+enterprise = []
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

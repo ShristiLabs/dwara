@@ -9,6 +9,22 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Workspaces + RBAC + audit (DW-067, Enterprise): the `enterprise`
+  cargo feature enables tenant namespaces (workspaces), admin RBAC
+  roles, and immutable audit log shipping. The API provides
+  `WorkspaceManager` (the coordinator holding workspaces, roles,
+  principals, and the audit log), `Workspace` (a tenant namespace
+  with name/description/active), `Role` (a named set of permissions),
+  `Permission` (an action on a workspace, with "*" for all),
+  `Principal` (an authenticated admin API caller with assigned roles),
+  `Action` (Read/Write/Admin with implication hierarchy:
+  Admin > Write > Read), and `AuditEntry` (a single audit log record:
+  seq, timestamp, principal, action, workspace, before/after state,
+  request_id). Cross-workspace access is denied by default. The
+  audit log is append-only/immutable with monotonically assigned
+  sequence numbers. The default workspace ("default") always exists
+  and cannot be deleted. Default OFF; build with
+  `cargo build --features enterprise`.
 - NGINX config import (DW-065): `dwara import nginx <config>` reads
   an NGINX config file and generates a Dwara config YAML with routes
   derived from the NGINX `location` blocks. This is a switching-cost

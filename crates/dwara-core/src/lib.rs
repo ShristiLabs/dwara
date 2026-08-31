@@ -79,6 +79,10 @@ pub mod supervision;
 // measure latency and uptime, feeding results into analytics and
 // webhooks.
 pub mod synthetic;
+// DW-067: Workspaces + RBAC + audit (Enterprise). Feature-gated
+// behind the `enterprise` cargo feature (default OFF).
+#[cfg(feature = "enterprise")]
+pub mod workspace;
 // DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
 // feature (default OFF) because wasmtime + cranelift are significant
 // binary size against the DW-026 25MB budget.
