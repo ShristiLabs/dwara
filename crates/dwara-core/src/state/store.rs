@@ -1233,6 +1233,9 @@ fn credential_parts(
     }
 }
 
+// White-box tests staying in src/ per AGENTS.md: these tests perform
+// raw-SQL introspection of the store's connection and exercise private
+// helpers that are not reachable through the public API.
 #[cfg(test)]
 mod tests {
     use super::*;

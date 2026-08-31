@@ -5743,6 +5743,8 @@ fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
 // --- with validation and the authorization ACLs); the dataplane consumes
 // --- it for the forwarded-header trust rule above. -------------------------
 
+// White-box test staying in src/ per AGENTS.md: exercises private proxy
+// internals that are not reachable through the public API.
 #[cfg(test)]
 mod tests {
     use super::*;

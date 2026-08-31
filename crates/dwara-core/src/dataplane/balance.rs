@@ -853,6 +853,10 @@ impl Dispatch {
     }
 }
 
+// White-box tests staying in src/ per AGENTS.md: these tests inspect
+// private balancer internals (`build_state`, `LbState` fields,
+// `effective_weight`) that are not reachable through the public API.
+// The public-surface load-balancing tests live in tests/unit/balance.rs.
 #[cfg(test)]
 mod tests {
     use super::*;

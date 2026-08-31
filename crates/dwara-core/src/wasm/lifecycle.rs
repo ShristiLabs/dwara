@@ -414,6 +414,10 @@ fn sha256_hex(data: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+// White-box tests staying in src/ per AGENTS.md: these tests directly
+// manipulate the private `plugins` map and call the private `sha256_hex`
+// helper, which the public API (`load`, `register_route`) does not
+// expose without a real WASM runtime.
 #[cfg(test)]
 mod tests {
     use super::*;

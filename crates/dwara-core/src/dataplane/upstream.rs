@@ -1552,6 +1552,8 @@ pub fn refresh_observation_gauges(registry: &UpstreamRegistry, obs: &Observabili
     }
 }
 
+// White-box test staying in src/ per AGENTS.md: exercises private
+// upstream client internals not reachable through the public API.
 #[cfg(test)]
 mod tests {
     use super::*;

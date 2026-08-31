@@ -391,6 +391,11 @@ pub fn current_usage(
     out
 }
 
+// White-box tests staying in src/ per AGENTS.md: the calendar-arithmetic
+// helpers (`days_from_civil`, `civil_from_days`, `SECS_PER_DAY`,
+// `retry_after`) are private and cannot be exercised through the public
+// API. The end-to-end `check`/`current_usage` tests use these private
+// helpers to construct exact epoch values for deterministic assertions.
 #[cfg(test)]
 mod tests {
     use super::*;

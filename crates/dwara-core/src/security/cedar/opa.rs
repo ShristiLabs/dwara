@@ -299,6 +299,10 @@ fn parse_url(url: &str) -> Result<(String, u16, String), OpaError> {
     Ok((host, port, path.to_string()))
 }
 
+// White-box tests staying in src/ per AGENTS.md: these tests populate
+// the private `cache` field and call the private `cache_key` method
+// and construct `CachedDecision` directly, none of which are reachable
+// through the public API.
 #[cfg(test)]
 mod tests {
     use super::*;

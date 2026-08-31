@@ -319,6 +319,10 @@ pub(crate) fn write_pid_file(path: &std::path::Path, pid: u32) -> io::Result<()>
     Ok(())
 }
 
+// White-box tests staying in src/ per AGENTS.md: these tests call
+// `pub(crate)` helpers (`bind_with_reuse_port`, `await_ready`,
+// `READY_FRAME`) that are not reachable from the binary crate's
+// `tests/` directory.
 #[cfg(test)]
 mod tests {
     use super::*;
