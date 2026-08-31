@@ -68,7 +68,7 @@ jobs:
           - fuzz_cookies_query
           - fuzz_cidr
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pinned: v5 @ fbc6f399
 
       - name: Install pinned nightly + cargo-fuzz
         run: |
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pinned: v5 @ fbc6f399
 
       - name: Run loom tests
         run: cargo test -p dwara-core --features loom --test loom
