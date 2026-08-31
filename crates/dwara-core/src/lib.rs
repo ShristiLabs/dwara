@@ -79,6 +79,10 @@ pub mod supervision;
 // measure latency and uptime, feeding results into analytics and
 // webhooks.
 pub mod synthetic;
+// DW-061: API aggregation plugin pack. Feature-gated behind the
+// `aggregation` cargo feature (default OFF).
+#[cfg(feature = "aggregation")]
+pub mod aggregation;
 // DW-067: Workspaces + RBAC + audit (Enterprise). Feature-gated
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]

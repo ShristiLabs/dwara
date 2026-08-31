@@ -144,6 +144,13 @@ openapi_validation = ["dep:jsonschema"]
 # (kube-rs, informers) is a separate effort. Build with
 # `cargo build --features k8s`.
 k8s = []
+# DW-061: API aggregation plugin pack. When enabled, the gateway can
+# compose responses from multiple upstreams (KrakenD-style) with
+# JSONPath fragment shaping and per-fragment fail-open/closed.
+# Default OFF: aggregation buffers bodies (explicit size caps), which
+# is an extension cost, never a tax on the zero-buffering proxy path.
+# Build with `cargo build --features aggregation`.
+aggregation = []
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

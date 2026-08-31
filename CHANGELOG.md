@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- API aggregation plugin pack (DW-061): the `aggregation` cargo
+  feature enables KrakenD-style multi-upstream composition with
+  JSONPath fragment shaping and per-fragment fail-open/closed. The
+  API provides `AggregationSpec` (an aggregation endpoint spec:
+  name, fragments, max response size), `FragmentSpec` (a single
+  fragment: service, path, method, JSONPath, target field, fail
+  policy, max fragment size), `FailPolicy` (FailOpen/FailClosed),
+  `FragmentResult` (Ok/Error per fragment), `ComposeResult`
+  (Ok with response+warnings / Error with partial), `compose` (the
+  pure composition step), `extract_jsonpath` (simplified JSONPath:
+  root, field access, nested fields, array index), `shape_fragment`
+  (extract using JSONPath or return as-is), `make_fragment_result`
+  (parse + shape + size-check), `make_error_fragment_result` (for
+  upstream fetch failures), and `validate_spec` (spec validation).
+  Constraint (decision 10, section 12.1): the core dataplane never
+  buffers full bodies -- only this plugin's own fragment transforms,
+  with explicit size caps, touch bodies. Default OFF; build with
+  `cargo build --features aggregation`.
 - CEL everywhere (DW-059): the `cel` cargo feature now provides one
   CEL surface across four use-sites, following the APISIX `expr`/Kong
   expressions-router precedent of a single expression language rather
