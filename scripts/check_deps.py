@@ -67,6 +67,10 @@ ALLOWED = {
     # DW-055: proxy-wasm host. Depends on config (plugin config types)
     # and plugins (the wasm adapter implements plugins::WasmDispatch).
     "wasm": {"config", "plugins"},
+    # DW-064: Kubernetes Gateway API translator + controller. Depends on
+    # config only (the translator maps K8s resources to dwara config types;
+    # the kube-rs controller wiring is feature-gated behind `k8s`).
+    "k8s_gateway": {"config"},
     "dataplane": {
         "config",
         "extensions",
@@ -82,7 +86,7 @@ ALLOWED = {
     },
 }
 
-USE_RE = re.compile(r"crate::([a-z_]+)")
+USE_RE = re.compile(r"crate::([a-z_][a-z0-9_]*)")
 
 violations = []
 src = Path(sys.argv[1] if len(sys.argv) > 1 else "crates/dwara-core/src")

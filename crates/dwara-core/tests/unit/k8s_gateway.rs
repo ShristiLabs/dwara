@@ -49,6 +49,7 @@ fn make_https_listener(port: u16, hostname: &str) -> GatewayListener {
                 name: "tls-cert".to_string(),
                 namespace: None,
             }],
+            frontend_validation: None,
         }),
     }
 }
@@ -91,6 +92,7 @@ fn make_path_match(match_type: &str, value: &str) -> HttpRouteMatch {
             value: value.to_string(),
         }),
         headers: vec![],
+        query_params: vec![],
     }
 }
 
@@ -139,6 +141,7 @@ fn translate_passthrough_tls() {
         tls: Some(ListenerTlsConfig {
             mode: "Passthrough".to_string(),
             certificate_refs: vec![],
+            frontend_validation: None,
         }),
     };
     let gw = make_gateway("my-gateway", vec![listener]);
@@ -157,6 +160,7 @@ fn translate_route_with_prefix_match() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("my-service", 8080)],
+            filters: vec![],
         }],
     );
 
@@ -188,6 +192,7 @@ fn translate_route_with_exact_match() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("Exact", "/health")],
             backend_refs: vec![make_backend_ref("my-service", 8080)],
+            filters: vec![],
         }],
     );
 
@@ -216,6 +221,7 @@ fn translate_route_with_no_match_matches_all() {
         vec![HttpRouteRule {
             matches: vec![],
             backend_refs: vec![make_backend_ref("my-service", 8080)],
+            filters: vec![],
         }],
     );
 
@@ -244,6 +250,7 @@ fn translate_route_with_no_backends_warns() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![],
+            filters: vec![],
         }],
     );
 
@@ -261,6 +268,7 @@ fn translate_route_with_missing_endpoints_warns() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("my-service", 8080)],
+            filters: vec![],
         }],
     );
 
@@ -282,6 +290,7 @@ fn route_attaches_to_correct_gateway() {
         vec![HttpRouteRule {
             matches: vec![],
             backend_refs: vec![make_backend_ref("svc", 80)],
+            filters: vec![],
         }],
     );
 
@@ -299,6 +308,7 @@ fn route_attaches_to_wrong_gateway_is_skipped() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("svc", 80)],
+            filters: vec![],
         }],
     );
 
@@ -325,6 +335,7 @@ fn route_with_no_parent_refs_attaches_to_all() {
             rules: vec![HttpRouteRule {
                 matches: vec![make_path_match("PathPrefix", "/api")],
                 backend_refs: vec![make_backend_ref("svc", 80)],
+                filters: vec![],
             }],
         },
     };
@@ -344,10 +355,12 @@ fn translate_multiple_rules() {
             HttpRouteRule {
                 matches: vec![make_path_match("PathPrefix", "/api")],
                 backend_refs: vec![make_backend_ref("api-svc", 8080)],
+                filters: vec![],
             },
             HttpRouteRule {
                 matches: vec![make_path_match("PathPrefix", "/web")],
                 backend_refs: vec![make_backend_ref("web-svc", 8080)],
+                filters: vec![],
             },
         ],
     );
@@ -403,6 +416,7 @@ fn translate_unknown_tls_mode_defaults_to_terminate() {
         tls: Some(ListenerTlsConfig {
             mode: "Unknown".to_string(),
             certificate_refs: vec![],
+            frontend_validation: None,
         }),
     };
     let gw = make_gateway("my-gateway", vec![listener]);
@@ -425,6 +439,7 @@ fn translate_route_not_attaching_is_skipped() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("svc", 80)],
+            filters: vec![],
         }],
     );
 
@@ -441,6 +456,7 @@ fn translate_multiple_endpoints_for_backend() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("my-service", 8080)],
+            filters: vec![],
         }],
     );
 
@@ -467,6 +483,7 @@ fn translate_route_action_is_proxy() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![make_backend_ref("svc", 80)],
+            filters: vec![],
         }],
     );
 
@@ -492,6 +509,7 @@ fn translate_route_with_no_backends_responds_503() {
         vec![HttpRouteRule {
             matches: vec![make_path_match("PathPrefix", "/api")],
             backend_refs: vec![],
+            filters: vec![],
         }],
     );
 

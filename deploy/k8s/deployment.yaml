@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dwara-controller
+  namespace: dwara-system
+  labels:
+    app.kubernetes.io/name: dwara
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dwara
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dwara
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: dwara-controller
+      containers:
+        - name: controller
+          image: ghcr.io/shristilabs/dwara-k8s-controller:latest
+          args: []
+          envFrom:
+            - configMapRef:
+                name: dwara-controller-config
+          volumeMounts:
+            - name: generated-config
+              mountPath: /etc/dwara/generated
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+        - name: gateway
+          image: ghcr.io/shristilabs/dwara:latest
+          env:
+            - name: DWARA_CONFIG
+              value: /etc/dwara/generated/dwara.yaml
+          volumeMounts:
+            - name: generated-config
+              mountPath: /etc/dwara/generated
+              readOnly: true
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      volumes:
+        - name: generated-config
+          emptyDir: {}

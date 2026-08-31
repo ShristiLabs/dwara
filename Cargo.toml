@@ -194,7 +194,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 prometheus = { version = "0.14", default-features = false }
 # CLI argument parsing (DW-022): clap is MIT OR Apache-2.0; derive
 # feature only to keep the dep tree small.
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 # Micro-benchmark harness (DW-024, dev/bench-only): MIT OR Apache-2.0.
 # default-features = false drops plotters/rayon (reporting deps we do not
 # use); cargo_bench_support keeps `--output-format bencher` for the
@@ -241,6 +241,22 @@ socket2 = "0.6"
 # CLI subcommand (the operator-facing upgrade trigger). Already in the
 # tree transitively; this only makes it a direct one. MIT OR Apache-2.0.
 libc = "0.2"
+# DW-064: Kubernetes Gateway API controller. kube-rs is the Rust client
+# for Kubernetes (Apache-2.0, allow-listed in deny.toml). Feature-gated
+# behind the `k8s` feature on dwara-core so the default build never pulls
+# it in. Version 4.0.0 published 2026-06-16, well-vetted (831K downloads).
+# The `runtime` feature enables watcher/Controller/reflector; `client`
+# enables the API client; `derive` enables the CustomResource derive macro
+# for Gateway API CRD types. k8s-openapi 0.28.0 is the matching version
+# (Apache-2.0 OR MIT, both allow-listed); the `v1_32` feature pins a
+# specific Kubernetes API version (NOT `latest`, so the build is
+# reproducible). schemars 1 is already a workspace dep.
+kube = { version = "4.0", default-features = false, features = [
+    "runtime",
+    "client",
+    "derive",
+] }
+k8s-openapi = { version = "0.28", default-features = false }
 
 [profile.release]
 lto = true

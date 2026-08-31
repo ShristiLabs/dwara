@@ -43,7 +43,21 @@ serde = { workspace = true }
 # MIT OR Apache-2.0.
 libc = { workspace = true }
 
+[features]
+# DW-064: Kubernetes Gateway API controller + conformance report. When
+# enabled, the `dwara k8s` subcommand and the `dwara-k8s-controller` binary
+# are compiled. Default OFF: kube-rs + k8s-openapi add significant binary
+# size. Build with `cargo build --features k8s`.
+k8s = ["dwara-core/k8s"]
+
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]
 name = "dwara-loadgen"
 path = "src/bin/loadgen.rs"
+
+# DW-064: Kubernetes Gateway API controller binary. Feature-gated behind
+# the `k8s` feature so the default build never pulls in kube-rs.
+[[bin]]
+name = "dwara-k8s-controller"
+path = "src/bin/k8s_controller.rs"
+required-features = ["k8s"]

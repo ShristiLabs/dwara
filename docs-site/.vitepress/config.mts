@@ -166,6 +166,10 @@ export default withMermaid(
                   text: "CEL expressions",
                   link: "/guide/cel-expressions",
                 },
+                {
+                  text: "Kubernetes Gateway API",
+                  link: "/guide/kubernetes-gateway-api",
+                },
               ],
             },
             {

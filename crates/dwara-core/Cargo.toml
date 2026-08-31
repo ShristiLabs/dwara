@@ -103,6 +103,13 @@ cedar-policy = { workspace = true, optional = true }
 # via the `openapi_validation` feature. MIT (allow-listed in
 # deny.toml).
 jsonschema = { workspace = true, optional = true }
+# DW-064: Kubernetes Gateway API controller. kube-rs (Apache-2.0) is the
+# Rust Kubernetes client; k8s-openapi (Apache-2.0 OR MIT) provides the
+# built-in API types. Both are optional so the default build never pulls
+# them in; enabled via the `k8s` feature. The `v1_32` feature on
+# k8s-openapi pins a specific Kubernetes API version (not `latest`).
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true, features = ["v1_32"] }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -145,13 +152,13 @@ cedar = ["dep:cedar-policy"]
 # jsonschema adds binary size. Build with
 # `cargo build --features openapi_validation`.
 openapi_validation = ["dep:jsonschema"]
-# DW-064: Kubernetes Gateway API translator. When enabled, the
-# gateway can translate Gateway API v1 resources (Gateway, HTTPRoute,
-# GatewayClass) into its config model. Default OFF: the translator
-# is the core translation layer; the actual K8s controller wiring
-# (kube-rs, informers) is a separate effort. Build with
-# `cargo build --features k8s`.
-k8s = []
+# DW-064: Kubernetes Gateway API translator + controller. When enabled,
+# the gateway can translate Gateway API v1 resources (Gateway, HTTPRoute,
+# GatewayClass) and Ingress resources into its config model, and run a
+# kube-rs controller that watches the API server and reconciles them into
+# a dwara config. Default OFF: kube-rs + k8s-openapi add significant
+# binary size. Build with `cargo build --features k8s`.
+k8s = ["dep:kube", "dep:k8s-openapi"]
 # DW-061: API aggregation plugin pack. When enabled, the gateway can
 # compose responses from multiple upstreams (KrakenD-style) with
 # JSONPath fragment shaping and per-fragment fail-open/closed.

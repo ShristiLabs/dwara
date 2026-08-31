@@ -34,6 +34,10 @@ pub mod loadgen;
 pub mod plugin_scaffold;
 // DW-065: Terraform-compatible state tool (`dwara tf`).
 pub mod tf;
+// DW-064: Kubernetes Gateway API conformance report generator
+// (`dwara k8s conformance-report`). Feature-gated behind `k8s`.
+#[cfg(feature = "k8s")]
+pub mod k8s_conformance;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};

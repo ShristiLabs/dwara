@@ -102,6 +102,26 @@ enum Command {
         #[command(subcommand)]
         kind: PluginKind,
     },
+    /// Kubernetes Gateway API tools (DW-064). Feature-gated behind `k8s`.
+    #[cfg(feature = "k8s")]
+    K8s {
+        #[command(subcommand)]
+        kind: K8sKind,
+    },
+}
+
+/// Subcommands of `dwara k8s` (DW-064).
+#[cfg(feature = "k8s")]
+#[derive(Subcommand)]
+enum K8sKind {
+    /// Generate the upstream Gateway API conformance report YAML based
+    /// on the features the translator supports. This is the artifact an
+    /// operator submits to be listed on k8s.io.
+    ConformanceReport {
+        /// Output path for the conformance report YAML (default: stdout).
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -479,6 +499,10 @@ fn main() {
                 }
             }
         },
+        #[cfg(feature = "k8s")]
+        Command::K8s { kind } => match kind {
+            K8sKind::ConformanceReport { output } => run_conformance_report(output),
+        },
     };
     std::process::exit(code);
 }
@@ -642,6 +666,37 @@ fn run_tf(kind: TfKind) -> i32 {
                     1
                 }
             }
+        }
+    }
+}
+
+/// DW-064: generate the upstream Gateway API conformance report YAML.
+/// Based on the features the translator actually supports (see
+/// `dwara_core::k8s_gateway::supported_features` / `skipped_features`).
+#[cfg(feature = "k8s")]
+fn run_conformance_report(output: Option<String>) -> i32 {
+    let report = dwara_cli::k8s_conformance::generate_report();
+    let yaml = match serde_yaml_ng::to_string(&report) {
+        Ok(y) => y,
+        Err(e) => {
+            eprintln!("cannot serialize conformance report: {e}");
+            return 1;
+        }
+    };
+    match output {
+        Some(path) => match write_atomic(&path, &yaml) {
+            Ok(()) => {
+                println!("conformance report written to {path}");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        None => {
+            print!("{yaml}");
+            0
         }
     }
 }

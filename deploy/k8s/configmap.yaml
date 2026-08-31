@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dwara-controller-config
+  namespace: dwara-system
+data:
+  # The GatewayClass controller name the controller watches for.
+  DWARA_K8S_CONTROLLER_NAME: "shristilabs.com/dwara"
+  # The Ingress class the controller watches for.
+  DWARA_K8S_INGRESS_CLASS: "dwara"
+  # The output path for the generated dwara config YAML.
+  # The dwara gateway sidecar watches this file via DW-054 file-watch.
+  DWARA_K8S_OUTPUT_CONFIG: "/etc/dwara/generated/dwara.yaml"
+  # The namespace to watch (empty = all namespaces).
+  DWARA_K8S_NAMESPACE: ""
