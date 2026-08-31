@@ -37,6 +37,9 @@ use std::collections::HashMap;
 
 pub use cel_interpreter::{ExecutionError, ParseError, ParseErrors, Value};
 
+// DW-059: CEL everywhere -- one CEL surface across four use-sites.
+pub mod everywhere;
+
 /// A compiled CEL program.
 ///
 /// Created at config publish time by [`CelProgram::compile`]. The

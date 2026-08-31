@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- CEL everywhere (DW-059): the `cel` cargo feature now provides one
+  CEL surface across four use-sites, following the APISIX `expr`/Kong
+  expressions-router precedent of a single expression language rather
+  than a bespoke DSL per feature. The API provides `RequestContext`
+  (the standard request context shared by all use-sites: path, method,
+  headers, query, host), `RouteCondition` (expression matchers in
+  routes -- evaluates to bool), `HeaderTransform` (header/transform
+  logic -- evaluates to string), `RateLimitKey` (rate-limit key
+  derivation -- evaluates to string), `PolicyCondition` (policy
+  conditions -- evaluates to bool), and `compile_for`/`evaluate_for`
+  (unified API with type checking per use-site). Golden tests per
+  use-site cover path prefix matching, method checks, header checks,
+  combined conditions, host checks, query checks, static values,
+  path-based transforms, header-based transforms, concatenation,
+  API key derivation, path-based keys, combined keys, host-based keys,
+  IP allowlisting, method restriction, path+method conditions, and
+  host-based policies. Default OFF; build with
+  `cargo build --features cel`.
 - Plugin SDK + scaffolding (DW-057): the `dwara plugin new` command
   generates a new proxy-wasm plugin project from a template (Rust ->
   wasm32-wasip1). The scaffold includes Cargo.toml (targeting
