@@ -242,9 +242,12 @@ async fn monthly_budget_binds_with_month_scale_reset_and_composes_with_daily() {
     assert_eq!(limit, 2, "the MONTHLY cap binds the headers");
     assert_eq!(remaining, 0);
     let now = now_epoch_s();
-    // Month-scale reset: further out than a day, within 32 days.
+    // Month-scale reset: in the future, within 32 days. On the last
+    // day of a month the reset (midnight on the 1st) may be less than
+    // a day away, so we only require it to be in the future, not more
+    // than 86_400s out.
     assert!(
-        reset > now + 86_400 && reset <= now + 32 * 86_400,
+        reset > now && reset <= now + 32 * 86_400,
         "monthly reset is month-scale: reset={reset} now={now}"
     );
     let retry: u64 = headers
@@ -252,7 +255,10 @@ async fn monthly_budget_binds_with_month_scale_reset_and_composes_with_daily() {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap();
-    assert!(retry > 86_400, "Retry-After is month-scale: {retry}");
+    // Retry-After is month-scale: on the last day of a month it may
+    // be less than 86_400s (the reset is midnight on the 1st), so we
+    // only require it to be positive.
+    assert!(retry > 0, "Retry-After is positive: {retry}");
 }
 
 #[tokio::test]
