@@ -9,6 +9,21 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Synthetic monitoring (DW-071): built-in probes per route that
+  measure latency and uptime, feeding results into analytics and
+  webhooks. Each route can have a synthetic probe configured: a
+  periodic HTTP request that records latency, status code, and
+  success/failure. The API provides `ProbeSpec` (probe configuration:
+  URL, method, interval, timeout, expected status, failure
+  threshold), `ProbeResult` (the result of a single probe run),
+  `ProbeRunner` (the coordinator that processes results and manages
+  edge-triggered alerting), and `ProbeOutcome` (Success/Failure/
+  AlertFired/Recovered). Alerts are edge-triggered: the first failure
+  that crosses the threshold fires an alert; subsequent consecutive
+  failures do not re-fire until the probe recovers. This is the
+  proactive/synthetic side of SLO tracking -- it pairs with DW-052
+  (SLO & error-budget export, M2), letting an SLO be tracked even on
+  routes with little real traffic.
 - OpenAPI response validation (DW-070): the `openapi_validation` cargo
   feature enables validation of upstream responses against the OpenAPI
   spec's response schemas. When a response violates the spec, it is

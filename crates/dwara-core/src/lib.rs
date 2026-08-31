@@ -75,6 +75,10 @@ pub mod security;
 pub mod snapshot;
 pub mod state;
 pub mod supervision;
+// DW-071: Synthetic monitoring. Built-in probes per route that
+// measure latency and uptime, feeding results into analytics and
+// webhooks.
+pub mod synthetic;
 // DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
 // feature (default OFF) because wasmtime + cranelift are significant
 // binary size against the DW-026 25MB budget.
