@@ -203,8 +203,28 @@ pub const SCHEMA_V3: &str = "
     CREATE INDEX IF NOT EXISTS idx_ai_spend_model ON ai_spend(model);
 ";
 
+/// Schema v4 (DW-084): the `ai_governance_events` table. One row per
+/// governance check outcome (allow or deny) when the audit switch is
+/// on, plus every DENIAL even when the audit switch is off (the
+/// done-when requirement: a blocked attempt appears in the audit
+/// log). The admin `/analytics/governance-audit` endpoint reads these
+/// rows for shadow review.
+pub const SCHEMA_V4: &str = "
+    CREATE TABLE IF NOT EXISTS ai_governance_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        consumer    TEXT NOT NULL,
+        team        TEXT NOT NULL DEFAULT '',
+        model       TEXT NOT NULL,
+        verdict     TEXT NOT NULL,
+        reason      TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_governance_ts ON ai_governance_events(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_governance_consumer ON ai_governance_events(consumer);
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
@@ -233,6 +253,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 3 {
         conn.execute_batch(SCHEMA_V3)?;
         conn.pragma_update(None, "user_version", 3)?;
+    }
+    if version < 4 {
+        conn.execute_batch(SCHEMA_V4)?;
+        conn.pragma_update(None, "user_version", 4)?;
     }
     Ok(())
 }

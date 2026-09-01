@@ -612,3 +612,98 @@ pub fn spend_summary(conn: &Connection, q: &SpendQuery) -> rusqlite::Result<Vec<
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// DW-084: governance audit over the `ai_governance_events` table.
+// ---------------------------------------------------------------------------
+
+/// One governance audit event row (DW-084): a raw
+/// `ai_governance_events` record — the shadow-audit view of which
+/// consumer/team called which model and whether the governance layer
+/// allowed or denied it.
+#[derive(Debug, Serialize)]
+pub struct GovernanceEventRow {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The denying policy (team) name for a denial, or the binding
+    /// allowlist's policy name for an allow (empty when no allowlist
+    /// binds the request).
+    pub team: String,
+    /// The client-facing model alias the request named.
+    pub model: String,
+    /// `allow` or `deny`.
+    pub verdict: String,
+    /// A short reason string (the denial cause; empty for an allow).
+    pub reason: String,
+}
+
+/// The governance audit endpoint's request body (DW-084): a time
+/// window over the `ai_governance_events` table.
+#[derive(Debug, Deserialize)]
+pub struct GovernanceAuditQuery {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Maximum returned rows (default 10 000, hard cap 10 000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Why a governance audit query was rejected before SQL was built.
+#[derive(Debug)]
+pub enum GovernanceAuditError {
+    BadRange,
+}
+
+impl std::fmt::Display for GovernanceAuditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GovernanceAuditError::BadRange => write!(f, "from_ms must be < to_ms"),
+        }
+    }
+}
+
+impl std::error::Error for GovernanceAuditError {}
+
+impl GovernanceAuditQuery {
+    /// Reject an invalid range.
+    pub fn validate(&self) -> Result<(), GovernanceAuditError> {
+        if self.from_ms >= self.to_ms {
+            return Err(GovernanceAuditError::BadRange);
+        }
+        Ok(())
+    }
+}
+
+/// Execute a governance audit query (DW-084): return the raw
+/// `ai_governance_events` rows in a time window, newest first. Reads
+/// the RAW rows directly — governance events are per-check, not
+/// rolled up (the volume is orders of magnitude below the access
+/// record path).
+pub fn governance_audit(
+    conn: &Connection,
+    q: &GovernanceAuditQuery,
+) -> rusqlite::Result<Vec<GovernanceEventRow>> {
+    let limit = q.limit.unwrap_or(10_000).min(10_000);
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, consumer, team, model, verdict, reason \
+         FROM ai_governance_events \
+         WHERE ts_ms >= ? AND ts_ms < ? \
+         ORDER BY ts_ms DESC \
+         LIMIT ?",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![q.from_ms, q.to_ms, limit as i64])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(GovernanceEventRow {
+            ts_ms: row.get(0)?,
+            consumer: row.get(1)?,
+            team: row.get(2)?,
+            model: row.get(3)?,
+            verdict: row.get(4)?,
+            reason: row.get(5)?,
+        });
+    }
+    Ok(out)
+}

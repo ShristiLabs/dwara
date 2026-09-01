@@ -2478,6 +2478,45 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+    // DW-084: governance team_allowlists must reference model aliases
+    // that exist in the `models` map. A typo in an allowlist that
+    // names a non-existent alias is an authoring error — the runtime
+    // would block every call to it (the alias never matches), so
+    // validation names it at publish time instead.
+    if let Some(gov) = &ai.governance {
+        let known: std::collections::BTreeSet<&str> =
+            ai.models.keys().map(|s| s.as_str()).collect();
+        for (policy, allowlist) in &gov.team_allowlists {
+            // The policy itself must exist (a typo'd policy name would
+            // silently bind nobody — an allowlist that governs nothing).
+            if !gateway.policies.iter().any(|p| &p.name == policy) {
+                issues.push(issue(
+                    "gateway",
+                    policy,
+                    "ai.governance.team_allowlists",
+                    format!(
+                        "references unknown policy '{}' (the allowlist would \
+                         govern nobody — a typo, or the policy was removed)",
+                        policy
+                    ),
+                ));
+            }
+            for (i, alias) in allowlist.iter().enumerate() {
+                if !known.contains(alias.as_str()) {
+                    issues.push(issue(
+                        "gateway",
+                        policy,
+                        &format!("ai.governance.team_allowlists[{policy}][{i}]"),
+                        format!(
+                            "references unknown model alias '{}' (not in \
+                             ai.models — a typo, or the alias was renamed)",
+                            alias
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {

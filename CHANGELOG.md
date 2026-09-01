@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Model governance (DW-084): per-team model allowlists
+  (`ai.governance.team_allowlists`, keyed by policy name) block
+  consumers from calling model aliases not in their team's allowlist.
+  The check runs after the request body is parsed (the alias is in
+  the body) and before any provider contact -- a denied request
+  returns 403 `model_denied_by_policy` in the OpenAI error shape, no
+  provider tokens spent. When multiple policies with allowlists
+  attach to a consumer, the model must be in ALL of them
+  (deny-wins). Consumers with no allowlist policy are allowed
+  (fail-open). A shadow audit (`ai.governance.audit: true`) records
+  every model usage (allowed and denied) in the analytics store's
+  new `ai_governance_events` table (schema v4): consumer, team,
+  model, verdict, reason. Queryable via `POST
+  /analytics/governance-audit` on the admin API. New metric
+  `dwara_ai_governance_denied_total{reason}`. Validation rejects
+  allowlists referencing non-existent model aliases. New
+  `ai::governance` module; no new dependencies.
+
 - AI cost attribution and metering (DW-079): per-model pricing tables
   (`ai.pricing`, keyed by provider model, integer micro-USD per 1k
   input/output tokens) make the DW-078 cost-per-day budget LIVE —

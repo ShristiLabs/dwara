@@ -209,6 +209,101 @@ where
         }
     };
 
+    // DW-084: model governance pre-route check. The requested model
+    // alias is checked against the consumer's binding team allowlists
+    // BEFORE routing — a disallowed (or typo'd) alias is blocked at
+    // the edge with 403 `model_denied_by_policy` rather than
+    // surfacing as a provider 404. The resolution mirrors the
+    // rate-limit/budget chain (consumer > route > service > listener
+    // > global, deny-wins intersection); a consumer with no binding
+    // allowlist policy is allowed (fail-open).
+    let governance = dp.ai_governance();
+    let governance_verdict = if governance.is_empty() {
+        crate::ai::governance::GovernanceVerdict::Allow
+    } else {
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let gateway = gen.snapshot.gateway();
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, listener_name);
+        governance.check(
+            consumer,
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            &gateway.global_policies,
+            &chat_req.model,
+        )
+    };
+    let governance_consumer = identity
+        .map(|id| id.consumer_name.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+    let governance_team = match &governance_verdict {
+        crate::ai::governance::GovernanceVerdict::Deny { policy, .. } => policy.clone(),
+        crate::ai::governance::GovernanceVerdict::Allow => String::new(),
+    };
+    if let crate::ai::governance::GovernanceVerdict::Deny { reason, .. } = &governance_verdict {
+        dp.observability_arc().record_ai_governance_denied(reason);
+        tracing::info!(
+            code = "model_denied_by_policy",
+            request_id = %rid,
+            route = %route_name,
+            consumer = %governance_consumer,
+            model = %chat_req.model,
+            reason = %reason,
+            "AI model governance denied the requested model before routing"
+        );
+        // DW-084: a blocked attempt is ALWAYS audited (the done-when
+        // requirement) when the governance block is present — the
+        // `audit` flag only extends recording to ALLOWED calls.
+        if let Some(analytics) = dp.analytics() {
+            analytics.offer_ai_governance_event(crate::analytics::AiGovernanceEvent {
+                ts_ms: now_ms(),
+                consumer: governance_consumer.clone(),
+                team: governance_team.clone(),
+                model: chat_req.model.clone(),
+                verdict: "deny".to_string(),
+                reason: reason.clone(),
+            });
+        }
+        let body = openai_compat::error_body(
+            &format!(
+                "the model '{}' is not allowed for this consumer by the \
+                 team allowlist policy",
+                chat_req.model
+            ),
+            "invalid_request_error",
+            Some("model_denied_by_policy"),
+            rid,
+        );
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+            .expect("static 403 response is valid");
+    }
+    // DW-084: when the audit switch is on, record ALLOWED calls too
+    // (shadow review — which team called which model).
+    if governance.audit() {
+        if let Some(analytics) = dp.analytics() {
+            analytics.offer_ai_governance_event(crate::analytics::AiGovernanceEvent {
+                ts_ms: now_ms(),
+                consumer: governance_consumer.clone(),
+                team: governance_team.clone(),
+                model: chat_req.model.clone(),
+                verdict: "allow".to_string(),
+                reason: String::new(),
+            });
+        }
+    }
+
     // 3. Streaming (DW-077): the request is passed through with
     // usage reporting FORCED on the provider call — the stream
     // metrics and the (upcoming) token budgets need provider-reported

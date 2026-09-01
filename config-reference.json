@@ -425,6 +425,17 @@
       "description": "The `ai:` top-level block (DW-075). Absent: no AI surface. Present:\nvalidation requires at least one provider and at least one model —\nan `ai:` block that can never serve a model is an authoring error,\nnot a silently inert config.",
       "type": "object",
       "properties": {
+        "governance": {
+          "description": "Model governance (DW-084): per-team (policy) model allowlists\nand the shadow-audit switch. Absent (the default): no\ngovernance — every consumer may call every configured alias,\nand no governance audit events are recorded.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiGovernance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "models": {
           "description": "Model alias table: the `model` value a client puts in its request\nbody maps to the provider that serves it and the provider's own\nmodel identifier. The alias is echoed back to the client; the\n`provider_model` never leaves the gateway.",
           "type": "object",
@@ -444,6 +455,27 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/AiProvider"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiGovernance": {
+      "description": "Model governance (DW-084 `ai.governance`): per-team model\nallowlists plus a shadow-audit switch. A team is a POLICY name\n(the same vocabulary the token budgets use for `scope: policy`):\nevery consumer attaching a policy with an allowlist entry is\nrestricted to that allowlist's aliases. The check runs BEFORE\nrouting, against the client-facing alias (the `model` value in\nthe request body), so a typo or a renamed alias is blocked at the\nedge rather than surfacing as a provider 404. Multiple policies\nwith allowlists that bind one request intersect (deny-wins): the\nmodel must be in EVERY binding allowlist, matching the authz\ndeny-anywhere-wins principle. Consumers with no binding allowlist\npolicy are unrestricted (fail-open, the DW-017 default posture).\n`audit: true` records BOTH allowed and denied attempts into the\n`ai_governance_events` analytics table for shadow review.",
+      "type": "object",
+      "properties": {
+        "audit": {
+          "description": "When true, record model usage for shadow audit: BOTH allowed\ncalls and denied attempts land in the `ai_governance_events`\nanalytics table (the admin `/analytics/governance-audit`\nendpoint reads it). When false (the default), only the\ndenial metric fires — no per-event audit rows are written.",
+          "type": "boolean"
+        },
+        "team_allowlists": {
+          "description": "Per-policy (team) model allowlists. The key is the POLICY name\n(the team), the value is the list of allowed client-facing\nmodel aliases. A consumer attaching a policy listed here may\nonly call the aliases in its allowlist; a consumer attaching\nno listed policy is unrestricted. Validation rejects an\nallowlist entry that names an alias absent from `ai.models`\n(an authoring error, not a runtime 404).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

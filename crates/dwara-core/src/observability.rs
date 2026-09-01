@@ -541,6 +541,11 @@ pub struct Observability {
     /// DW-078: AI budget denials, by kind (tokens | cost). No consumer
     /// label (cardinality); the consumer is in the access log line.
     ai_budget_denied_total: IntCounterVec,
+    /// DW-084: AI governance denials, by reason (config-bounded label —
+    /// the denial reason string, not the consumer or model). No
+    /// consumer/model labels (cardinality rule); the consumer and
+    /// model are in the governance audit table and the access log.
+    ai_governance_denied_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1027,6 +1032,17 @@ impl Observability {
             &["kind"],
         )
         .expect("valid metric definition");
+        let ai_governance_denied_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_governance_denied_total",
+                "AI model governance denials (DW-084), by reason. The reason \
+                 is a config-bounded label (the denial cause string), not the \
+                 consumer or model — cardinality rule. Consumer and model are \
+                 in the governance audit table and the access log.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1136,6 +1152,7 @@ impl Observability {
             Box::new(ai_cost_micros_total.clone()),
             Box::new(ai_stream_chunks_total.clone()),
             Box::new(ai_budget_denied_total.clone()),
+            Box::new(ai_governance_denied_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1201,6 +1218,7 @@ impl Observability {
             ai_cost_micros_total,
             ai_stream_chunks_total,
             ai_budget_denied_total,
+            ai_governance_denied_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1522,6 +1540,15 @@ impl Observability {
     /// `dwara_ai_budget_denied_total{kind}` (kind: tokens | cost).
     pub fn record_ai_budget_denied(&self, kind: &str) {
         self.ai_budget_denied_total.with_label_values(&[kind]).inc();
+    }
+
+    /// Count one AI governance denial (DW-084) in
+    /// `dwara_ai_governance_denied_total{reason}` (reason: the denial
+    /// cause string, config-bounded — no consumer/model labels).
+    pub fn record_ai_governance_denied(&self, reason: &str) {
+        self.ai_governance_denied_total
+            .with_label_values(&[reason])
+            .inc();
     }
 
     /// Count forwarded streaming chunks (DW-077) in

@@ -35,6 +35,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Serde skip helper: elide `audit` when false (the default).
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// The `ai:` top-level block (DW-075). Absent: no AI surface. Present:
 /// validation requires at least one provider and at least one model —
 /// an `ai:` block that can never serve a model is an authoring error,
@@ -62,6 +67,47 @@ pub struct AiConfig {
     /// the spend store stay live but inert until prices are declared).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pricing: BTreeMap<String, AiPricing>,
+    /// Model governance (DW-084): per-team (policy) model allowlists
+    /// and the shadow-audit switch. Absent (the default): no
+    /// governance — every consumer may call every configured alias,
+    /// and no governance audit events are recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<AiGovernance>,
+}
+
+/// Model governance (DW-084 `ai.governance`): per-team model
+/// allowlists plus a shadow-audit switch. A team is a POLICY name
+/// (the same vocabulary the token budgets use for `scope: policy`):
+/// every consumer attaching a policy with an allowlist entry is
+/// restricted to that allowlist's aliases. The check runs BEFORE
+/// routing, against the client-facing alias (the `model` value in
+/// the request body), so a typo or a renamed alias is blocked at the
+/// edge rather than surfacing as a provider 404. Multiple policies
+/// with allowlists that bind one request intersect (deny-wins): the
+/// model must be in EVERY binding allowlist, matching the authz
+/// deny-anywhere-wins principle. Consumers with no binding allowlist
+/// policy are unrestricted (fail-open, the DW-017 default posture).
+/// `audit: true` records BOTH allowed and denied attempts into the
+/// `ai_governance_events` analytics table for shadow review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiGovernance {
+    /// Per-policy (team) model allowlists. The key is the POLICY name
+    /// (the team), the value is the list of allowed client-facing
+    /// model aliases. A consumer attaching a policy listed here may
+    /// only call the aliases in its allowlist; a consumer attaching
+    /// no listed policy is unrestricted. Validation rejects an
+    /// allowlist entry that names an alias absent from `ai.models`
+    /// (an authoring error, not a runtime 404).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub team_allowlists: BTreeMap<String, Vec<String>>,
+    /// When true, record model usage for shadow audit: BOTH allowed
+    /// calls and denied attempts land in the `ai_governance_events`
+    /// analytics table (the admin `/analytics/governance-audit`
+    /// endpoint reads it). When false (the default), only the
+    /// denial metric fires — no per-event audit rows are written.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audit: bool,
 }
 
 /// One AI provider (DW-075 `ai.providers[]`).

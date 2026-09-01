@@ -148,6 +148,30 @@ pub struct AiSpendRecord {
     pub cost_micros: u64,
 }
 
+/// One AI governance audit event (DW-084): the per-check record
+/// written to the `ai_governance_events` table. A PLAIN DTO —
+/// deliberately not importing `ai::governance` (the analytics domain
+/// may not import the `ai` domain; see `scripts/check_deps.py`). The
+/// dataplane converts from `ai::governance::GovernanceVerdict` at the
+/// call site.
+#[derive(Debug, Clone)]
+pub struct AiGovernanceEvent {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The denying policy (team) name for a denial, or the FIRST
+    /// binding allowlist's policy name for an allow (empty when no
+    /// allowlist binds the request).
+    pub team: String,
+    /// The client-facing model alias the request named.
+    pub model: String,
+    /// `allow` or `deny`.
+    pub verdict: String,
+    /// A short reason string (the denial cause; empty for an allow).
+    pub reason: String,
+}
+
 impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
@@ -220,6 +244,14 @@ pub struct EmbeddedAnalytics {
     /// Records dropped on a full SPEND channel (the never-block
     /// counter for the DW-079 path).
     spend_dropped: AtomicU64,
+    /// DW-084: the AI governance event channel (same fire-and-forget
+    /// posture as the spend channel — drop and count on full, never
+    /// block the request path).
+    gov_tx: mpsc::Sender<AiGovernanceEvent>,
+    gov_rx: Mutex<Option<mpsc::Receiver<AiGovernanceEvent>>>,
+    /// Records dropped on a full GOVERNANCE channel (the never-block
+    /// counter for the DW-084 path).
+    gov_dropped: AtomicU64,
     /// Retention config: [raw, 1m, 5m, 1h, 1d] in ms.
     retention_ms: [i64; 5],
     /// Flush tick (ms) — the writer's maximum batch latency.
@@ -242,6 +274,7 @@ impl EmbeddedAnalytics {
         schema::migrate(&conn)?;
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
+        let (gov_tx, gov_rx) = mpsc::channel(CHANNEL_CAP);
         Ok(Arc::new(EmbeddedAnalytics {
             conn: Mutex::new(conn),
             rx: Mutex::new(Some(rx)),
@@ -249,6 +282,9 @@ impl EmbeddedAnalytics {
             spend_tx,
             spend_rx: Mutex::new(Some(spend_rx)),
             spend_dropped: AtomicU64::new(0),
+            gov_tx,
+            gov_rx: Mutex::new(Some(gov_rx)),
+            gov_dropped: AtomicU64::new(0),
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
@@ -274,6 +310,8 @@ impl EmbeddedAnalytics {
         // DW-079: take the spend receiver alongside the raw receiver —
         // a second call returns nothing for either.
         let spend_rx_opt = self.spend_rx.lock().unwrap().take();
+        // DW-084: take the governance receiver alongside the others.
+        let gov_rx_opt = self.gov_rx.lock().unwrap().take();
         let mut writer_shutdown = shutdown.clone();
         let writer = {
             let store = Arc::clone(self);
@@ -355,6 +393,47 @@ impl EmbeddedAnalytics {
         } else {
             None
         };
+        // DW-084: the governance event writer — same fire-and-forget
+        // batched transaction shape as the spend writer, draining the
+        // governance channel into the `ai_governance_events` table.
+        let gov_writer = if let Some(mut gov_rx) = gov_rx_opt {
+            let store = Arc::clone(self);
+            let mut gov_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiGovernanceEvent> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = gov_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_governance(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = gov_shutdown.changed() => {
+                            while let Ok(r) = gov_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_governance(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_governance(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let maintainer = {
             let store = Arc::clone(self);
             let mut shutdown2 = shutdown.clone();
@@ -372,6 +451,9 @@ impl EmbeddedAnalytics {
         };
         let mut handles = vec![writer, maintainer];
         if let Some(h) = spend_writer {
+            handles.push(h);
+        }
+        if let Some(h) = gov_writer {
             handles.push(h);
         }
         handles
@@ -516,6 +598,63 @@ impl EmbeddedAnalytics {
         }
     }
 
+    /// One batched transaction of `ai_governance_events` INSERTs
+    /// (DW-084). Same swallow-and-log posture as [`flush_spend`]: a
+    /// failed batch is lost, the counter is not bumped (the records
+    /// were accepted; the DISK failed).
+    fn flush_governance(&self, batch: &[AiGovernanceEvent]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_governance_batch_begin_failed",
+                    "ai_governance_events batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_governance_events \
+             (ts_ms, consumer, team, model, verdict, reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_governance_batch_prepare_failed",
+                    "ai_governance_events batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms, r.consumer, r.team, r.model, r.verdict, r.reason,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_governance_insert_failed",
+                    "ai_governance_events record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_governance_commit_failed",
+                    "ai_governance_events batch lost: {e}"
+                );
+            }
+        }
+    }
+
     /// One rollup + retention pass (cursor-guarded; safe to run at any
     /// time, from the ticker or shutdown).
     fn maintain(&self) {
@@ -621,6 +760,30 @@ impl EmbeddedAnalytics {
     /// (channel full). The honest loss counter for the DW-079 path.
     pub fn dropped_spend_records(&self) -> u64 {
         self.spend_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The AI governance event hot path (DW-084): fire-and-forget
+    /// record of one governance check outcome. NEVER blocks — a
+    /// bounded-channel `try_send` that drops and counts on full (the
+    /// same never-block posture as [`Self::offer_ai_spend`]).
+    pub fn offer_ai_governance_event(&self, rec: AiGovernanceEvent) {
+        if self.gov_tx.try_send(rec).is_err() {
+            let n = self.gov_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_governance_channel_full",
+                    total_dropped = n + 1,
+                    "ai_governance_events channel full; dropping records (never blocking the dataplane)"
+                );
+            }
+        }
+    }
+
+    /// AI governance events accepted by
+    /// [`Self::offer_ai_governance_event`] but dropped (channel full).
+    /// The honest loss counter for the DW-084 path.
+    pub fn dropped_governance_events(&self) -> u64 {
+        self.gov_dropped.load(Ordering::Relaxed)
     }
 }
 

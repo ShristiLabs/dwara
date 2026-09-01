@@ -99,20 +99,15 @@ fn default_max_fragment_bytes() -> usize {
 }
 
 /// The fail policy for a fragment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FailPolicy {
     /// Skip the fragment on error (the composed response omits the
     /// field). This is the default.
+    #[default]
     FailOpen,
     /// Return an error on failure (the entire composed response fails).
     FailClosed,
-}
-
-impl Default for FailPolicy {
-    fn default() -> Self {
-        FailPolicy::FailOpen
-    }
 }
 
 // ---------------------------------------------------------------------------

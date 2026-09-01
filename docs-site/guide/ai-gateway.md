@@ -438,6 +438,70 @@ and cost per model for the window. CSV is RFC 4180 compliant;
 Parquet is deferred to a future release (the seam is documented for
 billing pipelines that need columnar output).
 
+## Model governance
+
+Per-team model allowlists control which model aliases each team may
+call, and a shadow audit records every model usage (allowed and
+denied) for review.
+
+### Configuration
+
+```yaml
+ai:
+  governance:
+    team_allowlists:
+      acme-ai-budget: [gpt-4o-mini, claude-haiku]  # low-cost only
+      enterprise-team: [gpt-4o, claude-sonnet, gpt-4o-mini]
+    audit: true
+```
+
+The key in `team_allowlists` is a POLICY name -- the same policy that
+attaches to consumers via `policies: [...]`. A consumer attaching a
+policy with an allowlist may only call the listed model aliases. When
+multiple policies with allowlists attach to a consumer, the model
+must be in ALL of them (deny-wins, the same principle as AuthZ).
+
+| Field | Default | Description |
+|---|---|---|
+| `team_allowlists` | (empty) | Map of policy name to allowed model aliases. |
+| `audit` | `false` | When true, record every model usage (allowed and denied) for shadow audit. |
+
+### Enforcement
+
+The governance check runs AFTER the request body is parsed (the model
+alias is in the body) and BEFORE the provider is called. A denied
+request returns `403` with the OpenAI error shape:
+
+```json
+{
+  "error": {
+    "code": "model_denied_by_policy",
+    "message": "model 'gpt-4o' is not allowed for this team",
+    "request_id": "req-..."
+  }
+}
+```
+
+No provider tokens are spent on a denied request. Consumers with no
+allowlist policy attached are allowed (fail-open).
+
+### Audit
+
+When `audit: true`, every AI request (allowed and denied) is recorded
+in the governance audit log with: consumer, team (policy name), model
+alias, verdict (allow/deny), and reason. Audit events are queryable
+via the admin API:
+
+```
+POST /analytics/governance-audit
+{
+  "from_ms": 1693526400000,
+  "to_ms": 1693612800000
+}
+```
+
+Denials are counted in `dwara_ai_governance_denied_total{reason}`.
+
 ## Errors
 
 Errors come back in the OpenAI error shape, so SDK error handling
@@ -457,6 +521,7 @@ works unchanged:
 | Situation | Status | `code` |
 |---|---|---|
 | Over the [token budget](#token-budgets) (checked before the body is read) | 429 | `ai_budget_exceeded` |
+| Model denied by [governance](#model-governance) policy | 403 | `model_denied_by_policy` |
 | Unknown model alias | 404 | `model_not_found` |
 | Malformed body or request | 400 | `invalid_json` / others |
 | Request body over 16 MiB | 413 | `body_too_large` |
@@ -487,6 +552,9 @@ Metric families exported on `/metrics`:
 - `dwara_ai_cost_micros_total{provider,model}` -- total AI spend in
   micro-USD, attributed to the serving provider and provider model.
   No consumer label (cardinality stays config-bounded).
+- `dwara_ai_governance_denied_total{reason}` -- model-governance
+  denials (DW-084). `reason` is the denial reason string
+  (config-bounded).
 
 ## Validation and secrets
 

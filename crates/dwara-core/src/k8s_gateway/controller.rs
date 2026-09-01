@@ -271,6 +271,7 @@ impl Reconciler {
             redis_rate_limiter: None,
             config_convergence: None,
             plugins: Vec::new(),
+            ai: None,
         };
 
         for gw in &self.gateways {

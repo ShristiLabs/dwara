@@ -600,6 +600,13 @@ pub struct DataPlane {
     /// with no restart. Empty (every model unknown -> cost 0) when no
     /// pricing is configured — fail-open, never a crash.
     ai_pricing: ArcSwap<crate::ai::cost::PricingTable>,
+    /// AI model governance (DW-084): per-team model allowlists plus
+    /// the shadow-audit switch, compiled from the `ai.governance`
+    /// config block. Swapped on every reload so an allowlist change
+    /// takes effect on the next request with no restart. Empty (no
+    /// allowlists -> every consumer unrestricted) when governance is
+    /// not configured — fail-open.
+    ai_governance: ArcSwap<crate::ai::governance::GovernanceEngine>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -861,9 +868,13 @@ impl DataPlane {
         let ai_pricing = ArcSwap::from_pointee(crate::ai::cost::PricingTable::compile(
             snapshot.gateway().ai.as_ref(),
         ));
+        let ai_governance = ArcSwap::from_pointee(
+            crate::ai::governance::GovernanceEngine::compile(snapshot.gateway().ai.as_ref()),
+        );
         let dp = DataPlane {
             ai_budgets,
             ai_pricing,
+            ai_governance,
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1288,6 +1299,13 @@ impl DataPlane {
             .store(Arc::new(crate::ai::cost::PricingTable::compile(
                 snapshot.gateway().ai.as_ref(),
             )));
+        // DW-084: the governance engine swaps with the generation —
+        // an allowlist change takes effect on the next request with no
+        // restart.
+        self.ai_governance
+            .store(Arc::new(crate::ai::governance::GovernanceEngine::compile(
+                snapshot.gateway().ai.as_ref(),
+            )));
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1544,6 +1562,12 @@ impl DataPlane {
     /// The AI pricing table (DW-079): current per-model token rates.
     pub fn ai_pricing(&self) -> Arc<crate::ai::cost::PricingTable> {
         self.ai_pricing.load_full()
+    }
+
+    /// The AI governance engine (DW-084): current per-team model
+    /// allowlists and the audit switch.
+    pub fn ai_governance(&self) -> Arc<crate::ai::governance::GovernanceEngine> {
+        self.ai_governance.load_full()
     }
 
     /// The current generation's upstream registry. Used by the

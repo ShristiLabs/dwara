@@ -110,7 +110,9 @@ crates/dwara-core/src/
                       additive rollups, cursor-guarded cascade,
                       per-granularity retention, incremental vacuum);
                       the DW-079 ai_spend table (per-request token/cost
-                      records, schema v3) with its own fire-and-forget
+                      records, schema v3) and the DW-084
+                      ai_governance_events table (model-usage audit,
+                      schema v4), each with its own fire-and-forget
                       writer; implements extensions::analytics::AnalyticsSink;
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
@@ -126,8 +128,11 @@ crates/dwara-core/src/
                       adapters, the OpenAI-compat facade, hand-rolled
                       SSE framing, the compiled model-alias table
                       (transport lives in dataplane/ai_proxy), the
-                      DW-078 token-budget engine (budget.rs), and the
-                      DW-079 pricing table + cost computation (cost.rs)
+                      DW-078 token-budget engine (budget.rs), the
+                      DW-079 pricing table + cost computation (cost.rs),
+                      and the DW-084 model-governance engine
+                      (governance.rs: per-team model allowlists +
+                      shadow audit)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind

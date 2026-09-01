@@ -481,6 +481,7 @@ pub fn translate_ingress(
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
 
     Ok(TranslationResult {
