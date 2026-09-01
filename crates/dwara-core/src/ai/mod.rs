@@ -34,6 +34,7 @@
 pub mod adapter;
 pub mod adapters;
 pub mod budget;
+pub mod cost;
 pub mod openai_compat;
 pub mod routing;
 pub mod sse;

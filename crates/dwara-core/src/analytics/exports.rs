@@ -276,6 +276,28 @@ pub struct StatementRow {
     pub quota_daily: Option<QuotaBudget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_monthly: Option<QuotaBudget>,
+    /// DW-079: AI spend totals for this consumer over the window.
+    /// Populated from the `ai_spend` table via
+    /// [`query::spend_summary`]; zero when no AI traffic or analytics
+    /// is off.
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    /// Priced cost in integer micro-USD.
+    pub cost_micros: i64,
+}
+
+/// One per-model spend breakdown row (DW-079): the JSON statement's
+/// `spend_by_model` array member. Aggregated from the `ai_spend` table
+/// grouped by model over the export window.
+#[derive(Debug, Serialize)]
+pub struct SpendByModel {
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_micros: i64,
+    pub request_count: i64,
 }
 
 /// The JSON file's document shape.
@@ -292,6 +314,10 @@ struct UsageStatement {
     windows_nonempty: i64,
     totals: Option<query::QueryRow>,
     consumers: Vec<StatementRow>,
+    /// DW-079: per-model spend breakdown for the window (empty when
+    /// no AI traffic or analytics is off).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    spend_by_model: Vec<SpendByModel>,
 }
 
 /// One export attempt's ledger row (the `export_runs` table and the
@@ -370,7 +396,8 @@ pub fn run_export(
     };
 
     // The statement IS the query API's answer: same tables, same
-    // helpers, same period bounds.
+    // helpers, same period bounds. DW-079: the spend columns are the
+    // spend query API's answer over the same window (ai_spend table).
     let read = store.query(|c| {
         let grouped = query::structured(
             c,
@@ -400,9 +427,33 @@ pub fn run_export(
             rusqlite::params![gran as i64, from_ms, to_ms],
             |r| r.get(0),
         )?;
-        Ok((grouped, totals, nonempty))
+        // DW-079: spend per consumer and per model for the same
+        // window. Best-effort: a query failure (e.g. the ai_spend
+        // table not yet migrated) leaves the spend columns at zero
+        // rather than failing the whole export.
+        let spend_by_consumer = query::spend_summary(
+            c,
+            &query::SpendQuery {
+                from_ms,
+                to_ms,
+                group_by: vec!["consumer".to_string()],
+                limit: Some(10_000),
+            },
+        )
+        .unwrap_or_default();
+        let spend_by_model = query::spend_summary(
+            c,
+            &query::SpendQuery {
+                from_ms,
+                to_ms,
+                group_by: vec!["model".to_string()],
+                limit: Some(10_000),
+            },
+        )
+        .unwrap_or_default();
+        Ok((grouped, totals, nonempty, spend_by_consumer, spend_by_model))
     });
-    let (grouped, totals, nonempty) = match read {
+    let (grouped, totals, nonempty, spend_by_consumer, spend_by_model) = match read {
         Ok(v) => v,
         Err(e) => {
             return record_run(
@@ -412,10 +463,20 @@ pub fn run_export(
         }
     };
 
+    // Index the per-consumer spend by consumer name for the row join.
+    let mut spend_map: std::collections::HashMap<String, &query::SpendRow> =
+        std::collections::HashMap::new();
+    for s in &spend_by_consumer {
+        if let Some(name) = s.key.first() {
+            spend_map.insert(name.clone(), s);
+        }
+    }
+
     let quotas = quota_at(from_ms / 1000, to_ms / 1000);
     let mut rows = Vec::with_capacity(grouped.len());
     for r in &grouped {
         let q = quotas.get(&r.key[0]).copied().unwrap_or_default();
+        let spend = spend_map.get(&r.key[0]);
         rows.push(StatementRow {
             consumer: r.key[0].clone(),
             requests: r.requests,
@@ -426,11 +487,27 @@ pub fn run_export(
             avg_ms: r.avg_ms,
             quota_daily: q.daily,
             quota_monthly: q.monthly,
+            prompt_tokens: spend.map(|s| s.prompt_tokens).unwrap_or(0),
+            completion_tokens: spend.map(|s| s.completion_tokens).unwrap_or(0),
+            total_tokens: spend.map(|s| s.total_tokens).unwrap_or(0),
+            cost_micros: spend.map(|s| s.cost_micros).unwrap_or(0),
         });
     }
     run.consumers = rows.len();
     run.requests = totals.first().map(|t| t.requests).unwrap_or(0);
     run.windows_nonempty = nonempty;
+
+    let spend_by_model = spend_by_model
+        .iter()
+        .map(|s| SpendByModel {
+            model: s.key.first().cloned().unwrap_or_default(),
+            prompt_tokens: s.prompt_tokens,
+            completion_tokens: s.completion_tokens,
+            total_tokens: s.total_tokens,
+            cost_micros: s.cost_micros,
+            request_count: s.request_count,
+        })
+        .collect();
 
     let statement = UsageStatement {
         kind: "usage_statement",
@@ -442,6 +519,7 @@ pub fn run_export(
         windows_nonempty: nonempty,
         totals: totals.into_iter().next(),
         consumers: rows,
+        spend_by_model,
     };
 
     // Directory + files. Any write failure fails the run (files that
@@ -694,6 +772,10 @@ fn render_csv(s: &UsageStatement) -> Vec<u8> {
         "quota_daily_limit",
         "quota_monthly_used",
         "quota_monthly_limit",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cost_micros",
     ] {
         header.push(h.to_string());
     }
@@ -720,6 +802,11 @@ fn render_csv(s: &UsageStatement) -> Vec<u8> {
                 }
             }
         }
+        // DW-079: spend columns.
+        fields.push(c.prompt_tokens.to_string());
+        fields.push(c.completion_tokens.to_string());
+        fields.push(c.total_tokens.to_string());
+        fields.push(c.cost_micros.to_string());
         push_csv_row(&mut out, &fields);
     }
     out.into_bytes()

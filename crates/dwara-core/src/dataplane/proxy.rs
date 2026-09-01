@@ -594,6 +594,12 @@ pub struct DataPlane {
     /// reload-surviving spend ledger (empty engine when no policy
     /// declares a budget — the pre-check skips entirely).
     ai_budgets: ArcSwap<crate::ai::budget::AiBudgetEngine>,
+    /// AI pricing table (DW-079): per-provider-model token rates,
+    /// compiled from the `ai.pricing` config map. Swapped on every
+    /// reload so a pricing change takes effect on the next request
+    /// with no restart. Empty (every model unknown -> cost 0) when no
+    /// pricing is configured — fail-open, never a crash.
+    ai_pricing: ArcSwap<crate::ai::cost::PricingTable>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -852,8 +858,12 @@ impl DataPlane {
         let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
             snapshot.gateway(),
         ));
+        let ai_pricing = ArcSwap::from_pointee(crate::ai::cost::PricingTable::compile(
+            snapshot.gateway().ai.as_ref(),
+        ));
         let dp = DataPlane {
             ai_budgets,
+            ai_pricing,
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1271,6 +1281,13 @@ impl DataPlane {
                 self.ai_budgets.load_full().ledger(),
             ),
         ));
+        // DW-079: the pricing table swaps with the generation — a
+        // pricing change takes effect on the next request with no
+        // restart.
+        self.ai_pricing
+            .store(Arc::new(crate::ai::cost::PricingTable::compile(
+                snapshot.gateway().ai.as_ref(),
+            )));
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1522,6 +1539,11 @@ impl DataPlane {
     /// reload-surviving ledger.
     pub fn ai_budgets(&self) -> Arc<crate::ai::budget::AiBudgetEngine> {
         self.ai_budgets.load_full()
+    }
+
+    /// The AI pricing table (DW-079): current per-model token rates.
+    pub fn ai_pricing(&self) -> Arc<crate::ai::cost::PricingTable> {
+        self.ai_pricing.load_full()
     }
 
     /// The current generation's upstream registry. Used by the

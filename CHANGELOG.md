@@ -9,6 +9,26 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI cost attribution and metering (DW-079): per-model pricing tables
+  (`ai.pricing`, keyed by provider model, integer micro-USD per 1k
+  input/output tokens) make the DW-078 cost-per-day budget LIVE —
+  spend = provider-reported tokens × configured rate, all integer
+  micro-USD, no floating-point money. Every AI request (streaming and
+  non-streaming) records a spend row into the analytics store's new
+  `ai_spend` table (schema v3): consumer, team (the policy name for
+  `scope: policy` budgets), provider, model, version, token counts,
+  and cost. Rows are written fire-and-forget (drop-and-count on a
+  full channel — never blocks the request path). Spend is queryable
+  via `POST /analytics/spend` on the admin API (group by consumer,
+  team, model). The scheduled usage-report export (DW-120) carries
+  spend columns (`prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `cost_micros`) in CSV and JSON, plus a `spend_by_model` breakdown in
+  JSON. CSV is hand-rolled RFC 4180; Parquet is deferred (seam
+  documented). Pricing changes take effect on the next request after
+  a config reload — no restart. New metric
+  `dwara_ai_cost_micros_total{provider,model}` (config-bounded labels,
+  no consumer). New `ai::cost` module; no new dependencies.
+
 - AI token budgets (DW-078): policies can declare a `token_budget` —
   provider-reported tokens per minute and/or cost per UTC day (integer
   micro-USD, no float money) — enforced per consumer or shared per
@@ -25,9 +45,9 @@ the project follows semantic versioning once 1.0 is reached.
   provider tokens); dialects that only report usage at the end spend
   at stream end and are enforced by the next pre-check. The spend
   ledger survives config reloads; windows are fixed epoch-minute /
-  UTC-day. Cost/day is enforced end to end
-  but reads prices through one seam that returns 0 until the DW-079
-  pricing tables land (enforced-but-inert). Budgets resolve by policy
+  UTC-day. Cost/day is enforced end to end and reads prices through
+  the DW-079 pricing tables (`ai.pricing`) — live once a table is
+  configured. Budgets resolve by policy
   precedence with the most specific binding governing; unbudgeted
   consumers are unlimited. New metric
   `dwara_ai_budget_denied_total{kind}`; pre-check denials set the

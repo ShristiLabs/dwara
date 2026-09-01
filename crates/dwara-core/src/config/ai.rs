@@ -52,6 +52,16 @@ pub struct AiConfig {
     /// `provider_model` never leaves the gateway.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, AiModel>,
+    /// Per-model pricing table (DW-079): the key is the PROVIDER MODEL
+    /// identifier (the actual model the provider charges for, e.g.
+    /// `gpt-4o-mini`), NOT the client-facing alias. Costs are integer
+    /// micro-USD per 1 000 tokens (1 000 000 micro-USD = $1.00 — no
+    /// floating-point money). Spend = usage x price, aggregated per
+    /// key/team/model (DW-079). Absent (the default): no pricing, so
+    /// cost attribution records zero cost (the budget cost window and
+    /// the spend store stay live but inert until prices are declared).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pricing: BTreeMap<String, AiPricing>,
 }
 
 /// One AI provider (DW-075 `ai.providers[]`).
@@ -175,4 +185,20 @@ pub struct AiCanaryVersion {
     pub provider: String,
     /// The provider's own model identifier for this version.
     pub provider_model: String,
+}
+
+/// Per-model token pricing (DW-079 `ai.pricing.<provider_model>`).
+/// Costs are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =
+/// $1.00 — no floating-point money). The key in the parent map is the
+/// PROVIDER MODEL identifier (the actual model the provider charges
+/// for), not the client-facing alias. Spend is computed as
+/// `input_tokens * input_per_1k_micros / 1000 + output_tokens *
+/// output_per_1k_micros / 1000` (integer micro-USD, saturating).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiPricing {
+    /// Micro-USD per 1 000 input (prompt) tokens.
+    pub input_per_1k_micros: u64,
+    /// Micro-USD per 1 000 output (completion) tokens.
+    pub output_per_1k_micros: u64,
 }

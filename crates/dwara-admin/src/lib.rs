@@ -734,6 +734,44 @@ async fn analytics_query(
     }
 }
 
+/// POST /analytics/spend (DW-079): the spend query endpoint — a
+/// closed JSON grammar over the `ai_spend` table, aggregated per
+/// consumer/team/model for billing reconciliation. Never SQL text.
+async fn analytics_spend(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let q: dwara_core::analytics::query::SpendQuery = match serde_json::from_slice(&body) {
+        Ok(q) => q,
+        Err(err) => {
+            return envelope(
+                400,
+                "analytics_spend_invalid",
+                &format!("body is not a valid spend query: {err}"),
+                request_id,
+            )
+        }
+    };
+    if let Err(err) = q.validate() {
+        return envelope(400, "analytics_spend_invalid", &err.to_string(), request_id);
+    }
+    match store.query(|c| dwara_core::analytics::query::spend_summary(c, &q)) {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "query": { "from_ms": q.from_ms, "to_ms": q.to_ms,
+                           "group_by": q.group_by },
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_spend_failed", &e.to_string(), request_id),
+    }
+}
+
 /// GET /analytics/exports (DW-120): the export run ledger, newest
 /// first — every scheduled or manual usage-statement export attempt
 /// per window (status, partial flag, formats, consumer/request
@@ -1261,6 +1299,27 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             analytics_query(ctx, body, &request_id).await
         }
+        // POST /analytics/spend (DW-079): the spend query — a closed
+        // JSON grammar over the ai_spend table, aggregated per
+        // consumer/team/model for billing reconciliation.
+        ("POST", "/analytics/spend") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "query_too_large",
+                            &format!("query body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            analytics_spend(ctx, body, &request_id).await
+        }
         // GET /analytics/exports (DW-120): the export run ledger,
         // newest first. Query param: limit (default 25, 1..=100).
         ("GET", "/analytics/exports") => analytics_exports_list(ctx, &req, &request_id).await,
@@ -1298,6 +1357,7 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/analytics/dashboard"
             | "/analytics/top"
             | "/analytics/query"
+            | "/analytics/spend"
             | "/analytics/exports"
             | "/analytics/exports/run"
             | "/quotas/usage",

@@ -109,8 +109,10 @@ crates/dwara-core/src/
                       SQLite file (raw access records + 1m/5m/1h/1d
                       additive rollups, cursor-guarded cascade,
                       per-granularity retention, incremental vacuum);
-                      implements extensions::analytics::AnalyticsSink;
-                      the fire-and-forget channel writer must never
+                      the DW-079 ai_spend table (per-request token/cost
+                      records, schema v3) with its own fire-and-forget
+                      writer; implements extensions::analytics::AnalyticsSink;
+                      the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
   security/           tls, authn, authz
   resilience/         health, retries, breaker (passive observation)
@@ -122,8 +124,10 @@ crates/dwara-core/src/
                       chat types, the pure-translation
                       ProviderAdapter trait + OpenAI/Anthropic/Gemini
                       adapters, the OpenAI-compat facade, hand-rolled
-                      SSE framing, and the compiled model-alias table
-                      (transport lives in dataplane/ai_proxy)
+                      SSE framing, the compiled model-alias table
+                      (transport lives in dataplane/ai_proxy), the
+                      DW-078 token-budget engine (budget.rs), and the
+                      DW-079 pricing table + cost computation (cost.rs)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind

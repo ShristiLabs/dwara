@@ -418,6 +418,15 @@ where
                 upstream = %provider.upstream,
                 "ai stream established; forwarding begins"
             );
+            // DW-079: compute the consumer and team strings BEFORE
+            // moving `budget` into the stream body.
+            let consumer_name = identity
+                .map(|id| id.consumer_name.clone())
+                .unwrap_or_else(|| "anonymous".to_string());
+            let team = budget
+                .as_ref()
+                .map(|g| g.team_key().to_string())
+                .unwrap_or_default();
             let body = super::ai_proxy::AiStreamBody::new(
                 up_body,
                 adapter,
@@ -430,6 +439,10 @@ where
                 Arc::clone(&obs),
                 rid.to_string(),
                 budget,
+                dp.ai_pricing(),
+                dp.analytics(),
+                consumer_name,
+                team,
             );
             return Response::builder()
                 .status(StatusCode::OK)
@@ -514,13 +527,51 @@ where
                 usage.completion_tokens.unwrap_or(0),
                 version,
             );
+            // DW-079: price the call through the dataplane's compiled
+            // pricing table (swapped on reload, so a pricing change
+            // applies to the next request with no restart). Unknown
+            // model -> 0 (fail-open).
+            let pricing = dp.ai_pricing();
+            let cost = pricing.cost_micros(&target.provider_model, usage);
+            if cost > 0 {
+                obs.record_ai_cost(&provider.name, &target.provider_model, cost);
+            }
             // Budget spend (DW-078): the provider-reported usage is
             // recorded against the requesting holder's windows AFTER
             // the call — check-then-spend; the crossing (if any) is
             // already priced into the next pre-check.
             if let Some(guard) = &budget {
-                let cost = crate::ai::budget::cost_micros(&target.provider_model, usage);
                 guard.spend(now_epoch_s(), usage, cost);
+            }
+            // DW-079: record the spend dimensions into the analytics
+            // store for billing reconciliation. The team field is the
+            // policy-scoped budget's key (the policy name) when a
+            // team budget binds, else empty.
+            if let Some(analytics) = dp.analytics() {
+                let consumer_name = identity
+                    .map(|id| id.consumer_name.as_str())
+                    .unwrap_or("anonymous");
+                let team = budget
+                    .as_ref()
+                    .map(|g| g.team_key().to_string())
+                    .unwrap_or_default();
+                let prompt = usage.prompt_tokens.unwrap_or(0);
+                let completion = usage.completion_tokens.unwrap_or(0);
+                let total = usage
+                    .total_tokens
+                    .unwrap_or_else(|| prompt.saturating_add(completion));
+                analytics.offer_ai_spend(crate::analytics::AiSpendRecord {
+                    ts_ms: now_ms(),
+                    consumer: consumer_name.to_string(),
+                    team,
+                    provider: provider.name.clone(),
+                    model: target.provider_model.clone(),
+                    version: version.to_string(),
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    total_tokens: total,
+                    cost_micros: cost,
+                });
             }
         }
         obs.record_ai_request(&provider.name, route_name, "success", version);
@@ -631,6 +682,14 @@ fn now_epoch_s() -> u64 {
         .unwrap_or(0)
 }
 
+/// Current Unix milliseconds (DW-079 spend record timestamping).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Whether provider response headers declare an SSE body.
 fn is_event_stream(headers: &HeaderMap) -> bool {
     headers
@@ -700,8 +759,7 @@ pub struct AiStreamBody {
     /// The requesting holder's budget (DW-078): checked as usage
     /// events accumulate — a crossing cuts the stream off.
     budget: Option<crate::ai::budget::BudgetGuard>,
-    /// The serving provider's model id (the DW-079 pricing seam's
-    /// key; the prices themselves arrive with DW-079).
+    /// The serving provider's model id (the DW-079 pricing key).
     provider_model: String,
     /// The request id (the cutoff event's correlation handle).
     rid: String,
@@ -719,6 +777,20 @@ pub struct AiStreamBody {
     /// chunks the report arrived in.
     budget_spent_tokens: u64,
     budget_spent_cost_micros: u64,
+    /// DW-079: the dataplane's compiled pricing table (for pricing
+    /// the stream's terminal usage).
+    pricing: std::sync::Arc<crate::ai::cost::PricingTable>,
+    /// DW-079: the analytics store (for recording the spend record at
+    /// stream close). None when analytics is off.
+    analytics: Option<std::sync::Arc<crate::analytics::EmbeddedAnalytics>>,
+    /// DW-079: the consumer name for spend attribution.
+    consumer: String,
+    /// DW-079: the team key for spend attribution (policy name when
+    /// a team budget binds, else empty).
+    team: String,
+    /// DW-079: whether the spend record has been recorded (exactly
+    /// once per stream, at close).
+    spend_recorded: bool,
 }
 
 impl AiStreamBody {
@@ -738,6 +810,10 @@ impl AiStreamBody {
         obs: std::sync::Arc<crate::observability::Observability>,
         rid: String,
         budget: Option<crate::ai::budget::BudgetGuard>,
+        pricing: std::sync::Arc<crate::ai::cost::PricingTable>,
+        analytics: Option<std::sync::Arc<crate::analytics::EmbeddedAnalytics>>,
+        consumer: String,
+        team: String,
     ) -> Self {
         AiStreamBody {
             inner: Some(inner),
@@ -759,6 +835,11 @@ impl AiStreamBody {
             cut_off: false,
             budget_spent_tokens: 0,
             budget_spent_cost_micros: 0,
+            pricing,
+            analytics,
+            consumer,
+            team,
+            spend_recorded: false,
         }
     }
 
@@ -781,7 +862,7 @@ impl AiStreamBody {
                 .saturating_add(usage.completion_tokens.unwrap_or(0))
         });
         let tokens = total.saturating_sub(self.budget_spent_tokens);
-        let cost_total = crate::ai::budget::cost_micros(&self.provider_model, usage);
+        let cost_total = self.pricing.cost_micros(&self.provider_model, usage);
         let cost = cost_total.saturating_sub(self.budget_spent_cost_micros);
         if tokens == 0 && cost == 0 {
             return false;
@@ -874,6 +955,37 @@ impl AiStreamBody {
                 usage.completion_tokens.unwrap_or(0),
                 &self.gauges.version,
             );
+        }
+        // DW-079: record the spend dimensions into the analytics
+        // store (exactly once per stream). The terminal usage is the
+        // accumulated provider-reported total; cost is priced through
+        // the dataplane's pricing table.
+        if !self.spend_recorded {
+            self.spend_recorded = true;
+            let prompt = usage.prompt_tokens.unwrap_or(0);
+            let completion = usage.completion_tokens.unwrap_or(0);
+            let total = usage
+                .total_tokens
+                .unwrap_or_else(|| prompt.saturating_add(completion));
+            let cost = self.pricing.cost_micros(&self.provider_model, usage);
+            if cost > 0 {
+                self.obs
+                    .record_ai_cost(&self.gauges.provider, &self.provider_model, cost);
+            }
+            if let Some(analytics) = &self.analytics {
+                analytics.offer_ai_spend(crate::analytics::AiSpendRecord {
+                    ts_ms: now_ms(),
+                    consumer: self.consumer.clone(),
+                    team: self.team.clone(),
+                    provider: self.gauges.provider.clone(),
+                    model: self.provider_model.clone(),
+                    version: self.gauges.version.clone(),
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    total_tokens: total,
+                    cost_micros: cost,
+                });
+            }
         }
     }
 }

@@ -118,6 +118,36 @@ fn dims_json(pairs: &[(String, String)]) -> String {
     serde_json::Value::Object(map).to_string()
 }
 
+/// One AI spend record (DW-079): the per-request spend dimensions
+/// written to the `ai_spend` table. A PLAIN DTO — deliberately not
+/// importing `ai::types::Usage` (the analytics domain may not import
+/// the `ai` domain; see `scripts/check_deps.py`). The dataplane
+/// converts from `ai::types::Usage` at the call site.
+#[derive(Debug, Clone)]
+pub struct AiSpendRecord {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The policy-scoped team key (the policy name a `scope: policy`
+    /// budget uses), or empty when no team budget binds the request.
+    pub team: String,
+    /// The serving provider name (`ai.providers[].name`).
+    pub provider: String,
+    /// The provider's own model identifier (the pricing key).
+    pub model: String,
+    /// The canary version label (DW-076), or empty for non-canary.
+    pub version: String,
+    /// Provider-reported prompt (input) tokens.
+    pub prompt_tokens: u64,
+    /// Provider-reported completion (output) tokens.
+    pub completion_tokens: u64,
+    /// Total tokens (prompt + completion, or the provider's own total).
+    pub total_tokens: u64,
+    /// Priced cost in integer micro-USD (usage x pricing table).
+    pub cost_micros: u64,
+}
+
 impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
@@ -182,6 +212,14 @@ pub struct EmbeddedAnalytics {
     conn: Mutex<rusqlite::Connection>,
     tx: mpsc::Sender<RawRecord>,
     rx: Mutex<Option<mpsc::Receiver<RawRecord>>>,
+    /// DW-079: the AI spend record channel (same fire-and-forget
+    /// posture as the raw record channel — drop and count on full,
+    /// never block the request path).
+    spend_tx: mpsc::Sender<AiSpendRecord>,
+    spend_rx: Mutex<Option<mpsc::Receiver<AiSpendRecord>>>,
+    /// Records dropped on a full SPEND channel (the never-block
+    /// counter for the DW-079 path).
+    spend_dropped: AtomicU64,
     /// Retention config: [raw, 1m, 5m, 1h, 1d] in ms.
     retention_ms: [i64; 5],
     /// Flush tick (ms) — the writer's maximum batch latency.
@@ -203,10 +241,14 @@ impl EmbeddedAnalytics {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         schema::migrate(&conn)?;
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
+        let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
         Ok(Arc::new(EmbeddedAnalytics {
             conn: Mutex::new(conn),
             rx: Mutex::new(Some(rx)),
             tx,
+            spend_tx,
+            spend_rx: Mutex::new(Some(spend_rx)),
+            spend_dropped: AtomicU64::new(0),
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
@@ -229,6 +271,9 @@ impl EmbeddedAnalytics {
             );
             return Vec::new();
         };
+        // DW-079: take the spend receiver alongside the raw receiver —
+        // a second call returns nothing for either.
+        let spend_rx_opt = self.spend_rx.lock().unwrap().take();
         let mut writer_shutdown = shutdown.clone();
         let writer = {
             let store = Arc::clone(self);
@@ -269,6 +314,47 @@ impl EmbeddedAnalytics {
                 }
             })
         };
+        // DW-079: the spend writer — same fire-and-forget batched
+        // transaction shape as the raw writer, draining the spend
+        // channel into the `ai_spend` table.
+        let spend_writer = if let Some(mut spend_rx) = spend_rx_opt {
+            let store = Arc::clone(self);
+            let mut spend_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiSpendRecord> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = spend_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_spend(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = spend_shutdown.changed() => {
+                            while let Ok(r) = spend_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_spend(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_spend(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let maintainer = {
             let store = Arc::clone(self);
             let mut shutdown2 = shutdown.clone();
@@ -284,7 +370,11 @@ impl EmbeddedAnalytics {
                 }
             })
         };
-        vec![writer, maintainer]
+        let mut handles = vec![writer, maintainer];
+        if let Some(h) = spend_writer {
+            handles.push(h);
+        }
+        handles
     }
 
     /// One batched transaction of raw INSERTs. Errors are logged and
@@ -355,6 +445,72 @@ impl EmbeddedAnalytics {
                 tracing::warn!(
                     code = "analytics_commit_failed",
                     "analytics batch lost: {e}"
+                );
+            }
+        }
+    }
+
+    /// One batched transaction of `ai_spend` INSERTs (DW-079). Same
+    /// swallow-and-log posture as [`flush`]: a failed batch is lost,
+    /// the counter is not bumped (the records were accepted; the DISK
+    /// failed).
+    fn flush_spend(&self, batch: &[AiSpendRecord]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_spend_batch_begin_failed",
+                    "ai_spend batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_spend (ts_ms, consumer, team, provider, model, version,
+                                   prompt_tokens, completion_tokens, total_tokens, cost_micros)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_spend_batch_prepare_failed",
+                    "ai_spend batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.consumer,
+                r.team,
+                r.provider,
+                r.model,
+                r.version,
+                r.prompt_tokens as i64,
+                r.completion_tokens as i64,
+                r.total_tokens as i64,
+                r.cost_micros as i64,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_spend_insert_failed",
+                    "ai_spend record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_spend_commit_failed",
+                    "ai_spend batch lost: {e}"
                 );
             }
         }
@@ -442,6 +598,29 @@ impl EmbeddedAnalytics {
                 );
             }
         }
+    }
+
+    /// The AI spend hot path (DW-079): fire-and-forget record of one
+    /// completed AI request's spend dimensions. NEVER blocks — a
+    /// bounded-channel `try_send` that drops and counts on full (the
+    /// same never-block posture as [`Self::record`]).
+    pub fn offer_ai_spend(&self, rec: AiSpendRecord) {
+        if self.spend_tx.try_send(rec).is_err() {
+            let n = self.spend_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_spend_channel_full",
+                    total_dropped = n + 1,
+                    "ai_spend channel full; dropping records (never blocking the dataplane)"
+                );
+            }
+        }
+    }
+
+    /// AI spend records accepted by [`Self::offer_ai_spend`] but dropped
+    /// (channel full). The honest loss counter for the DW-079 path.
+    pub fn dropped_spend_records(&self) -> u64 {
+        self.spend_dropped.load(Ordering::Relaxed)
     }
 }
 

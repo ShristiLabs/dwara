@@ -271,6 +271,7 @@ impl AiBudgetEngine {
                         key,
                         tokens_per_min: budget.tokens_per_min,
                         cost_per_day_micros: budget.cost_per_day_micros,
+                        scope: budget.scope,
                     });
                 }
             }
@@ -327,6 +328,10 @@ pub struct BudgetGuard {
     key: String,
     tokens_per_min: Option<u64>,
     cost_per_day_micros: Option<u64>,
+    /// The budget's scope (DW-079): when `Policy`, the `key` IS the
+    /// team name (the policy name) — exposed so the spend recorder
+    /// can attribute the request to the team.
+    scope: TokenBudgetScope,
 }
 
 /// Which budget window denied (the `kind` label of
@@ -445,6 +450,17 @@ impl BudgetGuard {
         );
         format!("data: {}\n\n", body)
     }
+
+    /// The team key for spend attribution (DW-079): the policy name
+    /// when the budget is `scope: policy` (a shared team budget), or
+    /// an empty string when the budget is consumer-scoped or no
+    /// budget binds the request.
+    pub fn team_key(&self) -> &str {
+        match self.scope {
+            TokenBudgetScope::Policy => &self.key,
+            TokenBudgetScope::Consumer => "",
+        }
+    }
 }
 
 /// Keep the LATER wall when both windows deny: the Retry-After and
@@ -462,11 +478,14 @@ fn later_wall(
 }
 
 /// The DW-079 pricing seam: micro-USD for one provider-model call
-/// with this usage. Returns 0 until the pricing tables land — cost
-/// enforcement is wired end to end and reads prices ONLY through
-/// this function.
-pub fn cost_micros(_provider_model: &str, _usage: Usage) -> u64 {
-    0
+/// with this usage. Reads prices through a DEFAULT (empty) pricing
+/// table, so this free function always returns 0 — it exists for
+/// test/backward-compat call sites that do not have a dataplane
+/// handle. The live path uses the dataplane's compiled
+/// [`PricingTable`](crate::ai::cost::PricingTable) (stored on the
+/// DataPlane as an ArcSwap, refreshed per generation).
+pub fn cost_micros(provider_model: &str, usage: Usage) -> u64 {
+    crate::ai::cost::PricingTable::default().cost_micros(provider_model, usage)
 }
 
 /// Resolve a consumer's attached policies from the config (by name).

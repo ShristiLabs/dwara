@@ -220,15 +220,18 @@ fn csv_file_carries_the_same_numbers_and_escapes_hostile_names() {
     assert_eq!(run.status, "ok", "{}", run.error);
 
     let csv = read(&out, "dwara-usage-daily-1970-01-01.csv");
-    assert!(csv.starts_with("consumer,requests,errors,error_rate,rate_limited,shed,avg_ms,quota_daily_used,quota_daily_limit,quota_monthly_used,quota_monthly_limit\r\n"));
+    assert!(csv.starts_with("consumer,requests,errors,error_rate,rate_limited,shed,avg_ms,quota_daily_used,quota_daily_limit,quota_monthly_used,quota_monthly_limit,prompt_tokens,completion_tokens,total_tokens,cost_micros\r\n"));
     // Hostile name is quoted with doubled quotes.
     assert!(csv.contains("\"weird,\"\"name\",1,0,"), "{csv}");
     // acme carries its quota figures; beta's cells are EMPTY, not 0.
     assert!(csv.contains("acme,3,1,"), "{csv}");
     let acme_line = csv.lines().find(|l| l.starts_with("acme")).unwrap();
-    assert!(acme_line.ends_with(",2,1000,,"), "acme row: {acme_line}");
+    assert!(
+        acme_line.ends_with(",2,1000,,,0,0,0,0"),
+        "acme row: {acme_line}"
+    );
     let beta_line = csv.lines().find(|l| l.starts_with("beta")).unwrap();
-    assert!(beta_line.ends_with(",,,,"), "beta row: {beta_line}");
+    assert!(beta_line.ends_with(",,,,0,0,0,0"), "beta row: {beta_line}");
     assert!(csv.ends_with("\r\n"));
 }
 

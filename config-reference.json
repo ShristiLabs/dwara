@@ -432,6 +432,13 @@
             "$ref": "#/$defs/AiModel"
           }
         },
+        "pricing": {
+          "description": "Per-model pricing table (DW-079): the key is the PROVIDER MODEL\nidentifier (the actual model the provider charges for, e.g.\n`gpt-4o-mini`), NOT the client-facing alias. Costs are integer\nmicro-USD per 1 000 tokens (1 000 000 micro-USD = $1.00 — no\nfloating-point money). Spend = usage x price, aggregated per\nkey/team/model (DW-079). Absent (the default): no pricing, so\ncost attribution records zero cost (the budget cost window and\nthe spend store stay live but inert until prices are declared).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiPricing"
+          }
+        },
         "providers": {
           "description": "The provider pool. Each entry names an upstream that carries the\ntransport and the adapter `kind` that carries the wire translation.",
           "type": "array",
@@ -492,6 +499,29 @@
       "required": [
         "provider",
         "provider_model"
+      ]
+    },
+    "AiPricing": {
+      "description": "Per-model token pricing (DW-079 `ai.pricing.<provider_model>`).\nCosts are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =\n$1.00 — no floating-point money). The key in the parent map is the\nPROVIDER MODEL identifier (the actual model the provider charges\nfor), not the client-facing alias. Spend is computed as\n`input_tokens * input_per_1k_micros / 1000 + output_tokens *\noutput_per_1k_micros / 1000` (integer micro-USD, saturating).",
+      "type": "object",
+      "properties": {
+        "input_per_1k_micros": {
+          "description": "Micro-USD per 1 000 input (prompt) tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_per_1k_micros": {
+          "description": "Micro-USD per 1 000 output (completion) tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input_per_1k_micros",
+        "output_per_1k_micros"
       ]
     },
     "AiProvider": {

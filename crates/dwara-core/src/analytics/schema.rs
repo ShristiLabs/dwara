@@ -177,8 +177,34 @@ pub const SCHEMA_V2: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Schema v3 (DW-079): the `ai_spend` table. One row per completed AI
+/// request carrying the provider-reported token usage and the priced
+/// cost (micro-USD), attributed to the consumer/team/model/provider
+/// that served it. The spend query surface
+/// ([`super::query::spend_summary`]) aggregates these rows per
+/// consumer/team/model for billing reconciliation; the export
+/// statement (DW-120) folds the per-consumer totals into its rows.
+pub const SCHEMA_V3: &str = "
+    CREATE TABLE IF NOT EXISTS ai_spend (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms             INTEGER NOT NULL,
+        consumer          TEXT NOT NULL,
+        team              TEXT NOT NULL DEFAULT '',
+        provider          TEXT NOT NULL,
+        model             TEXT NOT NULL,
+        version           TEXT NOT NULL DEFAULT '',
+        prompt_tokens     INTEGER NOT NULL,
+        completion_tokens INTEGER NOT NULL,
+        total_tokens      INTEGER NOT NULL,
+        cost_micros       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_spend_ts ON ai_spend(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_spend_consumer ON ai_spend(consumer);
+    CREATE INDEX IF NOT EXISTS idx_ai_spend_model ON ai_spend(model);
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
@@ -203,6 +229,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 2 {
         conn.execute_batch(SCHEMA_V2)?;
         conn.pragma_update(None, "user_version", 2)?;
+    }
+    if version < 3 {
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.pragma_update(None, "user_version", 3)?;
     }
     Ok(())
 }

@@ -533,6 +533,11 @@ pub struct Observability {
     /// (DW-076). Provider-reported only (the locked M4 decision: the
     /// gateway never estimates).
     ai_tokens_total: IntCounterVec,
+    /// DW-079: total priced AI spend in micro-USD, by provider and
+    /// provider_model (config-bounded labels — no consumer label,
+    /// cardinality rule). Priced through the dataplane's compiled
+    /// pricing table; 0 for unknown models.
+    ai_cost_micros_total: IntCounterVec,
     /// DW-078: AI budget denials, by kind (tokens | cost). No consumer
     /// label (cardinality); the consumer is in the access log line.
     ai_budget_denied_total: IntCounterVec,
@@ -1062,6 +1067,16 @@ impl Observability {
             &["provider", "kind", "version"],
         )
         .expect("valid metric definition");
+        let ai_cost_micros_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_cost_micros_total",
+                "Total priced AI spend in micro-USD (DW-079), by provider and \
+                 provider_model. Priced through the dataplane's compiled pricing \
+                 table; 0 for unknown models. No consumer label (cardinality).",
+            ),
+            &["provider", "model"],
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -1118,6 +1133,7 @@ impl Observability {
             Box::new(config_convergence_refresh_failures_total.clone()),
             Box::new(ai_requests_total.clone()),
             Box::new(ai_tokens_total.clone()),
+            Box::new(ai_cost_micros_total.clone()),
             Box::new(ai_stream_chunks_total.clone()),
             Box::new(ai_budget_denied_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
@@ -1182,6 +1198,7 @@ impl Observability {
             config_convergence_refresh_failures_total,
             ai_requests_total,
             ai_tokens_total,
+            ai_cost_micros_total,
             ai_stream_chunks_total,
             ai_budget_denied_total,
             ai_first_token_seconds,
@@ -1561,6 +1578,16 @@ impl Observability {
             .ai_tokens_total
             .with_label_values(&[provider, "completion", version]);
         counters.inc_by(completion);
+    }
+
+    /// Add priced AI spend (DW-079) to
+    /// `dwara_ai_cost_micros_total{provider,model}` in micro-USD. The
+    /// provider and model labels are config-bounded (no consumer
+    /// label — cardinality rule).
+    pub fn record_ai_cost(&self, provider: &str, model: &str, cost_micros: u64) {
+        self.ai_cost_micros_total
+            .with_label_values(&[provider, model])
+            .inc_by(cost_micros);
     }
 
     /// The current `dwara_config_convergence_drift` gauge value (DW-054):

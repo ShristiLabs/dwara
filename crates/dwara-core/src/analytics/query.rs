@@ -481,3 +481,134 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// DW-079: spend aggregation over the `ai_spend` table.
+// ---------------------------------------------------------------------------
+
+/// The dimension columns the spend summary may group by (DW-079). The
+/// closed set the spend endpoint accepts — a subset of the `ai_spend`
+/// table's columns (no `provider`/`version` to keep the billing view
+/// focused on who/what, not the routing detail).
+pub const SPEND_GROUP_COLUMNS: [&str; 3] = ["consumer", "team", "model"];
+
+/// One spend summary row (DW-079): aggregated token and cost totals
+/// for one group key over a billing window.
+#[derive(Debug, Serialize)]
+pub struct SpendRow {
+    /// The group-by key values, in the query's `group_by` order (empty
+    /// for an ungrouped totals row).
+    pub key: Vec<String>,
+    /// Sum of prompt (input) tokens.
+    pub prompt_tokens: i64,
+    /// Sum of completion (output) tokens.
+    pub completion_tokens: i64,
+    /// Sum of total tokens.
+    pub total_tokens: i64,
+    /// Sum of priced cost (integer micro-USD).
+    pub cost_micros: i64,
+    /// Number of AI requests in the group.
+    pub request_count: i64,
+}
+
+/// The spend query endpoint's request body (DW-079): a closed grammar
+/// over the `ai_spend` table — never SQL text from the caller.
+#[derive(Debug, Deserialize)]
+pub struct SpendQuery {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Dimensions to group by (closed set: consumer, team, model).
+    /// Empty = one totals row.
+    #[serde(default)]
+    pub group_by: Vec<String>,
+    /// Maximum returned rows (default 10 000, hard cap 10 000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Why a spend query was rejected before SQL was built.
+#[derive(Debug)]
+pub enum SpendQueryError {
+    UnknownGroupBy(String),
+    BadRange,
+}
+
+impl std::fmt::Display for SpendQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpendQueryError::UnknownGroupBy(g) => write!(
+                f,
+                "unknown group_by '{g}' (one of: {})",
+                SPEND_GROUP_COLUMNS.join(", ")
+            ),
+            SpendQueryError::BadRange => write!(f, "from_ms must be < to_ms"),
+        }
+    }
+}
+
+impl std::error::Error for SpendQueryError {}
+
+impl SpendQuery {
+    /// Reject anything outside the closed grammar.
+    pub fn validate(&self) -> Result<(), SpendQueryError> {
+        if self.from_ms >= self.to_ms {
+            return Err(SpendQueryError::BadRange);
+        }
+        for g in &self.group_by {
+            if !SPEND_GROUP_COLUMNS.contains(&g.as_str()) {
+                return Err(SpendQueryError::UnknownGroupBy(g.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Execute a validated spend query (DW-079): aggregate the `ai_spend`
+/// table over a billing window, grouped by the requested dimensions.
+/// Rows order by cost descending (the billing-relevant axis). Reads
+/// the RAW `ai_spend` rows directly — spend is per-request, not
+/// rolled up (the volume is orders of magnitude below the access
+/// record path, and billing windows are short).
+pub fn spend_summary(conn: &Connection, q: &SpendQuery) -> rusqlite::Result<Vec<SpendRow>> {
+    let key_len = q.group_by.len();
+    let key_sel = if key_len == 0 {
+        String::new()
+    } else {
+        format!("{}, ", q.group_by.join(", "))
+    };
+    let group_all = if key_len == 0 {
+        String::new()
+    } else {
+        format!("GROUP BY {}", q.group_by.join(", "))
+    };
+    let sql = format!(
+        "SELECT {key_sel}
+                SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens),
+                SUM(cost_micros), COUNT(*)
+         FROM ai_spend
+         WHERE ts_ms >= ? AND ts_ms < ?
+         {group_all}
+         ORDER BY SUM(cost_micros) DESC
+         LIMIT ?"
+    );
+    let limit = q.limit.unwrap_or(10_000).min(10_000);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params![q.from_ms, q.to_ms, limit as i64])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut key = Vec::with_capacity(key_len);
+        for i in 0..key_len {
+            key.push(row.get::<_, String>(i)?);
+        }
+        let base = key_len;
+        out.push(SpendRow {
+            key,
+            prompt_tokens: row.get::<_, i64>(base)?,
+            completion_tokens: row.get::<_, i64>(base + 1)?,
+            total_tokens: row.get::<_, i64>(base + 2)?,
+            cost_micros: row.get::<_, i64>(base + 3)?,
+            request_count: row.get::<_, i64>(base + 4)?,
+        });
+    }
+    Ok(out)
+}
