@@ -419,11 +419,44 @@ where
         }
     }
 
-    // 4. Route (DW-076): the ordered candidate list for this alias —
-    // [primary, failover...] for a chained alias, the deterministic
-    // canary pick for a split alias. Empty means the alias does not
-    // exist.
-    let candidates = runtime.route(&chat_req.model, rid);
+    // 4. Route (DW-076 / DW-085): the ordered candidate list for this
+    // alias — [primary, failover...] for a chained alias, the
+    // deterministic canary pick for a split alias, or the policy
+    // evaluation result for a policy alias (DW-085: a FallbackChain
+    // policy may call an external classifier service async). Empty
+    // means the alias does not exist.
+    let prompt_text = chat_req
+        .messages
+        .iter()
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (candidates, policy_decision) = runtime
+        .route_with_policy(&chat_req.model, rid, &prompt_text)
+        .await;
+    // DW-085: record the routing-policy decision as a metric. The
+    // `ai` domain cannot import `observability` (the dependency
+    // direction forbids it), so the decision travels back here and
+    // the dataplane records it.
+    if let Some(decision) = policy_decision {
+        if let Some(crate::ai::CompiledModel::Policy(policy)) = runtime.model(&chat_req.model) {
+            let name = policy.name();
+            match decision {
+                crate::ai::policy::PolicyDecision::Escalate => {
+                    dp.observability_arc()
+                        .record_ai_routing_policy_escalation(name);
+                }
+                crate::ai::policy::PolicyDecision::Cheap
+                | crate::ai::policy::PolicyDecision::ClassifierError => {
+                    dp.observability_arc().record_ai_routing_policy_cheap(name);
+                }
+                crate::ai::policy::PolicyDecision::LatencyCost => {
+                    dp.observability_arc()
+                        .record_ai_routing_policy_latency_cost_selection(name);
+                }
+            }
+        }
+    }
     if candidates.is_empty() {
         return ai_error_response(
             StatusCode::NOT_FOUND,

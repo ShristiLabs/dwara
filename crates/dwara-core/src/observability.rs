@@ -559,6 +559,20 @@ pub struct Observability {
     /// (config-bounded label). No consumer label (cardinality); the
     /// consumer is in the access log.
     ai_semantic_cache_misses_total: IntCounterVec,
+    /// DW-085: AI routing-policy FallbackChain escalations (complex
+    /// prompt -> expensive model), by policy name (config-bounded
+    /// label). No consumer label (cardinality); the consumer is in
+    /// the access log.
+    ai_routing_policy_escalations_total: IntCounterVec,
+    /// DW-085: AI routing-policy FallbackChain cheap-model
+    /// selections (simple prompt -> cheap model), by policy name
+    /// (config-bounded label). No consumer label (cardinality); the
+    /// consumer is in the access log.
+    ai_routing_policy_cheap_total: IntCounterVec,
+    /// DW-085: AI routing-policy LatencyCost selections, by policy
+    /// name (config-bounded label). No consumer label (cardinality);
+    /// the consumer is in the access log.
+    ai_routing_policy_latency_cost_selections_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1087,6 +1101,38 @@ impl Observability {
             &["model"],
         )
         .expect("valid metric definition");
+        let ai_routing_policy_escalations_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_routing_policy_escalations_total",
+                "AI routing-policy FallbackChain escalations (DW-085): complex \
+                 prompts (classifier score >= threshold) routed to the costlier \
+                 model, by policy name (config-bounded label). No consumer \
+                 label — cardinality rule.",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
+        let ai_routing_policy_cheap_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_routing_policy_cheap_total",
+                "AI routing-policy FallbackChain cheap-model selections \
+                 (DW-085): simple prompts (classifier score < threshold) routed \
+                 to the cheap model, by policy name (config-bounded label). No \
+                 consumer label — cardinality rule.",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
+        let ai_routing_policy_latency_cost_selections_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_routing_policy_latency_cost_selections_total",
+                "AI routing-policy LatencyCost selections (DW-085): requests \
+                 routed by the static cost/latency policy, by policy name \
+                 (config-bounded label). No consumer label — cardinality rule.",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1200,6 +1246,9 @@ impl Observability {
             Box::new(ai_guardrail_blocked_total.clone()),
             Box::new(ai_semantic_cache_hits_total.clone()),
             Box::new(ai_semantic_cache_misses_total.clone()),
+            Box::new(ai_routing_policy_escalations_total.clone()),
+            Box::new(ai_routing_policy_cheap_total.clone()),
+            Box::new(ai_routing_policy_latency_cost_selections_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1269,6 +1318,9 @@ impl Observability {
             ai_guardrail_blocked_total,
             ai_semantic_cache_hits_total,
             ai_semantic_cache_misses_total,
+            ai_routing_policy_escalations_total,
+            ai_routing_policy_cheap_total,
+            ai_routing_policy_latency_cost_selections_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1629,6 +1681,37 @@ impl Observability {
     pub fn record_ai_semantic_cache_miss(&self, model: &str) {
         self.ai_semantic_cache_misses_total
             .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Count one AI routing-policy FallbackChain escalation (DW-085)
+    /// in `dwara_ai_routing_policy_escalations_total{policy}` (policy:
+    /// the routing-policy name, config-bounded). No consumer label
+    /// (cardinality rule).
+    pub fn record_ai_routing_policy_escalation(&self, policy: &str) {
+        self.ai_routing_policy_escalations_total
+            .with_label_values(&[policy])
+            .inc();
+    }
+
+    /// Count one AI routing-policy FallbackChain cheap-model
+    /// selection (DW-085) in
+    /// `dwara_ai_routing_policy_cheap_total{policy}` (policy: the
+    /// routing-policy name, config-bounded). No consumer label
+    /// (cardinality rule).
+    pub fn record_ai_routing_policy_cheap(&self, policy: &str) {
+        self.ai_routing_policy_cheap_total
+            .with_label_values(&[policy])
+            .inc();
+    }
+
+    /// Count one AI routing-policy LatencyCost selection (DW-085) in
+    /// `dwara_ai_routing_policy_latency_cost_selections_total{policy}`
+    /// (policy: the routing-policy name, config-bounded). No consumer
+    /// label (cardinality rule).
+    pub fn record_ai_routing_policy_latency_cost_selection(&self, policy: &str) {
+        self.ai_routing_policy_latency_cost_selections_total
+            .with_label_values(&[policy])
             .inc();
     }
 

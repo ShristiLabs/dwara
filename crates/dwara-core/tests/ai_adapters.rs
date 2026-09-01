@@ -581,6 +581,7 @@ fn ai_runtime_compiles_and_resolves() {
                 provider_model: "claude-sonnet-4-5".into(),
                 failover: vec![],
                 canary: vec![],
+                routing_policy: None,
             },
         )]
         .into_iter()
@@ -590,6 +591,7 @@ fn ai_runtime_compiles_and_resolves() {
         logging: None,
         guardrails: None,
         semantic_cache: None,
+        routing_policies: std::collections::BTreeMap::new(),
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
     assert_eq!(rt.provider_count(), 1);

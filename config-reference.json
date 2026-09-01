@@ -479,6 +479,13 @@
             "$ref": "#/$defs/AiProvider"
           }
         },
+        "routing_policies": {
+          "description": "Routing policies (DW-085 `ai.routing_policies`): named\nwithin-request escalation or latency-vs-cost selection plans,\nkeyed by name. A model alias declares `routing_policy: <name>`\nto be served by one; the policy is evaluated per request (a\nFallbackChain policy may call an external classifier service;\na LatencyCost policy picks deterministically at compile time).\nAbsent (the default): no routing policies.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiRoutingPolicy"
+          }
+        },
         "semantic_cache": {
           "description": "Semantic cache (DW-083 `ai.semantic_cache`): an\nembedding-similarity cache for AI prompts. A paraphrased\nprompt within the cosine-similarity threshold returns the\ncached response with no provider call and no token spend.\nUses an external embedding service (OpenAI-compatible\n/v1/embeddings API) and a pure-Rust HNSW ANN index\n(`hnsw_rs`). Feature-gated behind the `semantic_cache` cargo\nfeature; without it the config is accepted but the cache is a\nno-op. Absent (the default): no semantic cache.",
           "anyOf": [
@@ -639,6 +646,54 @@
       },
       "additionalProperties": false
     },
+    "AiLatencyCostCandidate": {
+      "description": "One candidate in a latency-vs-cost policy (DW-085\n`ai.routing_policies.<name>.candidates[]`).",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "description": "Relative cost score (1-10, where 1 = cheapest). Validation\nrejects values outside 1-10.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "latency": {
+          "description": "Relative latency score (1-10, where 1 = fastest). Validation\nrejects values outside 1-10.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "description": "The model alias to route to. Must reference an existing alias\nin `ai.models`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "cost",
+        "latency"
+      ]
+    },
+    "AiLatencyPreference": {
+      "description": "The latency-vs-cost selection preference (DW-085\n`ai.routing_policies.<name>.preference`).",
+      "oneOf": [
+        {
+          "description": "Pick the cheapest candidate (lowest `cost` score).",
+          "type": "string",
+          "const": "cost"
+        },
+        {
+          "description": "Pick the fastest candidate (lowest `latency` score).",
+          "type": "string",
+          "const": "latency"
+        },
+        {
+          "description": "Pick the best cost/latency ratio (lowest `cost + latency`\nsum).",
+          "type": "string",
+          "const": "balanced"
+        }
+      ]
+    },
     "AiLogging": {
       "description": "Prompt/response logging (DW-081 `ai.logging`): opt-in capture of\nthe canonical prompt and response with PII redaction, sampling,\nand retention. Capture is OFF by default (privacy-first): the\n`enabled` field defaults to false, so an `ai.logging` block\nwithout `enabled: true` captures nothing. When on, a redaction\npass scrubs PII/secrets before storage, `sample_rate` controls\nvolume, and `retention_secs` ages records out. Per-consumer\n`ai_logging` overrides respect tenant preference.",
       "type": "object",
@@ -696,6 +751,13 @@
         "provider_model": {
           "description": "The provider's own model identifier (e.g. `gpt-4o-mini`,\n`claude-sonnet-4-5`, `gemini-2.5-flash`), sent to the provider\nin place of the alias.",
           "type": "string"
+        },
+        "routing_policy": {
+          "description": "A routing policy name (DW-085): when set, this alias is served\nby the named entry in `ai.routing_policies` instead of a plain\nfailover chain or canary split. The policy is evaluated per\nrequest (a FallbackChain policy may call an external classifier\nservice to decide cheap-vs-expensive; a LatencyCost policy\npicks deterministically). Cannot be combined with `failover`\nor `canary` on the same alias (validation enforces mutual\nexclusivity): a policy alias composes over OTHER aliases'\nrouting plans, so it has no primary provider/model pair of its\nown.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -817,6 +879,92 @@
           "description": "Google Gemini `generateContent` API\n(`POST /v1beta/models/{model}:generateContent`).",
           "type": "string",
           "const": "gemini"
+        }
+      ]
+    },
+    "AiRoutingPolicy": {
+      "description": "A routing policy (DW-085 `ai.routing_policies.<name>`):\nwithin-request escalation or latency-vs-cost selection. Keyed by\nname in `ai.routing_policies`. An alias declares\n`routing_policy: <name>` to be served by one; the policy is\nevaluated per request and composes over DW-076 routing (the\ncandidate aliases it names are themselves plain chain/canary\naliases). Internally tagged by `kind` so the YAML shape is:\n\n```yaml\nrouting_policies:\n  my-policy:\n    kind: fallback_chain\n    cheap: cheap-model\n    escalate_to: expensive-model\n    classifier_url: http://...\n    classifier_model: complexity\n```",
+      "oneOf": [
+        {
+          "description": "Cheap-model-first with complexity-signal escalation (DW-085).\nCalls an external classifier service to estimate prompt\ncomplexity; simple prompts (score < threshold) use the cheap\nmodel, complex prompts (score >= threshold) escalate to the\ncostlier model. On classifier error, fails open to the cheap\nmodel (the safe default).",
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "description": "Optional API key for the classifier service (sent as\n`Authorization: Bearer <key>`). Can be a `${...}` secret\nreference (resolved at config-compile time). Inline values\nare redacted in config echoes; never logged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cheap": {
+              "description": "The model alias to use for simple prompts (the cheap model).\nMust reference an existing alias in `ai.models` (validation\nrejects a typo at publish time).",
+              "type": "string"
+            },
+            "classifier_model": {
+              "description": "The model name to pass to the classifier service in the\n`model` field of the POST body.",
+              "type": "string"
+            },
+            "classifier_url": {
+              "description": "The URL of the external classifier service. The service must\naccept a POST with `{\"model\": \"...\", \"input\": \"...\"}` and\nreturn `{\"data\": [{\"score\": 0.0-1.0}]}` (the OpenAI-compatible\nembeddings response shape, with `score` in place of\n`embedding`). Validation rejects an empty or non-http(s) URL.",
+              "type": "string"
+            },
+            "escalate_to": {
+              "description": "The model alias to escalate to for complex prompts. Must\nreference an existing alias in `ai.models`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fallback_chain"
+            },
+            "threshold": {
+              "description": "Complexity score threshold (0.0 to 1.0, inclusive). A score\nat or above the threshold triggers escalation to the costlier\nmodel; a score below the threshold uses the cheap model.\nDefault 0.5.",
+              "type": "number",
+              "format": "double",
+              "default": 0.5
+            },
+            "timeout_ms": {
+              "description": "Timeout for the classifier HTTP call in milliseconds. Default\n1000 (1 second). Validation rejects 0.",
+              "type": "integer",
+              "format": "uint64",
+              "default": 1000,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "cheap",
+            "escalate_to",
+            "classifier_url",
+            "classifier_model"
+          ]
+        },
+        {
+          "description": "Latency-vs-cost routing (DW-085): static config-based\nselection. The operator declares cost/latency scores per\ncandidate and a preference; the policy picks deterministically\nat compile time (no runtime metrics needed).",
+          "type": "object",
+          "properties": {
+            "candidates": {
+              "description": "The candidate models with their cost/latency scores. Each\n`model` must reference an existing alias in `ai.models`.\nValidation rejects an empty list.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AiLatencyCostCandidate"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "latency_cost"
+            },
+            "preference": {
+              "description": "The selection preference: `cost` (cheapest), `latency`\n(fastest), or `balanced` (best cost/latency sum).",
+              "$ref": "#/$defs/AiLatencyPreference"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "candidates",
+            "preference"
+          ]
         }
       ]
     },

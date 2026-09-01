@@ -2346,7 +2346,9 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
         // DW-076: failover and canary are mutually exclusive per alias
         // (the config docs explain why: failover retries a canary
         // request onto the stable version and silently undoes the
-        // experiment).
+        // experiment). DW-085: a routing policy is mutually exclusive
+        // with both — a policy alias composes over OTHER aliases'
+        // routing plans, so it has no provider/model pair of its own.
         if !m.failover.is_empty() && !m.canary.is_empty() {
             issues.push(issue(
                 "gateway",
@@ -2357,6 +2359,33 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                  a canary split deliberately serves several versions — \
                  combine them on separate aliases",
             ));
+        }
+        if m.routing_policy.is_some() && (!m.failover.is_empty() || !m.canary.is_empty()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}]"),
+                "an alias cannot declare a routing_policy together with \
+                 failover or canary: a policy alias composes over other \
+                 aliases' routing plans and has no provider/model pair of \
+                 its own — combine them on separate aliases",
+            ));
+        }
+        // DW-085: the referenced routing policy must exist.
+        if let Some(policy_name) = &m.routing_policy {
+            if !ai.routing_policies.contains_key(policy_name) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].routing_policy"),
+                    format!(
+                        "references unknown routing policy '{}' (not in \
+                         ai.routing_policies — a typo, or the policy was \
+                         removed)",
+                        policy_name
+                    ),
+                ));
+            }
         }
         // DW-076: the failover chain. Bounded to 4 alternates (the
         // chain is walked synchronously — every extra candidate adds a
@@ -2735,6 +2764,171 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                     "ai.semantic_cache.embedding_timeout_ms",
                     "the semantic cache embedding_timeout_ms must be > 0",
                 ));
+            }
+        }
+    }
+    // DW-085: routing policies validation. The referenced model
+    // aliases must exist (a typo would route to nothing), the
+    // classifier URL/model valid for FallbackChain, the threshold in
+    // [0.0, 1.0] and timeout > 0, and candidates non-empty with
+    // cost/latency in 1-10 for LatencyCost. Policy aliases (those
+    // with `routing_policy` set) cannot be referenced by other
+    // policies (no nested policies — a policy composes over plain
+    // chain/canary aliases only).
+    let policy_aliases: std::collections::BTreeSet<&str> = ai
+        .models
+        .iter()
+        .filter(|(_, m)| m.routing_policy.is_some())
+        .map(|(alias, _)| alias.as_str())
+        .collect();
+    for (policy_name, policy) in &ai.routing_policies {
+        match policy {
+            crate::config::ai::AiRoutingPolicy::FallbackChain(p) => {
+                if !ai.models.contains_key(&p.cheap) {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].cheap",
+                        format!(
+                            "references unknown model alias '{}' (not in \
+                             ai.models — a typo, or the alias was renamed)",
+                            p.cheap
+                        ),
+                    ));
+                } else if policy_aliases.contains(p.cheap.as_str()) {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].cheap",
+                        format!(
+                            "references alias '{}' which is itself a policy \
+                             alias (nested policies are not allowed — a policy \
+                             composes over plain chain/canary aliases only)",
+                            p.cheap
+                        ),
+                    ));
+                }
+                if !ai.models.contains_key(&p.escalate_to) {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].escalate_to",
+                        format!(
+                            "references unknown model alias '{}' (not in \
+                             ai.models — a typo, or the alias was renamed)",
+                            p.escalate_to
+                        ),
+                    ));
+                } else if policy_aliases.contains(p.escalate_to.as_str()) {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].escalate_to",
+                        format!(
+                            "references alias '{}' which is itself a policy \
+                             alias (nested policies are not allowed — a policy \
+                             composes over plain chain/canary aliases only)",
+                            p.escalate_to
+                        ),
+                    ));
+                }
+                if p.classifier_url.trim().is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].classifier_url",
+                        "the classifier_url must be non-empty (the external \
+                         complexity-classifier service endpoint)",
+                    ));
+                } else if !p.classifier_url.starts_with("http://")
+                    && !p.classifier_url.starts_with("https://")
+                {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].classifier_url",
+                        "the classifier_url must be an http or https URL",
+                    ));
+                }
+                if p.classifier_model.trim().is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].classifier_model",
+                        "the classifier_model must be non-empty (the model \
+                         name passed to the classifier service)",
+                    ));
+                }
+                if !(0.0..=1.0).contains(&p.threshold) {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].threshold",
+                        format!("the threshold must be in [0.0, 1.0] (got {})", p.threshold),
+                    ));
+                }
+                if p.timeout_ms == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[fallback_chain].timeout_ms",
+                        "the timeout_ms must be > 0",
+                    ));
+                }
+            }
+            crate::config::ai::AiRoutingPolicy::LatencyCost(p) => {
+                if p.candidates.is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        policy_name,
+                        "ai.routing_policies[latency_cost].candidates",
+                        "a latency_cost policy must declare at least one \
+                         candidate (an empty list would route to nothing)",
+                    ));
+                }
+                for (i, c) in p.candidates.iter().enumerate() {
+                    if !ai.models.contains_key(&c.model) {
+                        issues.push(issue(
+                            "gateway",
+                            policy_name,
+                            &format!("ai.routing_policies[latency_cost].candidates[{i}].model"),
+                            format!(
+                                "references unknown model alias '{}' (not in \
+                                 ai.models — a typo, or the alias was renamed)",
+                                c.model
+                            ),
+                        ));
+                    } else if policy_aliases.contains(c.model.as_str()) {
+                        issues.push(issue(
+                            "gateway",
+                            policy_name,
+                            &format!("ai.routing_policies[latency_cost].candidates[{i}].model"),
+                            format!(
+                                "references alias '{}' which is itself a policy \
+                                 alias (nested policies are not allowed — a \
+                                 policy composes over plain chain/canary aliases \
+                                 only)",
+                                c.model
+                            ),
+                        ));
+                    }
+                    if !(1..=10).contains(&c.cost) {
+                        issues.push(issue(
+                            "gateway",
+                            policy_name,
+                            &format!("ai.routing_policies[latency_cost].candidates[{i}].cost"),
+                            format!("the cost score must be in 1..=10 (got {})", c.cost),
+                        ));
+                    }
+                    if !(1..=10).contains(&c.latency) {
+                        issues.push(issue(
+                            "gateway",
+                            policy_name,
+                            &format!("ai.routing_policies[latency_cost].candidates[{i}].latency"),
+                            format!("the latency score must be in 1..=10 (got {})", c.latency),
+                        ));
+                    }
+                }
             }
         }
     }

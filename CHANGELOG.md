@@ -9,6 +9,29 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI routing policies (DW-085): within-request escalation and
+  latency-vs-cost selection, composed over the DW-076 routing
+  foundation. Two policy kinds: (1) FallbackChain -- calls an external
+  classifier service to estimate prompt complexity; simple prompts
+  (score < threshold) route to the cheap model, complex prompts (score
+  >= threshold) escalate to the costlier model; fails open to the cheap
+  model on classifier error. (2) LatencyCost -- static config-based
+  selection; the operator declares cost/latency scores per candidate
+  (1-10) and a preference (cost, latency, balanced); the policy picks
+  deterministically at compile time. Config under `ai.routing_policies`
+  (keyed by name, internally tagged by `kind`); a model alias declares
+  `routing_policy: <name>` (mutually exclusive with `failover` and
+  `canary`). New `ai::policy` module with `CompiledRoutingPolicy` and
+  async `evaluate()`. New `CompiledModel::Policy` variant with
+  two-pass compile (plain aliases first, then policy aliases). New
+  `AiRuntime::route_with_policy` async method. New metrics:
+  `dwara_ai_routing_policy_escalations_total{policy}`,
+  `dwara_ai_routing_policy_cheap_total{policy}`,
+  `dwara_ai_routing_policy_latency_cost_selections_total{policy}`.
+  Validation: mutual exclusivity, policy reference existence, alias
+  existence, score bounds, nested-policy rejection. No new
+  dependencies (reuses hyper_util for the classifier HTTP call).
+
 - AI semantic caching (DW-083): embedding-similarity cache that returns
   cached responses for paraphrased prompts within a configurable
   cosine-similarity threshold, avoiding provider calls and token spend.

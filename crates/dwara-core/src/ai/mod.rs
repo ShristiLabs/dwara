@@ -27,6 +27,9 @@
 //! - [`semantic_cache`] — the DW-083 semantic cache
 //!   (embedding-similarity cache for AI prompts; feature-gated behind
 //!   the `semantic_cache` cargo feature)
+//! - [`policy`] — the DW-085 routing-policy engine (within-request
+//!   escalation via an external classifier, and latency-vs-cost
+//!   static selection)
 //!
 //! # Dependency direction
 //!
@@ -44,6 +47,7 @@ pub mod governance;
 pub mod guardrails;
 pub mod logging;
 pub mod openai_compat;
+pub mod policy;
 pub mod redaction;
 pub mod routing;
 pub mod semantic_cache;
@@ -53,6 +57,7 @@ pub mod types;
 
 use crate::config::ai::{AiConfig, AiProviderKind};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub use adapter::{adapter_for, AiError, ProviderAdapter, ProviderErrorBody, ProviderRequest};
 
@@ -87,13 +92,22 @@ pub struct RouteTarget {
 }
 
 /// The compiled alias entry (DW-076): either a failover chain
-/// (primary first) or a canary split, never both (validation).
+/// (primary first), a canary split, or a routing policy (DW-085).
+/// A policy alias composes over OTHER aliases' routing plans, so it
+/// has no provider/model pair of its own — validation enforces that
+/// `routing_policy` is mutually exclusive with `failover` and
+/// `canary`.
 #[derive(Debug, Clone)]
 pub enum CompiledModel {
     /// `[primary, alternates...]` in config order.
     Chain(Vec<RouteTarget>),
     /// Weighted versions; the pick is deterministic per request id.
     Canary(Vec<(u32, RouteTarget)>),
+    /// A routing policy (DW-085): within-request escalation or
+    /// latency-vs-cost selection. The policy is evaluated per
+    /// request (async — a FallbackChain policy may call an external
+    /// classifier service).
+    Policy(Arc<policy::CompiledRoutingPolicy>),
 }
 
 /// The per-generation compiled AI table (DW-075): the provider pool
@@ -141,11 +155,32 @@ impl AiRuntime {
                 },
             );
         }
-        let models = cfg
-            .models
-            .iter()
-            .map(|(alias, m)| (alias.clone(), compile_model(m)))
-            .collect();
+        // DW-085: two-pass compile. Policy aliases compose over plain
+        // chain/canary aliases (they resolve named aliases to their
+        // primary RouteTarget), so the plain aliases must be compiled
+        // first. A policy alias cannot reference another policy alias
+        // (nested policies are not allowed); the first pass skips
+        // policy aliases, and the second pass compiles them against
+        // the first-pass map.
+        let mut first_pass: BTreeMap<String, CompiledModel> = BTreeMap::new();
+        for (alias, m) in &cfg.models {
+            if m.routing_policy.is_some() {
+                continue;
+            }
+            first_pass.insert(alias.clone(), compile_model(m));
+        }
+        let mut models = first_pass.clone();
+        for (alias, m) in &cfg.models {
+            if let Some(policy_name) = &m.routing_policy {
+                if let Some(policy_cfg) = cfg.routing_policies.get(policy_name) {
+                    if let Some(compiled) =
+                        policy::CompiledRoutingPolicy::compile(policy_name, policy_cfg, &first_pass)
+                    {
+                        models.insert(alias.clone(), CompiledModel::Policy(Arc::new(compiled)));
+                    }
+                }
+            }
+        }
         Some(AiRuntime { providers, models })
     }
 
@@ -168,14 +203,48 @@ impl AiRuntime {
     /// A canary alias yields exactly ONE candidate — the deterministic
     /// weighted pick for `pick_key` (the request id); a failover alias
     /// yields `[primary, alternates...]`. An empty result means the
-    /// alias does not exist.
+    /// alias does not exist. Policy aliases (DW-085) return an empty
+    /// list here — they need the async
+    /// [`route_with_policy`](Self::route_with_policy) path (the
+    /// classifier call is async). The sync `route` stays for tests
+    /// and the non-policy dataplane path.
     pub fn route<'a>(&'a self, alias: &str, pick_key: &str) -> Vec<&'a RouteTarget> {
         match self.models.get(alias) {
             Some(CompiledModel::Chain(chain)) => chain.iter().collect(),
             Some(CompiledModel::Canary(versions)) => {
                 vec![routing::weighted_pick(versions, pick_key)]
             }
+            Some(CompiledModel::Policy(_)) => Vec::new(),
             None => Vec::new(),
+        }
+    }
+
+    /// Route one request with policy evaluation (DW-085). Like
+    /// [`route`](Self::route) but handles Policy variants by calling
+    /// the async [`evaluate`](policy::CompiledRoutingPolicy::evaluate)
+    /// method. Returns owned [`RouteTarget`]s (the policy path
+    /// constructs them dynamically) plus an optional
+    /// [`PolicyDecision`](policy::PolicyDecision) the dataplane records
+    /// as a metric (None for non-policy models). For non-policy
+    /// models, delegates to the sync routing logic. An empty result
+    /// means the alias does not exist.
+    pub async fn route_with_policy(
+        &self,
+        alias: &str,
+        pick_key: &str,
+        prompt_text: &str,
+    ) -> (Vec<RouteTarget>, Option<policy::PolicyDecision>) {
+        match self.models.get(alias) {
+            Some(CompiledModel::Chain(chain)) => (chain.to_vec(), None),
+            Some(CompiledModel::Canary(versions)) => (
+                vec![routing::weighted_pick(versions, pick_key).clone()],
+                None,
+            ),
+            Some(CompiledModel::Policy(policy)) => {
+                let (targets, decision) = policy.evaluate(prompt_text).await;
+                (targets, Some(decision))
+            }
+            None => (Vec::new(), None),
         }
     }
 
@@ -191,6 +260,9 @@ impl AiRuntime {
         match self.models.get(alias)? {
             CompiledModel::Chain(chain) => chain.first(),
             CompiledModel::Canary(versions) => versions.first().map(|(_, t)| t),
+            // A policy alias has no single primary target — it is
+            // evaluated per request.
+            CompiledModel::Policy(_) => None,
         }
     }
 

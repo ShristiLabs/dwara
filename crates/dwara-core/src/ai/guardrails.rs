@@ -692,6 +692,7 @@ mod tests {
             logging: None,
             guardrails: Some(AiGuardrails { rules }),
             semantic_cache: None,
+            routing_policies: Default::default(),
         };
         GuardrailEngine::compile(Some(&cfg))
     }

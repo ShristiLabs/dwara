@@ -267,6 +267,7 @@ fn pricing_table_computes_correct_cost() {
         logging: None,
         guardrails: None,
         semantic_cache: None,
+        routing_policies: BTreeMap::new(),
     };
     let table = PricingTable::compile(Some(&cfg));
 

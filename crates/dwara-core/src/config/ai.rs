@@ -108,6 +108,15 @@ pub struct AiConfig {
     /// no-op. Absent (the default): no semantic cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_cache: Option<SemanticCacheConfig>,
+    /// Routing policies (DW-085 `ai.routing_policies`): named
+    /// within-request escalation or latency-vs-cost selection plans,
+    /// keyed by name. A model alias declares `routing_policy: <name>`
+    /// to be served by one; the policy is evaluated per request (a
+    /// FallbackChain policy may call an external classifier service;
+    /// a LatencyCost policy picks deterministically at compile time).
+    /// Absent (the default): no routing policies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub routing_policies: BTreeMap<String, AiRoutingPolicy>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -235,6 +244,18 @@ pub struct AiModel {
     /// combined with `failover` on the same alias.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canary: Vec<AiCanaryVersion>,
+    /// A routing policy name (DW-085): when set, this alias is served
+    /// by the named entry in `ai.routing_policies` instead of a plain
+    /// failover chain or canary split. The policy is evaluated per
+    /// request (a FallbackChain policy may call an external classifier
+    /// service to decide cheap-vs-expensive; a LatencyCost policy
+    /// picks deterministically). Cannot be combined with `failover`
+    /// or `canary` on the same alias (validation enforces mutual
+    /// exclusivity): a policy alias composes over OTHER aliases'
+    /// routing plans, so it has no primary provider/model pair of its
+    /// own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_policy: Option<String>,
 }
 
 /// One provider/model pair an alias can route to (DW-076): the primary
@@ -542,4 +563,141 @@ pub struct SemanticCacheConfig {
     /// are redacted in config echoes; never logged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_api_key: Option<String>,
+}
+
+// -------------------------------------------------------------------------
+// DW-085: routing policies (fallback chains + latency-cost selection).
+// -------------------------------------------------------------------------
+
+/// Default classifier complexity threshold: 0.5.
+fn default_classifier_threshold() -> f64 {
+    0.5
+}
+
+/// Default classifier HTTP timeout: 1000 ms.
+fn default_classifier_timeout_ms() -> u64 {
+    1000
+}
+
+/// A routing policy (DW-085 `ai.routing_policies.<name>`):
+/// within-request escalation or latency-vs-cost selection. Keyed by
+/// name in `ai.routing_policies`. An alias declares
+/// `routing_policy: <name>` to be served by one; the policy is
+/// evaluated per request and composes over DW-076 routing (the
+/// candidate aliases it names are themselves plain chain/canary
+/// aliases). Internally tagged by `kind` so the YAML shape is:
+///
+/// ```yaml
+/// routing_policies:
+///   my-policy:
+///     kind: fallback_chain
+///     cheap: cheap-model
+///     escalate_to: expensive-model
+///     classifier_url: http://...
+///     classifier_model: complexity
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum AiRoutingPolicy {
+    /// Cheap-model-first with complexity-signal escalation (DW-085).
+    /// Calls an external classifier service to estimate prompt
+    /// complexity; simple prompts (score < threshold) use the cheap
+    /// model, complex prompts (score >= threshold) escalate to the
+    /// costlier model. On classifier error, fails open to the cheap
+    /// model (the safe default).
+    FallbackChain(AiFallbackChainPolicy),
+    /// Latency-vs-cost routing (DW-085): static config-based
+    /// selection. The operator declares cost/latency scores per
+    /// candidate and a preference; the policy picks deterministically
+    /// at compile time (no runtime metrics needed).
+    LatencyCost(AiLatencyCostPolicy),
+}
+
+/// A fallback-chain routing policy (DW-085 `kind: fallback_chain`):
+/// cheap-model-first with complexity-signal escalation. The
+/// `cheap` and `escalate_to` fields name OTHER model aliases (plain
+/// chain/canary aliases — a policy composes over DW-076 routing, so
+/// it has no provider/model pair of its own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiFallbackChainPolicy {
+    /// The model alias to use for simple prompts (the cheap model).
+    /// Must reference an existing alias in `ai.models` (validation
+    /// rejects a typo at publish time).
+    pub cheap: String,
+    /// The model alias to escalate to for complex prompts. Must
+    /// reference an existing alias in `ai.models`.
+    pub escalate_to: String,
+    /// The URL of the external classifier service. The service must
+    /// accept a POST with `{"model": "...", "input": "..."}` and
+    /// return `{"data": [{"score": 0.0-1.0}]}` (the OpenAI-compatible
+    /// embeddings response shape, with `score` in place of
+    /// `embedding`). Validation rejects an empty or non-http(s) URL.
+    pub classifier_url: String,
+    /// The model name to pass to the classifier service in the
+    /// `model` field of the POST body.
+    pub classifier_model: String,
+    /// Complexity score threshold (0.0 to 1.0, inclusive). A score
+    /// at or above the threshold triggers escalation to the costlier
+    /// model; a score below the threshold uses the cheap model.
+    /// Default 0.5.
+    #[serde(default = "default_classifier_threshold")]
+    pub threshold: f64,
+    /// Timeout for the classifier HTTP call in milliseconds. Default
+    /// 1000 (1 second). Validation rejects 0.
+    #[serde(default = "default_classifier_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Optional API key for the classifier service (sent as
+    /// `Authorization: Bearer <key>`). Can be a `${...}` secret
+    /// reference (resolved at config-compile time). Inline values
+    /// are redacted in config echoes; never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// A latency-vs-cost routing policy (DW-085 `kind: latency_cost`):
+/// static config-based selection. The operator declares cost/latency
+/// scores per candidate and a preference; the policy sorts candidates
+/// at compile time and picks the best one deterministically (no
+/// runtime metrics needed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiLatencyCostPolicy {
+    /// The candidate models with their cost/latency scores. Each
+    /// `model` must reference an existing alias in `ai.models`.
+    /// Validation rejects an empty list.
+    pub candidates: Vec<AiLatencyCostCandidate>,
+    /// The selection preference: `cost` (cheapest), `latency`
+    /// (fastest), or `balanced` (best cost/latency sum).
+    pub preference: AiLatencyPreference,
+}
+
+/// One candidate in a latency-vs-cost policy (DW-085
+/// `ai.routing_policies.<name>.candidates[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiLatencyCostCandidate {
+    /// The model alias to route to. Must reference an existing alias
+    /// in `ai.models`.
+    pub model: String,
+    /// Relative cost score (1-10, where 1 = cheapest). Validation
+    /// rejects values outside 1-10.
+    pub cost: u32,
+    /// Relative latency score (1-10, where 1 = fastest). Validation
+    /// rejects values outside 1-10.
+    pub latency: u32,
+}
+
+/// The latency-vs-cost selection preference (DW-085
+/// `ai.routing_policies.<name>.preference`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiLatencyPreference {
+    /// Pick the cheapest candidate (lowest `cost` score).
+    Cost,
+    /// Pick the fastest candidate (lowest `latency` score).
+    Latency,
+    /// Pick the best cost/latency ratio (lowest `cost + latency`
+    /// sum).
+    Balanced,
 }
