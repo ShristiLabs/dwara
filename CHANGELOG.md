@@ -9,6 +9,31 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI token budgets (DW-078): policies can declare a `token_budget` —
+  provider-reported tokens per minute and/or cost per UTC day (integer
+  micro-USD, no float money) — enforced per consumer or shared per
+  policy (the team shape). Check-then-spend per the locked
+  no-estimation decision: the pre-check rejects a holder whose window
+  is already exhausted (429 `ai_budget_exceeded` + `Retry-After`,
+  before any provider contact), and the spend records what the
+  provider reports after the call; overrun within one request is
+  bounded by that request. While streaming, the provider's growing
+  usage report is spent as it arrives — each reported token counted
+  exactly once — and checked after every batch; a crossing stops
+  forwarding, emits the documented `ai_budget_exceeded` SSE event and
+  the terminator, and cancels the provider stream (no further
+  provider tokens); dialects that only report usage at the end spend
+  at stream end and are enforced by the next pre-check. The spend
+  ledger survives config reloads; windows are fixed epoch-minute /
+  UTC-day. Cost/day is enforced end to end
+  but reads prices through one seam that returns 0 until the DW-079
+  pricing tables land (enforced-but-inert). Budgets resolve by policy
+  precedence with the most specific binding governing; unbudgeted
+  consumers are unlimited. New metric
+  `dwara_ai_budget_denied_total{kind}`; pre-check denials set the
+  access record's rate_limited flag. New `ai::budget` module; no new
+  dependencies.
+
 - AI streaming (DW-077): `stream: true` on an ai route streams back
   as `text/event-stream`, translated frame-by-frame to OpenAI chunk
   shape with zero added buffering — each complete provider SSE frame

@@ -329,6 +329,7 @@ fn validate_rejects_malformed_rate_limit_rules() {
             rate_limits: vec![],
             timeouts: None,
             dry_run: false,
+            token_budget: None,
         }];
         gw
     }

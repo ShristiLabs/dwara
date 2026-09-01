@@ -2671,6 +2671,17 @@
               "type": "null"
             }
           ]
+        },
+        "token_budget": {
+          "description": "AI token budget (DW-078): caps provider-reported tokens per\nminute and/or priced cost per UTC day for the budget holder.\nDistinct from every rule above: those count REQUESTS, this\ncounts TOKENS. Resolution follows the frozen precedence chain\n(consumer > route > service > listener > global) with the MOST\nSPECIFIC level's budget governing (a limit-of-totals, not an\nAND-composed rule). `scope: consumer` (default) keys the budget\nto each attaching consumer; `scope: policy` makes one SHARED\n(team) budget keyed by the policy name. Consumers with no\nbinding budget are unlimited.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -3472,7 +3483,7 @@
           ]
         },
         {
-          "description": "AI provider translation (DW-075): the request body is parsed as\nan OpenAI chat-completions request, its `model` resolved through\nthe gateway's `ai:` block to a provider, translated to that\nprovider's wire format (OpenAI/Anthropic/Gemini), sent through\nthe provider's upstream, and the response translated back to the\nOpenAI shape. The route's `service` is still required by the\nschema but never dialed. Requires an `ai:` block (validation\nrejects the pairing otherwise). `stream: true` requests answer\n400 until the streaming pipeline lands (DW-077).",
+          "description": "AI provider translation (DW-075): the request body is parsed as\nan OpenAI chat-completions request, its `model` resolved through\nthe gateway's `ai:` block to a provider, translated to that\nprovider's wire format (OpenAI/Anthropic/Gemini), sent through\nthe provider's upstream, and the response translated back to the\nOpenAI shape. The route's `service` is still required by the\nschema but never dialed. Requires an `ai:` block (validation\nrejects the pairing otherwise). `stream: true` requests are\nserved via zero-buffer SSE pass-through (DW-077).",
           "type": "object",
           "properties": {
             "type": {
@@ -3965,6 +3976,50 @@
       "enum": [
         "terminate",
         "passthrough"
+      ]
+    },
+    "TokenBudget": {
+      "description": "An AI token budget (DW-078, `policies[].token_budget`): limits of\nTOTALS over windows — provider-reported tokens per minute and/or\ncost per UTC calendar day, enforced per consumer or shared per\npolicy (team). See the `ai::budget` module docs for the\ncheck-then-spend contract.",
+      "type": "object",
+      "properties": {
+        "cost_per_day_micros": {
+          "description": "Maximum spend per UTC calendar day, in integer micro-USD\n(1_000_000 = $1.00 — no floating-point money). Enforced end to\nend; the pricing input arrives with the DW-079 pricing tables,\nso the cost window is enforced-but-inert until then.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scope": {
+          "description": "Whose budget this is: `consumer` (default — each attaching\nconsumer gets its own window) or `policy` (one SHARED team\nbudget keyed by the policy name).",
+          "$ref": "#/$defs/TokenBudgetScope"
+        },
+        "tokens_per_min": {
+          "description": "Maximum provider-reported tokens per fixed 60-second window\n(epoch-minute aligned). Spent tokens come from the provider's\nown usage reports — the gateway never estimates.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "TokenBudgetScope": {
+      "description": "The budget's key scope (DW-078).",
+      "oneOf": [
+        {
+          "description": "One budget per attaching consumer.",
+          "type": "string",
+          "const": "consumer"
+        },
+        {
+          "description": "One shared (team) budget per policy.",
+          "type": "string",
+          "const": "policy"
+        }
       ]
     },
     "Transforms": {

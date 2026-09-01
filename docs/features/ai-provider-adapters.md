@@ -194,6 +194,76 @@ The two shapes are mutually exclusive per alias (validation): failover
 retries a canary request onto the stable version and silently undoes
 the experiment — combine them on separate aliases instead.
 
+## Token budgets (DW-078)
+
+A policy may declare a `token_budget`: a limit of TOTALS over windows
+— provider-reported tokens per minute and/or cost per UTC day —
+enforced per consumer (`scope: consumer`) or shared per policy
+(`scope: policy`, the team shape). Budgets compose with, and are
+distinct from, the request-count limiter (DW-017) and request quotas
+(DW-033): those count requests, this counts tokens.
+
+```yaml
+policies:
+  - name: acme-ai-budget
+    token_budget:
+      tokens_per_min: 500000     # provider-reported tokens / minute
+      cost_per_day_micros: 5000000   # $5.00/day, integer micro-USD
+      # scope: policy           # share one budget across consumers (team)
+consumers:
+  - name: acme
+    policies: [acme-ai-budget]
+```
+
+**Check-then-spend** (the locked no-estimation decision): the
+pre-check (inside the ai action, before the request body is even
+read) rejects a holder whose window is ALREADY exhausted — 429 with
+`Retry-After` (seconds to the denying window's boundary; the later
+wall when both windows are exhausted) and the OpenAI-shaped error
+body (`type: rate_limit_error`, `code: ai_budget_exceeded`), all
+before any provider contact; the spend records what the PROVIDER
+reports after the call (non-streaming: the response usage;
+streaming: DW-077's accumulated events). Overrun within one request is bounded by that request. The
+ledger survives config reloads (a reload never resets a live window);
+windows are epoch-minute (tokens) and UTC-day (cost), fixed and
+deterministic.
+
+**Mid-stream cutoff**: while forwarding, the provider's growing usage
+report is spent as it arrives — each reported token counted exactly
+once, no matter how many chunks the report spanned — and checked
+after every batch; a crossing stops forwarding, emits the documented
+`ai_budget_exceeded` SSE event and the terminator, and cancels the
+provider stream (dropping the body) — no further provider tokens are
+consumed. Only dialects that report usage MID-STREAM can be cut off
+(Anthropic carries input tokens in `message_start`); end-only
+reporters spend at stream end and are enforced by the next pre-check.
+The client sees exactly the error frame and then the terminator
+(already-forwarded content stands; the stream ends cleanly, and the
+frame's JSON keys serialize alphabetically — serde_json's default
+map order):
+
+```
+data: {"error":{"code":"ai_budget_exceeded","message":"the token budget for this window is exhausted; the stream was cut off","request_id":"<rid>","type":"rate_limit_error"}}
+
+data: [DONE]
+```
+
+**Cost/day** is enforced end to end but reads prices through one seam
+(`ai::budget::cost_micros`), which returns 0 until the DW-079 pricing
+tables land — enforced-but-inert, never estimated. Resolution follows
+the frozen precedence chain with the MOST SPECIFIC budget governing
+(a limit-of-totals, not an AND rule): consumer > route > service >
+listener > global. Consumers with no binding budget are unlimited.
+
+Metric: `dwara_ai_budget_denied_total{kind}` — a pre-check denial
+records the kind of the window that denied it (`tokens` or `cost`;
+`cost` cannot fire while the pricing seam returns 0), and a mid-stream
+cutoff records `tokens`. A PRE-CHECK denial sets the access record's
+`rate_limited` flag; a mid-stream cutoff cannot (the stream body
+owns the request past that point) — it records the metric and a WARN
+log (`ai_budget_exceeded_midstream`). The consumer is in the access
+log, never a metric label.
+
 ## Configuration
 
 ```yaml
@@ -247,7 +317,8 @@ rejected (it could never serve anything).
 
 - `crates/dwara-core/src/ai/` — types, adapter trait, adapters
   (`adapters/{openai,anthropic,gemini}.rs`), facade, SSE framer,
-  routing (DW-076), compiled runtime.
+  routing (DW-076), budget engine + ledger (DW-078, `budget.rs`),
+  compiled runtime.
 - `crates/dwara-core/src/config/ai.rs` — the `ai:` block schema.
 - `crates/dwara-core/src/dataplane/ai_proxy.rs` — the route action:
   bounded body read, alias resolution, transport, response
@@ -265,8 +336,18 @@ rejected (it could never serve anything).
   real gateway with mock providers speaking each dialect (they record
   path/auth/body they received): the three-provider done-when, error
   pass-through (429), unreachable provider 502, unknown model 404,
-  malformed body / `stream: true` 400s, validation matrix, config
-  redaction.
+  malformed-body 400s (a `stream: true` body against a non-SSE mock
+  falls through to the buffered path — it no longer 400s), the
+  validation matrix, config redaction.
+- `crates/dwara-core/tests/ai_budget.rs` — the DW-078 done-whens:
+  exhaustion rejects before provider contact (the provider saw exactly
+  the served requests), the mid-stream cutoff emits the documented
+  event and terminator with partial content standing, completed
+  streams spending exactly the reported tokens (watermark proof),
+  spend surviving a config reload, client-disconnect mid-stream
+  accounting, the team-scope shared ledger, cost-window inertness
+  until priced, consumer-over-route precedence, and the validation
+  matrix.
 - `crates/dwara-core/tests/ai_streaming.rs` — the DW-077 done-whens:
   three-dialect streaming e2e (chunk shape, content reassembly,
   terminal usage chunk, single gateway [DONE]), first-chunk latency
@@ -285,9 +366,10 @@ rejected (it could never serve anything).
 
 ## Future links
 
-- DW-077 wires `parse_stream_event` + `ai::sse` into a zero-buffer
-  SSE pass-through and lifts the `stream: true` 400.
-- DW-078/079 consume the provider-reported `Usage` this layer
-  normalizes.
+- DW-077 (streaming) and DW-078 (token budgets) have landed; see the
+  sections above.
+- DW-079 (cost attribution) consumes the provider-reported `Usage`
+  this layer normalizes and fills the `ai::budget::cost_micros`
+  pricing seam, turning the enforced-but-inert cost window live.
 - DW-080 (Ent) layers credential pools behind the same
   `ProviderAdapter` seam.

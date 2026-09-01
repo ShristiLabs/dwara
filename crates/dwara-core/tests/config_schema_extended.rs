@@ -587,6 +587,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             rate_limits: vec![],
             timeouts: None,
             dry_run: false,
+            token_budget: None,
         }],
         global_policies: vec![],
         authorization: None,

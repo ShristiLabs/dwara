@@ -11,6 +11,11 @@ separate by design and compose: when both are configured, both apply
 A quota never replenishes inside its window. It resets whole at the
 boundary -- the daily budget is full again at UTC midnight.
 
+Quotas count REQUESTS. AI routes have their own budget family that
+counts provider-reported TOKENS per minute (and spend per day) per
+consumer or team -- see
+[Token budgets](./ai-gateway#token-budgets) in the AI gateway guide.
+
 ## When to use this
 
 Use quotas when the unit of control is total volume per billing

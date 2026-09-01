@@ -52,7 +52,7 @@
 use crate::ai::adapter::{adapter_for, ProviderAdapter};
 use crate::ai::openai_compat;
 use crate::ai::stream::StreamTranslator;
-use crate::ai::types::ChatRequest;
+use crate::ai::types::{ChatRequest, Usage};
 use crate::dataplane::proxy::{DataPlane, Generation, ProxyBody};
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -87,11 +87,80 @@ pub(super) async fn serve_ai<B>(
     dp: &Arc<DataPlane>,
     rid: &str,
     rec: &mut crate::observability::AccessRecord,
+    identity: Option<&crate::security::authn::Identity>,
+    listener_name: &str,
 ) -> Response<ProxyBody>
 where
     B: Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    // AI token budget pre-check (DW-078): BEFORE the request body is
+    // even read — a holder whose window is exhausted never reaches a
+    // provider. The resolution mirrors the rate-limit chain (consumer
+    // > route > service > listener > global, most-specific budget
+    // governs); unbudgeted holders resolve no guard and skip.
+    let budget = {
+        let engine = dp.ai_budgets();
+        if engine.is_empty() {
+            None
+        } else {
+            let consumer = identity.map(|id| id.consumer_name.as_str());
+            let gateway = gen.snapshot.gateway();
+            let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+            let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+            let service_policies: &[String] = route_cfg
+                .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+                .unwrap_or(&[]);
+            let consumer_policies: &[String] = consumer
+                .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+                .unwrap_or(&[]);
+            let listener_policies = crate::ai::budget::listener_policies_of(gateway, listener_name);
+            engine.resolve(
+                consumer,
+                consumer_policies,
+                route_policies,
+                service_policies,
+                listener_policies,
+                &gateway.global_policies,
+            )
+        }
+    };
+    if let Some(guard) = &budget {
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let crate::ai::budget::BudgetVerdict::Denied {
+            kind,
+            retry_after_s,
+        } = guard.check(now_s)
+        {
+            rec.rate_limited = true;
+            dp.observability_arc()
+                .record_ai_budget_denied(kind.as_str());
+            tracing::info!(
+                code = "ai_budget_exceeded",
+                request_id = %rid,
+                route = %route_name,
+                kind = kind.as_str(),
+                retry_after_s,
+                "AI token budget exhausted; rejecting before provider contact"
+            );
+            let body = openai_compat::error_body(
+                "the token budget for this window is exhausted; retry later",
+                "rate_limit_error",
+                Some("ai_budget_exceeded"),
+                rid,
+            );
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("retry-after", retry_after_s.to_string())
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+                .expect("static 429 response is valid");
+        }
+    }
+
     // The generation's compiled AI table; absent only when validation
     // was bypassed (defensive: every publish path validates).
     let Some(runtime) = gen.ai() else {
@@ -355,9 +424,12 @@ where
                 format!("chatcmpl-{rid}"),
                 chat_req.model.clone(),
                 provider.name.clone(),
+                target.provider_model.clone(),
                 version.to_string(),
                 attempt_started,
                 Arc::clone(&obs),
+                rid.to_string(),
+                budget,
             );
             return Response::builder()
                 .status(StatusCode::OK)
@@ -442,6 +514,14 @@ where
                 usage.completion_tokens.unwrap_or(0),
                 version,
             );
+            // Budget spend (DW-078): the provider-reported usage is
+            // recorded against the requesting holder's windows AFTER
+            // the call — check-then-spend; the crossing (if any) is
+            // already priced into the next pre-check.
+            if let Some(guard) = &budget {
+                let cost = crate::ai::budget::cost_micros(&target.provider_model, usage);
+                guard.spend(now_epoch_s(), usage, cost);
+            }
         }
         obs.record_ai_request(&provider.name, route_name, "success", version);
         let body = openai_compat::response_to_openai(&chat_resp, &chat_req.model, rid);
@@ -543,6 +623,14 @@ fn ai_error_response(
     response_with_json(status, &body, &HeaderMap::new())
 }
 
+/// Current Unix seconds (budget window indexing).
+fn now_epoch_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Whether provider response headers declare an SSE body.
 fn is_event_stream(headers: &HeaderMap) -> bool {
     headers
@@ -599,13 +687,38 @@ struct StreamGauges {
 /// Infallible by construction: every failure mode is expressed as
 /// terminal frames, so the client stream always ends cleanly.
 pub struct AiStreamBody {
-    inner: crate::dataplane::upstream::UpstreamBody,
+    /// The provider's body — until the budget cutoff DROPS it (the
+    /// upstream cancel then propagates immediately, regardless of how
+    /// the client behaves; see `cut_off`).
+    inner: Option<crate::dataplane::upstream::UpstreamBody>,
     translator: StreamTranslator,
     adapter: &'static dyn ProviderAdapter,
     /// Synthesized terminal frames waiting to be forwarded.
     tail: std::collections::VecDeque<String>,
     gauges: StreamGauges,
     obs: std::sync::Arc<crate::observability::Observability>,
+    /// The requesting holder's budget (DW-078): checked as usage
+    /// events accumulate — a crossing cuts the stream off.
+    budget: Option<crate::ai::budget::BudgetGuard>,
+    /// The serving provider's model id (the DW-079 pricing seam's
+    /// key; the prices themselves arrive with DW-079).
+    provider_model: String,
+    /// The request id (the cutoff event's correlation handle).
+    rid: String,
+    /// Budget cutoff fired: the provider body was dropped AT the
+    /// cutoff so the upstream request is cancelled immediately — a
+    /// stalled client that never drains the tail must not keep the
+    /// provider generating billed tokens. Only the synthesized tail
+    /// remains to forward.
+    cut_off: bool,
+    /// Budget spend watermarks (DW-078): the accumulated totals
+    /// already spent. The provider's usage report GROWS as the stream
+    /// runs (input tokens at message_start, output at message_delta),
+    /// so every spend is the DELTA above the watermark — each
+    /// reported token is counted exactly once no matter how many
+    /// chunks the report arrived in.
+    budget_spent_tokens: u64,
+    budget_spent_cost_micros: u64,
 }
 
 impl AiStreamBody {
@@ -619,12 +732,15 @@ impl AiStreamBody {
         response_id: String,
         model_alias: String,
         provider: String,
+        provider_model: String,
         version: String,
         started: std::time::Instant,
         obs: std::sync::Arc<crate::observability::Observability>,
+        rid: String,
+        budget: Option<crate::ai::budget::BudgetGuard>,
     ) -> Self {
         AiStreamBody {
-            inner,
+            inner: Some(inner),
             translator: StreamTranslator::new(response_id, model_alias, openai_compat::unix_now()),
             adapter,
             tail: std::collections::VecDeque::new(),
@@ -637,6 +753,81 @@ impl AiStreamBody {
                 closed: false,
             },
             obs,
+            budget,
+            provider_model,
+            rid,
+            cut_off: false,
+            budget_spent_tokens: 0,
+            budget_spent_cost_micros: 0,
+        }
+    }
+
+    /// Spend the provider-reported usage GROWTH since the last spend
+    /// (DW-078). The translator's usage is an ACCUMULATOR that grows
+    /// as the provider reports (input tokens early, output late), so
+    /// only the delta above the watermark is NEW spend — each
+    /// reported token is counted exactly once regardless of how many
+    /// chunks its report spanned. Returns whether the token window
+    /// crossed its limit on THIS spend (the mid-stream cutoff signal).
+    fn budget_spend_delta(&mut self) -> bool {
+        let Some(guard) = &self.budget else {
+            return false;
+        };
+        let usage = self.translator.usage();
+        let total = usage.total_tokens.unwrap_or_else(|| {
+            usage
+                .prompt_tokens
+                .unwrap_or(0)
+                .saturating_add(usage.completion_tokens.unwrap_or(0))
+        });
+        let tokens = total.saturating_sub(self.budget_spent_tokens);
+        let cost_total = crate::ai::budget::cost_micros(&self.provider_model, usage);
+        let cost = cost_total.saturating_sub(self.budget_spent_cost_micros);
+        if tokens == 0 && cost == 0 {
+            return false;
+        }
+        // Watermarks advance to the accumulated totals (max, so a
+        // provider that revises a count downward never re-spends the
+        // difference later).
+        self.budget_spent_tokens = total.max(self.budget_spent_tokens);
+        self.budget_spent_cost_micros = cost_total.max(self.budget_spent_cost_micros);
+        guard.spend(
+            now_epoch_s(),
+            Usage {
+                total_tokens: Some(tokens),
+                ..Usage::default()
+            },
+            cost,
+        )
+    }
+
+    /// Mid-stream cutoff check (DW-078). Called after each translated
+    /// batch: the batch's NEW usage is spent against the holder's
+    /// window, and a crossing (only detectable when the dialect
+    /// reports usage mid-stream — Anthropic's message_start input
+    /// tokens) cuts the stream.
+    fn budget_tick(&mut self) {
+        if self.budget.is_none() {
+            return;
+        }
+        let crossed = self.budget_spend_delta();
+        if crossed && !self.cut_off && !self.translator.is_ended() {
+            self.cut_off = true;
+            // Drop the provider body NOW: an upstream request is
+            // cancelled the moment its body is dropped, however slowly
+            // (or never) the client drains the cutoff tail below — the
+            // cancel must not wait on client behavior. The tail still
+            // reaches the client: the cutoff event, then [DONE].
+            self.inner = None;
+            self.obs.record_ai_budget_denied("tokens");
+            tracing::warn!(
+                code = "ai_budget_exceeded_midstream",
+                request_id = %self.rid,
+                "token budget crossed mid-stream; cutting off and cancelling the provider stream"
+            );
+            self.tail
+                .push_back(crate::ai::budget::BudgetGuard::cutoff_frame(&self.rid));
+            self.tail.push_back("data: [DONE]\n\n".to_string());
         }
     }
 
@@ -668,6 +859,14 @@ impl AiStreamBody {
             self.gauges.started.elapsed().as_secs_f64(),
         );
         let usage = self.translator.usage();
+        // Terminal budget spend (DW-078): the not-yet-spent delta. A
+        // dialect that reports usage only in its final events spends
+        // here (its mid-stream ticks saw nothing) — enforced by the
+        // next pre-check; mid-stream cutoff was impossible for it.
+        // After a cutoff the stream's spend is already recorded.
+        if !self.cut_off {
+            self.budget_spend_delta();
+        }
         if usage.prompt_tokens.is_some() || usage.completion_tokens.is_some() {
             self.obs.record_ai_tokens(
                 &self.gauges.provider,
@@ -702,13 +901,20 @@ impl hyper::body::Body for AiStreamBody {
             if this.translator.is_ended() {
                 return Poll::Ready(None);
             }
-            match Pin::new(&mut this.inner).poll_frame(cx) {
+            // The provider body is gone once the budget cutoff dropped
+            // it (eager upstream cancel): the synthesized tail above is
+            // the stream's entire remainder.
+            let Some(inner) = this.inner.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match Pin::new(inner).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
                     let Some(data) = frame.data_ref().cloned() else {
                         continue; // trailers / non-data frames pass by
                     };
                     let (frames, chunks, first) = this.translator.feed(data.as_ref(), this.adapter);
                     this.note_chunks(chunks, first);
+                    this.budget_tick();
                     if this.translator.is_ended() {
                         this.tail.extend(this.translator.finish());
                     }

@@ -590,6 +590,10 @@ pub struct DataPlane {
     /// their TLS config) are per-generation; the introspection CACHE
     /// is per-dataplane.
     oidc_introspection_cache: Arc<crate::security::oidc::OidcIntrospectionCache>,
+    /// AI token budgets (DW-078): per-generation rules over a
+    /// reload-surviving spend ledger (empty engine when no policy
+    /// declares a budget — the pre-check skips entirely).
+    ai_budgets: ArcSwap<crate::ai::budget::AiBudgetEngine>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -845,7 +849,11 @@ impl DataPlane {
             Arc::new(crate::security::oidc::OidcIntrospectionCache::new());
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
+        let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
+            snapshot.gateway(),
+        ));
         let dp = DataPlane {
+            ai_budgets,
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1254,6 +1262,15 @@ impl DataPlane {
             .note_generation(Some(previous.snapshot.as_ref()), &snapshot);
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
+        // DW-078: budget RULES swap with the generation; the LEDGER
+        // (spent windows) carries over — a reload never resets a
+        // live budget window.
+        self.ai_budgets.store(Arc::new(
+            crate::ai::budget::AiBudgetEngine::compile_with_ledger(
+                snapshot.gateway(),
+                self.ai_budgets.load_full().ledger(),
+            ),
+        ));
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1499,6 +1516,12 @@ impl DataPlane {
                 }
             }
         })
+    }
+
+    /// The AI budget engine (DW-078): current rules over the shared
+    /// reload-surviving ledger.
+    pub fn ai_budgets(&self) -> Arc<crate::ai::budget::AiBudgetEngine> {
+        self.ai_budgets.load_full()
     }
 
     /// The current generation's upstream registry. Used by the
@@ -5062,7 +5085,18 @@ where
             serve_mock(mock, gen.snapshot.route_table().mock_body(idx), rid).await
         }
         RouteAction::Ai => {
-            crate::dataplane::ai_proxy::serve_ai(req, &route.name, gen, dp, rid, rec).await
+            let listener_name = rec.listener.clone();
+            crate::dataplane::ai_proxy::serve_ai(
+                req,
+                &route.name,
+                gen,
+                dp,
+                rid,
+                rec,
+                identity,
+                &listener_name,
+            )
+            .await
         }
         RouteAction::Proxy { .. } => {
             // DW-062: fault injection — abort and delay are evaluated

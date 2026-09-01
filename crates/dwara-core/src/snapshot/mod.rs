@@ -2654,6 +2654,39 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // DW-078: AI token budgets on policies — set fields must be positive,
+    // and at least one window must be configured (a budget block that
+    // bounds nothing is an authoring error).
+    for p in &gateway.policies {
+        if let Some(tb) = &p.token_budget {
+            if tb.tokens_per_min.is_none() && tb.cost_per_day_micros.is_none() {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "token_budget",
+                    "a token_budget must set tokens_per_min and/or cost_per_day_micros \
+                 (an empty budget bounds nothing)",
+                ));
+            }
+            if tb.tokens_per_min == Some(0) {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "token_budget.tokens_per_min",
+                    "tokens_per_min must be > 0 (omit the field for no token window)",
+                ));
+            }
+            if tb.cost_per_day_micros == Some(0) {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "token_budget.cost_per_day_micros",
+                    "cost_per_day_micros must be > 0 (omit the field for no cost window)",
+                ));
+            }
+        }
+    }
+
     // Duplicate names within each entity kind.
     let mut check_dups = |kind: &str, field: &str, names: Vec<&str>| {
         let mut seen = std::collections::BTreeSet::new();

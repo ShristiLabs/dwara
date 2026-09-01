@@ -2910,8 +2910,8 @@ pub enum RouteAction {
     /// the provider's upstream, and the response translated back to the
     /// OpenAI shape. The route's `service` is still required by the
     /// schema but never dialed. Requires an `ai:` block (validation
-    /// rejects the pairing otherwise). `stream: true` requests answer
-    /// 400 until the streaming pipeline lands (DW-077).
+    /// rejects the pairing otherwise). `stream: true` requests are
+    /// served via zero-buffer SSE pass-through (DW-077).
     Ai,
 }
 
@@ -4031,6 +4031,65 @@ pub struct Policy {
     /// rejection and are unaffected.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
+    /// AI token budget (DW-078): caps provider-reported tokens per
+    /// minute and/or priced cost per UTC day for the budget holder.
+    /// Distinct from every rule above: those count REQUESTS, this
+    /// counts TOKENS. Resolution follows the frozen precedence chain
+    /// (consumer > route > service > listener > global) with the MOST
+    /// SPECIFIC level's budget governing (a limit-of-totals, not an
+    /// AND-composed rule). `scope: consumer` (default) keys the budget
+    /// to each attaching consumer; `scope: policy` makes one SHARED
+    /// (team) budget keyed by the policy name. Consumers with no
+    /// binding budget are unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<TokenBudget>,
+}
+
+/// An AI token budget (DW-078, `policies[].token_budget`): limits of
+/// TOTALS over windows — provider-reported tokens per minute and/or
+/// cost per UTC calendar day, enforced per consumer or shared per
+/// policy (team). See the `ai::budget` module docs for the
+/// check-then-spend contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBudget {
+    /// Maximum provider-reported tokens per fixed 60-second window
+    /// (epoch-minute aligned). Spent tokens come from the provider's
+    /// own usage reports — the gateway never estimates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_min: Option<u64>,
+    /// Maximum spend per UTC calendar day, in integer micro-USD
+    /// (1_000_000 = $1.00 — no floating-point money). Enforced end to
+    /// end; the pricing input arrives with the DW-079 pricing tables,
+    /// so the cost window is enforced-but-inert until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_day_micros: Option<u64>,
+    /// Whose budget this is: `consumer` (default — each attaching
+    /// consumer gets its own window) or `policy` (one SHARED team
+    /// budget keyed by the policy name).
+    #[serde(
+        default = "default_token_budget_scope",
+        skip_serializing_if = "is_default_token_budget_scope"
+    )]
+    pub scope: TokenBudgetScope,
+}
+
+/// The budget's key scope (DW-078).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenBudgetScope {
+    /// One budget per attaching consumer.
+    Consumer,
+    /// One shared (team) budget per policy.
+    Policy,
+}
+
+fn default_token_budget_scope() -> TokenBudgetScope {
+    TokenBudgetScope::Consumer
+}
+
+fn is_default_token_budget_scope(s: &TokenBudgetScope) -> bool {
+    *s == TokenBudgetScope::Consumer
 }
 
 /// One rate-limit rule (DW-017): a key selector plus one or more stacked

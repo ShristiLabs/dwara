@@ -21,6 +21,8 @@ Use the AI gateway when:
   of in every client.
 - You want gateway metrics for AI traffic (requests per provider,
   token usage) alongside your other routing metrics.
+- You want to cap how many tokens (or how much spend) one consumer
+  or team may burn -- see [Token budgets](#token-budgets).
 
 ## Configuration
 
@@ -277,6 +279,97 @@ retry a canary request onto the stable version and silently undo the
 experiment. Run the failover chain and the canary split on separate
 aliases.
 
+## Token budgets
+
+A token budget caps the total AI consumption of one consumer (or one
+shared team): provider-reported TOKENS per minute, and/or spend per
+UTC day. It is a budget, not a rate -- where rate limits count
+requests and [consumer quotas](./quotas) count requests per day or
+month, a token budget counts what the provider reports back, so the
+three compose when all are configured.
+
+::: info Status
+Tokens-per-minute budgets are fully enforced. The cost-per-day window
+is wired end to end but reads prices through a seam that returns 0
+until per-model pricing tables land (DW-079): configuring
+`cost_per_day_micros` today reserves the limit, and it begins
+denying the day pricing arrives. The gateway never estimates a price.
+:::
+
+Budgets are declared on a policy, and the policy is attached to the
+consumers (or routes) it should govern:
+
+```yaml
+policies:
+  - name: acme-ai-budget
+    token_budget:
+      tokens_per_min: 500000        # provider-reported tokens / minute
+      cost_per_day_micros: 5000000  # $5.00/day, integer micro-USD
+      # scope: policy              # one SHARED team budget instead
+                                    # of one window per consumer
+
+consumers:
+  - name: acme
+    credentials:
+      - type: api_key
+        key: ${ACME_KEY}
+    policies: [acme-ai-budget]
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `tokens_per_min` | none | Max provider-reported tokens per fixed 60-second window. |
+| `cost_per_day_micros` | none | Max spend per UTC day, in integer micro-USD (1,000,000 = $1.00). Inert until pricing lands -- see the note above. |
+| `scope` | `consumer` | `consumer`: every consumer attaching the policy gets its own window. `policy`: one shared (team) budget -- all attaching consumers spend from the same window. |
+
+At least one of `tokens_per_min` / `cost_per_day_micros` must be set,
+and a set value must be greater than zero (validation rejects an
+empty or zero budget).
+
+### How enforcement behaves
+
+- **A spent window rejects before the provider is called.** A request
+  from a holder whose window is already exhausted gets `429` with a
+  `Retry-After` header (seconds until the window resets) and the
+  OpenAI error shape, `code: ai_budget_exceeded`. No provider tokens
+  are spent on a rejected request.
+- **The gateway spends what the provider reports, never an
+  estimate.** Usage is recorded after the provider answers, so a
+  holder sitting exactly at its limit can always complete one more
+  request; the next one is rejected. Overrun is bounded by that one
+  request's usage.
+- **A stream that crosses its budget is cut off mid-stream.** Usage
+  is spent as the provider reports it during the stream; on a
+  crossing, forwarding stops, the client receives this event and then
+  `[DONE]` (already-streamed content stands, the connection is not
+  reset), and the provider request is cancelled -- no further
+  provider tokens are consumed:
+
+  ```
+  data: {"error":{"code":"ai_budget_exceeded","message":"the token budget for this window is exhausted; the stream was cut off","request_id":"req-...","type":"rate_limit_error"}}
+
+  data: [DONE]
+  ```
+
+  Only providers that report usage during the stream (Anthropic does)
+  can be cut off mid-stream; providers that report usage only at the
+  end are enforced on the next request's pre-check.
+- **Spend survives config reloads.** Changing limits (or anything
+  else) by reload never resets a live window -- a minute window rolls
+  at the minute boundary, the day window at UTC midnight, regardless
+  of reloads.
+- **Counters are in-memory and per instance.** No state store is
+  required; a fleet of gateway instances each count their own share
+  (fleet-wide shared budgets are the enterprise edition's follow-up).
+
+If several policies in the attachment chain (consumer > route >
+service > listener > global) declare a budget, the most specific one
+governs. Consumers with no budget attached are unlimited.
+
+Denials are counted in `dwara_ai_budget_denied_total{kind}` (see
+[Metrics](#metrics)); the consumer name appears in the access log,
+never as a metric label.
+
 ## Errors
 
 Errors come back in the OpenAI error shape, so SDK error handling
@@ -295,6 +388,7 @@ works unchanged:
 
 | Situation | Status | `code` |
 |---|---|---|
+| Over the [token budget](#token-budgets) (checked before the body is read) | 429 | `ai_budget_exceeded` |
 | Unknown model alias | 404 | `model_not_found` |
 | Malformed body or request | 400 | `invalid_json` / others |
 | Request body over 16 MiB | 413 | `body_too_large` |
@@ -304,18 +398,24 @@ works unchanged:
 
 Provider errors pass through with the provider's own status code and
 message (in the OpenAI error envelope), so client retry logic sees
-the real 429/5xx.
+the real 429/5xx. The budget 429 additionally carries a `Retry-After`
+header (seconds until the denying window resets).
 
 ## Metrics
 
-Two metric families are exported on `/metrics`:
+Metric families exported on `/metrics`:
 
-- `dwara_ai_requests_total{provider,route,outcome}` -- outcomes are
-  `success`, `provider_error`, `transport_error`, and
-  `translation_error`.
-- `dwara_ai_tokens_total{provider,kind}` -- token usage as REPORTED
-  BY THE PROVIDER (`kind` is `prompt` or `completion`). The gateway
-  does not estimate token counts.
+- `dwara_ai_requests_total{provider,route,outcome,version}` --
+  outcomes are `success`, `provider_error`, `transport_error`, and
+  `translation_error`; `version` is the canary version that served,
+  or `default` for aliases without a split.
+- `dwara_ai_tokens_total{provider,kind,version}` -- token usage as
+  REPORTED BY THE PROVIDER (`kind` is `prompt` or `completion`). The
+  gateway does not estimate token counts.
+- `dwara_ai_budget_denied_total{kind}` -- token-budget pre-check
+  rejections and mid-stream cutoffs. A pre-check records the kind of
+  the window that denied (`tokens` or `cost`; `cost` stays inert until
+  DW-079 pricing lands); a mid-stream cutoff records `tokens`.
 
 ## Validation and secrets
 

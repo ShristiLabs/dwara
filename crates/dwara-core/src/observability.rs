@@ -533,6 +533,9 @@ pub struct Observability {
     /// (DW-076). Provider-reported only (the locked M4 decision: the
     /// gateway never estimates).
     ai_tokens_total: IntCounterVec,
+    /// DW-078: AI budget denials, by kind (tokens | cost). No consumer
+    /// label (cardinality); the consumer is in the access log line.
+    ai_budget_denied_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1009,6 +1012,16 @@ impl Observability {
             &["provider", "route", "outcome", "version"],
         )
         .expect("valid metric definition");
+        let ai_budget_denied_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_budget_denied_total",
+                "AI token/cost budget denials (DW-078), by kind (tokens | \
+                 cost). Consumer identity is in the access log, not a \
+                 label.",
+            ),
+            &["kind"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1106,6 +1119,7 @@ impl Observability {
             Box::new(ai_requests_total.clone()),
             Box::new(ai_tokens_total.clone()),
             Box::new(ai_stream_chunks_total.clone()),
+            Box::new(ai_budget_denied_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1169,6 +1183,7 @@ impl Observability {
             ai_requests_total,
             ai_tokens_total,
             ai_stream_chunks_total,
+            ai_budget_denied_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1484,6 +1499,12 @@ impl Observability {
     /// `dwara_config_convergence_refresh_total`.
     pub fn record_config_convergence_refresh(&self) {
         self.config_convergence_refresh_total.inc();
+    }
+
+    /// Count one AI budget denial (DW-078) in
+    /// `dwara_ai_budget_denied_total{kind}` (kind: tokens | cost).
+    pub fn record_ai_budget_denied(&self, kind: &str) {
+        self.ai_budget_denied_total.with_label_values(&[kind]).inc();
     }
 
     /// Count forwarded streaming chunks (DW-077) in

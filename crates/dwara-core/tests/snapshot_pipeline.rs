@@ -227,6 +227,7 @@ fn validation_rejects_duplicate_policy_name() {
         timeouts: None,
         rate_limits: vec![],
         dry_run: false,
+        token_budget: None,
     });
     gw.policies.push(dwara_core::config::Policy {
         name: "p".into(),
@@ -234,6 +235,7 @@ fn validation_rejects_duplicate_policy_name() {
         timeouts: None,
         rate_limits: vec![],
         dry_run: false,
+        token_budget: None,
     });
     assert_single_issue(&gw, "policy", "p", "name");
 }
@@ -1070,6 +1072,7 @@ fn policy_gateway(rl: RateLimit) -> Gateway {
         timeouts: None,
         rate_limits: vec![],
         dry_run: false,
+        token_budget: None,
     });
     gw
 }
@@ -1396,6 +1399,7 @@ fn validation_accepts_resolved_global_and_listener_policy_references() {
         rate_limits: vec![],
         dry_run: false,
         timeouts: None,
+        token_budget: None,
     }];
     gw.global_policies = vec!["p".into()];
     gw.listeners[0].policies = vec!["p".into()];
