@@ -2343,6 +2343,140 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 "provider_model must be non-empty",
             ));
         }
+        // DW-076: failover and canary are mutually exclusive per alias
+        // (the config docs explain why: failover retries a canary
+        // request onto the stable version and silently undoes the
+        // experiment).
+        if !m.failover.is_empty() && !m.canary.is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}]"),
+                "an alias cannot declare both failover and canary: \
+                 failover is an availability chain for one logical model, \
+                 a canary split deliberately serves several versions — \
+                 combine them on separate aliases",
+            ));
+        }
+        // DW-076: the failover chain. Bounded to 4 alternates (the
+        // chain is walked synchronously — every extra candidate adds a
+        // full provider round-trip to the request's worst-case
+        // latency, the same reasoning that bounds splits). Entries
+        // must resolve, and the chain must not repeat a provider/model
+        // pair (a duplicate would re-send to a target that just failed
+        // — the provider's upstream breaker owns same-target retries).
+        if m.failover.len() > 4 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}].failover"),
+                format!(
+                    "failover accepts at most 4 alternates ({} given): the \
+                     chain is walked synchronously, so every extra candidate \
+                     adds a full provider round-trip to the request's \
+                     worst-case latency",
+                    m.failover.len()
+                ),
+            ));
+        }
+        let mut chain = vec![(m.provider.as_str(), m.provider_model.as_str())];
+        for (i, f) in m.failover.iter().enumerate() {
+            if !names.contains(f.provider.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].failover[{i}].provider"),
+                    format!("references unknown ai provider '{}'", f.provider),
+                ));
+            }
+            if f.provider_model.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].failover[{i}].provider_model"),
+                    "provider_model must be non-empty",
+                ));
+            }
+            if chain.contains(&(f.provider.as_str(), f.provider_model.as_str())) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].failover[{i}]"),
+                    format!(
+                        "duplicates the provider/model pair ('{}' / '{}') already \
+                         earlier in the chain — the upstream breaker owns \
+                         same-target retries",
+                        f.provider, f.provider_model
+                    ),
+                ));
+            } else {
+                chain.push((f.provider.as_str(), f.provider_model.as_str()));
+            }
+        }
+        // DW-076: the canary split. Bounded to 2..=8 versions (the
+        // DW-040 split bound: the pick scans linearly, and every
+        // version is a metrics label — an unbounded list is a series
+        // explosion; one version is not a split, it is the whole
+        // model). Version names unique and non-empty, weights >= 1,
+        // providers resolve.
+        if !m.canary.is_empty() && !(2..=8).contains(&m.canary.len()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}].canary"),
+                format!(
+                    "a canary split needs 2..=8 versions ({} given): one \
+                     version is the whole model (no split), and every version \
+                     is a metrics label — the bound keeps the pick cheap and \
+                     the series count sane",
+                    m.canary.len()
+                ),
+            ));
+        }
+        let mut versions = std::collections::BTreeSet::new();
+        for (i, v) in m.canary.iter().enumerate() {
+            if v.version.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary[{i}].version"),
+                    "version name must be non-empty",
+                ));
+            }
+            if !versions.insert(v.version.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary[{i}].version"),
+                    format!("duplicate version name '{}'", v.version),
+                ));
+            }
+            if v.weight == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary[{i}].weight"),
+                    "weight must be >= 1 (park a version by removing the \
+                     entry, not by zeroing it)",
+                ));
+            }
+            if !names.contains(v.provider.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary[{i}].provider"),
+                    format!("references unknown ai provider '{}'", v.provider),
+                ));
+            }
+            if v.provider_model.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary[{i}].provider_model"),
+                    "provider_model must be non-empty",
+                ));
+            }
+        }
     }
 }
 

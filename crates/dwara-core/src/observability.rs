@@ -514,14 +514,16 @@ pub struct Observability {
     /// DW-075: AI route requests, by provider/route/outcome. The
     /// provider label is the `ai.providers[].name` (config-bounded);
     /// outcomes: success, provider_error, transport_error,
-    /// translation_error. Client-side rejections (malformed body,
-    /// unknown model) are NOT counted here — they never reach a
-    /// provider and are already visible in requests_total's status
-    /// classes.
+    /// translation_error. DW-076 adds the canary `version` label
+    /// (config-bounded; "default" for non-canary aliases).
+    /// Client-side rejections (malformed body, unknown model) are NOT
+    /// counted here — they never reach a provider and are already
+    /// visible in requests_total's status classes.
     ai_requests_total: IntCounterVec,
     /// DW-075: provider-reported token usage, by provider and
-    /// direction (prompt|completion). Provider-reported only (the
-    /// locked M4 decision: the gateway never estimates).
+    /// direction (prompt|completion), with the canary `version` label
+    /// (DW-076). Provider-reported only (the locked M4 decision: the
+    /// gateway never estimates).
     ai_tokens_total: IntCounterVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
@@ -982,20 +984,22 @@ impl Observability {
                 "dwara_ai_requests_total",
                 "AI route requests (DW-075), by provider/route/outcome. Outcomes: \
                  success, provider_error, transport_error, translation_error. \
-                 Client-side rejections never reach a provider and are not counted \
-                 here.",
+                 The version label is the canary version that served (DW-076) \
+                 or default. Client-side rejections never reach a provider and \
+                 are not counted here.",
             ),
-            &["provider", "route", "outcome"],
+            &["provider", "route", "outcome", "version"],
         )
         .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
                 "Provider-reported AI token usage (DW-075), by provider and \
-                 direction (prompt|completion). Provider-reported only; the \
-                 gateway never estimates.",
+                 direction (prompt|completion), with the canary version label \
+                 (DW-076) or default. Provider-reported only; the gateway never \
+                 estimates.",
             ),
-            &["provider", "kind"],
+            &["provider", "kind", "version"],
         )
         .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
@@ -1436,25 +1440,28 @@ impl Observability {
     }
 
     /// Count one AI route request outcome (DW-075) in
-    /// `dwara_ai_requests_total{provider,route,outcome}`. The provider
-    /// and route labels are config-bounded.
-    pub fn record_ai_request(&self, provider: &str, route: &str, outcome: &str) {
+    /// `dwara_ai_requests_total{provider,route,outcome,version}`. The
+    /// provider, route, and version labels are config-bounded
+    /// (`version` is the canary version that served, DW-076, or
+    /// "default" for non-canary aliases).
+    pub fn record_ai_request(&self, provider: &str, route: &str, outcome: &str, version: &str) {
         self.ai_requests_total
-            .with_label_values(&[provider, route, outcome])
+            .with_label_values(&[provider, route, outcome, version])
             .inc();
     }
 
     /// Add provider-reported token usage (DW-075) to
-    /// `dwara_ai_tokens_total{provider,kind}` (kind: prompt |
-    /// completion). Provider-reported values only.
-    pub fn record_ai_tokens(&self, provider: &str, prompt: u64, completion: u64) {
+    /// `dwara_ai_tokens_total{provider,kind,version}` (kind: prompt |
+    /// completion; version: the canary version that served, DW-076, or
+    /// "default"). Provider-reported values only.
+    pub fn record_ai_tokens(&self, provider: &str, prompt: u64, completion: u64, version: &str) {
         let counters = self
             .ai_tokens_total
-            .with_label_values(&[provider, "prompt"]);
+            .with_label_values(&[provider, "prompt", version]);
         counters.inc_by(prompt);
         let counters = self
             .ai_tokens_total
-            .with_label_values(&[provider, "completion"]);
+            .with_label_values(&[provider, "completion", version]);
         counters.inc_by(completion);
     }
 

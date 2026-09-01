@@ -120,4 +120,59 @@ pub struct AiModel {
     /// `claude-sonnet-4-5`, `gemini-2.5-flash`), sent to the provider
     /// in place of the alias.
     pub provider_model: String,
+    /// Ordered failover chain (DW-076): when the primary target
+    /// answers 429 or a 5xx, or its transport errors, the gateway
+    /// retries the next entry — a DIFFERENT provider/model pair, never
+    /// a re-send to the provider that just failed (its upstream's
+    /// breaker owns same-provider retries). The client sees one
+    /// response. Absent (the default): no failover, the primary's
+    /// answer is final. Cannot be combined with `canary` on the same
+    /// alias (validation rejects the pairing): failover is an
+    /// availability chain for a single logical model; a canary split
+    /// is deliberately serving multiple versions at once — mixing the
+    /// two would retry a canary request onto the stable version and
+    /// silently undo the experiment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failover: Vec<AiModelTarget>,
+    /// Weighted canary split (DW-076): traffic for this alias
+    /// distributes across the listed versions by a deterministic
+    /// weighted hash of the request id (the same slot semantics as
+    /// traffic splitting: ratios hold per request, and re-sending a
+    /// request with the same id lands on the same version). Each
+    /// version names exactly one provider/model pair and carries no
+    /// failover of its own. Absent (the default): no split. Cannot be
+    /// combined with `failover` on the same alias.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canary: Vec<AiCanaryVersion>,
+}
+
+/// One provider/model pair an alias can route to (DW-076): the primary
+/// shape reused by failover entries and canary versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiModelTarget {
+    /// Name of the `ai.providers[]` entry.
+    pub provider: String,
+    /// The provider's own model identifier.
+    pub provider_model: String,
+}
+
+/// One weighted version of a canary split (DW-076
+/// `ai.models.<alias>.canary[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCanaryVersion {
+    /// Version name — the analytics/metrics attribution label for
+    /// requests this version served. Unique within the alias; bounded
+    /// label (config entity).
+    pub version: String,
+    /// Relative weight (>= 1). A weight of 0 is not allowed here (the
+    /// split machinery parks traffic by RE-BALANCING weights, and a
+    /// zero-weight canary entry that still exists would read as
+    /// coverage it does not have) — remove the entry to park it.
+    pub weight: u32,
+    /// Name of the `ai.providers[]` entry serving this version.
+    pub provider: String,
+    /// The provider's own model identifier for this version.
+    pub provider_model: String,
 }

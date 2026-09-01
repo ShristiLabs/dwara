@@ -9,6 +9,31 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI routing and failover (DW-076): model aliases can declare an
+  ordered failover chain (`failover:` — alternate provider/model
+  pairs) and a weighted canary split (`canary:` — versions with
+  weights). The AI route action walks the chain on transient provider
+  failures (429, 5xx, transport errors, per-dialect translation
+  rejections) and fails over transparently — the provider response is
+  buffered whole before translation, so a failing candidate emits
+  nothing client-visible; deterministic provider errors (other 4xx)
+  are final, and an exhausted chain returns the LAST provider's
+  answer. Same-provider retries stay with the upstream breaker
+  (validation rejects duplicate provider/model pairs in a chain).
+  Canary traffic splits by a deterministic weighted hash of the
+  request id (the same slot semantics as traffic splitting: re-sends
+  with the same id land on the same version; ramp by re-balancing
+  weights). Usage and request metrics attribute to the provider and
+  canary version that ACTUALLY served — `dwara_ai_requests_total` and
+  `dwara_ai_tokens_total` gain a `version` label ("default" for plain
+  aliases), and the access record follows the serving provider with an
+  `attempts` count — the input DW-079 cost metering reads. Failover
+  and canary are mutually exclusive per alias (validation), and both
+  are length-bounded (at most 4 failover alternates; 2..=8 canary
+  versions). New `ai::routing` module (pure functions; explicit
+  FNV-1a pick hash so canary series stay comparable across restarts).
+  No new dependencies.
+
 - AI provider adapters (DW-075): an OpenAI-compatible chat-completions
   facade with per-provider wire translation — the same client request
   (OpenAI shape) serves OpenAI, Anthropic, and Gemini via the new

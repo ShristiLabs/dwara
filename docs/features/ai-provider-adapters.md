@@ -104,6 +104,73 @@ from deltas, and OpenAI chunk serialization
 (`openai_compat::stream_event_to_openai_chunk`) all exist and are
 tested now so DW-077 composes on top without adapter changes.
 
+## Routing and failover (DW-076)
+
+The alias table grew two routing shapes, both compiled into the
+per-generation `AiRuntime` and resolved per request in `ai::routing`
+(pure functions; the pick hash is an explicit FNV-1a so canary series
+stay comparable across restarts and toolchains):
+
+```yaml
+ai:
+  models:
+    chat:                       # availability chain
+      provider: openai
+      provider_model: gpt-4o-mini-2024-07-18
+      failover:
+        - provider: anthropic   # tried, in order, when the primary
+          provider_model: claude-sonnet-4-5   # answers 429/5xx or is
+                                             # unreachable
+    summarize:                  # weighted canary
+      provider: openai
+      provider_model: placeholder
+      canary:
+        - version: stable       # attribution label
+          weight: 9
+          provider: openai
+          provider_model: gpt-4o-mini-2024-07-18
+        - version: canary
+          weight: 1
+          provider: openai
+          provider_model: gpt-4o-mini-2025-01-31
+```
+
+**Failover** walks `[primary, alternates...]` on RETRYABLE outcomes
+only: 429, 5xx, transport errors, per-dialect translation rejections,
+and provider-specific body failures (a malformed or over-cap 200 — a
+runaway completion). Other provider errors (400, 401, 404) are
+deterministic and final. Failover is invisible to the client by
+construction — the provider response is read and translated whole
+before any byte reaches the client. The chain never re-sends to a
+provider/model pair that just failed (validation rejects duplicate
+pairs); same-provider retries belong to the provider's upstream
+breaker. When every candidate fails, the client sees the LAST
+provider's answer — the closest to the truth of the outage. The chain
+holds at most 4 alternates (validation): it is walked synchronously,
+so every extra candidate adds a full provider round-trip to the
+request's worst-case latency.
+
+**Canary** picks exactly one version per request by the deterministic
+weighted hash of the request id (the same cumulative-slot semantics as
+`dataplane::split`): re-sends with the same id land on the same
+version, and ratios converge statistically over distinct ids. A split
+holds 2..=8 versions (validation — the DW-040 split bound: the pick
+scans linearly and every version is a metrics label; one version is
+not a split), each with weight >= 1 (park a version by removing the
+entry). Ramp by re-balancing weights (90/10 to 95/5), never by
+growing one side.
+
+**Attribution** follows the serving provider and version everywhere:
+`dwara_ai_requests_total` and `dwara_ai_tokens_total` carry a
+`version` label (the canary version name, or `default` for plain
+aliases), the access record's upstream follows the provider that
+served, and the access log line carries `attempts` (the candidate
+number that succeeded) — the input DW-079's cost metering reads.
+
+The two shapes are mutually exclusive per alias (validation): failover
+retries a canary request onto the stable version and silently undoes
+the experiment — combine them on separate aliases instead.
+
 ## Configuration
 
 ```yaml
@@ -144,18 +211,20 @@ rejected (it could never serve anything).
 
 ## Metrics
 
-- `dwara_ai_requests_total{provider,route,outcome}` — outcomes:
-  success, provider_error, transport_error, translation_error
-  (client-side rejections are not counted here; they never reach a
-  provider).
-- `dwara_ai_tokens_total{provider,kind}` — kind: prompt | completion,
-  provider-reported values only.
+- `dwara_ai_requests_total{provider,route,outcome,version}` —
+  outcomes: success, provider_error, transport_error,
+  translation_error; `version` is the canary version that served or
+  `default` (client-side rejections are not counted here; they never
+  reach a provider).
+- `dwara_ai_tokens_total{provider,kind,version}` — kind: prompt |
+  completion, provider-reported values only, attributed to the serving
+  provider and version.
 
 ## Where the code is
 
 - `crates/dwara-core/src/ai/` — types, adapter trait, adapters
   (`adapters/{openai,anthropic,gemini}.rs`), facade, SSE framer,
-  compiled runtime.
+  routing (DW-076), compiled runtime.
 - `crates/dwara-core/src/config/ai.rs` — the `ai:` block schema.
 - `crates/dwara-core/src/dataplane/ai_proxy.rs` — the route action:
   bounded body read, alias resolution, transport, response
@@ -175,11 +244,16 @@ rejected (it could never serve anything).
   pass-through (429), unreachable provider 502, unknown model 404,
   malformed body / `stream: true` 400s, validation matrix, config
   redaction.
+- `crates/dwara-core/tests/ai_routing.rs` — the DW-076 done-whens:
+  failover on injected 429/500/transport-error (client sees success,
+  both attempts attributed), exhaustion returns the last provider's
+  answer, non-retryable 404 does NOT fail over, no-list passthrough,
+  the 9:1 canary split over 200 distinct request ids converges and is
+  deterministic per id, per-version metrics attribution, the routing
+  validation matrix, and the compiled-plan unit case.
 
 ## Future links
 
-- DW-076 wraps the provider call with failover (429/5xx) and weighted
-  model-version canaries — no adapter changes needed.
 - DW-077 wires `parse_stream_event` + `ai::sse` into a zero-buffer
   SSE pass-through and lifts the `stream: true` 400.
 - DW-078/079 consume the provider-reported `Usage` this layer

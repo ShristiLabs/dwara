@@ -579,6 +579,8 @@ fn ai_runtime_compiles_and_resolves() {
             AiModel {
                 provider: "p1".into(),
                 provider_model: "claude-sonnet-4-5".into(),
+                failover: vec![],
+                canary: vec![],
             },
         )]
         .into_iter()

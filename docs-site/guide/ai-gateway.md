@@ -169,6 +169,85 @@ OpenAI's `seed` or `response_format`) pass through when the serving
 provider is OpenAI or an OpenAI-compatible server, and are dropped
 for Anthropic and Gemini.
 
+## Failover and canary
+
+A model alias can do more than name one provider. Two optional
+additions control availability and rollout — but not both on the same
+alias.
+
+### Failover chains
+
+```yaml
+ai:
+  models:
+    chat:
+      provider: openai
+      provider_model: gpt-4o-mini-2024-07-18
+      failover:
+        - provider: anthropic
+          provider_model: claude-sonnet-4-5
+```
+
+When the serving provider answers 429 or a 5xx, is unreachable, or
+rejects the conversation in its dialect, the gateway retries the next
+entry in the chain — up to 4 alternates. The client sees one response
+and nothing about a failed attempt: providers are only answered after
+the gateway has their full response. Deterministic provider errors
+(a 400, an invalid key, an unknown model) are NOT retried on another
+provider — another provider would only re-diagnose them. If every
+entry fails, the client receives the LAST provider's answer.
+
+Use failover when one logical model must stay up across provider
+outages. Note that every extra entry adds a full provider round-trip
+to a failing request's latency — that is why the bound is 4.
+
+### Canary splits
+
+```yaml
+ai:
+  models:
+    summarize:
+      provider: openai
+      provider_model: placeholder    # unused when canary is present
+      canary:
+        - version: stable            # the attribution label
+          weight: 9
+          provider: openai
+          provider_model: gpt-4o-mini-2024-07-18
+        - version: canary
+          weight: 1
+          provider: anthropic
+          provider_model: claude-haiku-4-5
+```
+
+Traffic for the alias splits across 2..=8 versions by a deterministic
+weighted hash of the request id: the same request id always lands on
+the same version, and the split follows the configured ratios over
+many requests. Versions may live on different providers.
+
+To ramp a canary, RE-BALANCE the weights (90/10 to 95/5, keeping the
+total constant) and reload the config — the next requests use the new
+split, no restart needed. Growing one side alone also works but
+reshuffles which ids land where; re-balancing moves the fewest
+requests between versions.
+
+### What you observe
+
+- `dwara_ai_requests_total{provider,route,outcome,version}` — one
+  outcome per provider ATTEMPT: a failed-over request shows
+  `provider_error` on the failing provider and `success` on the one
+  that served. The `version` label is the canary version name, or
+  `default` for aliases without a split.
+- `dwara_ai_tokens_total{provider,kind,version}` — token usage
+  attributed to the provider and version that actually served.
+- The access log's `attempts` field is the candidate number that
+  succeeded (1 = the primary answered).
+
+An alias cannot declare both `failover` and `canary`: failover would
+retry a canary request onto the stable version and silently undo the
+experiment. Run the failover chain and the canary split on separate
+aliases.
+
 ## Errors
 
 Errors come back in the OpenAI error shape, so SDK error handling

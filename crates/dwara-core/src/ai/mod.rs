@@ -34,6 +34,7 @@
 pub mod adapter;
 pub mod adapters;
 pub mod openai_compat;
+pub mod routing;
 pub mod sse;
 pub mod types;
 
@@ -59,6 +60,29 @@ pub struct CompiledProvider {
     pub auth_headers: Vec<(String, String)>,
 }
 
+/// One routable provider/model pair (DW-076): a failover-chain member
+/// or a canary version. `version` is the canary attribution label
+/// (None for plain chain targets).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteTarget {
+    /// The provider NAME (lookup key into the provider pool).
+    pub provider: String,
+    /// The provider's own model identifier.
+    pub provider_model: String,
+    /// The canary version name this target serves, if any.
+    pub version: Option<String>,
+}
+
+/// The compiled alias entry (DW-076): either a failover chain
+/// (primary first) or a canary split, never both (validation).
+#[derive(Debug, Clone)]
+pub enum CompiledModel {
+    /// `[primary, alternates...]` in config order.
+    Chain(Vec<RouteTarget>),
+    /// Weighted versions; the pick is deterministic per request id.
+    Canary(Vec<(u32, RouteTarget)>),
+}
+
 /// The per-generation compiled AI table (DW-075): the provider pool
 /// with resolved credentials plus the model alias map. Built at
 /// dataplane refresh from the published config; immutable once
@@ -66,7 +90,7 @@ pub struct CompiledProvider {
 #[derive(Debug, Clone, Default)]
 pub struct AiRuntime {
     providers: BTreeMap<String, CompiledProvider>,
-    models: BTreeMap<String, (String, String)>,
+    models: BTreeMap<String, CompiledModel>,
 }
 
 impl AiRuntime {
@@ -107,21 +131,54 @@ impl AiRuntime {
         let models = cfg
             .models
             .iter()
-            .map(|(alias, m)| {
-                (
-                    alias.clone(),
-                    (m.provider.clone(), m.provider_model.clone()),
-                )
-            })
+            .map(|(alias, m)| (alias.clone(), compile_model(m)))
             .collect();
         Some(AiRuntime { providers, models })
     }
 
-    /// Resolve a model alias to its provider and provider model id.
+    /// Resolve a model alias to its provider and provider model id
+    /// (the DW-075 single-target view; failover lists and canary
+    /// splits resolve to the same primary).
     pub fn resolve<'a>(&'a self, alias: &str) -> Option<(&'a CompiledProvider, &'a str)> {
-        let (provider_name, provider_model) = self.models.get(alias)?;
-        let provider = self.providers.get(provider_name)?;
-        Some((provider, provider_model.as_str()))
+        let target = self.primary_target(alias)?;
+        let provider = self.providers.get(&target.provider)?;
+        Some((provider, target.provider_model.as_str()))
+    }
+
+    /// The compiled model entry for an alias (routing introspection
+    /// and tests).
+    pub fn model(&self, alias: &str) -> Option<&CompiledModel> {
+        self.models.get(alias)
+    }
+
+    /// Route one request (DW-076): the ordered candidate list to try.
+    /// A canary alias yields exactly ONE candidate — the deterministic
+    /// weighted pick for `pick_key` (the request id); a failover alias
+    /// yields `[primary, alternates...]`. An empty result means the
+    /// alias does not exist.
+    pub fn route<'a>(&'a self, alias: &str, pick_key: &str) -> Vec<&'a RouteTarget> {
+        match self.models.get(alias) {
+            Some(CompiledModel::Chain(chain)) => chain.iter().collect(),
+            Some(CompiledModel::Canary(versions)) => {
+                vec![routing::weighted_pick(versions, pick_key)]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The compiled provider by name.
+    pub fn provider(&self, name: &str) -> Option<&CompiledProvider> {
+        self.providers.get(name)
+    }
+
+    /// The primary target of an alias (first chain entry; the first
+    /// canary version for split aliases — used by the DW-075
+    /// single-target `resolve`).
+    fn primary_target(&self, alias: &str) -> Option<&RouteTarget> {
+        match self.models.get(alias)? {
+            CompiledModel::Chain(chain) => chain.first(),
+            CompiledModel::Canary(versions) => versions.first().map(|(_, t)| t),
+        }
     }
 
     /// Number of compiled providers (config introspection/tests).
@@ -133,4 +190,38 @@ impl AiRuntime {
     pub fn model_count(&self) -> usize {
         self.models.len()
     }
+}
+
+/// Compile one alias config entry into its routing plan (DW-076).
+/// A canary list wins when present; otherwise the chain is
+/// `[primary] + failover`.
+fn compile_model(m: &crate::config::ai::AiModel) -> CompiledModel {
+    if !m.canary.is_empty() {
+        return CompiledModel::Canary(
+            m.canary
+                .iter()
+                .map(|v| {
+                    (
+                        v.weight,
+                        RouteTarget {
+                            provider: v.provider.clone(),
+                            provider_model: v.provider_model.clone(),
+                            version: Some(v.version.clone()),
+                        },
+                    )
+                })
+                .collect(),
+        );
+    }
+    let mut chain = vec![RouteTarget {
+        provider: m.provider.clone(),
+        provider_model: m.provider_model.clone(),
+        version: None,
+    }];
+    chain.extend(m.failover.iter().map(|f| RouteTarget {
+        provider: f.provider.clone(),
+        provider_model: f.provider_model.clone(),
+        version: None,
+    }));
+    CompiledModel::Chain(chain)
 }

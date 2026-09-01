@@ -390,6 +390,37 @@
         "queue_timeout_ms"
       ]
     },
+    "AiCanaryVersion": {
+      "description": "One weighted version of a canary split (DW-076\n`ai.models.<alias>.canary[]`).",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "Name of the `ai.providers[]` entry serving this version.",
+          "type": "string"
+        },
+        "provider_model": {
+          "description": "The provider's own model identifier for this version.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version name — the analytics/metrics attribution label for\nrequests this version served. Unique within the alias; bounded\nlabel (config entity).",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Relative weight (>= 1). A weight of 0 is not allowed here (the\nsplit machinery parks traffic by RE-BALANCING weights, and a\nzero-weight canary entry that still exists would read as\ncoverage it does not have) — remove the entry to park it.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "weight",
+        "provider",
+        "provider_model"
+      ]
+    },
     "AiConfig": {
       "description": "The `ai:` top-level block (DW-075). Absent: no AI surface. Present:\nvalidation requires at least one provider and at least one model —\nan `ai:` block that can never serve a model is an authoring error,\nnot a silently inert config.",
       "type": "object",
@@ -415,12 +446,45 @@
       "description": "One model alias mapping (DW-075 `ai.models{alias}`).",
       "type": "object",
       "properties": {
+        "canary": {
+          "description": "Weighted canary split (DW-076): traffic for this alias\ndistributes across the listed versions by a deterministic\nweighted hash of the request id (the same slot semantics as\ntraffic splitting: ratios hold per request, and re-sending a\nrequest with the same id lands on the same version). Each\nversion names exactly one provider/model pair and carries no\nfailover of its own. Absent (the default): no split. Cannot be\ncombined with `failover` on the same alias.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiCanaryVersion"
+          }
+        },
+        "failover": {
+          "description": "Ordered failover chain (DW-076): when the primary target\nanswers 429 or a 5xx, or its transport errors, the gateway\nretries the next entry — a DIFFERENT provider/model pair, never\na re-send to the provider that just failed (its upstream's\nbreaker owns same-provider retries). The client sees one\nresponse. Absent (the default): no failover, the primary's\nanswer is final. Cannot be combined with `canary` on the same\nalias (validation rejects the pairing): failover is an\navailability chain for a single logical model; a canary split\nis deliberately serving multiple versions at once — mixing the\ntwo would retry a canary request onto the stable version and\nsilently undo the experiment.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiModelTarget"
+          }
+        },
         "provider": {
           "description": "Name of the `ai.providers[]` entry that serves this alias.",
           "type": "string"
         },
         "provider_model": {
           "description": "The provider's own model identifier (e.g. `gpt-4o-mini`,\n`claude-sonnet-4-5`, `gemini-2.5-flash`), sent to the provider\nin place of the alias.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "provider_model"
+      ]
+    },
+    "AiModelTarget": {
+      "description": "One provider/model pair an alias can route to (DW-076): the primary\nshape reused by failover entries and canary versions.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "Name of the `ai.providers[]` entry.",
+          "type": "string"
+        },
+        "provider_model": {
+          "description": "The provider's own model identifier.",
           "type": "string"
         }
       },
