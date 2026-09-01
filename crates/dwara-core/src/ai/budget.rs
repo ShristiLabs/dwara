@@ -506,6 +506,10 @@ pub fn listener_policies_of<'a>(
         .unwrap_or(&[])
 }
 
+// White-box suite: stays in src/ because it inspects private
+// BudgetLedger/resolve internals (window indexing, reload pruning,
+// scope fall-through) that the e2e tests in tests/ai_budget.rs can
+// only observe indirectly.
 #[cfg(test)]
 mod tests {
     use super::*;
