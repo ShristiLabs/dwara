@@ -21,3 +21,8 @@ your config files entirely.
   consumer mapping.
 - [OpenID Connect](./oidc) - Bearer-token introspection (RFC 7662), the
   authorization-code + PKCE relying-party flow, and token exchange.
+- [Authorization rules](./authorization) - the built-in allow/deny
+  model: consumers, groups, JWT scopes and claims, IP ACLs, and GeoIP
+  gates at five precedence levels.
+- [Cedar and OPA authorization](./cedar-opa-authz) - delegating
+  authorization decisions to external policy engines.

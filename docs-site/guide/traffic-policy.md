@@ -19,3 +19,5 @@ with no restart.
   concurrency permit up to a timeout so latency rises before shedding.
 - [WAF-lite filtering](./waf-lite) - heuristic SQLi/XSS/path-traversal
   pattern matching with a dry-run mode for safe rollout.
+- [Consumer quotas](./quotas) - per-consumer daily/monthly request
+  budgets over the durable state store, distinct from rate limits.

@@ -66,7 +66,7 @@ CA) fails the TLS handshake before any HTTP is exchanged.
 | `GET /config_dump` | full published gateway config as redacted JSON with generation/hash headers (DW-072) — the structured equivalent of `GET /config` (which returns YAML) |
 | `GET /runtime_info` | process-level runtime info (DW-072): version, uptime, config generation, config hash, readiness |
 | `POST /cache/purge` | O(1) response-cache invalidation: `{\"route\": \"<name>\"}` to purge one route's entries, `{\"all\": true}` to advance the epoch for every cache-enabled route (responses `hit`/`stale` become `miss` on next request) |
-| `GET /quotas/usage` | per-consumer request-budget metering: current-window used vs. limit for each budgeted consumer (requires the state store, `DWARA_STATE_DB`) |
+| `GET /quotas/usage` | per-consumer request-budget metering: current-window used vs. limit for each budgeted consumer (requires the state store, `DWARA_STATE_DB`; see [Consumer quotas](./quotas)) |
 | `GET` / `POST /consumers/{name}/credentials` | list a consumer's credentials (lifecycle stamps only) / issue a new API key, opening the dual-validity window — see [Key rotation workflows](#key-rotation-workflows) |
 | `POST /credentials/{id}/retire` | retire (or schedule retirement of) a credential — see [Key rotation workflows](#key-rotation-workflows) |
 | `GET /analytics/dashboard`, `GET /analytics/top`, `POST /analytics/query`, `GET /analytics/exports`, `POST /analytics/exports/run` | the embedded analytics store's query surface — see [Analytics](./analytics) |

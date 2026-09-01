@@ -184,6 +184,7 @@ export default withMermaid(
                 },
                 { text: "Admission queues", link: "/guide/admission-queue" },
                 { text: "WAF-lite filtering", link: "/guide/waf-lite" },
+                { text: "Consumer quotas", link: "/guide/quotas" },
                 {
                   text: "Request hedging",
                   link: "/guide/request-hedging",
@@ -207,6 +208,7 @@ export default withMermaid(
                 },
                 { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
                 { text: "OpenID Connect", link: "/guide/oidc" },
+                { text: "Authorization rules", link: "/guide/authorization" },
                 {
                   text: "Cedar and OPA authorization",
                   link: "/guide/cedar-opa-authz",

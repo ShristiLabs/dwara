@@ -117,7 +117,10 @@ reporter: once per configured window the gateway writes a per-consumer
 usage statement — requests, errors, error rate, rate-limited and shed
 counts, average latency, and quota budget figures — as one
 deterministic file per format. Durable input for a billing pipeline,
-distinct from the ad hoc query API.
+distinct from the ad hoc query API. The quota figures come from
+consumer budgets (see [Consumer quotas](./quotas)); live per-window
+counters are also readable via `GET /quotas/usage` on the
+[admin API](./admin-api).
 
 ```yaml
 analytics:
