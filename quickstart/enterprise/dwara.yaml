@@ -1,0 +1,40 @@
+# Enterprise quickstart: the controller's source of truth (DW-066).
+# The controller watches this file and, on every change, compiles it,
+# publishes a new generation, and broadcasts it to every connected edge;
+# each edge writes the received config to its local file, and its
+# gateway hot-reloads. Editing THIS ONE FILE reconfigures the whole
+# fleet -- that convergence loop is the enterprise demo.
+#
+# Both data planes run this same config: one listener on 8443 (mapped
+# to host ports 8443 and 8444 by compose) routing to the shared nginx
+# upstream. Run from quickstart/: ./gen-certs.sh first (writes ./certs,
+# shared with the OSS quickstart), then seed the edge dirs per the
+# enterprise README before `docker compose up`.
+listeners:
+  - name: tls
+    address: 0.0.0.0
+    port: 8443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/certs/server.crt
+      key_file: /etc/dwara/certs/server.key
+routes:
+  - name: demo
+    service: demo
+    match:
+      # Regex catch-all: validation rejects prefix "/" (it trims to the
+      # empty string and would shadow every route).
+      path:
+        type: regex
+        value: /.*
+    action:
+      type: proxy
+services:
+  - name: demo
+    upstream: demo-upstream
+upstreams:
+  - name: demo-upstream
+    endpoints:
+      - address: upstream
+        port: 80

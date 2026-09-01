@@ -11,6 +11,10 @@
 //!   (default: `0.1.0`).
 //! - `--config-output` / `DWARA_CP_CONFIG_OUTPUT`: the local config
 //!   output path (default: `/etc/dwara/dwara.yaml`).
+//! - `DWARA_LOG`: the tracing filter (default:
+//!   `dwara=info,dwara_core=info`); the runtime's own events
+//!   (connect, receive, apply, ack, reconnect) come from
+//!   `dwara_core::cp_dp`, so the default covers both prefixes.
 //!
 //! The edge connects to the controller, registers, receives config
 //! updates, writes them to the local config file, and sends acks. On
@@ -22,6 +26,23 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use dwara_core::cp_dp::edge::{EdgeConfig, EdgeRuntime};
+
+/// Install the tracing subscriber: the same registry + EnvFilter +
+/// JSON fmt stack dwara-bin installs, so edge logs flow through the
+/// same pipeline as gateway logs. Without this the runtime's tracing
+/// events are dropped and the edge is silent -- an operator could not
+/// tell a converged edge from one that never received a generation.
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let filter = tracing_subscriber::EnvFilter::new(
+        std::env::var("DWARA_LOG").unwrap_or_else(|_| "dwara=info,dwara_core=info".to_string()),
+    );
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().json().with_target(true))
+        .init();
+}
 
 /// dwara CP/DP split data plane (edge).
 #[derive(Parser)]
@@ -58,6 +79,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    init_tracing();
 
     let config = EdgeConfig::new(
         &args.controller_endpoint,

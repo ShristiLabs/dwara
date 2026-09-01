@@ -1,2 +1,11 @@
 # gen-certs.sh output: local self-signed material, never committed
 certs/
+
+# enterprise/ quickstart: edge config caches (seeded per README, then
+# maintained by dwara-edge at runtime) -- derived state, never committed
+enterprise/edge-1/
+enterprise/edge-2/
+
+# enterprise/ quickstart: vendor-licensing.sh output (the private
+# licensing-core clone the Docker build consumes) -- never committed
+enterprise/vendor/

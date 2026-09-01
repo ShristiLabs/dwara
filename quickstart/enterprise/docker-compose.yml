@@ -1,0 +1,138 @@
+# Enterprise quickstart (DW-066): the CP/DP split topology on one
+# docker network -- a controller broadcasting config generations to a
+# fleet of two edges/gateways proxying the demo nginx upstream.
+#
+#   ../gen-certs.sh                      # from quickstart/ (shared certs)
+#   ./vendor-licensing.sh                # vendor the private licensing-core
+#   cp dwara.yaml edge-1/dwara.yaml      # seed both gateways' config
+#   cp dwara.yaml edge-2/dwara.yaml
+#   docker compose up
+#   curl --cacert ../certs/server.crt https://localhost:9443/
+#   curl --cacert ../certs/server.crt https://localhost:9444/
+#
+# Then edit ./dwara.yaml (the controller's source of truth) and watch
+# both gateways hot-reload to the new generation: one file drives the
+# whole fleet. Full walkthrough in README.md.
+#
+# One image (../Dockerfile.ent, FROM scratch + the ent feature) carries
+# all three binaries; each service picks one via `command:`. Scratch has
+# no users, so every service injects the nonroot UID 65532 via `user:`
+# (same as the OSS quickstart).
+services:
+  # The control plane: watches ./dwara.yaml (the whole directory is
+  # mounted, read-only), and on every change compiles it, publishes a
+  # new generation, and broadcasts it to connected edges over gRPC.
+  # Single-controller here, so --leader is explicit; the gRPC port
+  # stays on the compose network (not published to the host).
+  #
+  # The DIRECTORY mount (not a single-file mount) is deliberate: the
+  # controller polls the file's content, and a single-file bind mount
+  # pins the inode it was started with -- an atomic host-side edit
+  # (sed -i, editors, write-temp-then-rename) would never be seen. A
+  # directory mount resolves the file fresh on every poll.
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ent
+    user: "65532:65532"
+    command:
+      - /usr/local/bin/dwara-controller
+      - --bind=0.0.0.0:50051
+      - --config-source=/etc/dwara-src/dwara.yaml
+      - --leader
+    volumes:
+      - .:/etc/dwara-src:ro
+      # The controller COMPILES each config change before broadcasting
+      # (invalid configs are never pushed), and compilation validates
+      # that the TLS material the config references exists on disk --
+      # so the certs must be mounted here too, at the same path the
+      # gateways see.
+      - ../certs:/etc/dwara/certs:ro
+
+  # Data plane 1: the edge connects to the controller, receives config
+  # generations, and writes them to /etc/dwara/dwara.yaml (the ./edge-1
+  # bind mount). Its gateway (below) watches that file and hot-reloads.
+  # The seed copy of dwara.yaml in ./edge-1 is also the outage cache:
+  # if the controller is down, the edge keeps serving the last config.
+  edge-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ent
+    user: "65532:65532"
+    command:
+      - /usr/local/bin/dwara-edge
+      - --controller-endpoint=http://controller:50051
+      - --edge-id=edge-1
+      - --config-output=/etc/dwara/dwara.yaml
+    volumes:
+      - ./edge-1:/etc/dwara
+    depends_on:
+      - controller
+
+  # Data plane 1's gateway: plain dwara binary watching the config file
+  # the edge maintains. TLS material comes from the same ../certs the
+  # OSS quickstart generated.
+  gateway-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ent
+    user: "65532:65532"
+    command:
+      - /usr/local/bin/dwara
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+    volumes:
+      # No :ro on the config dir: Docker must be able to create the
+      # nested /etc/dwara/certs mountpoint inside it (see below). The
+      # gateway process itself only ever reads the config.
+      - ./edge-1:/etc/dwara
+      - ../certs:/etc/dwara/certs:ro
+    ports:
+      # Host ports 9443/9444, deliberately distinct from the OSS
+      # quickstart's 8443 so both demos can run at once (container port
+      # stays 8443 per dwara.yaml).
+      - "9443:8443"
+    depends_on:
+      - edge-1
+      - upstream
+
+  # Data plane 2: identical to data plane 1 -- the point of the demo is
+  # that both gateways run the SAME config pushed from ONE file.
+  edge-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ent
+    user: "65532:65532"
+    command:
+      - /usr/local/bin/dwara-edge
+      - --controller-endpoint=http://controller:50051
+      - --edge-id=edge-2
+      - --config-output=/etc/dwara/dwara.yaml
+    volumes:
+      - ./edge-2:/etc/dwara
+    depends_on:
+      - controller
+
+  gateway-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ent
+    user: "65532:65532"
+    command:
+      - /usr/local/bin/dwara
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+    volumes:
+      # No :ro, same as gateway-1 (nested certs mountpoint).
+      - ./edge-2:/etc/dwara
+      - ../certs:/etc/dwara/certs:ro
+    ports:
+      - "9444:8443"
+    depends_on:
+      - edge-2
+      - upstream
+
+  upstream:
+    image: nginx:alpine
+    volumes:
+      - ../upstream:/usr/share/nginx/html:ro

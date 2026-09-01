@@ -2,7 +2,7 @@
 #
 # Install:
 #   install -Dm755 target/*/release/dwara /usr/local/bin/dwara
-#   install -Dm644 quickstart/dwara.yaml /etc/dwara/dwara.yaml   # or your own
+#   install -Dm644 quickstart/oss/dwara.yaml /etc/dwara/dwara.yaml   # or your own
 #   install -Dm644 packaging/systemd/dwara.service /etc/systemd/system/dwara.service
 #   useradd --system --home /var/lib/dwara --shell /usr/sbin/nologin dwara
 #   install -d /etc/dwara/certs

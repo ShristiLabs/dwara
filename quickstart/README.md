@@ -1,37 +1,24 @@
-# dwara quickstart
+# dwara quickstarts
 
-One command, TLS proxying a demo upstream (DW-026 done-when).
+Runnable demos of the two dwara editions, one per directory:
 
-## Run
+| Directory | Edition | Topology |
+|---|---|---|
+| [oss/](./oss/README.md) | OSS (default build, Apache-2.0) | One gateway container TLS-terminating in front of the demo nginx upstream |
+| [enterprise/](./enterprise/README.md) | Enterprise (`ent` build + license gate) | CP/DP split: a controller broadcasting config generations to a fleet of two edge/gateway data planes |
 
-```sh
-./gen-certs.sh          # self-signed localhost certificate into ./certs
-docker compose up       # builds the gateway image (Dockerfile.scratch)
-curl --cacert certs/server.crt https://localhost:8443/
-```
+Both run on one docker network per edition and share the assets at this
+directory's root:
 
-Linux hosts need `certs/` readable by the container user: if `gen-certs.sh`
-was not run with sudo, also run `sudo chown -R 65532:65532 certs`
-(macOS/Docker Desktop needs nothing extra).
+- `gen-certs.sh` — writes the self-signed localhost TLS pair into
+  `certs/` (gitignored). Run it once; both quickstarts mount `certs/`.
+- `upstream/` — the static demo page the nginx container serves.
 
-The curl prints the demo page from the nginx upstream, having negotiated
-TLS with the gateway, which routed `/` to the upstream and proxied the
-response back. Any HTTP client trusting `certs/server.crt` works the same.
+Host ports do not collide: the OSS quickstart publishes 8443, the
+enterprise quickstart 9443/9444, so both can run at the same time.
 
-## What is running
-
-- `dwara` — the gateway image built from `../Dockerfile.scratch`: a
-  static musl binary on `FROM scratch` (no shell, no libc, no CA bundle;
-  upstream TLS roots are compiled in via webpki-roots). It terminates
-  TLS on :8443 with `certs/server.{crt,key}` per `dwara.yaml`.
-- `upstream` — `nginx:alpine` serving the static page in `./upstream`.
-
-Switch to `../Dockerfile.distroless` in `docker-compose.yml` for the
-variant with a baked-in nonroot UID. Binary size and image knobs are
-documented in `../packaging/README.md`.
-
-## Teardown
-
-```sh
-docker compose down
-```
+The enterprise quickstart needs one extra preparation step
+(`enterprise/vendor-licensing.sh`, which requires read access to the
+private ShristiLabs/licensing repo) because the `ent` build links the
+licensing-core dependency; see
+[enterprise/README.md](./enterprise/README.md) for the full walkthrough.

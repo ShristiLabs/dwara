@@ -39,6 +39,22 @@ RUN case "${TARGETARCH:-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')}" i
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac
 RUN rustup target add "$(cat /target.triple)"
+# The workspace Cargo.lock pins the private licensing-core git dep (the
+# `ent` feature, DW-032). Cargo refreshes every source named in the
+# lockfile during resolution -- even for builds that never enable the
+# feature -- so a docker build of the OSS gateway (no ent) would fail
+# fetching that private repo without credentials. Redirect the git
+# source to a local stub for this build: ent is never enabled here, so
+# the stub only satisfies resolution and is never compiled. Dockerfile.ent
+# vendors the real crate instead (it compiles the feature in). The rev
+# and version are parsed from the manifests so nothing can drift.
+RUN REV=$(sed -n 's/.*licensing.git", rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml) \
+    && VER=$(awk '/name = "licensing-core"/{getline; sub(/^version = /,""); gsub(/"/,""); print; exit}' Cargo.lock) \
+    && mkdir -p third-party/licensing-core/src .cargo \
+    && printf '[package]\nname = "licensing-core"\nversion = "%s"\nedition = "2021"\npublish = false\n\n[lib]\npath = "src/lib.rs"\n' "$VER" > third-party/licensing-core/Cargo.toml \
+    && : > third-party/licensing-core/src/lib.rs \
+    && printf '{"files":{}}' > third-party/licensing-core/.cargo-checksum.json \
+    && printf '[source."git+https://github.com/ShristiLabs/licensing.git?rev=%s"]\ngit = "https://github.com/ShristiLabs/licensing.git"\nrev = "%s"\nreplace-with = "oss-stub-licensing"\n\n[source.oss-stub-licensing]\ndirectory = "/build/third-party"\n' "$REV" "$REV" > .cargo/config.toml
 RUN cargo build --release --target "$(cat /target.triple)" --bin dwara -p dwara-bin
 
 FROM scratch

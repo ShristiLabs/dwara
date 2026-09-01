@@ -9,6 +9,10 @@
 //!   file path to watch (default: `./dwara.yaml`).
 //! - `--leader` / `DWARA_CP_LEADER`: whether this controller is the
 //!   leader (default: `true` for single-instance).
+//! - `DWARA_LOG`: the tracing filter (default:
+//!   `dwara=info,dwara_core=info`); the runtime's own events
+//!   (leader election, generation publishes, compile failures) come
+//!   from `dwara_core::cp_dp`, so the default covers both prefixes.
 //!
 //! The controller watches the config source file, compiles configs on
 //! change, and pushes them to connected edges via gRPC streaming.
@@ -19,6 +23,24 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use dwara_core::cp_dp::controller::{ControllerConfig, ControllerRuntime};
+
+/// Install the tracing subscriber: the same registry + EnvFilter +
+/// JSON fmt stack dwara-bin installs, so controller logs flow through
+/// the same pipeline as gateway logs. Without this the runtime's
+/// tracing events are dropped and the control plane is silent --
+/// unacceptable for the component an operator watches during a fleet
+/// config rollout.
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let filter = tracing_subscriber::EnvFilter::new(
+        std::env::var("DWARA_LOG").unwrap_or_else(|_| "dwara=info,dwara_core=info".to_string()),
+    );
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().json().with_target(true))
+        .init();
+}
 
 /// dwara CP/DP split control plane.
 #[derive(Parser)]
@@ -43,6 +65,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    init_tracing();
 
     let bind_addr: SocketAddr = args.bind.parse().expect("invalid bind address");
     let config_source = PathBuf::from(args.config_source);

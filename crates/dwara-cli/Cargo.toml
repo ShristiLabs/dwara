@@ -42,6 +42,11 @@ serde = { workspace = true }
 # already in the tree transitively; this only makes it a direct one.
 # MIT OR Apache-2.0.
 libc = { workspace = true }
+# DW-066: tracing subscriber for the ent controller/edge binaries (the
+# same registry + EnvFilter + JSON fmt stack dwara-bin installs).
+# Optional + ent-gated so the default CLI build never pulls it in.
+# Already a workspace dependency of dwara-bin (MIT OR Apache-2.0).
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 # DW-064: Kubernetes Gateway API controller + conformance report. When
@@ -53,7 +58,7 @@ k8s = ["dwara-core/k8s"]
 # `dwara-controller` and `dwara-edge` binaries are compiled. Default
 # OFF: tonic + prost add binary size. Build with
 # `cargo build --features ent`.
-ent = ["dwara-core/ent"]
+ent = ["dwara-core/ent", "dep:tracing-subscriber"]
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]
