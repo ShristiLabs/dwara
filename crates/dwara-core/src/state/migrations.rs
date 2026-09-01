@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -128,6 +128,24 @@ const MIGRATION_004_CREDENTIAL_SOURCE_REF: &str =
 const MIGRATION_005_CREDENTIAL_RETIRE_AT: &str =
     "ALTER TABLE credentials ADD COLUMN retire_at INTEGER;";
 
+/// Migration 006 (DW-086): `prompt_overrides` — one row per prompt
+/// name whose active version has been overridden at runtime via the
+/// admin API (the config declares the default `active` version; the
+/// override table records the operator's runtime choice, which takes
+/// precedence). The table is keyed by prompt name (TEXT PRIMARY KEY);
+/// `version` is the overridden active version name, and `updated_at`
+/// is the Unix-epoch seconds of the override. A row is DELETED when
+/// the override is cleared (revert to config default). Additive (a
+/// new table; existing databases have no rows = every prompt uses its
+/// config-declared active version, exactly the pre-006 behavior).
+const MIGRATION_006_PROMPT_OVERRIDES: &str = "
+    CREATE TABLE IF NOT EXISTS prompt_overrides (
+        prompt_name TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -137,6 +155,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_003_CONSUMER_GROUPS),
         M::up(MIGRATION_004_CREDENTIAL_SOURCE_REF),
         M::up(MIGRATION_005_CREDENTIAL_RETIRE_AT),
+        M::up(MIGRATION_006_PROMPT_OVERRIDES),
     ])
 }
 

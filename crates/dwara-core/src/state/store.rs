@@ -923,6 +923,71 @@ impl StateStore {
             .optional()?;
         Ok(used.unwrap_or(0))
     }
+
+    // -----------------------------------------------------------------
+    // DW-086: prompt-version overrides (runtime active-version
+    // management). The config declares the default `active` version
+    // for each prompt; the admin API can override it at runtime, and
+    // the override is persisted here so it survives reloads. A
+    // reload that drops the prompt from config silently drops the
+    // override too (the prompt no longer exists).
+    // -----------------------------------------------------------------
+
+    /// Set (or replace) the active-version override for a prompt
+    /// (DW-086). Idempotent: re-setting the same prompt moves the
+    /// override to the new version. The caller validates that the
+    /// prompt name and version exist in the CURRENT config before
+    /// calling (the store does not know the config).
+    pub fn set_prompt_override(&self, prompt_name: &str, version: &str) -> Result<()> {
+        let now = now_secs();
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO prompt_overrides (prompt_name, version, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (prompt_name) DO UPDATE SET version = ?2, updated_at = ?3",
+            params![prompt_name, version, now],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the active-version override for a prompt (DW-086):
+    /// revert to the config-declared `active` version. Idempotent
+    /// (clearing a prompt with no override is a no-op).
+    pub fn clear_prompt_override(&self, prompt_name: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "DELETE FROM prompt_overrides WHERE prompt_name = ?1",
+            params![prompt_name],
+        )?;
+        Ok(())
+    }
+
+    /// Read the active-version override for a prompt (DW-086):
+    /// `Some(version)` when an override exists, `None` when the
+    /// config-declared `active` version governs.
+    pub fn get_prompt_override(&self, prompt_name: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM prompt_overrides WHERE prompt_name = ?1",
+                params![prompt_name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(version)
+    }
+
+    /// Every prompt override row (prompt_name, version), for the
+    /// admin surface's list view and for the compile-time override
+    /// merge (DW-086).
+    pub fn list_prompt_overrides(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt =
+            conn.prepare("SELECT prompt_name, version FROM prompt_overrides ORDER BY prompt_name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38

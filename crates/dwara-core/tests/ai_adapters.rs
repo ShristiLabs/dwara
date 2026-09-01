@@ -582,6 +582,7 @@ fn ai_runtime_compiles_and_resolves() {
                 failover: vec![],
                 canary: vec![],
                 routing_policy: None,
+                ab_test: None,
             },
         )]
         .into_iter()
@@ -592,6 +593,7 @@ fn ai_runtime_compiles_and_resolves() {
         guardrails: None,
         semantic_cache: None,
         routing_policies: std::collections::BTreeMap::new(),
+        experiments: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
     assert_eq!(rt.provider_count(), 1);

@@ -207,6 +207,80 @@ pub struct AiPromptLogRecord {
     pub stream: bool,
 }
 
+/// One AI experiment assignment record (DW-086): the per-request
+/// record written to the `ai_experiment_assignments` table when a
+/// request is served by an A/B test alias. A PLAIN DTO — deliberately
+/// not importing `ai::experiments` (the analytics domain may not
+/// import the `ai` domain; see `scripts/check_deps.py`).
+#[derive(Debug, Clone)]
+pub struct AiExperimentAssignment {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id (correlation handle).
+    pub request_id: String,
+    /// The experiment (A/B test) name.
+    pub experiment: String,
+    /// The selected variant name.
+    pub variant: String,
+    /// The model alias the variant routes to.
+    pub model: String,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+}
+
+/// One AI eval result record (DW-086): the per-case record written to
+/// the `ai_eval_results` table when an eval is run via the admin API.
+/// A PLAIN DTO — the admin endpoint constructs it from the eval
+/// runner's output.
+#[derive(Debug, Clone)]
+pub struct AiEvalResultRecord {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The eval name (from config).
+    pub eval_name: String,
+    /// The model alias the eval ran against.
+    pub model: String,
+    /// The variant name (when running an A/B test's variants), or
+    /// empty.
+    pub variant: String,
+    /// The prompt version reference (`prompt_name/version_name`), or
+    /// empty.
+    pub prompt_version: String,
+    /// The case index in the golden set.
+    pub case_index: usize,
+    /// The input prompt.
+    pub input: String,
+    /// The expected output.
+    pub expected: String,
+    /// The actual output from the provider.
+    pub actual: String,
+    /// Whether the case passed (scorer matched).
+    pub passed: bool,
+    /// The scorer name (`exact_match`, `contains`, `regex`).
+    pub scorer: String,
+    /// The latency of the provider call in milliseconds.
+    pub latency_ms: f64,
+}
+
+/// One AI feedback record (DW-086): the per-feedback record written
+/// to the `ai_feedback` table when feedback is ingested via the admin
+/// API.
+#[derive(Debug, Clone)]
+pub struct AiFeedbackRecord {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id the feedback refers to.
+    pub request_id: String,
+    /// The feedback label (e.g. `good`, `bad`, `thumbs_up`).
+    pub label: String,
+    /// An optional free-form comment.
+    pub comment: String,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The model alias the feedback refers to (optional).
+    pub model: String,
+}
+
 impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
@@ -300,6 +374,28 @@ pub struct EmbeddedAnalytics {
     /// retention sweep (the default when logging is off). Atomic so
     /// a reload can update it without blocking the maintainer.
     prompt_log_retention_ms: AtomicI64,
+    /// DW-086: the experiment assignment channel (same fire-and-forget
+    /// posture as the spend/governance/prompt-log channels — drop and
+    /// count on full, never block the request path).
+    exp_assign_tx: mpsc::Sender<AiExperimentAssignment>,
+    exp_assign_rx: Mutex<Option<mpsc::Receiver<AiExperimentAssignment>>>,
+    /// Records dropped on a full EXP_ASSIGN channel (the never-block
+    /// counter for the DW-086 assignment path).
+    exp_assign_dropped: AtomicU64,
+    /// DW-086: the eval result channel (same fire-and-forget posture
+    /// — the admin eval runner writes results here, and a background
+    /// writer drains them into the `ai_eval_results` table).
+    eval_result_tx: mpsc::Sender<AiEvalResultRecord>,
+    eval_result_rx: Mutex<Option<mpsc::Receiver<AiEvalResultRecord>>>,
+    /// Records dropped on a full EVAL_RESULT channel.
+    eval_result_dropped: AtomicU64,
+    /// DW-086: the feedback channel (same fire-and-forget posture —
+    /// the admin feedback endpoint writes records here, and a
+    /// background writer drains them into the `ai_feedback` table).
+    feedback_tx: mpsc::Sender<AiFeedbackRecord>,
+    feedback_rx: Mutex<Option<mpsc::Receiver<AiFeedbackRecord>>>,
+    /// Records dropped on a full FEEDBACK channel.
+    feedback_dropped: AtomicU64,
     /// Retention config: [raw, 1m, 5m, 1h, 1d] in ms.
     retention_ms: [i64; 5],
     /// Flush tick (ms) — the writer's maximum batch latency.
@@ -330,6 +426,9 @@ impl EmbeddedAnalytics {
         let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
         let (gov_tx, gov_rx) = mpsc::channel(CHANNEL_CAP);
         let (prompt_log_tx, prompt_log_rx) = mpsc::channel(CHANNEL_CAP);
+        let (exp_assign_tx, exp_assign_rx) = mpsc::channel(CHANNEL_CAP);
+        let (eval_result_tx, eval_result_rx) = mpsc::channel(CHANNEL_CAP);
+        let (feedback_tx, feedback_rx) = mpsc::channel(CHANNEL_CAP);
         Ok(Arc::new(EmbeddedAnalytics {
             conn: Mutex::new(conn),
             rx: Mutex::new(Some(rx)),
@@ -344,6 +443,15 @@ impl EmbeddedAnalytics {
             prompt_log_rx: Mutex::new(Some(prompt_log_rx)),
             prompt_log_dropped: AtomicU64::new(0),
             prompt_log_retention_ms: AtomicI64::new(prompt_log_retention_ms),
+            exp_assign_tx,
+            exp_assign_rx: Mutex::new(Some(exp_assign_rx)),
+            exp_assign_dropped: AtomicU64::new(0),
+            eval_result_tx,
+            eval_result_rx: Mutex::new(Some(eval_result_rx)),
+            eval_result_dropped: AtomicU64::new(0),
+            feedback_tx,
+            feedback_rx: Mutex::new(Some(feedback_rx)),
+            feedback_dropped: AtomicU64::new(0),
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
@@ -373,6 +481,11 @@ impl EmbeddedAnalytics {
         let gov_rx_opt = self.gov_rx.lock().unwrap().take();
         // DW-081: take the prompt log receiver alongside the others.
         let prompt_log_rx_opt = self.prompt_log_rx.lock().unwrap().take();
+        // DW-086: take the experiment assignment, eval result, and
+        // feedback receivers alongside the others.
+        let exp_assign_rx_opt = self.exp_assign_rx.lock().unwrap().take();
+        let eval_result_rx_opt = self.eval_result_rx.lock().unwrap().take();
+        let feedback_rx_opt = self.feedback_rx.lock().unwrap().take();
         let mut writer_shutdown = shutdown.clone();
         let writer = {
             let store = Arc::clone(self);
@@ -536,6 +649,129 @@ impl EmbeddedAnalytics {
         } else {
             None
         };
+        // DW-086: the experiment assignment writer — same
+        // fire-and-forget batched transaction shape, draining the
+        // assignment channel into the `ai_experiment_assignments` table.
+        let exp_assign_writer = if let Some(mut exp_assign_rx) = exp_assign_rx_opt {
+            let store = Arc::clone(self);
+            let mut exp_assign_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiExperimentAssignment> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = exp_assign_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_exp_assign(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = exp_assign_shutdown.changed() => {
+                            while let Ok(r) = exp_assign_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_exp_assign(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_exp_assign(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+        // DW-086: the eval result writer — same fire-and-forget
+        // batched transaction shape, draining the eval result channel
+        // into the `ai_eval_results` table.
+        let eval_result_writer = if let Some(mut eval_result_rx) = eval_result_rx_opt {
+            let store = Arc::clone(self);
+            let mut eval_result_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiEvalResultRecord> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = eval_result_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_eval_result(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = eval_result_shutdown.changed() => {
+                            while let Ok(r) = eval_result_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_eval_result(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_eval_result(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+        // DW-086: the feedback writer — same fire-and-forget batched
+        // transaction shape, draining the feedback channel into the
+        // `ai_feedback` table.
+        let feedback_writer = if let Some(mut feedback_rx) = feedback_rx_opt {
+            let store = Arc::clone(self);
+            let mut feedback_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiFeedbackRecord> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = feedback_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_feedback(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = feedback_shutdown.changed() => {
+                            while let Ok(r) = feedback_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_feedback(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_feedback(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let maintainer = {
             let store = Arc::clone(self);
             let mut shutdown2 = shutdown.clone();
@@ -559,6 +795,15 @@ impl EmbeddedAnalytics {
             handles.push(h);
         }
         if let Some(h) = prompt_log_writer {
+            handles.push(h);
+        }
+        if let Some(h) = exp_assign_writer {
+            handles.push(h);
+        }
+        if let Some(h) = eval_result_writer {
+            handles.push(h);
+        }
+        if let Some(h) = feedback_writer {
             handles.push(h);
         }
         handles
@@ -827,6 +1072,194 @@ impl EmbeddedAnalytics {
         }
     }
 
+    /// One batched transaction of `ai_experiment_assignments` INSERTs
+    /// (DW-086). Same swallow-and-log posture as the other flush
+    /// methods.
+    fn flush_exp_assign(&self, batch: &[AiExperimentAssignment]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_exp_assign_batch_begin_failed",
+                    "ai_experiment_assignments batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_experiment_assignments \
+             (ts_ms, request_id, experiment, variant, model, consumer) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_exp_assign_batch_prepare_failed",
+                    "ai_experiment_assignments batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.request_id,
+                r.experiment,
+                r.variant,
+                r.model,
+                r.consumer,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_exp_assign_insert_failed",
+                    "ai_experiment_assignments record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_exp_assign_commit_failed",
+                    "ai_experiment_assignments batch lost: {e}"
+                );
+            }
+        }
+    }
+
+    /// One batched transaction of `ai_eval_results` INSERTs (DW-086).
+    /// Same swallow-and-log posture as the other flush methods.
+    fn flush_eval_result(&self, batch: &[AiEvalResultRecord]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_eval_result_batch_begin_failed",
+                    "ai_eval_results batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_eval_results \
+             (ts_ms, eval_name, model, variant, prompt_version, case_index, \
+              input, expected, actual, passed, scorer, latency_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_eval_result_batch_prepare_failed",
+                    "ai_eval_results batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.eval_name,
+                r.model,
+                r.variant,
+                r.prompt_version,
+                r.case_index as i64,
+                r.input,
+                r.expected,
+                r.actual,
+                r.passed as i64,
+                r.scorer,
+                r.latency_ms,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_eval_result_insert_failed",
+                    "ai_eval_results record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_eval_result_commit_failed",
+                    "ai_eval_results batch lost: {e}"
+                );
+            }
+        }
+    }
+
+    /// One batched transaction of `ai_feedback` INSERTs (DW-086).
+    /// Same swallow-and-log posture as the other flush methods.
+    fn flush_feedback(&self, batch: &[AiFeedbackRecord]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_feedback_batch_begin_failed",
+                    "ai_feedback batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_feedback \
+             (ts_ms, request_id, label, comment, consumer, model) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_feedback_batch_prepare_failed",
+                    "ai_feedback batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.request_id,
+                r.label,
+                r.comment,
+                r.consumer,
+                r.model,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_feedback_insert_failed",
+                    "ai_feedback record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_feedback_commit_failed",
+                    "ai_feedback batch lost: {e}"
+                );
+            }
+        }
+    }
+
     /// One rollup + retention pass (cursor-guarded; safe to run at any
     /// time, from the ticker or shutdown).
     fn maintain(&self) {
@@ -1002,6 +1435,71 @@ impl EmbeddedAnalytics {
     pub fn set_prompt_log_retention_ms(&self, retention_ms: i64) {
         self.prompt_log_retention_ms
             .store(retention_ms, Ordering::Relaxed);
+    }
+
+    /// The experiment assignment hot path (DW-086): fire-and-forget
+    /// record of one A/B test variant selection. NEVER blocks — a
+    /// bounded-channel `try_send` that drops and counts on full.
+    pub fn offer_ai_experiment_assignment(&self, rec: AiExperimentAssignment) {
+        if self.exp_assign_tx.try_send(rec).is_err() {
+            let n = self.exp_assign_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_exp_assign_channel_full",
+                    total_dropped = n + 1,
+                    "ai_experiment_assignments channel full; dropping records \
+                     (never blocking the dataplane)"
+                );
+            }
+        }
+    }
+
+    /// Experiment assignment records accepted but dropped (channel
+    /// full). The honest loss counter for the DW-086 assignment path.
+    pub fn dropped_exp_assign_records(&self) -> u64 {
+        self.exp_assign_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The eval result path (DW-086): fire-and-forget record of one
+    /// eval case result. NEVER blocks — a bounded-channel `try_send`
+    /// that drops and counts on full.
+    pub fn offer_ai_eval_result(&self, rec: AiEvalResultRecord) {
+        if self.eval_result_tx.try_send(rec).is_err() {
+            let n = self.eval_result_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_eval_result_channel_full",
+                    total_dropped = n + 1,
+                    "ai_eval_results channel full; dropping records"
+                );
+            }
+        }
+    }
+
+    /// Eval result records accepted but dropped (channel full).
+    pub fn dropped_eval_result_records(&self) -> u64 {
+        self.eval_result_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The feedback path (DW-086): fire-and-forget record of one
+    /// feedback entry. NEVER blocks — a bounded-channel `try_send`
+    /// that drops and counts on full.
+    pub fn offer_ai_feedback(&self, rec: AiFeedbackRecord) {
+        if self.feedback_tx.try_send(rec).is_err() {
+            let n = self.feedback_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_feedback_channel_full",
+                    total_dropped = n + 1,
+                    "ai_feedback channel full; dropping records"
+                );
+            }
+        }
+    }
+
+    /// Feedback records accepted but dropped (channel full).
+    pub fn dropped_feedback_records(&self) -> u64 {
+        self.feedback_dropped.load(Ordering::Relaxed)
     }
 }
 

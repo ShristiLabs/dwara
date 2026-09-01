@@ -2371,6 +2371,45 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                  its own — combine them on separate aliases",
             ));
         }
+        // DW-086: ab_test is mutually exclusive with failover, canary,
+        // and routing_policy (an experiment alias composes over OTHER
+        // aliases' routing plans, same as a policy alias).
+        if m.ab_test.is_some()
+            && (!m.failover.is_empty() || !m.canary.is_empty() || m.routing_policy.is_some())
+        {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}]"),
+                "an alias cannot declare an ab_test together with \
+                 failover, canary, or routing_policy: an experiment alias \
+                 composes over other aliases' routing plans and has no \
+                 provider/model pair of its own — combine them on separate \
+                 aliases",
+            ));
+        }
+        // DW-086: the referenced A/B test must exist in
+        // ai.experiments.ab_tests.
+        if let Some(test_name) = &m.ab_test {
+            let exists = ai
+                .experiments
+                .as_ref()
+                .map(|e| e.ab_tests.contains_key(test_name))
+                .unwrap_or(false);
+            if !exists {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].ab_test"),
+                    format!(
+                        "references unknown A/B test '{}' (not in \
+                         ai.experiments.ab_tests — a typo, or the test was \
+                         removed, or ai.experiments is not configured)",
+                        test_name
+                    ),
+                ));
+            }
+        }
         // DW-085: the referenced routing policy must exist.
         if let Some(policy_name) = &m.routing_policy {
             if !ai.routing_policies.contains_key(policy_name) {
@@ -2927,6 +2966,220 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                             &format!("ai.routing_policies[latency_cost].candidates[{i}].latency"),
                             format!("the latency score must be in 1..=10 (got {})", c.latency),
                         ));
+                    }
+                }
+            }
+        }
+    }
+
+    // DW-086: experiments validation. A/B test variants must reference
+    // existing plain (non-policy, non-experiment) model aliases; prompt
+    // references must resolve to existing prompt versions; evals must
+    // reference existing model aliases and valid prompt versions.
+    // Experiment aliases (those with `ab_test` set) cannot be
+    // referenced by other experiments (no nested experiments — an
+    // experiment composes over plain chain/canary aliases only).
+    let experiment_aliases: std::collections::BTreeSet<&str> = ai
+        .models
+        .iter()
+        .filter(|(_, m)| m.ab_test.is_some())
+        .map(|(alias, _)| alias.as_str())
+        .collect();
+    if let Some(experiments) = &ai.experiments {
+        // Validate A/B tests.
+        for (test_name, test) in &experiments.ab_tests {
+            if test.variants.len() < 2 {
+                issues.push(issue(
+                    "gateway",
+                    test_name,
+                    &format!("ai.experiments.ab_tests[{test_name}].variants"),
+                    "an A/B test must have at least 2 variants (got \
+                     fewer)",
+                ));
+            }
+            for (i, variant) in test.variants.iter().enumerate() {
+                if !ai.models.contains_key(&variant.model) {
+                    issues.push(issue(
+                        "gateway",
+                        test_name,
+                        &format!("ai.experiments.ab_tests[{test_name}].variants[{i}].model"),
+                        format!(
+                            "references unknown model alias '{}' (not in \
+                             ai.models — a typo, or the alias was renamed)",
+                            variant.model
+                        ),
+                    ));
+                } else if policy_aliases.contains(variant.model.as_str())
+                    || experiment_aliases.contains(variant.model.as_str())
+                {
+                    issues.push(issue(
+                        "gateway",
+                        test_name,
+                        &format!("ai.experiments.ab_tests[{test_name}].variants[{i}].model"),
+                        format!(
+                            "references alias '{}' which is itself a policy \
+                             or experiment alias (nested policies/experiments \
+                             are not allowed — an experiment composes over \
+                             plain chain/canary aliases only)",
+                            variant.model
+                        ),
+                    ));
+                }
+                if variant.weight == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        test_name,
+                        &format!("ai.experiments.ab_tests[{test_name}].variants[{i}].weight"),
+                        "a variant weight must be >= 1 (got 0)",
+                    ));
+                }
+                // Validate prompt reference if present.
+                if let Some(prompt_ref) = &variant.prompt {
+                    if let Some((prompt_name, version_name)) = prompt_ref.split_once('/') {
+                        let prompt_exists = experiments
+                            .prompts
+                            .get(prompt_name)
+                            .is_some_and(|p| p.versions.contains_key(version_name));
+                        if !prompt_exists {
+                            issues.push(issue(
+                                "gateway",
+                                test_name,
+                                &format!(
+                                    "ai.experiments.ab_tests[{test_name}].variants[{i}].prompt"
+                                ),
+                                format!(
+                                    "references unknown prompt version '{}' \
+                                     (not in ai.experiments.prompts — a typo, \
+                                     or the prompt/version was removed)",
+                                    prompt_ref
+                                ),
+                            ));
+                        }
+                    } else {
+                        issues.push(issue(
+                            "gateway",
+                            test_name,
+                            &format!("ai.experiments.ab_tests[{test_name}].variants[{i}].prompt"),
+                            format!(
+                                "prompt reference '{}' must be in the form \
+                                 'prompt_name/version_name'",
+                                prompt_ref
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        // Validate prompts: active version must exist.
+        for (prompt_name, prompt) in &experiments.prompts {
+            if !prompt.versions.contains_key(&prompt.active) {
+                issues.push(issue(
+                    "gateway",
+                    prompt_name,
+                    &format!("ai.experiments.prompts[{prompt_name}].active"),
+                    format!(
+                        "references unknown version '{}' (not in \
+                         ai.experiments.prompts[{prompt_name}].versions — \
+                         a typo, or the version was removed)",
+                        prompt.active
+                    ),
+                ));
+            }
+            if prompt.versions.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    prompt_name,
+                    &format!("ai.experiments.prompts[{prompt_name}].versions"),
+                    "a prompt must have at least one version",
+                ));
+            }
+        }
+        // Validate evals: prompt reference must resolve, golden set
+        // non-empty. The model alias is specified at eval run time by
+        // the admin endpoint (the eval config does not bind to a
+        // specific model — the same eval can run against any model).
+        for (eval_name, eval) in &experiments.evals {
+            if let Some(prompt_ref) = &eval.prompt {
+                if let Some((prompt_name, version_name)) = prompt_ref.split_once('/') {
+                    let prompt_exists = experiments
+                        .prompts
+                        .get(prompt_name)
+                        .is_some_and(|p| p.versions.contains_key(version_name));
+                    if !prompt_exists {
+                        issues.push(issue(
+                            "gateway",
+                            eval_name,
+                            &format!("ai.experiments.evals[{eval_name}].prompt"),
+                            format!(
+                                "references unknown prompt version '{}' \
+                                 (not in ai.experiments.prompts)",
+                                prompt_ref
+                            ),
+                        ));
+                    }
+                } else {
+                    issues.push(issue(
+                        "gateway",
+                        eval_name,
+                        &format!("ai.experiments.evals[{eval_name}].prompt"),
+                        format!(
+                            "prompt reference '{}' must be in the form \
+                             'prompt_name/version_name'",
+                            prompt_ref
+                        ),
+                    ));
+                }
+            }
+            if eval.golden_set.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    eval_name,
+                    &format!("ai.experiments.evals[{eval_name}].golden_set"),
+                    "an eval must have at least one golden-set case",
+                ));
+            }
+            for (i, case) in eval.golden_set.iter().enumerate() {
+                if case.input.is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        eval_name,
+                        &format!("ai.experiments.evals[{eval_name}].golden_set[{i}].input"),
+                        "an eval case input must be non-empty",
+                    ));
+                }
+                if case.expected.is_empty() {
+                    issues.push(issue(
+                        "gateway",
+                        eval_name,
+                        &format!("ai.experiments.evals[{eval_name}].golden_set[{i}].expected"),
+                        "an eval case expected value must be non-empty",
+                    ));
+                }
+                if let Some(scorer) = &case.scorer {
+                    if scorer != "exact_match" && scorer != "contains" && scorer != "regex" {
+                        issues.push(issue(
+                            "gateway",
+                            eval_name,
+                            &format!(
+                                "ai.experiments.evals[{eval_name}].golden_set[{i}].scorer"
+                            ),
+                            format!(
+                                "unknown scorer '{}' (must be one of: exact_match, contains, regex)",
+                                scorer
+                            ),
+                        ));
+                    }
+                    if scorer == "regex" {
+                        if let Err(e) = regex::Regex::new(&case.expected) {
+                            issues.push(issue(
+                                "gateway",
+                                eval_name,
+                                &format!(
+                                    "ai.experiments.evals[{eval_name}].golden_set[{i}].expected"
+                                ),
+                                format!("invalid regex pattern for regex scorer: {e}",),
+                            ));
+                        }
                     }
                 }
             }

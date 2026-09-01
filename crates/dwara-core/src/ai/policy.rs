@@ -234,6 +234,7 @@ fn primary_target_of<'a>(
         CompiledModel::Chain(chain) => chain.first(),
         CompiledModel::Canary(versions) => versions.first().map(|(_, t)| t),
         CompiledModel::Policy(_) => None,
+        CompiledModel::Experiment(_) => None,
     }
 }
 

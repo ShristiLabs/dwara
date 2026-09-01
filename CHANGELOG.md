@@ -9,6 +9,49 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI prompt experimentation (DW-086): prompt versioning, A/B model
+  comparison, regression evals, and feedback ingestion. Config under
+  `ai.experiments` (keyed by `prompts`, `ab_tests`, `evals`, and
+  `feedback`). (1) Prompt versioning: each prompt declares one or more
+  versions (each with a system message) and an active version; the
+  active version's system message is prepended to the request's
+  messages when a variant or eval references it; the active version
+  can be overridden at runtime via the admin API (stored in the state
+  store's new `prompt_overrides` table). (2) A/B model comparison: an
+  alias declares `ab_test: <name>` (mutually exclusive with `failover`,
+  `canary`, and `routing_policy`); the test's variants each name a
+  plain model alias, an optional prompt version, and a weight; the
+  split is deterministic by request id (same slot semantics as canary
+  splits); each assignment is recorded in the new
+  `ai_experiment_assignments` analytics table. (3) Regression evals:
+  each eval declares a golden set of input/expected pairs with a
+  scorer (`exact_match`, `contains`, `regex`); the admin API runs the
+  eval against a model alias or an A/B test's variants via direct
+  provider calls; results are stored in the new `ai_eval_results`
+  analytics table. (4) Feedback ingestion: the admin API accepts
+  feedback records (request id, label, comment) stored in the new
+  `ai_feedback` analytics table. (5) Verdict computation: the admin
+  API computes a verdict from stored eval results (highest pass rate
+  wins, lowest average latency tiebreaker, full tie = no winner). New
+  `ai::experiments` module with `CompiledAbTest`, `CompiledAbVariant`,
+  `ExperimentDecision`, `EvalScorer`, `EvalRunResult`,
+  `ExperimentVerdict`, `run_eval()`, and `compute_verdict()`. New
+  `CompiledModel::Experiment` variant with three-pass compile (plain
+  aliases, then policy aliases, then experiment aliases). New
+  `AiRuntime::route_experiment` method. New state table
+  `prompt_overrides` (migration 006). New analytics tables
+  `ai_experiment_assignments`, `ai_eval_results`, `ai_feedback`
+  (schema v6). New admin API endpoints: `GET/PUT/DELETE
+  /experiments/prompt-overrides`, `POST /experiments/feedback`,
+  `POST /experiments/verdict`. New metric
+  `dwara_ai_experiment_variant_selections_total{experiment,variant}`
+  (config-bounded labels, no consumer label). Validation: mutual
+  exclusivity, A/B test reference existence, variant model alias
+  existence, nested-experiment rejection, minimum 2 variants, prompt
+  reference resolution, scorer name validation, regex pattern
+  compilation, non-empty golden-set cases. No new dependencies
+  (reuses hyper_util for the eval runner HTTP calls).
+
 - AI routing policies (DW-085): within-request escalation and
   latency-vs-cost selection, composed over the DW-076 routing
   foundation. Two policy kinds: (1) FallbackChain -- calls an external

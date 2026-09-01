@@ -398,6 +398,7 @@ fn runtime_route_plans_chains_and_canaries() {
                     }],
                     canary: vec![],
                     routing_policy: None,
+                    ab_test: None,
                 },
             ),
             (
@@ -421,6 +422,7 @@ fn runtime_route_plans_chains_and_canaries() {
                         },
                     ],
                     routing_policy: None,
+                    ab_test: None,
                 },
             ),
         ]
@@ -432,6 +434,7 @@ fn runtime_route_plans_chains_and_canaries() {
         guardrails: None,
         semantic_cache: None,
         routing_policies: std::collections::BTreeMap::new(),
+        experiments: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
 

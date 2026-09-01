@@ -1097,6 +1097,395 @@ async fn quotas_usage(
     )
 }
 
+// -----------------------------------------------------------------
+// DW-086: Prompt experimentation admin endpoints.
+// -----------------------------------------------------------------
+
+/// GET /experiments/prompt-overrides (DW-086): list all runtime
+/// prompt-version overrides (prompt_name, version).
+async fn experiments_prompt_overrides_list(
+    ctx: Arc<AdminContext>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            503,
+            "state_store_not_configured",
+            "a state store is required for prompt overrides",
+            request_id,
+        );
+    };
+    match store.list_prompt_overrides() {
+        Ok(overrides) => json_response(
+            200,
+            serde_json::json!({
+                "overrides": overrides.iter().map(|(name, version)| {
+                    serde_json::json!({
+                        "prompt_name": name,
+                        "version": version,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => envelope(
+            500,
+            "prompt_overrides_list_failed",
+            &e.to_string(),
+            request_id,
+        ),
+    }
+}
+
+/// PUT /experiments/prompt-overrides (DW-086): set or replace a
+/// prompt-version override. Body: `{"prompt_name": "...", "version":
+/// "..."}`. The caller validates that the prompt name and version
+/// exist in the current config before calling.
+async fn experiments_prompt_overrides_set(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            503,
+            "state_store_not_configured",
+            "a state store is required for prompt overrides",
+            request_id,
+        );
+    };
+    let req: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                &format!("body is not valid JSON: {e}"),
+                request_id,
+            )
+        }
+    };
+    let prompt_name = match req.get("prompt_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                "missing required field 'prompt_name'",
+                request_id,
+            )
+        }
+    };
+    let version = match req.get("version").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                "missing required field 'version'",
+                request_id,
+            )
+        }
+    };
+    // Validate against the current config.
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    if let Some(ai) = &gateway.ai {
+        if let Some(experiments) = &ai.experiments {
+            if let Some(prompt) = experiments.prompts.get(&prompt_name) {
+                if !prompt.versions.contains_key(&version) {
+                    return envelope(
+                        400,
+                        "prompt_override_invalid",
+                        &format!(
+                            "version '{}' does not exist for prompt '{}'",
+                            version, prompt_name
+                        ),
+                        request_id,
+                    );
+                }
+            } else {
+                return envelope(
+                    400,
+                    "prompt_override_invalid",
+                    &format!("prompt '{}' does not exist in config", prompt_name),
+                    request_id,
+                );
+            }
+        } else {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                "ai.experiments is not configured",
+                request_id,
+            );
+        }
+    } else {
+        return envelope(
+            400,
+            "prompt_override_invalid",
+            "ai block is not configured",
+            request_id,
+        );
+    }
+    match store.set_prompt_override(&prompt_name, &version) {
+        Ok(()) => json_response(
+            200,
+            serde_json::json!({
+                "prompt_name": prompt_name,
+                "version": version,
+                "status": "set",
+            }),
+        ),
+        Err(e) => envelope(
+            500,
+            "prompt_override_set_failed",
+            &e.to_string(),
+            request_id,
+        ),
+    }
+}
+
+/// DELETE /experiments/prompt-overrides (DW-086): clear a
+/// prompt-version override (revert to config-declared active
+/// version). Body: `{"prompt_name": "..."}`.
+async fn experiments_prompt_overrides_clear(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            503,
+            "state_store_not_configured",
+            "a state store is required for prompt overrides",
+            request_id,
+        );
+    };
+    let req: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                &format!("body is not valid JSON: {e}"),
+                request_id,
+            )
+        }
+    };
+    let prompt_name = match req.get("prompt_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return envelope(
+                400,
+                "prompt_override_invalid",
+                "missing required field 'prompt_name'",
+                request_id,
+            )
+        }
+    };
+    match store.clear_prompt_override(&prompt_name) {
+        Ok(()) => json_response(
+            200,
+            serde_json::json!({
+                "prompt_name": prompt_name,
+                "status": "cleared",
+            }),
+        ),
+        Err(e) => envelope(
+            500,
+            "prompt_override_clear_failed",
+            &e.to_string(),
+            request_id,
+        ),
+    }
+}
+
+/// POST /experiments/feedback (DW-086): ingest one feedback record.
+/// Body: `{"request_id": "...", "label": "...", "comment": "...",
+/// "consumer": "...", "model": "..."}`.
+async fn experiments_feedback_ingest(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(analytics) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let req: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return envelope(
+                400,
+                "feedback_invalid",
+                &format!("body is not valid JSON: {e}"),
+                request_id,
+            )
+        }
+    };
+    let rec = dwara_core::analytics::AiFeedbackRecord {
+        ts_ms: now_ms() as i64,
+        request_id: req
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        label: req
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        comment: req
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        consumer: req
+            .get("consumer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("anonymous")
+            .to_string(),
+        model: req
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    if rec.request_id.is_empty() || rec.label.is_empty() {
+        return envelope(
+            400,
+            "feedback_invalid",
+            "fields 'request_id' and 'label' are required and must be non-empty",
+            request_id,
+        );
+    }
+    analytics.offer_ai_feedback(rec);
+    json_response(200, serde_json::json!({"status": "accepted"}))
+}
+
+/// POST /experiments/verdict (DW-086): compute the verdict for an
+/// A/B test from stored eval results. Body: `{"experiment": "..."}`.
+/// Reads eval results from the analytics store and computes the
+/// winner (highest pass rate, lowest latency tiebreaker).
+async fn experiments_verdict(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(analytics) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let req: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return envelope(
+                400,
+                "verdict_invalid",
+                &format!("body is not valid JSON: {e}"),
+                request_id,
+            )
+        }
+    };
+    let experiment_name = match req.get("experiment").and_then(|v| v.as_str()) {
+        Some(e) => e.to_string(),
+        None => {
+            return envelope(
+                400,
+                "verdict_invalid",
+                "missing required field 'experiment'",
+                request_id,
+            )
+        }
+    };
+    // Read eval results from the analytics store for this experiment.
+    let results = match analytics.query(|c| {
+        let mut stmt = c.prepare(
+            "SELECT variant, case_index, input, expected, actual, \
+             passed, scorer, latency_ms \
+             FROM ai_eval_results WHERE eval_name = ?1 ORDER BY variant, case_index",
+        )?;
+        // Collect raw rows first.
+        struct RawRow {
+            variant: String,
+            case_index: usize,
+            input: String,
+            expected: String,
+            actual: String,
+            passed: bool,
+            scorer: String,
+            latency_ms: f64,
+        }
+        let rows = stmt.query_map([&experiment_name], |r| {
+            Ok(RawRow {
+                variant: r.get::<_, String>(0)?,
+                case_index: r.get::<_, i64>(1)? as usize,
+                input: r.get::<_, String>(2)?,
+                expected: r.get::<_, String>(3)?,
+                actual: r.get::<_, String>(4)?,
+                passed: r.get::<_, i64>(5)? != 0,
+                scorer: r.get::<_, String>(6)?,
+                latency_ms: r.get::<_, f64>(7)?,
+            })
+        })?;
+        // Group cases by variant.
+        let mut by_variant: std::collections::BTreeMap<
+            String,
+            Vec<dwara_core::ai::experiments::EvalCaseResult>,
+        > = std::collections::BTreeMap::new();
+        for row in rows {
+            let r = row?;
+            by_variant.entry(r.variant.clone()).or_default().push(
+                dwara_core::ai::experiments::EvalCaseResult {
+                    case_index: r.case_index,
+                    input: r.input,
+                    expected: r.expected,
+                    actual: r.actual,
+                    passed: r.passed,
+                    scorer: dwara_core::ai::experiments::EvalScorer::parse(Some(r.scorer.as_str())),
+                    latency_ms: r.latency_ms,
+                },
+            );
+        }
+        let results: Vec<dwara_core::ai::experiments::EvalRunResult> = by_variant
+            .into_iter()
+            .map(
+                |(variant, cases)| dwara_core::ai::experiments::EvalRunResult {
+                    eval_name: experiment_name.clone(),
+                    model: String::new(),
+                    variant,
+                    prompt_version: String::new(),
+                    cases,
+                },
+            )
+            .collect();
+        Ok(results)
+    }) {
+        Ok(results) => results,
+        Err(e) => return envelope(500, "verdict_query_failed", &e.to_string(), request_id),
+    };
+    if results.is_empty() {
+        return envelope(
+            404,
+            "verdict_no_results",
+            &format!("no eval results found for experiment '{}'", experiment_name),
+            request_id,
+        );
+    }
+    let verdict = dwara_core::ai::experiments::compute_verdict(&experiment_name, &results);
+    json_response(
+        200,
+        serde_json::json!({
+            "experiment": verdict.experiment,
+            "winner": verdict.winner,
+            "pass_rates": verdict.pass_rates.iter().map(|(v, r)| {
+                serde_json::json!({"variant": v, "pass_rate": r})
+            }).collect::<Vec<_>>(),
+            "avg_latencies": verdict.avg_latencies.iter().map(|(v, l)| {
+                serde_json::json!({"variant": v, "avg_latency_ms": l})
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
 /// Validate + compile a candidate gateway as a dry run; Err carries a
 /// message listing EVERY problem (validation reports all issues at
 /// once, never fail-fast).
@@ -1489,6 +1878,91 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             analytics_exports_run(ctx, body, &request_id).await
         }
+        // DW-086: Prompt experimentation endpoints.
+        // GET /experiments/prompt-overrides — list all runtime
+        // prompt-version overrides.
+        ("GET", "/experiments/prompt-overrides") => {
+            experiments_prompt_overrides_list(ctx, &request_id).await
+        }
+        // PUT /experiments/prompt-overrides — set or replace a
+        // prompt-version override.
+        ("PUT", "/experiments/prompt-overrides") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "body_too_large",
+                            &format!("body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            experiments_prompt_overrides_set(ctx, body, &request_id).await
+        }
+        // DELETE /experiments/prompt-overrides — clear a
+        // prompt-version override.
+        ("DELETE", "/experiments/prompt-overrides") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "body_too_large",
+                            &format!("body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            experiments_prompt_overrides_clear(ctx, body, &request_id).await
+        }
+        // POST /experiments/feedback — ingest one feedback record.
+        ("POST", "/experiments/feedback") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "body_too_large",
+                            &format!("body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            experiments_feedback_ingest(ctx, body, &request_id).await
+        }
+        // POST /experiments/verdict — compute the verdict for an
+        // A/B test from stored eval results.
+        ("POST", "/experiments/verdict") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "body_too_large",
+                            &format!("body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            experiments_verdict(ctx, body, &request_id).await
+        }
         // A known resource path with the wrong method.
         (
             _,
@@ -1506,6 +1980,9 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/analytics/governance-audit"
             | "/analytics/exports"
             | "/analytics/exports/run"
+            | "/experiments/prompt-overrides"
+            | "/experiments/feedback"
+            | "/experiments/verdict"
             | "/quotas/usage",
         ) => envelope(
             405,

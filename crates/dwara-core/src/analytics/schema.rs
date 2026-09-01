@@ -248,7 +248,68 @@ pub const SCHEMA_V5: &str = "
 ";
 
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
+
+/// Schema v6 (DW-086): three tables for prompt experimentation.
+///
+/// - `ai_experiment_assignments` — one row per request that was
+///   served by an A/B test alias, recording which variant was
+///   selected. The `request_id` ties the assignment to the access
+///   log and spend rows; the `experiment` and `variant` labels are
+///   config-bounded (the experiment and variant names from config).
+///
+/// - `ai_eval_results` — one row per eval case run, recording the
+///   input, expected, actual output, pass/fail, scorer, and
+///   attribution (eval name, model alias, variant, prompt version).
+///   The admin `/analytics/eval-results` endpoint reads these rows.
+///
+/// - `ai_feedback` — one row per feedback record ingested via the
+///   admin API, carrying the request id, label, comment, and
+///   attribution. The admin `/analytics/feedback` endpoint reads
+///   these rows.
+pub const SCHEMA_V6: &str = "
+    CREATE TABLE IF NOT EXISTS ai_experiment_assignments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        request_id  TEXT NOT NULL,
+        experiment  TEXT NOT NULL,
+        variant     TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        consumer    TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_exp_assign_ts ON ai_experiment_assignments(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_exp_assign_experiment ON ai_experiment_assignments(experiment);
+
+    CREATE TABLE IF NOT EXISTS ai_eval_results (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms           INTEGER NOT NULL,
+        eval_name       TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        variant         TEXT NOT NULL DEFAULT '',
+        prompt_version  TEXT NOT NULL DEFAULT '',
+        case_index      INTEGER NOT NULL,
+        input           TEXT NOT NULL,
+        expected        TEXT NOT NULL,
+        actual          TEXT NOT NULL,
+        passed          INTEGER NOT NULL,
+        scorer          TEXT NOT NULL,
+        latency_ms      REAL NOT NULL DEFAULT 0.0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_eval_results_ts ON ai_eval_results(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_eval_results_eval ON ai_eval_results(eval_name);
+
+    CREATE TABLE IF NOT EXISTS ai_feedback (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        request_id  TEXT NOT NULL,
+        label       TEXT NOT NULL,
+        comment     TEXT NOT NULL DEFAULT '',
+        consumer    TEXT NOT NULL DEFAULT '',
+        model       TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_feedback_ts ON ai_feedback(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_feedback_request_id ON ai_feedback(request_id);
+";
 
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
@@ -285,6 +346,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 5 {
         conn.execute_batch(SCHEMA_V5)?;
         conn.pragma_update(None, "user_version", 5)?;
+    }
+    if version < 6 {
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.pragma_update(None, "user_version", 6)?;
     }
     Ok(())
 }

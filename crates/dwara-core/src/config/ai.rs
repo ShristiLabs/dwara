@@ -117,6 +117,11 @@ pub struct AiConfig {
     /// Absent (the default): no routing policies.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub routing_policies: BTreeMap<String, AiRoutingPolicy>,
+    /// Prompt experimentation (DW-086 `ai.experiments`): prompt
+    /// versioning, A/B model comparison, regression evals, and
+    /// feedback ingestion. Absent (the default): no experiments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiments: Option<AiExperiments>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -256,6 +261,17 @@ pub struct AiModel {
     /// own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_policy: Option<String>,
+    /// An A/B test name (DW-086): when set, this alias is served by
+    /// the named entry in `ai.experiments.ab_tests` instead of a
+    /// plain failover chain, canary split, or routing policy. The
+    /// experiment is evaluated per request (a deterministic weighted
+    /// pick by request id selects a variant). Cannot be combined
+    /// with `failover`, `canary`, or `routing_policy` on the same
+    /// alias (validation enforces mutual exclusivity): an experiment
+    /// alias composes over OTHER aliases' routing plans, so it has
+    /// no primary provider/model pair of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ab_test: Option<String>,
 }
 
 /// One provider/model pair an alias can route to (DW-076): the primary
@@ -700,4 +716,171 @@ pub enum AiLatencyPreference {
     /// Pick the best cost/latency ratio (lowest `cost + latency`
     /// sum).
     Balanced,
+}
+
+// -------------------------------------------------------------------------
+// DW-086: prompt experimentation (versioning, A/B tests, evals,
+// feedback).
+// -------------------------------------------------------------------------
+
+/// Default feedback enabled flag: true.
+fn default_feedback_enabled() -> bool {
+    true
+}
+
+/// Prompt experimentation (DW-086 `ai.experiments`): prompt
+/// versioning, A/B model comparison, regression evals, and feedback
+/// ingestion. Absent (the default): no experiments surface.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiExperiments {
+    /// Named prompt version sets (DW-086). Each entry declares one
+    /// or more versions (each with a system message) and an active
+    /// version. The active version can be overridden at runtime via
+    /// the admin API (stored in the state store). Absent (the
+    /// default): no prompt versioning.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prompts: BTreeMap<String, AiPromptVersions>,
+    /// Named A/B tests (DW-086). Each test declares two or more
+    /// variants (each naming a model alias, an optional prompt
+    /// version, and a weight). A model alias declares `ab_test:
+    /// <name>` to be served by one; the test is evaluated per
+    /// request (a deterministic weighted pick by request id selects
+    /// a variant). Absent (the default): no A/B tests.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ab_tests: BTreeMap<String, AiAbTest>,
+    /// Named regression evals (DW-086). Each eval declares a golden
+    /// set of input/expected cases and an optional prompt version;
+    /// the admin API runs it against a model alias (or an A/B test's
+    /// variants) and stores the results. Absent (the default): no
+    /// evals.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evals: BTreeMap<String, AiEval>,
+    /// Feedback ingestion config (DW-086). When enabled, the admin
+    /// API accepts feedback records (request id, label, comment)
+    /// and stores them in analytics. Absent (the default): feedback
+    /// is enabled (the default is `enabled: true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<AiFeedbackConfig>,
+}
+
+/// One prompt's version set (DW-086 `ai.experiments.prompts.<name>`):
+/// a map of version names to system messages plus the active version.
+/// The active version can be overridden at runtime via the admin API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiPromptVersions {
+    /// The named versions, each carrying a system message. Version
+    /// names must be non-empty (validation rejects empty strings).
+    pub versions: BTreeMap<String, AiPromptVersion>,
+    /// The active version name. Must exist in `versions` (validation
+    /// rejects a name not in the map). Can be overridden at runtime
+    /// via the admin API (the override is stored in the state store).
+    pub active: String,
+}
+
+/// One prompt version (DW-086
+/// `ai.experiments.prompts.<name>.versions.<version>`): a system
+/// message prepended to the request's messages when this version is
+/// active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiPromptVersion {
+    /// The system message prepended to the request's messages. If
+    /// the request already has a system message, the template's
+    /// system message is prepended BEFORE it.
+    pub system: String,
+}
+
+/// One A/B test (DW-086 `ai.experiments.ab_tests.<name>`): two or
+/// more variants, each naming a model alias, an optional prompt
+/// version, and a weight. A model alias declares `ab_test: <name>`
+/// to be served by one; the test is evaluated per request (a
+/// deterministic weighted pick by request id selects a variant).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiAbTest {
+    /// The variants. Validation requires at least 2 (one variant is
+    /// not a test). Each variant's `model` must reference an existing
+    /// alias in `ai.models` that is NOT itself an experiment alias
+    /// (no nested experiments).
+    pub variants: Vec<AiAbVariant>,
+}
+
+/// One variant of an A/B test (DW-086
+/// `ai.experiments.ab_tests.<name>.variants[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiAbVariant {
+    /// The variant name (for analytics/metrics attribution). Must be
+    /// non-empty.
+    pub name: String,
+    /// The model alias this variant routes to. Must reference an
+    /// existing alias in `ai.models` that is NOT itself an experiment
+    /// alias (no nested experiments — validation rejects it).
+    pub model: String,
+    /// An optional prompt version reference in
+    /// `"prompt_name/version_name"` format. When set, the named
+    /// version's system message is prepended to the request's
+    /// messages for this variant. Validation rejects a reference
+    /// whose prompt or version does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Relative weight (>= 1). The deterministic weighted pick uses
+    /// the same slot semantics as canary splits (ratios hold per
+    /// request, and re-sending a request with the same id lands on
+    /// the same variant). Validation rejects 0.
+    pub weight: u32,
+}
+
+/// One regression eval (DW-086 `ai.experiments.evals.<name>`): a
+/// golden set of input/expected cases plus an optional prompt
+/// version. The admin API runs it against a model alias (or an A/B
+/// test's variants) and stores the results in analytics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiEval {
+    /// An optional prompt version reference in
+    /// `"prompt_name/version_name"` format. When set, the named
+    /// version's system message is prepended to each eval case's
+    /// input. Validation rejects a reference whose prompt or version
+    /// does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// The golden set: input/expected pairs with a scorer. Validation
+    /// requires at least one case and non-empty `input`/`expected`.
+    pub golden_set: Vec<AiEvalCase>,
+}
+
+/// One eval case (DW-086
+/// `ai.experiments.evals.<name>.golden_set[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiEvalCase {
+    /// The input prompt (sent as the user message to the provider).
+    /// Must be non-empty (validation rejects empty strings).
+    pub input: String,
+    /// The expected output. The scorer compares the provider's output
+    /// against this value. For `exact_match`, an exact string match;
+    /// for `contains`, the output must contain this string; for
+    /// `regex`, this is the regex pattern the output must match.
+    pub expected: String,
+    /// The scorer name. One of: `exact_match` (default), `contains`,
+    /// `regex`. When `regex`, `expected` must be a valid regex
+    /// pattern (validation compiles it at publish time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer: Option<String>,
+}
+
+/// Feedback ingestion config (DW-086
+/// `ai.experiments.feedback`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiFeedbackConfig {
+    /// Whether the feedback admin endpoint accepts records. Default
+    /// true (an `ai.experiments.feedback` block without `enabled:
+    /// false` accepts feedback). When false, the endpoint returns
+    /// 403.
+    #[serde(default = "default_feedback_enabled", skip_serializing_if = "is_false")]
+    pub enabled: bool,
 }

@@ -457,6 +457,47 @@ where
             }
         }
     }
+    // DW-086: experiment alias resolution. When the model is an
+    // experiment (A/B test) alias, route_with_policy already picked
+    // the variant and returned its target in `candidates`. Here we
+    // inject the variant's system message into the request (if any)
+    // and record the assignment to analytics for attribution.
+    if let Some(crate::ai::CompiledModel::Experiment(test)) = runtime.model(&chat_req.model) {
+        let variant = test.pick(rid);
+        // Record the variant selection as a metric.
+        dp.observability_arc()
+            .record_ai_experiment_variant_selection(&test.name, &variant.name);
+        // Inject the variant's prompt-version system message BEFORE
+        // any existing system message (the variant's system message
+        // is the experiment's prompt; the client's system message, if
+        // any, follows it).
+        if let Some(sys) = &variant.system_message {
+            chat_req.messages.insert(
+                0,
+                crate::ai::types::ChatMessage::text(
+                    crate::ai::types::ChatRole::System,
+                    sys.clone(),
+                ),
+            );
+        }
+        // Record the assignment to analytics (fire-and-forget).
+        if let Some(analytics) = dp.analytics() {
+            analytics.offer_ai_experiment_assignment(crate::analytics::AiExperimentAssignment {
+                ts_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                request_id: rid.to_string(),
+                experiment: test.name.clone(),
+                variant: variant.name.clone(),
+                model: variant.target.provider_model.clone(),
+                consumer: identity
+                    .map(|id| id.consumer_name.clone())
+                    .unwrap_or_else(|| "anonymous".to_string()),
+            });
+        }
+    }
+
     if candidates.is_empty() {
         return ai_error_response(
             StatusCode::NOT_FOUND,

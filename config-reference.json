@@ -390,6 +390,56 @@
         "queue_timeout_ms"
       ]
     },
+    "AiAbTest": {
+      "description": "One A/B test (DW-086 `ai.experiments.ab_tests.<name>`): two or\nmore variants, each naming a model alias, an optional prompt\nversion, and a weight. A model alias declares `ab_test: <name>`\nto be served by one; the test is evaluated per request (a\ndeterministic weighted pick by request id selects a variant).",
+      "type": "object",
+      "properties": {
+        "variants": {
+          "description": "The variants. Validation requires at least 2 (one variant is\nnot a test). Each variant's `model` must reference an existing\nalias in `ai.models` that is NOT itself an experiment alias\n(no nested experiments).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiAbVariant"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "variants"
+      ]
+    },
+    "AiAbVariant": {
+      "description": "One variant of an A/B test (DW-086\n`ai.experiments.ab_tests.<name>.variants[]`).",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "The model alias this variant routes to. Must reference an\nexisting alias in `ai.models` that is NOT itself an experiment\nalias (no nested experiments — validation rejects it).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The variant name (for analytics/metrics attribution). Must be\nnon-empty.",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "An optional prompt version reference in\n`\"prompt_name/version_name\"` format. When set, the named\nversion's system message is prepended to the request's\nmessages for this variant. Validation rejects a reference\nwhose prompt or version does not exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weight": {
+          "description": "Relative weight (>= 1). The deterministic weighted pick uses\nthe same slot semantics as canary splits (ratios hold per\nrequest, and re-sending a request with the same id lands on\nthe same variant). Validation rejects 0.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "model",
+        "weight"
+      ]
+    },
     "AiCanaryVersion": {
       "description": "One weighted version of a canary split (DW-076\n`ai.models.<alias>.canary[]`).",
       "type": "object",
@@ -425,6 +475,17 @@
       "description": "The `ai:` top-level block (DW-075). Absent: no AI surface. Present:\nvalidation requires at least one provider and at least one model —\nan `ai:` block that can never serve a model is an authoring error,\nnot a silently inert config.",
       "type": "object",
       "properties": {
+        "experiments": {
+          "description": "Prompt experimentation (DW-086 `ai.experiments`): prompt\nversioning, A/B model comparison, regression evals, and\nfeedback ingestion. Absent (the default): no experiments.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiExperiments"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "governance": {
           "description": "Model governance (DW-084): per-team (policy) model allowlists\nand the shadow-audit switch. Absent (the default): no\ngovernance — every consumer may call every configured alias,\nand no governance audit events are recorded.",
           "anyOf": [
@@ -496,6 +557,107 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiEval": {
+      "description": "One regression eval (DW-086 `ai.experiments.evals.<name>`): a\ngolden set of input/expected cases plus an optional prompt\nversion. The admin API runs it against a model alias (or an A/B\ntest's variants) and stores the results in analytics.",
+      "type": "object",
+      "properties": {
+        "golden_set": {
+          "description": "The golden set: input/expected pairs with a scorer. Validation\nrequires at least one case and non-empty `input`/`expected`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiEvalCase"
+          }
+        },
+        "prompt": {
+          "description": "An optional prompt version reference in\n`\"prompt_name/version_name\"` format. When set, the named\nversion's system message is prepended to each eval case's\ninput. Validation rejects a reference whose prompt or version\ndoes not exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "golden_set"
+      ]
+    },
+    "AiEvalCase": {
+      "description": "One eval case (DW-086\n`ai.experiments.evals.<name>.golden_set[]`).",
+      "type": "object",
+      "properties": {
+        "expected": {
+          "description": "The expected output. The scorer compares the provider's output\nagainst this value. For `exact_match`, an exact string match;\nfor `contains`, the output must contain this string; for\n`regex`, this is the regex pattern the output must match.",
+          "type": "string"
+        },
+        "input": {
+          "description": "The input prompt (sent as the user message to the provider).\nMust be non-empty (validation rejects empty strings).",
+          "type": "string"
+        },
+        "scorer": {
+          "description": "The scorer name. One of: `exact_match` (default), `contains`,\n`regex`. When `regex`, `expected` must be a valid regex\npattern (validation compiles it at publish time).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "expected"
+      ]
+    },
+    "AiExperiments": {
+      "description": "Prompt experimentation (DW-086 `ai.experiments`): prompt\nversioning, A/B model comparison, regression evals, and feedback\ningestion. Absent (the default): no experiments surface.",
+      "type": "object",
+      "properties": {
+        "ab_tests": {
+          "description": "Named A/B tests (DW-086). Each test declares two or more\nvariants (each naming a model alias, an optional prompt\nversion, and a weight). A model alias declares `ab_test:\n<name>` to be served by one; the test is evaluated per\nrequest (a deterministic weighted pick by request id selects\na variant). Absent (the default): no A/B tests.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiAbTest"
+          }
+        },
+        "evals": {
+          "description": "Named regression evals (DW-086). Each eval declares a golden\nset of input/expected cases and an optional prompt version;\nthe admin API runs it against a model alias (or an A/B test's\nvariants) and stores the results. Absent (the default): no\nevals.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiEval"
+          }
+        },
+        "feedback": {
+          "description": "Feedback ingestion config (DW-086). When enabled, the admin\nAPI accepts feedback records (request id, label, comment)\nand stores them in analytics. Absent (the default): feedback\nis enabled (the default is `enabled: true`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiFeedbackConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompts": {
+          "description": "Named prompt version sets (DW-086). Each entry declares one\nor more versions (each with a system message) and an active\nversion. The active version can be overridden at runtime via\nthe admin API (stored in the state store). Absent (the\ndefault): no prompt versioning.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiPromptVersions"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiFeedbackConfig": {
+      "description": "Feedback ingestion config (DW-086\n`ai.experiments.feedback`).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the feedback admin endpoint accepts records. Default\ntrue (an `ai.experiments.feedback` block without `enabled:\nfalse` accepts feedback). When false, the endpoint returns\n403.",
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false
@@ -730,6 +892,13 @@
       "description": "One model alias mapping (DW-075 `ai.models{alias}`).",
       "type": "object",
       "properties": {
+        "ab_test": {
+          "description": "An A/B test name (DW-086): when set, this alias is served by\nthe named entry in `ai.experiments.ab_tests` instead of a\nplain failover chain, canary split, or routing policy. The\nexperiment is evaluated per request (a deterministic weighted\npick by request id selects a variant). Cannot be combined\nwith `failover`, `canary`, or `routing_policy` on the same\nalias (validation enforces mutual exclusivity): an experiment\nalias composes over OTHER aliases' routing plans, so it has\nno primary provider/model pair of its own.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "canary": {
           "description": "Weighted canary split (DW-076): traffic for this alias\ndistributes across the listed versions by a deterministic\nweighted hash of the request id (the same slot semantics as\ntraffic splitting: ratios hold per request, and re-sending a\nrequest with the same id lands on the same version). Each\nversion names exactly one provider/model pair and carries no\nfailover of its own. Absent (the default): no split. Cannot be\ncombined with `failover` on the same alias.",
           "type": "array",
@@ -806,6 +975,42 @@
       "required": [
         "input_per_1k_micros",
         "output_per_1k_micros"
+      ]
+    },
+    "AiPromptVersion": {
+      "description": "One prompt version (DW-086\n`ai.experiments.prompts.<name>.versions.<version>`): a system\nmessage prepended to the request's messages when this version is\nactive.",
+      "type": "object",
+      "properties": {
+        "system": {
+          "description": "The system message prepended to the request's messages. If\nthe request already has a system message, the template's\nsystem message is prepended BEFORE it.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "system"
+      ]
+    },
+    "AiPromptVersions": {
+      "description": "One prompt's version set (DW-086 `ai.experiments.prompts.<name>`):\na map of version names to system messages plus the active version.\nThe active version can be overridden at runtime via the admin API.",
+      "type": "object",
+      "properties": {
+        "active": {
+          "description": "The active version name. Must exist in `versions` (validation\nrejects a name not in the map). Can be overridden at runtime\nvia the admin API (the override is stored in the state store).",
+          "type": "string"
+        },
+        "versions": {
+          "description": "The named versions, each carrying a system message. Version\nnames must be non-empty (validation rejects empty strings).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiPromptVersion"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "versions",
+        "active"
       ]
     },
     "AiProvider": {

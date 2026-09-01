@@ -43,6 +43,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod budget;
 pub mod cost;
+pub mod experiments;
 pub mod governance;
 pub mod guardrails;
 pub mod logging;
@@ -92,11 +93,14 @@ pub struct RouteTarget {
 }
 
 /// The compiled alias entry (DW-076): either a failover chain
-/// (primary first), a canary split, or a routing policy (DW-085).
-/// A policy alias composes over OTHER aliases' routing plans, so it
-/// has no provider/model pair of its own — validation enforces that
-/// `routing_policy` is mutually exclusive with `failover` and
-/// `canary`.
+/// (primary first), a canary split, a routing policy (DW-085), or an
+/// A/B test experiment (DW-086). A policy alias composes over OTHER
+/// aliases' routing plans, so it has no provider/model pair of its
+/// own — validation enforces that `routing_policy` is mutually
+/// exclusive with `failover` and `canary`. An experiment alias
+/// composes over OTHER aliases' routing plans too — validation
+/// enforces that `ab_test` is mutually exclusive with `failover`,
+/// `canary`, and `routing_policy`.
 #[derive(Debug, Clone)]
 pub enum CompiledModel {
     /// `[primary, alternates...]` in config order.
@@ -108,6 +112,12 @@ pub enum CompiledModel {
     /// request (async — a FallbackChain policy may call an external
     /// classifier service).
     Policy(Arc<policy::CompiledRoutingPolicy>),
+    /// An A/B test experiment (DW-086): two or more variants, each
+    /// naming a model alias (and an optional prompt version). The
+    /// experiment is evaluated per request (a deterministic weighted
+    /// pick by request id selects a variant). Arc'd because the
+    /// compiled test carries resolved targets and prompt messages.
+    Experiment(Arc<experiments::CompiledAbTest>),
 }
 
 /// The per-generation compiled AI table (DW-075): the provider pool
@@ -155,20 +165,26 @@ impl AiRuntime {
                 },
             );
         }
-        // DW-085: two-pass compile. Policy aliases compose over plain
-        // chain/canary aliases (they resolve named aliases to their
-        // primary RouteTarget), so the plain aliases must be compiled
-        // first. A policy alias cannot reference another policy alias
-        // (nested policies are not allowed); the first pass skips
-        // policy aliases, and the second pass compiles them against
-        // the first-pass map.
+        // DW-085/DW-086: three-pass compile. Policy aliases and
+        // experiment aliases compose over plain chain/canary aliases
+        // (they resolve named aliases to their primary RouteTarget),
+        // so the plain aliases must be compiled first. A policy alias
+        // cannot reference another policy alias (nested policies are
+        // not allowed); an experiment alias cannot reference another
+        // experiment alias (nested experiments are not allowed). The
+        // first pass skips policy and experiment aliases, the second
+        // pass compiles policy aliases against the first-pass map,
+        // and the third pass compiles experiment aliases against the
+        // first-pass map (experiment variants reference plain
+        // aliases only, not policy aliases).
         let mut first_pass: BTreeMap<String, CompiledModel> = BTreeMap::new();
         for (alias, m) in &cfg.models {
-            if m.routing_policy.is_some() {
+            if m.routing_policy.is_some() || m.ab_test.is_some() {
                 continue;
             }
             first_pass.insert(alias.clone(), compile_model(m));
         }
+        // Second pass: policy aliases.
         let mut models = first_pass.clone();
         for (alias, m) in &cfg.models {
             if let Some(policy_name) = &m.routing_policy {
@@ -177,6 +193,26 @@ impl AiRuntime {
                         policy::CompiledRoutingPolicy::compile(policy_name, policy_cfg, &first_pass)
                     {
                         models.insert(alias.clone(), CompiledModel::Policy(Arc::new(compiled)));
+                    }
+                }
+            }
+        }
+        // Third pass: experiment aliases.
+        for (alias, m) in &cfg.models {
+            if let Some(test_name) = &m.ab_test {
+                if let Some(experiments_cfg) = &cfg.experiments {
+                    if let Some(test_cfg) = experiments_cfg.ab_tests.get(test_name) {
+                        if let Some(compiled) = experiments::CompiledAbTest::compile(
+                            test_name,
+                            test_cfg,
+                            &first_pass,
+                            Some(experiments_cfg),
+                        ) {
+                            models.insert(
+                                alias.clone(),
+                                CompiledModel::Experiment(Arc::new(compiled)),
+                            );
+                        }
                     }
                 }
             }
@@ -203,11 +239,13 @@ impl AiRuntime {
     /// A canary alias yields exactly ONE candidate — the deterministic
     /// weighted pick for `pick_key` (the request id); a failover alias
     /// yields `[primary, alternates...]`. An empty result means the
-    /// alias does not exist. Policy aliases (DW-085) return an empty
-    /// list here — they need the async
-    /// [`route_with_policy`](Self::route_with_policy) path (the
-    /// classifier call is async). The sync `route` stays for tests
-    /// and the non-policy dataplane path.
+    /// alias does not exist. Policy aliases (DW-085) and experiment
+    /// aliases (DW-086) return an empty list here — they need the
+    /// async [`route_with_policy`](Self::route_with_policy) path (the
+    /// classifier call is async for policies; the experiment pick is
+    /// sync but returns an [`experiments::ExperimentDecision`] the dataplane
+    /// records). The sync `route` stays for tests and the non-policy
+    /// dataplane path.
     pub fn route<'a>(&'a self, alias: &str, pick_key: &str) -> Vec<&'a RouteTarget> {
         match self.models.get(alias) {
             Some(CompiledModel::Chain(chain)) => chain.iter().collect(),
@@ -215,19 +253,23 @@ impl AiRuntime {
                 vec![routing::weighted_pick(versions, pick_key)]
             }
             Some(CompiledModel::Policy(_)) => Vec::new(),
+            Some(CompiledModel::Experiment(_)) => Vec::new(),
             None => Vec::new(),
         }
     }
 
-    /// Route one request with policy evaluation (DW-085). Like
-    /// [`route`](Self::route) but handles Policy variants by calling
-    /// the async [`evaluate`](policy::CompiledRoutingPolicy::evaluate)
-    /// method. Returns owned [`RouteTarget`]s (the policy path
-    /// constructs them dynamically) plus an optional
-    /// [`PolicyDecision`](policy::PolicyDecision) the dataplane records
-    /// as a metric (None for non-policy models). For non-policy
-    /// models, delegates to the sync routing logic. An empty result
-    /// means the alias does not exist.
+    /// Route one request with policy/experiment evaluation (DW-085 /
+    /// DW-086). Like [`route`](Self::route) but handles Policy
+    /// variants by calling the async
+    /// [`evaluate`](policy::CompiledRoutingPolicy::evaluate) method,
+    /// and Experiment variants by doing the deterministic weighted
+    /// pick. Returns owned [`RouteTarget`]s plus an optional
+    /// [`PolicyDecision`](policy::PolicyDecision) the dataplane
+    /// records as a metric (None for non-policy models). For
+    /// experiment models, the [`experiments::ExperimentDecision`] is returned
+    /// separately via [`route_experiment`](Self::route_experiment).
+    /// For non-policy/non-experiment models, delegates to the sync
+    /// routing logic. An empty result means the alias does not exist.
     pub async fn route_with_policy(
         &self,
         alias: &str,
@@ -244,7 +286,45 @@ impl AiRuntime {
                 let (targets, decision) = policy.evaluate(prompt_text).await;
                 (targets, Some(decision))
             }
+            Some(CompiledModel::Experiment(test)) => {
+                let variant = test.pick(pick_key);
+                (vec![variant.target.clone()], None)
+            }
             None => (Vec::new(), None),
+        }
+    }
+
+    /// Route one request for an experiment alias (DW-086): the
+    /// deterministic weighted pick selects a variant, returning the
+    /// [`RouteTarget`] and the [`experiments::ExperimentDecision`] for analytics
+    /// attribution. Returns None when the alias is not an experiment
+    /// alias or does not exist.
+    pub fn route_experiment(
+        &self,
+        alias: &str,
+        pick_key: &str,
+    ) -> Option<(RouteTarget, experiments::ExperimentDecision)> {
+        match self.models.get(alias)? {
+            CompiledModel::Experiment(test) => {
+                let variant = test.pick(pick_key);
+                Some((
+                    variant.target.clone(),
+                    experiments::ExperimentDecision {
+                        experiment: test.name.clone(),
+                        variant: variant.name.clone(),
+                        model: variant.target.provider_model.clone(),
+                    },
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The compiled experiment for an alias (introspection/tests).
+    pub fn experiment(&self, alias: &str) -> Option<&Arc<experiments::CompiledAbTest>> {
+        match self.models.get(alias)? {
+            CompiledModel::Experiment(test) => Some(test),
+            _ => None,
         }
     }
 
@@ -263,6 +343,9 @@ impl AiRuntime {
             // A policy alias has no single primary target — it is
             // evaluated per request.
             CompiledModel::Policy(_) => None,
+            // An experiment alias has no single primary target — it
+            // is evaluated per request (the variant pick).
+            CompiledModel::Experiment(_) => None,
         }
     }
 

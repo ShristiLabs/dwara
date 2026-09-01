@@ -573,6 +573,11 @@ pub struct Observability {
     /// name (config-bounded label). No consumer label (cardinality);
     /// the consumer is in the access log.
     ai_routing_policy_latency_cost_selections_total: IntCounterVec,
+    /// DW-086: AI experiment (A/B test) variant selections, by
+    /// experiment and variant (config-bounded labels). No consumer
+    /// label (cardinality); the consumer is in the access log and
+    /// the analytics assignment table.
+    ai_experiment_variant_selections_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1133,6 +1138,17 @@ impl Observability {
             &["policy"],
         )
         .expect("valid metric definition");
+        let ai_experiment_variant_selections_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_experiment_variant_selections_total",
+                "AI experiment (A/B test) variant selections (DW-086), by \
+                 experiment and variant (config-bounded labels). No consumer \
+                 label — cardinality rule; the consumer is in the access log \
+                 and the analytics assignment table.",
+            ),
+            &["experiment", "variant"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1249,6 +1265,7 @@ impl Observability {
             Box::new(ai_routing_policy_escalations_total.clone()),
             Box::new(ai_routing_policy_cheap_total.clone()),
             Box::new(ai_routing_policy_latency_cost_selections_total.clone()),
+            Box::new(ai_experiment_variant_selections_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1321,6 +1338,7 @@ impl Observability {
             ai_routing_policy_escalations_total,
             ai_routing_policy_cheap_total,
             ai_routing_policy_latency_cost_selections_total,
+            ai_experiment_variant_selections_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1712,6 +1730,17 @@ impl Observability {
     pub fn record_ai_routing_policy_latency_cost_selection(&self, policy: &str) {
         self.ai_routing_policy_latency_cost_selections_total
             .with_label_values(&[policy])
+            .inc();
+    }
+
+    /// Count one AI experiment (A/B test) variant selection (DW-086)
+    /// in `dwara_ai_experiment_variant_selections_total{experiment,
+    /// variant}` (experiment: the A/B test name, variant: the
+    /// selected variant name, both config-bounded labels). No
+    /// consumer label (cardinality rule).
+    pub fn record_ai_experiment_variant_selection(&self, experiment: &str, variant: &str) {
+        self.ai_experiment_variant_selections_total
+            .with_label_values(&[experiment, variant])
             .inc();
     }
 
