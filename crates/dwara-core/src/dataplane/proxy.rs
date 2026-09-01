@@ -307,6 +307,11 @@ pub enum ProxyBody {
     /// `max_body_bytes` cap mid-stream, and continues streaming the
     /// original bytes exactly as if no cache existed.
     Passthrough(crate::dataplane::response_cache::PassthroughBody),
+    /// AI streaming body (DW-077): the provider's SSE stream
+    /// translated frame-by-frame into OpenAI-shaped chunks — zero
+    /// buffering, gateway-owned terminator, infallible by
+    /// construction (provider aborts become terminal error frames).
+    Ai(Box<crate::dataplane::ai_proxy::AiStreamBody>),
 }
 
 /// Error of a [`ProxyBody`]: upstream stream failure or a compression
@@ -346,6 +351,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Upstream(b) => Pin::new(b).poll_frame(cx).map_err(ProxyBodyError::Upstream),
             ProxyBody::Compressed(b) => Pin::new(b.as_mut()).poll_frame(cx),
             ProxyBody::Passthrough(b) => Pin::new(b).poll_frame(cx),
+            ProxyBody::Ai(b) => Pin::new(b.as_mut()).poll_frame(cx),
         }
     }
 
@@ -355,6 +361,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Upstream(b) => b.is_end_stream(),
             ProxyBody::Compressed(b) => b.is_end_stream(),
             ProxyBody::Passthrough(b) => b.is_end_stream(),
+            ProxyBody::Ai(b) => b.is_end_stream(),
         }
     }
 
@@ -364,6 +371,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Upstream(b) => b.size_hint(),
             ProxyBody::Compressed(b) => b.size_hint(),
             ProxyBody::Passthrough(b) => b.size_hint(),
+            ProxyBody::Ai(b) => b.size_hint(),
         }
     }
 }

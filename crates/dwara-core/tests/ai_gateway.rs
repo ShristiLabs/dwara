@@ -297,7 +297,7 @@ async fn unknown_model_answers_404_model_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn malformed_body_and_streaming_answer_400() {
+async fn malformed_body_answers_400_and_stream_falls_through_to_buffered() {
     let (openai_port, _) = mock_provider("openai");
     let (anthropic_port, _) = mock_provider("anthropic");
     let (gemini_port, _) = mock_provider("gemini");
@@ -339,7 +339,11 @@ async fn malformed_body_and_streaming_answer_400() {
     let (status, _) = body_of(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // stream: true until DW-077.
+    // stream: true is a STREAM since DW-077: against this mock (a
+    // plain JSON 200, not SSE) the gateway falls through to the
+    // buffered translate path, so the client still gets a 200 JSON
+    // body. The streaming behavior itself is covered by
+    // tests/ai_streaming.rs.
     let resp = client
         .request(
             Request::builder()
@@ -359,9 +363,9 @@ async fn malformed_body_and_streaming_answer_400() {
         .await
         .unwrap();
     let (status, bytes) = body_of(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
     let out: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(out["error"]["code"], "streaming_not_supported");
+    assert_eq!(out["choices"][0]["message"]["content"], "openai says hi");
 }
 
 #[tokio::test(flavor = "multi_thread")]

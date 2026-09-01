@@ -11,13 +11,6 @@ Your model names stay yours: clients ask for the alias you publish
 and the provider's real model identifier never leaves the gateway.
 Rotate providers by editing the alias table -- no client changes.
 
-::: info Status
-Non-streaming chat completions are fully supported. Streaming
-(`"stream": true`) is answered with HTTP 400
-`streaming_not_supported` for now; the streaming pipeline is a
-planned feature and this page will be updated when it lands.
-:::
-
 ## When to use this
 
 Use the AI gateway when:
@@ -169,6 +162,42 @@ OpenAI's `seed` or `response_format`) pass through when the serving
 provider is OpenAI or an OpenAI-compatible server, and are dropped
 for Anthropic and Gemini.
 
+## Streaming
+
+Send `"stream": true` and the response streams back as
+`text/event-stream`: each provider chunk is translated to the OpenAI
+chunk shape and forwarded as it arrives — the gateway does not wait
+for the provider to finish, so the first tokens reach your client at
+the provider's own pace.
+
+What clients receive, regardless of which provider served the call:
+
+- `chat.completion.chunk` frames with your model alias, in order.
+- A terminal usage frame (`"choices": []` with a `usage` object) when
+  the provider reported token usage. Token counts are
+  PROVIDER-REPORTED ONLY — the gateway never estimates. Usage
+  reporting is requested from the provider even when the client did
+  not ask, so the counts are always available for metrics.
+- A final `data: [DONE]` frame. The gateway writes this terminator
+  itself for every provider, so the stream shape is identical across
+  OpenAI, Anthropic, and Gemini.
+
+If the provider dies mid-stream, already-received content stands and
+the stream ends cleanly with an error chunk
+(`provider_stream_aborted`) followed by `data: [DONE]` — the
+connection is not reset. Failover (see below) applies only BEFORE the
+stream starts; once chunks are flowing, the serving provider is
+committed.
+
+Streaming metrics (per provider):
+
+- `dwara_ai_stream_chunks_total` — forwarded chunks.
+- `dwara_ai_first_token_seconds` — time from request to the first
+  forwarded chunk (the number streaming consumers feel).
+- `dwara_ai_stream_duration_seconds` — total stream duration.
+- `dwara_ai_tokens_total` — the stream's provider-reported usage,
+  attributed to the serving provider (and canary version).
+
 ## Failover and canary
 
 A model alias can do more than name one provider. Two optional
@@ -268,7 +297,6 @@ works unchanged:
 |---|---|---|
 | Unknown model alias | 404 | `model_not_found` |
 | Malformed body or request | 400 | `invalid_json` / others |
-| `stream: true` | 400 | `streaming_not_supported` |
 | Request body over 16 MiB | 413 | `body_too_large` |
 | Provider returned an error | the provider's status | the provider's code, when sent |
 | Provider unreachable | 502 | `provider_unreachable` |

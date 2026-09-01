@@ -5,7 +5,7 @@
 //! Runs when a route's action is `ai`: parse the client's OpenAI
 //! chat-completions body, resolve the model alias through the
 //! generation's [`AiRuntime`](crate::ai::AiRuntime), translate via the
-//! provider's [`ProviderAdapter`](crate::ai::adapter::ProviderAdapter),
+//! provider's [`ProviderAdapter`],
 //! place the call through the provider's UPSTREAM (pooling, TLS,
 //! timeouts, breaker, health — the standard machinery), and translate
 //! the response back. All failures answer in the OpenAI error shape so
@@ -38,14 +38,20 @@
 //! or runaway peer cannot turn the translation into an unbounded
 //! buffer.
 //!
-//! Streaming: `stream: true` answers 400 (`streaming_not_supported`)
-//! until DW-077 wires the zero-buffer SSE pass-through. The adapters
-//! already translate delta shapes (verified per adapter in
-//! `tests/ai_adapters.rs`), so the streaming pipeline composes on top
-//! without adapter changes.
+//! Streaming (DW-077): `stream: true` requests stream back to the
+//! client as `text/event-stream`, translated frame-by-frame with ZERO
+//! added buffering ([`AiStreamBody`] + [`StreamTranslator`]): each
+//! complete provider frame becomes client frames in the same poll.
+//! Token counts are provider-reported only (locked decision) and
+//! accumulate mid-stream into one terminal usage chunk; the gateway
+//! owns the `data: [DONE]` terminator. The failover chain applies
+//! until the streaming response is returned (the commit point); after
+//! the first forwarded frame a provider abort ends the stream cleanly
+//! with an error chunk — already-forwarded content stands.
 
-use crate::ai::adapter::adapter_for;
+use crate::ai::adapter::{adapter_for, ProviderAdapter};
 use crate::ai::openai_compat;
+use crate::ai::stream::StreamTranslator;
 use crate::ai::types::ChatRequest;
 use crate::dataplane::proxy::{DataPlane, Generation, ProxyBody};
 use bytes::Bytes;
@@ -53,7 +59,9 @@ use http_body_util::{BodyExt as _, Full};
 use hyper::body::Body;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use std::pin::pin;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// Inbound AI request body cap: 16 MiB, generous against long-context
 /// requests while bounding the translation buffer.
@@ -119,7 +127,7 @@ where
             )
         }
     };
-    let chat_req: ChatRequest = match openai_compat::parse_chat_request(&json_body) {
+    let mut chat_req: ChatRequest = match openai_compat::parse_chat_request(&json_body) {
         Ok(r) => r,
         Err(e) => {
             return ai_error_response(
@@ -132,17 +140,15 @@ where
         }
     };
 
-    // 3. Streaming arrives with DW-077 (module docs).
-    if chat_req.stream {
-        return ai_error_response(
-            StatusCode::BAD_REQUEST,
-            "streaming is not supported on this gateway yet (the streaming \
-             pipeline is a planned feature); send stream: false or use a \
-             proxy route to the provider",
-            "invalid_request_error",
-            Some("streaming_not_supported"),
-            rid,
-        );
+    // 3. Streaming (DW-077): the request is passed through with
+    // usage reporting FORCED on the provider call — the stream
+    // metrics and the (upcoming) token budgets need provider-reported
+    // counts even when the client did not ask for the usage chunk,
+    // and the terminal usage chunk we emit is the documented
+    // include_usage shape either way.
+    let stream_requested = chat_req.stream;
+    if stream_requested {
+        chat_req.stream_options_include_usage = true;
     }
 
     // 4. Route (DW-076): the ordered candidate list for this alias —
@@ -270,6 +276,7 @@ where
         // provider across the failover walk (DW-076).
         rec.upstream = Some(provider.upstream.clone());
         rec.attempts = attempts;
+        let attempt_started = std::time::Instant::now();
         let upstream_resp = match handle.send(outbound).await {
             Ok(r) => r,
             Err(e) => {
@@ -323,6 +330,41 @@ where
             // Other 4xx (bad request, bad key) is deterministic —
             // retrying another provider would only re-diagnose it.
             return resp;
+        }
+        // Streaming pass-through (DW-077): a 200 SSE response streams
+        // to the client frame-by-frame with zero added buffering. This
+        // is the failover COMMIT point — returning the streaming
+        // response forwards headers (and then chunks) to the client,
+        // so no later candidate can replace anything from here on.
+        if stream_requested && is_event_stream(&up_parts.headers) {
+            obs.record_ai_request(&provider.name, route_name, "success", version);
+            tracing::info!(
+                code = "ai_stream_started",
+                request_id = %rid,
+                route = %route_name,
+                provider = %provider.name,
+                model = %chat_req.model,
+                version = %version,
+                attempts = attempts,
+                upstream = %provider.upstream,
+                "ai stream established; forwarding begins"
+            );
+            let body = super::ai_proxy::AiStreamBody::new(
+                up_body,
+                adapter,
+                format!("chatcmpl-{rid}"),
+                chat_req.model.clone(),
+                provider.name.clone(),
+                version.to_string(),
+                attempt_started,
+                Arc::clone(&obs),
+            );
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+                .header(hyper::header::CACHE_CONTROL, "no-cache")
+                .body(ProxyBody::Ai(Box::new(body)))
+                .expect("streaming response is valid");
         }
         let ok_bytes =
             match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "response", rid).await {
@@ -501,6 +543,15 @@ fn ai_error_response(
     response_with_json(status, &body, &HeaderMap::new())
 }
 
+/// Whether provider response headers declare an SSE body.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("text/event-stream"))
+        .unwrap_or(false)
+}
+
 /// Build a JSON response. The provider's `x-request-id` (when sent) is
 /// carried through for correlation; every other provider header is
 /// dropped — the gateway authored this response.
@@ -518,4 +569,208 @@ fn response_with_json(
     builder
         .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
         .expect("static JSON response is valid")
+}
+
+// ---------------------------------------------------------------------------
+// The streaming body (DW-077)
+// ---------------------------------------------------------------------------
+
+/// Per-stream accounting shared by the body and its metrics hooks.
+struct StreamGauges {
+    provider: String,
+    version: String,
+    chunks: u64,
+    first_token_recorded: bool,
+    started: std::time::Instant,
+    /// Set once terminal metrics have been recorded (clean end OR
+    /// drop): the counters must fire exactly once per stream.
+    closed: bool,
+}
+
+/// The zero-buffer AI streaming body (DW-077): wraps the provider's
+/// upstream body, translates each COMPLETE provider SSE frame into
+/// OpenAI-shaped client frames as the bytes arrive, and forwards them
+/// in the same poll — nothing waits for the stream to finish. Usage
+/// events accumulate (provider-reported only) and are emitted as one
+/// terminal chunk; the gateway owns the `data: [DONE]` terminator. A
+/// provider body error after forwarding becomes a terminal error
+/// chunk (already-forwarded content stands), never a reset.
+///
+/// Infallible by construction: every failure mode is expressed as
+/// terminal frames, so the client stream always ends cleanly.
+pub struct AiStreamBody {
+    inner: crate::dataplane::upstream::UpstreamBody,
+    translator: StreamTranslator,
+    adapter: &'static dyn ProviderAdapter,
+    /// Synthesized terminal frames waiting to be forwarded.
+    tail: std::collections::VecDeque<String>,
+    gauges: StreamGauges,
+    obs: std::sync::Arc<crate::observability::Observability>,
+}
+
+impl AiStreamBody {
+    /// Build the body for a provider stream whose headers resolved
+    /// successfully. `started` is the request's send instant (first-
+    /// token latency measures from there).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        inner: crate::dataplane::upstream::UpstreamBody,
+        adapter: &'static dyn ProviderAdapter,
+        response_id: String,
+        model_alias: String,
+        provider: String,
+        version: String,
+        started: std::time::Instant,
+        obs: std::sync::Arc<crate::observability::Observability>,
+    ) -> Self {
+        AiStreamBody {
+            inner,
+            translator: StreamTranslator::new(response_id, model_alias, openai_compat::unix_now()),
+            adapter,
+            tail: std::collections::VecDeque::new(),
+            gauges: StreamGauges {
+                provider,
+                version,
+                chunks: 0,
+                first_token_recorded: false,
+                started,
+                closed: false,
+            },
+            obs,
+        }
+    }
+
+    /// Record per-chunk accounting for a translated batch.
+    fn note_chunks(&mut self, count: usize, first: bool) {
+        for _ in 0..count {
+            self.obs.record_ai_stream_chunk(&self.gauges.provider);
+        }
+        self.gauges.chunks += count as u64;
+        if first && !self.gauges.first_token_recorded {
+            self.gauges.first_token_recorded = true;
+            self.obs.record_ai_first_token(
+                &self.gauges.provider,
+                self.gauges.started.elapsed().as_secs_f64(),
+            );
+        }
+    }
+
+    /// Terminal metrics: exactly once per stream. Records duration and
+    /// the accumulated provider-reported usage (the DW-079 input; the
+    /// version label carries the canary attribution, DW-076).
+    fn close(&mut self) {
+        if self.gauges.closed {
+            return;
+        }
+        self.gauges.closed = true;
+        self.obs.record_ai_stream_end(
+            &self.gauges.provider,
+            self.gauges.started.elapsed().as_secs_f64(),
+        );
+        let usage = self.translator.usage();
+        if usage.prompt_tokens.is_some() || usage.completion_tokens.is_some() {
+            self.obs.record_ai_tokens(
+                &self.gauges.provider,
+                usage.prompt_tokens.unwrap_or(0),
+                usage.completion_tokens.unwrap_or(0),
+                &self.gauges.version,
+            );
+        }
+    }
+}
+
+impl hyper::body::Body for AiStreamBody {
+    type Data = Bytes;
+    type Error = super::proxy::ProxyBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, super::proxy::ProxyBodyError>>> {
+        let this = self.get_mut();
+        loop {
+            // Drain synthesized terminal frames first: one data frame
+            // per poll (flushes reach the client per frame).
+            if let Some(text) = this.tail.pop_front() {
+                if this.tail.is_empty() && this.translator.is_ended() {
+                    // The last terminal frame: close after it is
+                    // handed over. The NEXT poll returns None.
+                    this.close();
+                }
+                return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(text)))));
+            }
+            if this.translator.is_ended() {
+                return Poll::Ready(None);
+            }
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let Some(data) = frame.data_ref().cloned() else {
+                        continue; // trailers / non-data frames pass by
+                    };
+                    let (frames, chunks, first) = this.translator.feed(data.as_ref(), this.adapter);
+                    this.note_chunks(chunks, first);
+                    if this.translator.is_ended() {
+                        this.tail.extend(this.translator.finish());
+                    }
+                    if frames.is_empty() {
+                        // Bytes only continued a partial frame; keep
+                        // polling (or drain the tail next loop).
+                        continue;
+                    }
+                    let mut joined = String::new();
+                    for f in frames {
+                        joined.push_str(&f);
+                    }
+                    return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(joined)))));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    // Mid-stream provider abort: already-forwarded
+                    // content stands; the client stream ends cleanly
+                    // with an error chunk and the terminator.
+                    tracing::warn!(
+                        code = "ai_stream_aborted",
+                        provider = %this.gauges.provider,
+                        "provider stream aborted mid-flight: {e}"
+                    );
+                    this.tail.extend(
+                        this.translator
+                            .abort_tail("the model provider closed the stream"),
+                    );
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    // Clean end: flush any unterminated frame, then
+                    // the terminal usage chunk and the terminator.
+                    let (frames, chunks, first) = this.translator.flush_partial(this.adapter);
+                    this.note_chunks(chunks, first);
+                    let mut joined = String::new();
+                    for f in frames {
+                        joined.push_str(&f);
+                    }
+                    this.tail.extend(this.translator.finish());
+                    if joined.is_empty() {
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(joined)))));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::SizeHint::default()
+    }
+}
+
+impl Drop for AiStreamBody {
+    fn drop(&mut self) {
+        // A client that hangs up mid-stream still owes its terminal
+        // metrics (duration histogram; usage if reported).
+        self.close();
+    }
 }

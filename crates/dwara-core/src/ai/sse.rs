@@ -213,3 +213,36 @@ mod tests {
         assert_eq!(out[0].data, "tail");
     }
 }
+
+#[cfg(test)]
+mod dw077_regressions {
+    use super::*;
+
+    // Regression (found building the DW-077 e2e suite): a frame split
+    // MID-JSON across body writes must assemble — the buffer is pure
+    // bytes to the decoder and JSON structure is irrelevant to it.
+
+    #[test]
+    fn frame_split_mid_json_assembles() {
+        let mut dec = SseDecoder::new();
+        assert!(dec.push(b"data: {\"delta\":{\"content\":\"Hel").is_empty());
+        let out = dec.push(
+            b"lo\"}}
+
+",
+        );
+        assert_eq!(out.len(), 1, "frames: {out:?}");
+        assert_eq!(out[0].data, "{\"delta\":{\"content\":\"Hello\"}}");
+    }
+
+    #[test]
+    fn two_choice_frame_yields_two_events() {
+        // The multi-choice chunk shape providers send: one provider
+        // frame can carry several deltas.
+        let payload = "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"}},{\"index\":0,\"delta\":{\"content\":\"wor\"}}]}";
+        let v: serde_json::Value = serde_json::from_str(payload).expect("valid json");
+        let adapter = crate::ai::adapter::adapter_for(crate::config::ai::AiProviderKind::Openai);
+        let events = adapter.parse_stream_event(&v).expect("parses");
+        assert_eq!(events.len(), 2, "events: {events:?}");
+    }
+}

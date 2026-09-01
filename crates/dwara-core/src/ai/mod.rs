@@ -36,6 +36,7 @@ pub mod adapters;
 pub mod openai_compat;
 pub mod routing;
 pub mod sse;
+pub mod stream;
 pub mod types;
 
 use crate::config::ai::{AiConfig, AiProviderKind};

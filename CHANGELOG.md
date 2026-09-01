@@ -9,6 +9,29 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI streaming (DW-077): `stream: true` on an ai route streams back
+  as `text/event-stream`, translated frame-by-frame to OpenAI chunk
+  shape with zero added buffering — each complete provider SSE frame
+  becomes client frames in the same poll, so first-chunk latency
+  tracks the provider (asserted in tests against the provider's own
+  write instants: the client's first chunk arrives before the
+  provider's last write). Provider usage events accumulate mid-stream
+  (provider-reported only, the locked no-estimation decision) and are
+  re-emitted as one terminal `choices: []` usage chunk; usage
+  reporting is forced on the provider call so counts always exist for
+  metrics and the upcoming token budgets. The gateway owns the
+  `data: [DONE]` terminator (the provider's own is swallowed — uniform
+  delta/usage/DONE ordering across dialects). The DW-076 failover
+  chain applies until the streaming response is returned (the commit
+  point); a mid-stream provider abort ends the stream cleanly with a
+  terminal error chunk — already-forwarded content stands. New
+  metrics: dwara_ai_stream_chunks_total, dwara_ai_first_token_seconds,
+  dwara_ai_stream_duration_seconds (per provider), plus stream usage
+  into dwara_ai_tokens_total with the canary version label. New
+  `ai::stream` translator (pure, unit-tested) and the dataplane
+  `AiStreamBody` (a new ProxyBody variant). No new dependencies; no
+  new config surface — streaming is simply how ai routes behave.
+
 - AI routing and failover (DW-076): model aliases can declare an
   ordered failover chain (`failover:` — alternate provider/model
   pairs) and a weighted canary split (`canary:` — versions with

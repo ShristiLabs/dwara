@@ -184,6 +184,14 @@ const DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+/// Histogram buckets for `dwara_ai_first_token_seconds` (DW-077):
+/// first-token latency is the metric streaming consumers feel, so the
+/// low end is finer than DURATION_BUCKETS; 30s covers a cold provider
+/// queue without a tail bucket that swallows real regressions.
+const FIRST_TOKEN_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.5, 5.0, 10.0, 30.0,
+];
+
 /// Prometheus status-class label ("2xx", "5xx", ...).
 pub fn status_class(status: u16) -> String {
     format!("{}xx", status / 100)
@@ -525,6 +533,16 @@ pub struct Observability {
     /// (DW-076). Provider-reported only (the locked M4 decision: the
     /// gateway never estimates).
     ai_tokens_total: IntCounterVec,
+    /// DW-077: forwarded streaming chunks (SSE frames), by provider.
+    /// One per client-visible delta chunk — the per-chunk
+    /// observability of the streaming path.
+    ai_stream_chunks_total: IntCounterVec,
+    /// DW-077: time to the FIRST forwarded chunk of a stream, by
+    /// provider (request send to first delta), in seconds.
+    ai_first_token_seconds: HistogramVec,
+    /// DW-077: total streaming duration (first request byte to stream
+    /// end), by provider, in seconds.
+    ai_stream_duration_seconds: HistogramVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -991,6 +1009,35 @@ impl Observability {
             &["provider", "route", "outcome", "version"],
         )
         .expect("valid metric definition");
+        let ai_stream_chunks_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_stream_chunks_total",
+                "Forwarded AI streaming chunks (DW-077), by provider. One per \
+                 client-visible delta chunk.",
+            ),
+            &["provider"],
+        )
+        .expect("valid metric definition");
+        let ai_first_token_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_ai_first_token_seconds",
+                "Time to the first forwarded chunk of an AI stream (DW-077), \
+                 by provider.",
+            )
+            .buckets(FIRST_TOKEN_BUCKETS.to_vec()),
+            &["provider"],
+        )
+        .expect("valid metric definition");
+        let ai_stream_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_ai_stream_duration_seconds",
+                "Total AI stream duration (DW-077) — request send to stream \
+                 end — by provider.",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
+            &["provider"],
+        )
+        .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
@@ -1058,6 +1105,9 @@ impl Observability {
             Box::new(config_convergence_refresh_failures_total.clone()),
             Box::new(ai_requests_total.clone()),
             Box::new(ai_tokens_total.clone()),
+            Box::new(ai_stream_chunks_total.clone()),
+            Box::new(ai_first_token_seconds.clone()),
+            Box::new(ai_stream_duration_seconds.clone()),
         ] {
             registry
                 .register(m)
@@ -1118,6 +1168,9 @@ impl Observability {
             config_convergence_refresh_failures_total,
             ai_requests_total,
             ai_tokens_total,
+            ai_stream_chunks_total,
+            ai_first_token_seconds,
+            ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1431,6 +1484,30 @@ impl Observability {
     /// `dwara_config_convergence_refresh_total`.
     pub fn record_config_convergence_refresh(&self) {
         self.config_convergence_refresh_total.inc();
+    }
+
+    /// Count forwarded streaming chunks (DW-077) in
+    /// `dwara_ai_stream_chunks_total{provider}`.
+    pub fn record_ai_stream_chunk(&self, provider: &str) {
+        self.ai_stream_chunks_total
+            .with_label_values(&[provider])
+            .inc();
+    }
+
+    /// Record the time to a stream's first forwarded chunk (DW-077) in
+    /// `dwara_ai_first_token_seconds{provider}`. Call once per stream.
+    pub fn record_ai_first_token(&self, provider: &str, seconds: f64) {
+        self.ai_first_token_seconds
+            .with_label_values(&[provider])
+            .observe(seconds);
+    }
+
+    /// Record a completed stream's total duration (DW-077) in
+    /// `dwara_ai_stream_duration_seconds{provider}`.
+    pub fn record_ai_stream_end(&self, provider: &str, seconds: f64) {
+        self.ai_stream_duration_seconds
+            .with_label_values(&[provider])
+            .observe(seconds);
     }
 
     /// Count one convergence refresh failure (DW-054) in

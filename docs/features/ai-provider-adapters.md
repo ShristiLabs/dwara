@@ -93,16 +93,39 @@ to `ai` routes — the AI action owns its response shape end to end
 (route `limits:` and the standard policy chain DO apply; they run
 before the action).
 
-## Streaming status (DW-075 scope)
+## Streaming (DW-077)
 
-Adapters translate provider SSE deltas (`parse_stream_event`) and the
-in-house SSE framer (`ai::sse`, the locked no-new-dependency decision)
-is verified against recorded streams — but the GATEWAY path answers
-`stream: true` with 400 `streaming_not_supported` until DW-077 wires
-the zero-buffer pass-through. The delta translation, usage extraction
-from deltas, and OpenAI chunk serialization
-(`openai_compat::stream_event_to_openai_chunk`) all exist and are
-tested now so DW-077 composes on top without adapter changes.
+`stream: true` now streams: the provider's SSE response is translated
+frame-by-frame into OpenAI-shaped chunks and forwarded with ZERO added
+buffering — each complete provider frame becomes client frames in the
+same poll (`ai::stream::StreamTranslator` over `ai::sse`; the dataplane
+`AiStreamBody` drives it over the upstream body, one poll in, one
+frame out).
+
+Shape: every provider delta is one `chat.completion.chunk` frame;
+provider usage events accumulate (provider-reported only — the locked
+decision, no estimation) and land in ONE terminal `choices: []` usage
+chunk; the GATEWAY owns the `data: [DONE]` terminator (the provider's
+own, even OpenAI's, is swallowed — uniform ordering: deltas, usage,
+DONE). Usage reporting is forced on the provider call
+(`stream_options.include_usage`) so metrics and the upcoming token
+budgets always have counts, whether or not the client asked.
+
+Interaction with failover (DW-076): the candidate chain applies until
+the streaming response is returned — the COMMIT point (headers + first
+chunks go to the client; a later candidate can no longer replace
+anything). A provider abort AFTER the commit ends the stream cleanly:
+a terminal OpenAI-shaped error chunk (`provider_stream_aborted`) then
+`[DONE]`; already-forwarded content stands. A non-SSE 200 from a
+misbehaving provider falls through to the buffered translate path.
+
+Metrics: `dwara_ai_stream_chunks_total{provider}` (one per forwarded
+delta chunk), `dwara_ai_first_token_seconds{provider}` (send to first
+forwarded chunk), `dwara_ai_stream_duration_seconds{provider}`, and
+the stream's provider-reported usage into `dwara_ai_tokens_total` with
+the canary version label. The success outcome is recorded at stream
+start; terminal metrics fire exactly once (clean end or client
+hangup).
 
 ## Routing and failover (DW-076)
 
@@ -244,6 +267,14 @@ rejected (it could never serve anything).
   pass-through (429), unreachable provider 502, unknown model 404,
   malformed body / `stream: true` 400s, validation matrix, config
   redaction.
+- `crates/dwara-core/tests/ai_streaming.rs` — the DW-077 done-whens:
+  three-dialect streaming e2e (chunk shape, content reassembly,
+  terminal usage chunk, single gateway [DONE]), first-chunk latency
+  bounded against the provider's own write instants (the zero-buffer
+  proof: the client's first chunk arrives before the provider's LAST
+  write), streamed usage equal to the provider's reported totals,
+  mid-stream abort ending cleanly, failover before the commit point,
+  and per-chunk metrics.
 - `crates/dwara-core/tests/ai_routing.rs` — the DW-076 done-whens:
   failover on injected 429/500/transport-error (client sees success,
   both attempts attributed), exhaustion returns the last provider's

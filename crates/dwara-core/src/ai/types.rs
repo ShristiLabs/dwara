@@ -234,7 +234,11 @@ pub struct Usage {
 impl Usage {
     /// Fold a later usage report into this one (streaming providers
     /// report input tokens in an opening event and output tokens in a
-    /// closing one; each side is filled in as it arrives).
+    /// closing one; each side is filled in as it arrives). When both
+    /// sides are known and the provider never sent a total, the total
+    /// is DERIVED (prompt + completion) — the same rule the
+    /// non-streaming Anthropic parse applies, so a provider's streamed
+    /// and non-streamed totals agree.
     pub fn merge(&mut self, later: Usage) {
         if later.prompt_tokens.is_some() {
             self.prompt_tokens = later.prompt_tokens;
@@ -244,6 +248,11 @@ impl Usage {
         }
         if later.total_tokens.is_some() {
             self.total_tokens = later.total_tokens;
+        }
+        if self.total_tokens.is_none() {
+            if let (Some(p), Some(c)) = (self.prompt_tokens, self.completion_tokens) {
+                self.total_tokens = Some(p + c);
+            }
         }
     }
 }
