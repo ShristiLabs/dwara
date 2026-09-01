@@ -607,6 +607,13 @@ pub struct DataPlane {
     /// allowlists -> every consumer unrestricted) when governance is
     /// not configured — fail-open.
     ai_governance: ArcSwap<crate::ai::governance::GovernanceEngine>,
+    /// AI prompt/response logging (DW-081): the compiled logging
+    /// engine (enabled flag, sampling rate, retention, redactor),
+    /// compiled from the `ai.logging` config block. Swapped on every
+    /// reload so a logging change takes effect on the next request
+    /// with no restart. None (an empty engine) when logging is not
+    /// configured — capture is off (privacy-first).
+    ai_logging: arc_swap::ArcSwapOption<crate::ai::logging::AiLoggingEngine>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -871,10 +878,14 @@ impl DataPlane {
         let ai_governance = ArcSwap::from_pointee(
             crate::ai::governance::GovernanceEngine::compile(snapshot.gateway().ai.as_ref()),
         );
+        let ai_logging =
+            crate::ai::logging::AiLoggingEngine::compile(snapshot.gateway().ai.as_ref())
+                .map(Arc::new);
         let dp = DataPlane {
             ai_budgets,
             ai_pricing,
             ai_governance,
+            ai_logging: arc_swap::ArcSwapOption::new(ai_logging),
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1306,6 +1317,21 @@ impl DataPlane {
             .store(Arc::new(crate::ai::governance::GovernanceEngine::compile(
                 snapshot.gateway().ai.as_ref(),
             )));
+        // DW-081: the logging engine swaps with the generation — a
+        // logging config change takes effect on the next request with
+        // no restart. Also update the analytics store's prompt log
+        // retention so the maintenance tick ages records out per the
+        // new window.
+        let logging_engine =
+            crate::ai::logging::AiLoggingEngine::compile(snapshot.gateway().ai.as_ref())
+                .map(Arc::new);
+        if let Some(engine) = &logging_engine {
+            if let Some(analytics) = self.analytics() {
+                let retention_ms = (engine.retention_secs() as i64) * 1000;
+                analytics.set_prompt_log_retention_ms(retention_ms);
+            }
+        }
+        self.ai_logging.store(logging_engine);
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1568,6 +1594,13 @@ impl DataPlane {
     /// allowlists and the audit switch.
     pub fn ai_governance(&self) -> Arc<crate::ai::governance::GovernanceEngine> {
         self.ai_governance.load_full()
+    }
+
+    /// The AI prompt/response logging engine (DW-081): current logging
+    /// config (enabled, sampling, retention) and compiled redactor.
+    /// None when logging is not configured (capture off, privacy-first).
+    pub fn ai_logging(&self) -> Option<Arc<crate::ai::logging::AiLoggingEngine>> {
+        self.ai_logging.load_full()
     }
 
     /// The current generation's upstream registry. Used by the

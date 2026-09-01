@@ -522,6 +522,21 @@ where
                 .as_ref()
                 .map(|g| g.team_key().to_string())
                 .unwrap_or_default();
+            // DW-081: build the streaming capture context when logging
+            // is enabled for this consumer. The prompt is stored
+            // redacted at stream close; the response is marked as
+            // streamed (the full content is not reassembled).
+            let prompt_log_ctx = build_stream_prompt_log_ctx(
+                dp,
+                gen,
+                rid,
+                route_name,
+                &provider.name,
+                &target.provider_model,
+                version,
+                identity,
+                &json_body,
+            );
             let body = super::ai_proxy::AiStreamBody::new(
                 up_body,
                 adapter,
@@ -538,6 +553,7 @@ where
                 dp.analytics(),
                 consumer_name,
                 team,
+                prompt_log_ctx,
             );
             return Response::builder()
                 .status(StatusCode::OK)
@@ -671,6 +687,24 @@ where
         }
         obs.record_ai_request(&provider.name, route_name, "success", version);
         let body = openai_compat::response_to_openai(&chat_resp, &chat_req.model, rid);
+        // DW-081: prompt/response logging capture hook (non-streaming).
+        // After the response is parsed and BEFORE it is sent, check
+        // whether logging is enabled (global + per-consumer override),
+        // apply sampling, redact, and offer to analytics. The capture
+        // is fire-and-forget (never blocks the response path).
+        capture_prompt_log(
+            dp,
+            gen,
+            rid,
+            route_name,
+            &provider.name,
+            &target.provider_model,
+            version,
+            identity,
+            &json_body,
+            &body,
+            false,
+        );
         tracing::info!(
             code = "ai_request_served",
             request_id = %rid,
@@ -700,6 +734,115 @@ where
         );
     }
     fallback_response
+}
+
+/// DW-081: prompt/response logging capture hook. Checks whether
+/// logging is enabled (global + per-consumer override), applies
+/// sampling, redacts the prompt and response JSON, and offers the
+/// record to the analytics store. Fire-and-forget — never blocks.
+#[allow(clippy::too_many_arguments)]
+fn capture_prompt_log(
+    dp: &Arc<DataPlane>,
+    gen: &Arc<Generation>,
+    rid: &str,
+    route_name: &str,
+    provider: &str,
+    model: &str,
+    version: &str,
+    identity: Option<&crate::security::authn::Identity>,
+    prompt_json: &serde_json::Value,
+    response_json: &serde_json::Value,
+    stream: bool,
+) {
+    let Some(logging) = dp.ai_logging() else {
+        return;
+    };
+    // Resolve the per-consumer override from the config.
+    let consumer_name = identity
+        .map(|id| id.consumer_name.as_str())
+        .unwrap_or("anonymous");
+    let consumer_override = gen
+        .snapshot
+        .gateway()
+        .consumers
+        .iter()
+        .find(|c| c.name == consumer_name)
+        .and_then(|c| c.ai_logging);
+    if !logging.capture_for(consumer_override) {
+        return;
+    }
+    // Sampling: deterministic per request id.
+    if !logging.should_sample(rid) {
+        return;
+    }
+    // Redact both the prompt and the response.
+    let redactor = logging.redactor();
+    let redacted_prompt = redactor.redact_json(prompt_json);
+    let redacted_response = redactor.redact_json(response_json);
+    // Offer to analytics (fire-and-forget).
+    if let Some(analytics) = dp.analytics() {
+        analytics.offer_ai_prompt_log(crate::analytics::AiPromptLogRecord {
+            ts_ms: now_ms(),
+            request_id: rid.to_string(),
+            consumer: consumer_name.to_string(),
+            route: route_name.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            version: version.to_string(),
+            prompt_json: redacted_prompt.to_string(),
+            response_json: redacted_response.to_string(),
+            stream,
+        });
+    }
+}
+
+/// DW-081: build the streaming capture context. Returns None when
+/// logging is off for this consumer or the sampling decision is
+/// negative — the stream body then skips the capture at close. The
+/// prompt JSON is carried to stream close where it is redacted and
+/// offered (the response is marked as streamed).
+#[allow(clippy::too_many_arguments)]
+fn build_stream_prompt_log_ctx(
+    dp: &Arc<DataPlane>,
+    gen: &Arc<Generation>,
+    rid: &str,
+    route_name: &str,
+    provider: &str,
+    model: &str,
+    version: &str,
+    identity: Option<&crate::security::authn::Identity>,
+    prompt_json: &serde_json::Value,
+) -> Option<PromptLogCtx> {
+    let logging = dp.ai_logging()?;
+    let consumer_name = identity
+        .map(|id| id.consumer_name.as_str())
+        .unwrap_or("anonymous");
+    let consumer_override = gen
+        .snapshot
+        .gateway()
+        .consumers
+        .iter()
+        .find(|c| c.name == consumer_name)
+        .and_then(|c| c.ai_logging);
+    if !logging.capture_for(consumer_override) {
+        return None;
+    }
+    if !logging.should_sample(rid) {
+        return None;
+    }
+    // Redact the prompt at build time (the stream body does not carry
+    // the redactor).
+    let redactor = logging.redactor();
+    let redacted_prompt = redactor.redact_json(prompt_json);
+    Some(PromptLogCtx {
+        route: route_name.to_string(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        version: version.to_string(),
+        consumer: consumer_name.to_string(),
+        prompt_json: redacted_prompt.to_string(),
+        recorded: false,
+    })
 }
 
 /// Collect a body up to `cap` bytes, aborting the read the moment the
@@ -886,6 +1029,27 @@ pub struct AiStreamBody {
     /// DW-079: whether the spend record has been recorded (exactly
     /// once per stream, at close).
     spend_recorded: bool,
+    /// DW-081: prompt/response logging context for streaming capture.
+    /// The prompt JSON (the original OpenAI-shaped request body) is
+    /// stored redacted at stream close; the response is marked as
+    /// streamed (the full content is not reassembled — buffering the
+    /// entire stream would contradict the zero-buffer design).
+    prompt_log_ctx: Option<PromptLogCtx>,
+}
+
+/// DW-081: the streaming capture context carried by AiStreamBody.
+pub(super) struct PromptLogCtx {
+    route: String,
+    provider: String,
+    model: String,
+    version: String,
+    consumer: String,
+    /// The REDACTED prompt as a JSON string (redacted at build time
+    /// so the stream body does not need to carry the redactor).
+    prompt_json: String,
+    /// Whether the prompt log has been recorded (exactly once per
+    /// stream, at close).
+    recorded: bool,
 }
 
 impl AiStreamBody {
@@ -909,6 +1073,7 @@ impl AiStreamBody {
         analytics: Option<std::sync::Arc<crate::analytics::EmbeddedAnalytics>>,
         consumer: String,
         team: String,
+        prompt_log_ctx: Option<PromptLogCtx>,
     ) -> Self {
         AiStreamBody {
             inner: Some(inner),
@@ -935,6 +1100,7 @@ impl AiStreamBody {
             consumer,
             team,
             spend_recorded: false,
+            prompt_log_ctx,
         }
     }
 
@@ -1080,6 +1246,32 @@ impl AiStreamBody {
                     total_tokens: total,
                     cost_micros: cost,
                 });
+            }
+        }
+        // DW-081: streaming prompt/response capture. The prompt is
+        // stored redacted (redacted at build time); the response is
+        // marked as streamed (the full content is not reassembled —
+        // buffering the entire stream would contradict the zero-buffer
+        // design). The context was built at stream start only when
+        // logging is enabled for this consumer and the sampling
+        // decision was positive.
+        if let Some(ctx) = &mut self.prompt_log_ctx {
+            if !ctx.recorded {
+                ctx.recorded = true;
+                if let Some(analytics) = &self.analytics {
+                    analytics.offer_ai_prompt_log(crate::analytics::AiPromptLogRecord {
+                        ts_ms: now_ms(),
+                        request_id: self.rid.clone(),
+                        consumer: ctx.consumer.clone(),
+                        route: ctx.route.clone(),
+                        provider: ctx.provider.clone(),
+                        model: ctx.model.clone(),
+                        version: ctx.version.clone(),
+                        prompt_json: ctx.prompt_json.clone(),
+                        response_json: serde_json::json!({"streamed": true}).to_string(),
+                        stream: true,
+                    });
+                }
             }
         }
     }

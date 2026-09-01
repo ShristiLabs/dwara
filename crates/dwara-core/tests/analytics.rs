@@ -43,7 +43,7 @@ async fn completion_path_records_raw_rows_with_custom_dims() {
     );
     let yaml = gateway_yaml(&gateway_extra, backend_port, None, "");
     let dp = support::dataplane_from(&yaml);
-    let store = EmbeddedAnalytics::open(&db_path, DEFAULT_RETENTION_MS, 50).unwrap();
+    let store = EmbeddedAnalytics::open(&db_path, DEFAULT_RETENTION_MS, 50, 0).unwrap();
     dp.set_analytics(Arc::clone(&store));
     let port = spawn_gateway(dp).await;
     let client = h1_client();

@@ -1491,6 +1491,7 @@ async fn analytics_dashboard_top_and_query_serve_rollups() {
         db.to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1676,6 +1677,7 @@ async fn analytics_exports_list_is_newest_first_with_default_and_clamped_limits(
         db.to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1768,6 +1770,7 @@ async fn analytics_exports_run_writes_files_ledger_and_a_parsable_statement() {
         db.to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1878,6 +1881,7 @@ async fn analytics_exports_run_rejects_invalid_requests_without_side_effects() {
         db.to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1940,6 +1944,7 @@ async fn analytics_exports_run_without_analytics_exports_block_is_400() {
         db.to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));

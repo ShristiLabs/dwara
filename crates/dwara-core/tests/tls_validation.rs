@@ -413,5 +413,6 @@ fn base_consumer_rest() -> dwara_core::config::Consumer {
         groups: vec![],
         authorization: None,
         quotas: None,
+        ai_logging: None,
     }
 }

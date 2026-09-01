@@ -93,6 +93,7 @@ fn schema_v2_export_runs_table_exists() {
         dir.path().join("a.db").to_str().unwrap(),
         DEFAULT_RETENTION_MS,
         1000,
+        0,
     )
     .unwrap();
     store
@@ -104,7 +105,7 @@ fn schema_v2_export_runs_table_exists() {
             )?;
             assert_eq!(n, 1);
             let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            assert_eq!(v, 4);
+            assert_eq!(v, 5);
             Ok(())
         })
         .unwrap();

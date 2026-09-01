@@ -223,8 +223,32 @@ pub const SCHEMA_V4: &str = "
     CREATE INDEX IF NOT EXISTS idx_ai_governance_consumer ON ai_governance_events(consumer);
 ";
 
+/// Schema v5 (DW-081): the `ai_prompt_logs` table. One row per
+/// captured AI request carrying the REDACTED prompt and response as
+/// JSON, attributed to the consumer/route/provider/model that served
+/// it. Capture is opt-in (privacy-first); the redaction pass scrubs
+/// PII/secrets before storage. The admin `/analytics/prompt-logs`
+/// endpoint reads these rows.
+pub const SCHEMA_V5: &str = "
+    CREATE TABLE IF NOT EXISTS ai_prompt_logs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms         INTEGER NOT NULL,
+        request_id    TEXT NOT NULL,
+        consumer      TEXT NOT NULL,
+        route         TEXT NOT NULL,
+        provider      TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        version       TEXT NOT NULL DEFAULT '',
+        prompt_json   TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        stream        INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_prompt_logs_ts ON ai_prompt_logs(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_prompt_logs_consumer ON ai_prompt_logs(consumer);
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
@@ -257,6 +281,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 4 {
         conn.execute_batch(SCHEMA_V4)?;
         conn.pragma_update(None, "user_version", 4)?;
+    }
+    if version < 5 {
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.pragma_update(None, "user_version", 5)?;
     }
     Ok(())
 }

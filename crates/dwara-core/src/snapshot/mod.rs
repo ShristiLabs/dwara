@@ -2517,6 +2517,47 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+    // DW-081: prompt/response logging validation. The sample rate
+    // must be 0.0..=1.0, retention must be > 0 when enabled, and
+    // custom redaction patterns must be valid regexes (compiled at
+    // validation time — invalid regex fails at publish).
+    if let Some(logging) = &ai.logging {
+        if !(0.0..=1.0).contains(&logging.sample_rate) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "ai.logging.sample_rate",
+                format!(
+                    "sample_rate must be between 0.0 and 1.0 (got {})",
+                    logging.sample_rate
+                ),
+            ));
+        }
+        if logging.enabled && logging.retention_secs == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "ai.logging.retention_secs",
+                "retention_secs must be > 0 when logging is enabled \
+                 (0 would retain records forever — omit the field for \
+                 the 7-day default, or set a positive value)",
+            ));
+        }
+        for (i, pat) in logging.redaction.patterns.iter().enumerate() {
+            if regex::Regex::new(pat).is_err() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.logging.redaction.patterns[{i}]"),
+                    format!(
+                        "'{}' is not a valid regex pattern (the custom \
+                         redaction pattern must compile)",
+                        pat
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {

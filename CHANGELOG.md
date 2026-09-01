@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI prompt/response logging (DW-081): opt-in capture of prompts and
+  responses with PII redaction, sampling, and retention. Capture is
+  OFF by default (privacy-first). When enabled (`ai.logging.enabled:
+  true`), a redaction pass scrubs PII and secrets (emails, phone
+  numbers, API keys, credit cards, Bearer tokens, plus custom regex
+  patterns) from all string values in the serialized prompt and
+  response JSON before storage -- no PII reaches the log store.
+  Sampling (`sample_rate`, 0.0 to 1.0) is deterministic by request
+  id. Retention (`retention_secs`, default 7 days) deletes old
+  records via the analytics maintenance tick. Per-consumer override
+  (`consumers[].ai_logging: true|false`) respects tenant preference.
+  Logs are stored in the analytics store's new `ai_prompt_logs` table
+  (schema v5) and queryable via `POST /analytics/prompt-logs` on the
+  admin API. For streaming responses, the prompt is captured in full
+  and the response is marked as streamed (the zero-buffer design
+  precludes full content reassembly). New `ai::redaction` and
+  `ai::logging` modules; no new dependencies (regex already in-tree).
+
 - Model governance (DW-084): per-team model allowlists
   (`ai.governance.team_allowlists`, keyed by policy name) block
   consumers from calling model aliases not in their team's allowlist.

@@ -707,3 +707,133 @@ pub fn governance_audit(
     }
     Ok(out)
 }
+
+/// One prompt log row (DW-081): a raw `ai_prompt_logs` record — the
+/// redacted prompt and response for one captured AI request.
+#[derive(Debug, Serialize)]
+pub struct PromptLogRow {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id (correlation handle).
+    pub request_id: String,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The route name that served the request.
+    pub route: String,
+    /// The serving provider name.
+    pub provider: String,
+    /// The provider's own model identifier.
+    pub model: String,
+    /// The canary version label, or empty for non-canary.
+    pub version: String,
+    /// The REDACTED prompt as JSON.
+    pub prompt_json: String,
+    /// The REDACTED response as JSON.
+    pub response_json: String,
+    /// Whether the request was streaming.
+    pub stream: bool,
+}
+
+/// The prompt-logs endpoint's request body (DW-081): a time window
+/// over the `ai_prompt_logs` table, optionally filtered by consumer.
+#[derive(Debug, Deserialize)]
+pub struct PromptLogQuery {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Optional consumer filter.
+    #[serde(default)]
+    pub consumer: Option<String>,
+    /// Maximum returned rows (default 1 000, hard cap 10 000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Why a prompt-logs query was rejected before SQL was built.
+#[derive(Debug)]
+pub enum PromptLogError {
+    BadRange,
+}
+
+impl std::fmt::Display for PromptLogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptLogError::BadRange => write!(f, "from_ms must be < to_ms"),
+        }
+    }
+}
+
+impl std::error::Error for PromptLogError {}
+
+impl PromptLogQuery {
+    /// Reject an invalid range.
+    pub fn validate(&self) -> Result<(), PromptLogError> {
+        if self.from_ms >= self.to_ms {
+            return Err(PromptLogError::BadRange);
+        }
+        Ok(())
+    }
+}
+
+/// Execute a prompt-logs query (DW-081): return the raw
+/// `ai_prompt_logs` rows in a time window, newest first. Reads the
+/// RAW rows directly — prompt logs are per-request, not rolled up.
+/// Optionally filtered by consumer.
+pub fn prompt_logs(conn: &Connection, q: &PromptLogQuery) -> rusqlite::Result<Vec<PromptLogRow>> {
+    let limit = q.limit.unwrap_or(1_000).min(10_000);
+    let mut out = Vec::new();
+    if let Some(consumer) = &q.consumer {
+        let mut stmt = conn.prepare(
+            "SELECT ts_ms, request_id, consumer, route, provider, model, version, \
+             prompt_json, response_json, stream \
+             FROM ai_prompt_logs \
+             WHERE ts_ms >= ? AND ts_ms < ? AND consumer = ? \
+             ORDER BY ts_ms DESC \
+             LIMIT ?",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![
+            q.from_ms,
+            q.to_ms,
+            consumer,
+            limit as i64
+        ])?;
+        while let Some(row) = rows.next()? {
+            out.push(PromptLogRow {
+                ts_ms: row.get(0)?,
+                request_id: row.get(1)?,
+                consumer: row.get(2)?,
+                route: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                version: row.get(6)?,
+                prompt_json: row.get(7)?,
+                response_json: row.get(8)?,
+                stream: row.get::<_, i64>(9)? != 0,
+            });
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT ts_ms, request_id, consumer, route, provider, model, version, \
+             prompt_json, response_json, stream \
+             FROM ai_prompt_logs \
+             WHERE ts_ms >= ? AND ts_ms < ? \
+             ORDER BY ts_ms DESC \
+             LIMIT ?",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![q.from_ms, q.to_ms, limit as i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(PromptLogRow {
+                ts_ms: row.get(0)?,
+                request_id: row.get(1)?,
+                consumer: row.get(2)?,
+                route: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                version: row.get(6)?,
+                prompt_json: row.get(7)?,
+                response_json: row.get(8)?,
+                stream: row.get::<_, i64>(9)? != 0,
+            });
+        }
+    }
+    Ok(out)
+}

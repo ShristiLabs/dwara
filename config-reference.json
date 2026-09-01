@@ -436,6 +436,17 @@
             }
           ]
         },
+        "logging": {
+          "description": "Prompt/response logging (DW-081): opt-in capture of the\ncanonical prompt and response with PII redaction, sampling,\nand retention. Absent (the default): no capture — privacy-first\n(no prompt or response text is ever stored). When present and\n`enabled: true`, a redaction pass scrubs PII/secrets before\nstorage, `sample_rate` controls volume, and `retention_secs`\nages records out. Per-consumer `ai_logging` overrides respect\ntenant preference (see [`crate::config::Consumer::ai_logging`]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiLogging"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "models": {
           "description": "Model alias table: the `model` value a client puts in its request\nbody maps to the provider that serves it and the provider's own\nmodel identifier. The alias is echoed back to the client; the\n`provider_model` never leaves the gateway.",
           "type": "object",
@@ -477,6 +488,38 @@
               "type": "string"
             }
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiLogging": {
+      "description": "Prompt/response logging (DW-081 `ai.logging`): opt-in capture of\nthe canonical prompt and response with PII redaction, sampling,\nand retention. Capture is OFF by default (privacy-first): the\n`enabled` field defaults to false, so an `ai.logging` block\nwithout `enabled: true` captures nothing. When on, a redaction\npass scrubs PII/secrets before storage, `sample_rate` controls\nvolume, and `retention_secs` ages records out. Per-consumer\n`ai_logging` overrides respect tenant preference.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default false (privacy-first): no prompt or\nresponse text is stored unless this is explicitly true.",
+          "type": "boolean",
+          "default": false
+        },
+        "redaction": {
+          "description": "PII redaction patterns. Built-in defaults (emails, phone\nnumbers, API keys, credit card numbers) are always active\nwhen redaction is on; custom patterns are added to the set.",
+          "$ref": "#/$defs/RedactionConfig",
+          "default": {
+            "replacement": ""
+          }
+        },
+        "retention_secs": {
+          "description": "Retention in seconds. Records older than this are deleted by\nthe analytics maintenance tick. Default 7 days (604800).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 604800,
+          "minimum": 0
+        },
+        "sample_rate": {
+          "description": "Sampling rate 0.0..=1.0. Default 1.0 (capture all when\nenabled). The sample decision is deterministic per request\n(a hash of the request id), so a re-send with the same id\nlands on the same decision.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
         }
       },
       "additionalProperties": false
@@ -1219,6 +1262,13 @@
       "description": "Identity of an API caller (app/team/user); owns credentials, quotas, and\nthe analytics identity.",
       "type": "object",
       "properties": {
+        "ai_logging": {
+          "description": "AI prompt/response logging override (DW-081). None = inherit\nthe global `ai.logging.enabled` setting; Some(false) = disable\ncapture for this consumer even if global is on; Some(true) =\nenable capture for this consumer even if global is off\n(requires the `ai.logging` block to exist — the redactor and\nretention are always needed). The per-consumer toggle respects\ntenant preference: a consumer with capture disabled produces\nno stored prompts/responses.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "authorization": {
           "description": "Consumer-level authorization rules (#123): the MOST specific link\nof the frozen chain consumer > route > service > listener >\nglobal — applies to every request authenticated as this consumer\n(naturally only once authentication has identified it). A deny at\nany level wins; otherwise the most specific level with rules\ngoverns (see [`Authz`] and the `authz` module). Same validation\nrules as route-level authorization.",
           "anyOf": [
@@ -2911,6 +2961,25 @@
           ],
           "format": "uint32",
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RedactionConfig": {
+      "description": "PII redaction configuration (DW-081 `ai.logging.redaction`).\nBuilt-in patterns scrub common PII/secrets; custom patterns add\ndeployment-specific scrubbing. All patterns are compiled into a\nsingle `regex::RegexSet` for one-pass efficiency.",
+      "type": "object",
+      "properties": {
+        "patterns": {
+          "description": "Additional regex patterns to scrub (beyond the built-in\ndefaults). Each is a Rust `regex` crate pattern; invalid\npatterns fail validation at publish time.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "replacement": {
+          "description": "Replacement string for redacted content. Default\n`\"[REDACTED]\"`.",
+          "type": "string",
+          "default": "[REDACTED]"
         }
       },
       "additionalProperties": false

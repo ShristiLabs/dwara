@@ -822,6 +822,58 @@ async fn analytics_governance_audit(
     }
 }
 
+/// POST /analytics/prompt-logs (DW-081): the prompt log endpoint — a
+/// time window over the `ai_prompt_logs` table, returning the
+/// REDACTED prompt and response for each captured AI request.
+/// Optionally filtered by consumer. Never SQL text.
+async fn analytics_prompt_logs(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let q: dwara_core::analytics::query::PromptLogQuery = match serde_json::from_slice(&body) {
+        Ok(q) => q,
+        Err(err) => {
+            return envelope(
+                400,
+                "analytics_prompt_logs_invalid",
+                &format!("body is not a valid prompt logs query: {err}"),
+                request_id,
+            )
+        }
+    };
+    if let Err(err) = q.validate() {
+        return envelope(
+            400,
+            "analytics_prompt_logs_invalid",
+            &err.to_string(),
+            request_id,
+        );
+    }
+    match store.query(|c| dwara_core::analytics::query::prompt_logs(c, &q)) {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "query": {
+                    "from_ms": q.from_ms,
+                    "to_ms": q.to_ms,
+                    "consumer": q.consumer,
+                },
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(
+            500,
+            "analytics_prompt_logs_failed",
+            &e.to_string(),
+            request_id,
+        ),
+    }
+}
+
 /// GET /analytics/exports (DW-120): the export run ledger, newest
 /// first — every scheduled or manual usage-statement export attempt
 /// per window (status, partial flag, formats, consumer/request
@@ -1390,6 +1442,28 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
                 }
             };
             analytics_governance_audit(ctx, body, &request_id).await
+        }
+        // POST /analytics/prompt-logs (DW-081): the prompt log query
+        // — a time window over the ai_prompt_logs table, returning
+        // the REDACTED prompt and response for each captured AI
+        // request. Optionally filtered by consumer.
+        ("POST", "/analytics/prompt-logs") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "query_too_large",
+                            &format!("query body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            analytics_prompt_logs(ctx, body, &request_id).await
         }
         // GET /analytics/exports (DW-120): the export run ledger,
         // newest first. Query param: limit (default 25, 1..=100).

@@ -681,7 +681,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(|r| r.effective())
                 .unwrap_or(dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS);
             let flush = cfg.flush_ms.unwrap_or(1000);
-            match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush) {
+            match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush, 0) {
                 Ok(store) => {
                     dp.set_analytics(Arc::clone(&store));
                     let handles = store.spawn_workers(shutdown_rx.clone());

@@ -73,6 +73,16 @@ pub struct AiConfig {
     /// and no governance audit events are recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance: Option<AiGovernance>,
+    /// Prompt/response logging (DW-081): opt-in capture of the
+    /// canonical prompt and response with PII redaction, sampling,
+    /// and retention. Absent (the default): no capture — privacy-first
+    /// (no prompt or response text is ever stored). When present and
+    /// `enabled: true`, a redaction pass scrubs PII/secrets before
+    /// storage, `sample_rate` controls volume, and `retention_secs`
+    /// ages records out. Per-consumer `ai_logging` overrides respect
+    /// tenant preference (see [`crate::config::Consumer::ai_logging`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<AiLogging>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -247,4 +257,69 @@ pub struct AiPricing {
     pub input_per_1k_micros: u64,
     /// Micro-USD per 1 000 output (completion) tokens.
     pub output_per_1k_micros: u64,
+}
+
+/// Default sampling rate: capture all when enabled (1.0).
+fn default_sample_rate() -> f64 {
+    1.0
+}
+
+/// Default retention: 7 days in seconds (604800).
+fn default_retention_secs() -> u64 {
+    604_800
+}
+
+/// Default redaction replacement string.
+fn default_replacement() -> String {
+    "[REDACTED]".to_string()
+}
+
+/// Prompt/response logging (DW-081 `ai.logging`): opt-in capture of
+/// the canonical prompt and response with PII redaction, sampling,
+/// and retention. Capture is OFF by default (privacy-first): the
+/// `enabled` field defaults to false, so an `ai.logging` block
+/// without `enabled: true` captures nothing. When on, a redaction
+/// pass scrubs PII/secrets before storage, `sample_rate` controls
+/// volume, and `retention_secs` ages records out. Per-consumer
+/// `ai_logging` overrides respect tenant preference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiLogging {
+    /// Master switch. Default false (privacy-first): no prompt or
+    /// response text is stored unless this is explicitly true.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sampling rate 0.0..=1.0. Default 1.0 (capture all when
+    /// enabled). The sample decision is deterministic per request
+    /// (a hash of the request id), so a re-send with the same id
+    /// lands on the same decision.
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: f64,
+    /// Retention in seconds. Records older than this are deleted by
+    /// the analytics maintenance tick. Default 7 days (604800).
+    #[serde(default = "default_retention_secs")]
+    pub retention_secs: u64,
+    /// PII redaction patterns. Built-in defaults (emails, phone
+    /// numbers, API keys, credit card numbers) are always active
+    /// when redaction is on; custom patterns are added to the set.
+    #[serde(default)]
+    pub redaction: RedactionConfig,
+}
+
+/// PII redaction configuration (DW-081 `ai.logging.redaction`).
+/// Built-in patterns scrub common PII/secrets; custom patterns add
+/// deployment-specific scrubbing. All patterns are compiled into a
+/// single `regex::RegexSet` for one-pass efficiency.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedactionConfig {
+    /// Additional regex patterns to scrub (beyond the built-in
+    /// defaults). Each is a Rust `regex` crate pattern; invalid
+    /// patterns fail validation at publish time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<String>,
+    /// Replacement string for redacted content. Default
+    /// `"[REDACTED]"`.
+    #[serde(default = "default_replacement")]
+    pub replacement: String,
 }

@@ -426,6 +426,7 @@ fn runtime_route_plans_chains_and_canaries() {
         .collect(),
         pricing: std::collections::BTreeMap::new(),
         governance: None,
+        logging: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
 

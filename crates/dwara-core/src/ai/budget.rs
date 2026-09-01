@@ -557,6 +557,7 @@ mod tests {
             quotas: None,
             groups: vec![],
             authorization: None,
+            ai_logging: None,
         }];
         g
     }

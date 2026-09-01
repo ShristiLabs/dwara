@@ -53,7 +53,7 @@ pub mod query;
 pub mod rollup;
 pub mod schema;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
@@ -172,6 +172,41 @@ pub struct AiGovernanceEvent {
     pub reason: String,
 }
 
+/// One AI prompt/response log record (DW-081): the per-request
+/// capture written to the `ai_prompt_logs` table. A PLAIN DTO —
+/// deliberately not importing `ai::types` (the analytics domain may
+/// not import the `ai` domain; see `scripts/check_deps.py`). The
+/// dataplane serializes and redacts the `ChatRequest`/`ChatResponse`
+/// at the call site, passing the redacted JSON strings here. Capture
+/// is opt-in (privacy-first); the redaction pass runs BEFORE the
+/// record is offered.
+#[derive(Debug, Clone)]
+pub struct AiPromptLogRecord {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id (correlation handle).
+    pub request_id: String,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The route name that served the request.
+    pub route: String,
+    /// The serving provider name.
+    pub provider: String,
+    /// The provider's own model identifier.
+    pub model: String,
+    /// The canary version label, or empty for non-canary.
+    pub version: String,
+    /// The REDACTED prompt as JSON (the serialized ChatRequest after
+    /// redaction).
+    pub prompt_json: String,
+    /// The REDACTED response as JSON (the serialized ChatResponse
+    /// after redaction, or `{"streamed": true}` for streaming
+    /// captures where the full content is not reassembled).
+    pub response_json: String,
+    /// Whether the request was streaming.
+    pub stream: bool,
+}
+
 impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
@@ -252,6 +287,19 @@ pub struct EmbeddedAnalytics {
     /// Records dropped on a full GOVERNANCE channel (the never-block
     /// counter for the DW-084 path).
     gov_dropped: AtomicU64,
+    /// DW-081: the AI prompt log channel (same fire-and-forget
+    /// posture as the spend/governance channels — drop and count on
+    /// full, never block the request path).
+    prompt_log_tx: mpsc::Sender<AiPromptLogRecord>,
+    prompt_log_rx: Mutex<Option<mpsc::Receiver<AiPromptLogRecord>>>,
+    /// Records dropped on a full PROMPT_LOG channel (the never-block
+    /// counter for the DW-081 path).
+    prompt_log_dropped: AtomicU64,
+    /// DW-081: the prompt log retention window in ms. Records older
+    /// than this are deleted by the maintenance tick. 0 = no
+    /// retention sweep (the default when logging is off). Atomic so
+    /// a reload can update it without blocking the maintainer.
+    prompt_log_retention_ms: AtomicI64,
     /// Retention config: [raw, 1m, 5m, 1h, 1d] in ms.
     retention_ms: [i64; 5],
     /// Flush tick (ms) — the writer's maximum batch latency.
@@ -264,8 +312,14 @@ impl EmbeddedAnalytics {
     /// Open (or create) the analytics database at `path`, apply
     /// migrations, and return the store with its channel wired. The
     /// writer is NOT started here — see
-    /// [`EmbeddedAnalytics::spawn_workers`].
-    pub fn open(path: &str, retention_ms: [i64; 5], flush_ms: u64) -> rusqlite::Result<Arc<Self>> {
+    /// [`EmbeddedAnalytics::spawn_workers`]. `prompt_log_retention_ms`
+    /// is the DW-081 prompt log retention window (0 = no sweep).
+    pub fn open(
+        path: &str,
+        retention_ms: [i64; 5],
+        flush_ms: u64,
+        prompt_log_retention_ms: i64,
+    ) -> rusqlite::Result<Arc<Self>> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -275,6 +329,7 @@ impl EmbeddedAnalytics {
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
         let (gov_tx, gov_rx) = mpsc::channel(CHANNEL_CAP);
+        let (prompt_log_tx, prompt_log_rx) = mpsc::channel(CHANNEL_CAP);
         Ok(Arc::new(EmbeddedAnalytics {
             conn: Mutex::new(conn),
             rx: Mutex::new(Some(rx)),
@@ -285,6 +340,10 @@ impl EmbeddedAnalytics {
             gov_tx,
             gov_rx: Mutex::new(Some(gov_rx)),
             gov_dropped: AtomicU64::new(0),
+            prompt_log_tx,
+            prompt_log_rx: Mutex::new(Some(prompt_log_rx)),
+            prompt_log_dropped: AtomicU64::new(0),
+            prompt_log_retention_ms: AtomicI64::new(prompt_log_retention_ms),
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
@@ -312,6 +371,8 @@ impl EmbeddedAnalytics {
         let spend_rx_opt = self.spend_rx.lock().unwrap().take();
         // DW-084: take the governance receiver alongside the others.
         let gov_rx_opt = self.gov_rx.lock().unwrap().take();
+        // DW-081: take the prompt log receiver alongside the others.
+        let prompt_log_rx_opt = self.prompt_log_rx.lock().unwrap().take();
         let mut writer_shutdown = shutdown.clone();
         let writer = {
             let store = Arc::clone(self);
@@ -434,6 +495,47 @@ impl EmbeddedAnalytics {
         } else {
             None
         };
+        // DW-081: the prompt log writer — same fire-and-forget batched
+        // transaction shape as the governance writer, draining the
+        // prompt log channel into the `ai_prompt_logs` table.
+        let prompt_log_writer = if let Some(mut prompt_log_rx) = prompt_log_rx_opt {
+            let store = Arc::clone(self);
+            let mut prompt_log_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<AiPromptLogRecord> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = prompt_log_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_prompt_log(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = prompt_log_shutdown.changed() => {
+                            while let Ok(r) = prompt_log_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_prompt_log(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_prompt_log(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let maintainer = {
             let store = Arc::clone(self);
             let mut shutdown2 = shutdown.clone();
@@ -454,6 +556,9 @@ impl EmbeddedAnalytics {
             handles.push(h);
         }
         if let Some(h) = gov_writer {
+            handles.push(h);
+        }
+        if let Some(h) = prompt_log_writer {
             handles.push(h);
         }
         handles
@@ -655,6 +760,73 @@ impl EmbeddedAnalytics {
         }
     }
 
+    /// One batched transaction of `ai_prompt_logs` INSERTs (DW-081).
+    /// Same swallow-and-log posture as [`flush_governance`]: a failed
+    /// batch is lost, the counter is not bumped (the records were
+    /// accepted; the DISK failed).
+    fn flush_prompt_log(&self, batch: &[AiPromptLogRecord]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_prompt_log_batch_begin_failed",
+                    "ai_prompt_logs batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO ai_prompt_logs \
+             (ts_ms, request_id, consumer, route, provider, model, version, \
+              prompt_json, response_json, stream) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_prompt_log_batch_prepare_failed",
+                    "ai_prompt_logs batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.request_id,
+                r.consumer,
+                r.route,
+                r.provider,
+                r.model,
+                r.version,
+                r.prompt_json,
+                r.response_json,
+                r.stream as i64,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_prompt_log_insert_failed",
+                    "ai_prompt_logs record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_prompt_log_commit_failed",
+                    "ai_prompt_logs batch lost: {e}"
+                );
+            }
+        }
+    }
+
     /// One rollup + retention pass (cursor-guarded; safe to run at any
     /// time, from the ticker or shutdown).
     fn maintain(&self) {
@@ -693,6 +865,19 @@ impl EmbeddedAnalytics {
                 windows = rolled,
                 "rollup pass complete"
             );
+        }
+        // DW-081: prompt log retention sweep. Records older than the
+        // configured retention window are deleted. A retention of 0
+        // means no sweep (logging is off or unconfigured).
+        let retention_ms = self.prompt_log_retention_ms.load(Ordering::Relaxed);
+        if retention_ms > 0 {
+            let cutoff = now.saturating_sub(retention_ms);
+            if let Err(e) = conn.execute("DELETE FROM ai_prompt_logs WHERE ts_ms < ?1", [cutoff]) {
+                tracing::warn!(
+                    code = "analytics_prompt_log_retention_failed",
+                    "ai_prompt_logs retention sweep failed: {e}"
+                );
+            }
         }
     }
 
@@ -784,6 +969,39 @@ impl EmbeddedAnalytics {
     /// The honest loss counter for the DW-084 path.
     pub fn dropped_governance_events(&self) -> u64 {
         self.gov_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The AI prompt log hot path (DW-081): fire-and-forget record of
+    /// one captured prompt/response pair (already redacted). NEVER
+    /// blocks — a bounded-channel `try_send` that drops and counts on
+    /// full (the same never-block posture as
+    /// [`Self::offer_ai_governance_event`]).
+    pub fn offer_ai_prompt_log(&self, rec: AiPromptLogRecord) {
+        if self.prompt_log_tx.try_send(rec).is_err() {
+            let n = self.prompt_log_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_prompt_log_channel_full",
+                    total_dropped = n + 1,
+                    "ai_prompt_logs channel full; dropping records (never blocking the dataplane)"
+                );
+            }
+        }
+    }
+
+    /// AI prompt log records accepted by [`Self::offer_ai_prompt_log`]
+    /// but dropped (channel full). The honest loss counter for the
+    /// DW-081 path.
+    pub fn dropped_prompt_log_records(&self) -> u64 {
+        self.prompt_log_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Update the prompt log retention window (DW-081). Called on
+    /// reload when the logging config changes. A retention of 0
+    /// disables the sweep.
+    pub fn set_prompt_log_retention_ms(&self, retention_ms: i64) {
+        self.prompt_log_retention_ms
+            .store(retention_ms, Ordering::Relaxed);
     }
 }
 

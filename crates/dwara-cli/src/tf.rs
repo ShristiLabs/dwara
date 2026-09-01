@@ -213,6 +213,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
                     groups: Vec::new(),
                     authorization: None,
                     quotas: None,
+                    ai_logging: None,
                 });
             }
             _ => {}

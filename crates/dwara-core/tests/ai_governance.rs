@@ -235,6 +235,7 @@ fn attach_analytics(dp: &Arc<DataPlane>) -> AnalyticsHandle {
         &dir.path().join("a.db").display().to_string(),
         ANALYTICS_DEFAULT_RETENTION_MS,
         100,
+        0,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));
@@ -543,6 +544,7 @@ async fn governance_event_direct_insert_and_query() {
         &dir.path().join("a.db").display().to_string(),
         ANALYTICS_DEFAULT_RETENTION_MS,
         50,
+        0,
     )
     .unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());
@@ -645,6 +647,7 @@ fn governance_engine_deny_when_model_not_in_allowlist() {
             team_allowlists: allowlists,
             audit: false,
         }),
+        logging: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     assert!(!engine.is_empty());
@@ -696,6 +699,7 @@ fn governance_engine_deny_wins_across_multiple_policies() {
             team_allowlists: allowlists,
             audit: false,
         }),
+        logging: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     // Consumer attaches both broad + strict. cheap is in both -> allow.

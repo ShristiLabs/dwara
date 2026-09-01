@@ -3872,6 +3872,16 @@ pub struct Consumer {
     /// follow-up (issue "DW-155").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<ConsumerQuotas>,
+    /// AI prompt/response logging override (DW-081). None = inherit
+    /// the global `ai.logging.enabled` setting; Some(false) = disable
+    /// capture for this consumer even if global is on; Some(true) =
+    /// enable capture for this consumer even if global is off
+    /// (requires the `ai.logging` block to exist — the redactor and
+    /// retention are always needed). The per-consumer toggle respects
+    /// tenant preference: a consumer with capture disabled produces
+    /// no stored prompts/responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_logging: Option<bool>,
 }
 
 /// Per-consumer request budgets (DW-033): daily and/or monthly request

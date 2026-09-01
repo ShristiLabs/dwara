@@ -38,7 +38,13 @@ fn real_now_ms() -> i64 {
 }
 
 fn open_store(dir: &tempfile::TempDir, retention: [i64; 5]) -> std::sync::Arc<EmbeddedAnalytics> {
-    EmbeddedAnalytics::open(dir.path().join("a.db").to_str().unwrap(), retention, 1000).unwrap()
+    EmbeddedAnalytics::open(
+        dir.path().join("a.db").to_str().unwrap(),
+        retention,
+        1000,
+        0,
+    )
+    .unwrap()
 }
 
 /// Insert one raw row (the redacted AccessRecord field set).

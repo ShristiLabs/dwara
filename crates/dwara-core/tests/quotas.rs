@@ -348,6 +348,7 @@ async fn quota_denial_metering_reaches_metrics_and_analytics() {
         dir.path().join("analytics.db").to_str().unwrap(),
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         20,
+        0,
     )
     .unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());

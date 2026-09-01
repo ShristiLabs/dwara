@@ -207,6 +207,7 @@ fn attach_analytics(dp: &Arc<DataPlane>) -> AnalyticsHandle {
         &dir.path().join("a.db").display().to_string(),
         ANALYTICS_DEFAULT_RETENTION_MS,
         100,
+        0,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));
@@ -263,6 +264,7 @@ fn pricing_table_computes_correct_cost() {
         models: BTreeMap::new(),
         pricing,
         governance: None,
+        logging: None,
     };
     let table = PricingTable::compile(Some(&cfg));
 
@@ -625,6 +627,7 @@ async fn spend_record_direct_insert_and_query() {
         &dir.path().join("a.db").display().to_string(),
         ANALYTICS_DEFAULT_RETENTION_MS,
         50,
+        0,
     )
     .unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());

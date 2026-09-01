@@ -112,8 +112,10 @@ crates/dwara-core/src/
                       the DW-079 ai_spend table (per-request token/cost
                       records, schema v3) and the DW-084
                       ai_governance_events table (model-usage audit,
-                      schema v4), each with its own fire-and-forget
-                      writer; implements extensions::analytics::AnalyticsSink;
+                      schema v4), and the DW-081 ai_prompt_logs table
+                      (redacted prompt/response capture, schema v5),
+                      each with its own fire-and-forget writer;
+                      implements extensions::analytics::AnalyticsSink;
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
   security/           tls, authn, authz
@@ -132,7 +134,9 @@ crates/dwara-core/src/
                       DW-079 pricing table + cost computation (cost.rs),
                       and the DW-084 model-governance engine
                       (governance.rs: per-team model allowlists +
-                      shadow audit)
+                      shadow audit), and the DW-081 prompt/response
+                      logging (redaction.rs: PII scrubbing; logging.rs:
+                      sampling + retention + per-consumer toggle)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind
