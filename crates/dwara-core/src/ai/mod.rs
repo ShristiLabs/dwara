@@ -22,6 +22,8 @@
 //! - [`openai_compat`] — the client-facing facade (parse/serialize)
 //! - [`sse`] — hand-rolled SSE framing (in-house by the locked M4
 //!   dependency decision)
+//! - [`guardrails`] — the DW-082 guardrail engine (prompt-injection,
+//!   PII, banned-content, output schema enforcement)
 //!
 //! # Dependency direction
 //!
@@ -36,6 +38,7 @@ pub mod adapters;
 pub mod budget;
 pub mod cost;
 pub mod governance;
+pub mod guardrails;
 pub mod logging;
 pub mod openai_compat;
 pub mod redaction;

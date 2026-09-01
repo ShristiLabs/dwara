@@ -83,6 +83,20 @@ pub struct AiConfig {
     /// tenant preference (see [`crate::config::Consumer::ai_logging`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<AiLogging>,
+    /// Guardrails (DW-082): prompt-injection heuristics, PII
+    /// detection, banned-content filters, and output schema
+    /// enforcement as a middleware chain on the AI proxy action.
+    /// Absent (the default): no guardrails — every prompt and
+    /// response passes through uninspected. When present, each rule
+    /// inspects the prompt (before the provider call) and/or the
+    /// response (after), and blocks, redacts, or logs per its
+    /// `action`. Policy-scoped rules apply only to consumers
+    /// attaching a listed policy; an empty `policies` list applies
+    /// to all. Schema enforcement requires the `openapi_validation`
+    /// cargo feature (jsonschema); without it, schema rules are
+    /// accepted but inert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<AiGuardrails>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -322,4 +336,124 @@ pub struct RedactionConfig {
     /// `"[REDACTED]"`.
     #[serde(default = "default_replacement")]
     pub replacement: String,
+}
+
+/// Guardrails (DW-082 `ai.guardrails`): a list of rules that inspect
+/// prompts and responses for prompt-injection, PII, banned content,
+/// and output schema conformance. Each rule is one check applied at
+/// the prompt phase (before the provider call) and/or the response
+/// phase (after). Policy-scoped rules apply only to consumers
+/// attaching a listed policy; an empty `policies` list applies to
+/// all. See [`AiGuardrailRule`] for the per-rule shape.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiGuardrails {
+    /// Guardrail rules. Each rule is one check applied to prompts
+    /// and/or responses, in declaration order. Rule names must be
+    /// unique (validation rejects duplicates).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<AiGuardrailRule>,
+}
+
+/// One guardrail rule (DW-082 `ai.guardrails.rules[]`). A rule
+/// declares a `kind` (what to check), an `action` (what to do on a
+/// match), a `phase` (prompt, response, or both), the patterns or
+/// schema to check against, and the policies it attaches to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiGuardrailRule {
+    /// Rule name (for logging/metrics attribution). Must be unique
+    /// within the guardrails block (validation rejects duplicates).
+    pub name: String,
+    /// Guardrail kind: what the rule checks.
+    pub kind: AiGuardrailKind,
+    /// Action on match: `block` (return an error to the client),
+    /// `redact` (scrub the match and continue — prompt phase only),
+    /// or `log` (observe only, dry-run — the request proceeds).
+    pub action: AiGuardrailAction,
+    /// When to apply: `prompt` (before the provider call), `response`
+    /// (after), or `both`. Default `both`.
+    #[serde(default = "default_guardrail_phase")]
+    pub phase: AiGuardrailPhase,
+    /// Patterns for injection/pii/banned kinds (regex strings). Each
+    /// is a Rust `regex` crate pattern; invalid patterns fail
+    /// validation at publish time. For `pii` kind, the built-in PII
+    /// patterns (email, phone, API key, credit card) are always
+    /// active alongside any custom patterns declared here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<String>,
+    /// JSON schema for output schema enforcement (`schema` kind
+    /// only). The response content (parsed as JSON) is validated
+    /// against this schema; a violation blocks the response.
+    /// Requires the `openapi_validation` cargo feature (jsonschema);
+    /// without it, schema rules are accepted but inert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// Policy names this rule attaches to. Empty (the default) means
+    /// the rule applies to ALL consumers. When non-empty, the rule
+    /// applies only to consumers whose attached policies (the
+    /// consumer > route > service > listener > global chain) include
+    /// at least one listed name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<String>,
+}
+
+/// The default guardrail phase: `both`.
+fn default_guardrail_phase() -> AiGuardrailPhase {
+    AiGuardrailPhase::Both
+}
+
+/// Guardrail kind (DW-082 `ai.guardrails.rules[].kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGuardrailKind {
+    /// Prompt-injection heuristics: pattern matching for common
+    /// injection attempts ("ignore previous instructions", role
+    /// injection, instruction override). Applied at the prompt
+    /// phase.
+    Injection,
+    /// PII detection: the built-in PII patterns (email, phone, API
+    /// key, credit card) plus any custom patterns. Applied at the
+    /// prompt phase; `redact` action scrubs the PII before the
+    /// provider call.
+    Pii,
+    /// Banned-content filter: pattern matching against a banned
+    /// content list. Applied at the prompt and/or response phase per
+    /// the rule's `phase`.
+    Banned,
+    /// Output schema enforcement: the response content is validated
+    /// against the declared JSON schema. Applied at the response
+    /// phase (non-streaming only — streaming cannot validate a
+    /// schema on partial content). Requires the
+    /// `openapi_validation` cargo feature.
+    Schema,
+}
+
+/// Guardrail action (DW-082 `ai.guardrails.rules[].action`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGuardrailAction {
+    /// Block the request/response: return a 400 error to the client
+    /// with code `guardrail_blocked` (prompt) or
+    /// `response_schema_violation` / `guardrail_blocked` (response).
+    Block,
+    /// Redact the match and continue: scrub the PII/banned content
+    /// from the prompt before the provider call. Prompt phase only.
+    Redact,
+    /// Log only (dry-run): record the match but allow the request
+    /// through. Use to tune thresholds before switching to `block`.
+    Log,
+}
+
+/// Guardrail phase (DW-082 `ai.guardrails.rules[].phase`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGuardrailPhase {
+    /// Apply at the prompt phase (before the provider call).
+    Prompt,
+    /// Apply at the response phase (after the provider call, before
+    /// the response is returned to the client).
+    Response,
+    /// Apply at both phases.
+    Both,
 }

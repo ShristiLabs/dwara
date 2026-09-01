@@ -304,6 +304,75 @@ where
         }
     }
 
+    // DW-082: prompt guardrails. AFTER the chat request is parsed and
+    // AFTER the governance check, BEFORE model resolution and the
+    // provider call. A `block` action returns a 400
+    // `guardrail_blocked`; a `redact` action scrubs the prompt and
+    // continues; a `log` action records and continues (dry-run). The
+    // policy chain is the same one governance uses (consumer > route
+    // > service > listener > global).
+    let guardrails = dp.ai_guardrails();
+    if !guardrails.is_empty() {
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let gateway = gen.snapshot.gateway();
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, listener_name);
+        let guardrail_result = guardrails.check_prompt(
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            &gateway.global_policies,
+            &chat_req,
+        );
+        match &guardrail_result {
+            crate::ai::guardrails::GuardrailResult::Block { rule_name, reason } => {
+                dp.observability_arc()
+                    .record_ai_guardrail_blocked(rule_name, "prompt");
+                tracing::info!(
+                    code = "guardrail_blocked",
+                    request_id = %rid,
+                    route = %route_name,
+                    rule = %rule_name,
+                    reason = %reason,
+                    "AI guardrail blocked the prompt before the provider call"
+                );
+                let body = openai_compat::error_body(
+                    &format!("the prompt was blocked by guardrail rule '{rule_name}': {reason}"),
+                    "invalid_request_error",
+                    Some("guardrail_blocked"),
+                    rid,
+                );
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                    .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+                    .expect("static 400 response is valid");
+            }
+            crate::ai::guardrails::GuardrailResult::Redact {
+                rule_name,
+                redacted_prompt,
+            } => {
+                tracing::info!(
+                    code = "guardrail_redacted",
+                    request_id = %rid,
+                    route = %route_name,
+                    rule = %rule_name,
+                    "AI guardrail redacted the prompt before the provider call"
+                );
+                chat_req = guardrails.apply_redaction(&chat_req, redacted_prompt);
+            }
+            crate::ai::guardrails::GuardrailResult::Allow => {}
+        }
+    }
+
     // 3. Streaming (DW-077): the request is passed through with
     // usage reporting FORCED on the provider call — the stream
     // metrics and the (upcoming) token budgets need provider-reported
@@ -554,6 +623,7 @@ where
                 consumer_name,
                 team,
                 prompt_log_ctx,
+                Arc::clone(&guardrails),
             );
             return Response::builder()
                 .status(StatusCode::OK)
@@ -686,6 +756,69 @@ where
             }
         }
         obs.record_ai_request(&provider.name, route_name, "success", version);
+        // DW-082: response guardrails. AFTER the response is parsed
+        // and BEFORE it is returned to the client. A `block` action
+        // returns a 400 (`response_schema_violation` for schema kind,
+        // `guardrail_blocked` otherwise); a `log` action records and
+        // continues. Non-streaming only (streaming responses cannot
+        // be schema-validated on partial content; banned-content
+        // checks run per-chunk in the stream body).
+        if !guardrails.is_empty() {
+            let consumer = identity.map(|id| id.consumer_name.as_str());
+            let gateway = gen.snapshot.gateway();
+            let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+            let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+            let service_policies: &[String] = route_cfg
+                .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+                .unwrap_or(&[]);
+            let consumer_policies: &[String] = consumer
+                .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+                .unwrap_or(&[]);
+            let listener_policies = crate::ai::budget::listener_policies_of(gateway, listener_name);
+            let guardrail_result = guardrails.check_response(
+                consumer_policies,
+                route_policies,
+                service_policies,
+                listener_policies,
+                &gateway.global_policies,
+                &chat_resp,
+            );
+            if let crate::ai::guardrails::GuardrailResult::Block { rule_name, reason } =
+                &guardrail_result
+            {
+                let kind_label = if reason == "response_schema_violation" {
+                    "schema"
+                } else {
+                    "response"
+                };
+                dp.observability_arc()
+                    .record_ai_guardrail_blocked(rule_name, kind_label);
+                tracing::info!(
+                    code = "guardrail_blocked",
+                    request_id = %rid,
+                    route = %route_name,
+                    rule = %rule_name,
+                    reason = %reason,
+                    "AI guardrail blocked the response before returning to the client"
+                );
+                let error_code = if reason == "response_schema_violation" {
+                    "response_schema_violation"
+                } else {
+                    "guardrail_blocked"
+                };
+                let body = openai_compat::error_body(
+                    &format!("the response was blocked by guardrail rule '{rule_name}': {reason}"),
+                    "invalid_request_error",
+                    Some(error_code),
+                    rid,
+                );
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                    .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+                    .expect("static 400 response is valid");
+            }
+        }
         let body = openai_compat::response_to_openai(&chat_resp, &chat_req.model, rid);
         // DW-081: prompt/response logging capture hook (non-streaming).
         // After the response is parsed and BEFORE it is sent, check
@@ -1035,6 +1168,15 @@ pub struct AiStreamBody {
     /// streamed (the full content is not reassembled — buffering the
     /// entire stream would contradict the zero-buffer design).
     prompt_log_ctx: Option<PromptLogCtx>,
+    /// DW-082: the compiled guardrail engine for streaming banned-
+    /// content checks. Each forwarded chunk's text is checked against
+    /// banned-content rules; a match cuts the stream off (similar to
+    /// the budget cutoff). Schema enforcement does not apply to
+    /// streaming (partial content cannot be validated).
+    guardrails: std::sync::Arc<crate::ai::guardrails::GuardrailEngine>,
+    /// DW-082: whether a banned-content cutoff has fired (the tail
+    /// is the stream's remainder).
+    guardrail_cut_off: bool,
 }
 
 /// DW-081: the streaming capture context carried by AiStreamBody.
@@ -1074,6 +1216,7 @@ impl AiStreamBody {
         consumer: String,
         team: String,
         prompt_log_ctx: Option<PromptLogCtx>,
+        guardrails: std::sync::Arc<crate::ai::guardrails::GuardrailEngine>,
     ) -> Self {
         AiStreamBody {
             inner: Some(inner),
@@ -1101,6 +1244,8 @@ impl AiStreamBody {
             team,
             spend_recorded: false,
             prompt_log_ctx,
+            guardrails,
+            guardrail_cut_off: false,
         }
     }
 
@@ -1169,6 +1314,39 @@ impl AiStreamBody {
             );
             self.tail
                 .push_back(crate::ai::budget::BudgetGuard::cutoff_frame(&self.rid));
+            self.tail.push_back("data: [DONE]\n\n".to_string());
+        }
+    }
+
+    /// DW-082: mid-stream banned-content check. Called after each
+    /// translated batch: the batch's forwarded text is checked against
+    /// banned-content rules; a match cuts the stream off (similar to
+    /// the budget cutoff). Schema enforcement does not apply to
+    /// streaming (partial content cannot be validated).
+    fn guardrail_tick(&mut self, batch_text: &str) {
+        if self.guardrails.is_empty() || self.guardrail_cut_off {
+            return;
+        }
+        if let Some(rule_name) = self.guardrails.check_stream_chunk(batch_text) {
+            self.guardrail_cut_off = true;
+            // Drop the provider body NOW (eager upstream cancel).
+            self.inner = None;
+            self.obs.record_ai_guardrail_blocked(&rule_name, "banned");
+            tracing::warn!(
+                code = "guardrail_blocked_midstream",
+                request_id = %self.rid,
+                rule = %rule_name,
+                "banned-content guardrail matched mid-stream; cutting off and cancelling the provider stream"
+            );
+            // Synthesize an error chunk and the terminator.
+            let error_payload = serde_json::json!({
+                "error": {
+                    "code": "guardrail_blocked",
+                    "message": "the response was blocked by a banned-content guardrail",
+                    "request_id": self.rid,
+                }
+            });
+            self.tail.push_back(format!("data: {}\n\n", error_payload));
             self.tail.push_back("data: [DONE]\n\n".to_string());
         }
     }
@@ -1323,8 +1501,24 @@ impl hyper::body::Body for AiStreamBody {
                         continue;
                     }
                     let mut joined = String::new();
-                    for f in frames {
-                        joined.push_str(&f);
+                    for f in &frames {
+                        joined.push_str(f);
+                    }
+                    // DW-082: banned-content guardrail check on the
+                    // forwarded batch text. A match cuts the stream
+                    // off (the tail is synthesized above); the
+                    // already-joined batch is still forwarded (the
+                    // match is in THIS batch — the cutoff prevents
+                    // FURTHER content, not retroactive suppression).
+                    this.guardrail_tick(&joined);
+                    if this.guardrail_cut_off {
+                        // The guardrail fired: forward this batch
+                        // (already-joined) then the tail (error +
+                        // [DONE]) drains on subsequent polls. The
+                        // provider body was dropped by guardrail_tick.
+                        return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(
+                            joined,
+                        )))));
                     }
                     return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(joined)))));
                 }

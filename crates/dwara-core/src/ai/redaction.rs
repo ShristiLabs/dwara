@@ -37,6 +37,13 @@ const BUILTIN_PATTERNS: &[&str] = &[
     r"\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}",
 ];
 
+/// The built-in PII/secrets pattern strings (public for reuse by the
+/// DW-082 guardrails engine's PII detection). Returns the same set
+/// the [`Redactor`] always active when redaction is on.
+pub fn builtin_pii_patterns() -> &'static [&'static str] {
+    BUILTIN_PATTERNS
+}
+
 /// A compiled PII redactor (DW-081). Built from a
 /// [`RedactionConfig`]; applies all patterns (built-in + custom) in a
 /// single pass over the text, replacing matches with the configured

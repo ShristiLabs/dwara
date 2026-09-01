@@ -588,6 +588,7 @@ fn ai_runtime_compiles_and_resolves() {
         pricing: std::collections::BTreeMap::new(),
         governance: None,
         logging: None,
+        guardrails: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
     assert_eq!(rt.provider_count(), 1);

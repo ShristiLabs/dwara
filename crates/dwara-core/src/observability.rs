@@ -546,6 +546,11 @@ pub struct Observability {
     /// consumer/model labels (cardinality rule); the consumer and
     /// model are in the governance audit table and the access log.
     ai_governance_denied_total: IntCounterVec,
+    /// DW-082: AI guardrail blocks, by rule name and kind
+    /// (config-bounded labels — the rule name and the kind/phase
+    /// string). No consumer label (cardinality); the consumer is in
+    /// the access log.
+    ai_guardrail_blocked_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1043,6 +1048,17 @@ impl Observability {
             &["reason"],
         )
         .expect("valid metric definition");
+        let ai_guardrail_blocked_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_guardrail_blocked_total",
+                "AI guardrail blocks (DW-082), by rule name and kind. The rule \
+                 name is a config-bounded label (the rule's declared name), and \
+                 the kind labels the phase/kind (prompt, response, schema, \
+                 pii, injection, banned). No consumer label — cardinality rule.",
+            ),
+            &["rule", "kind"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1153,6 +1169,7 @@ impl Observability {
             Box::new(ai_stream_chunks_total.clone()),
             Box::new(ai_budget_denied_total.clone()),
             Box::new(ai_governance_denied_total.clone()),
+            Box::new(ai_guardrail_blocked_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1219,6 +1236,7 @@ impl Observability {
             ai_stream_chunks_total,
             ai_budget_denied_total,
             ai_governance_denied_total,
+            ai_guardrail_blocked_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1548,6 +1566,17 @@ impl Observability {
     pub fn record_ai_governance_denied(&self, reason: &str) {
         self.ai_governance_denied_total
             .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Count one AI guardrail block (DW-082) in
+    /// `dwara_ai_guardrail_blocked_total{rule,kind}` (rule: the rule
+    /// name, config-bounded; kind: the phase/kind label — prompt,
+    /// response, schema, pii, injection, banned). No consumer label
+    /// (cardinality rule).
+    pub fn record_ai_guardrail_blocked(&self, rule: &str, kind: &str) {
+        self.ai_guardrail_blocked_total
+            .with_label_values(&[rule, kind])
             .inc();
     }
 

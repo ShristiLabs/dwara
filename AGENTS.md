@@ -134,9 +134,13 @@ crates/dwara-core/src/
                       DW-079 pricing table + cost computation (cost.rs),
                       and the DW-084 model-governance engine
                       (governance.rs: per-team model allowlists +
-                      shadow audit), and the DW-081 prompt/response
+                      shadow audit), the DW-081 prompt/response
                       logging (redaction.rs: PII scrubbing; logging.rs:
-                      sampling + retention + per-consumer toggle)
+                      sampling + retention + per-consumer toggle), and
+                      the DW-082 guardrails engine (guardrails.rs:
+                      prompt-injection/PII/banned-content/schema
+                      enforcement, compiled RegexSet + jsonschema,
+                      policy-scoped, prompt + response phases)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind
@@ -360,7 +364,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | SLO & error-budget export (DW-052) | dwara-core | `observability` (SLO e2e: config→refresh→traffic→/metrics series), `tests/unit/observability.rs` SLO cases (window math, expiry, ring wrap+reset, unconfigured/removal, empty-family safety), `config_schema_extended` slo validation matrix |
 | Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
-| AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation) |
+| AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) + cost attribution (DW-079) + model governance (DW-084) + prompt/response logging (DW-081) + guardrails (DW-082) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation), `ai_cost` (pricing table, spend recording, export columns), `ai_governance` (per-team allowlist, shadow audit, deny-wins), `ai_prompt_logging` (sampling, retention, PII redaction, per-consumer toggle), `ai_guardrails` (injection block, PII redact, banned block, schema enforcement, policy scoping, log dry-run, benign-traffic corpus, validation) |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |

@@ -2558,6 +2558,105 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+    // DW-082: guardrails validation. Rule names must be unique, regex
+    // patterns must compile, and JSON schemas (for schema-kind rules)
+    // must be valid. Policy references must name existing policies
+    // (a typo'd policy name would silently bind nobody).
+    if let Some(guardrails) = &ai.guardrails {
+        let mut rule_names = std::collections::BTreeSet::new();
+        for (i, rule) in guardrails.rules.iter().enumerate() {
+            if rule.name.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.guardrails.rules[{i}].name"),
+                    "guardrail rule name must be non-empty",
+                ));
+            } else if !rule_names.insert(rule.name.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.guardrails.rules[{i}].name"),
+                    format!("duplicate guardrail rule name '{}'", rule.name),
+                ));
+            }
+            // Validate regex patterns compile.
+            for (j, pat) in rule.patterns.iter().enumerate() {
+                if regex::Regex::new(pat).is_err() {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("ai.guardrails.rules[{i}].patterns[{j}]"),
+                        format!(
+                            "'{}' is not a valid regex pattern (the guardrail \
+                             pattern must compile)",
+                            pat
+                        ),
+                    ));
+                }
+            }
+            // Validate schema-kind rules have a schema.
+            if rule.kind == crate::config::ai::AiGuardrailKind::Schema && rule.schema.is_none() {
+                issues.push(issue(
+                    "gateway",
+                    &rule.name,
+                    &format!("ai.guardrails.rules[{i}].schema"),
+                    "a schema-kind guardrail rule must declare a JSON schema \
+                     (the `schema` field is required for kind: schema)",
+                ));
+            }
+            // Validate schema is valid JSON (it is already parsed by
+            // serde, so this is always true — but check it is an
+            // object or bool, the valid JSON Schema root shapes).
+            if let Some(schema) = &rule.schema {
+                if !schema.is_object() && !schema.is_boolean() {
+                    issues.push(issue(
+                        "gateway",
+                        &rule.name,
+                        &format!("ai.guardrails.rules[{i}].schema"),
+                        "a JSON schema must be an object or a boolean \
+                         (the root schema shape)",
+                    ));
+                }
+            }
+            // Validate policy references exist.
+            for (j, policy) in rule.policies.iter().enumerate() {
+                if !gateway.policies.iter().any(|p| &p.name == policy) {
+                    issues.push(issue(
+                        "gateway",
+                        &rule.name,
+                        &format!("ai.guardrails.rules[{i}].policies[{j}]"),
+                        format!(
+                            "references unknown policy '{}' (the rule would \
+                             apply to nobody — a typo, or the policy was removed)",
+                            policy
+                        ),
+                    ));
+                }
+            }
+            // Redact action is prompt-phase only (a redact at the
+            // response phase is a no-op — warn, not reject, since it
+            // is a benign misconfiguration).
+            if rule.action == crate::config::ai::AiGuardrailAction::Redact
+                && !matches!(
+                    rule.phase,
+                    crate::config::ai::AiGuardrailPhase::Prompt
+                        | crate::config::ai::AiGuardrailPhase::Both
+                )
+            {
+                // This is not a hard error — a redact at the response
+                // phase is treated as a log by the engine. But name
+                // it so the operator notices.
+                issues.push(issue(
+                    "gateway",
+                    &rule.name,
+                    &format!("ai.guardrails.rules[{i}].action"),
+                    "redact action is only effective at the prompt phase; \
+                     at the response phase it is treated as log (dry-run)",
+                ));
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {

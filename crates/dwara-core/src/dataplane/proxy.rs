@@ -614,6 +614,14 @@ pub struct DataPlane {
     /// with no restart. None (an empty engine) when logging is not
     /// configured — capture is off (privacy-first).
     ai_logging: arc_swap::ArcSwapOption<crate::ai::logging::AiLoggingEngine>,
+    /// AI guardrails (DW-082): the compiled guardrail engine
+    /// (prompt-injection, PII, banned-content, output schema
+    /// enforcement), compiled from the `ai.guardrails` config block.
+    /// Swapped on every reload so a guardrail change takes effect on
+    /// the next request with no restart. Empty (no rules -> every
+    /// prompt and response passes through) when guardrails are not
+    /// configured — fail-open.
+    ai_guardrails: ArcSwap<crate::ai::guardrails::GuardrailEngine>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -881,11 +889,15 @@ impl DataPlane {
         let ai_logging =
             crate::ai::logging::AiLoggingEngine::compile(snapshot.gateway().ai.as_ref())
                 .map(Arc::new);
+        let ai_guardrails = ArcSwap::from_pointee(crate::ai::guardrails::GuardrailEngine::compile(
+            snapshot.gateway().ai.as_ref(),
+        ));
         let dp = DataPlane {
             ai_budgets,
             ai_pricing,
             ai_governance,
             ai_logging: arc_swap::ArcSwapOption::new(ai_logging),
+            ai_guardrails,
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1332,6 +1344,13 @@ impl DataPlane {
             }
         }
         self.ai_logging.store(logging_engine);
+        // DW-082: the guardrail engine swaps with the generation —
+        // a guardrail change takes effect on the next request with no
+        // restart.
+        self.ai_guardrails
+            .store(Arc::new(crate::ai::guardrails::GuardrailEngine::compile(
+                snapshot.gateway().ai.as_ref(),
+            )));
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1601,6 +1620,14 @@ impl DataPlane {
     /// None when logging is not configured (capture off, privacy-first).
     pub fn ai_logging(&self) -> Option<Arc<crate::ai::logging::AiLoggingEngine>> {
         self.ai_logging.load_full()
+    }
+
+    /// The AI guardrail engine (DW-082): current compiled guardrail
+    /// rules (prompt-injection, PII, banned-content, output schema
+    /// enforcement). Empty when guardrails are not configured (every
+    /// prompt and response passes through — fail-open).
+    pub fn ai_guardrails(&self) -> Arc<crate::ai::guardrails::GuardrailEngine> {
+        self.ai_guardrails.load_full()
     }
 
     /// The current generation's upstream registry. Used by the

@@ -9,6 +9,32 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI guardrails (DW-082): prompt-injection heuristics, PII detection,
+  banned-content filters, and output-schema enforcement as a
+  middleware chain on the AI proxy action. Rules are configured under
+  `ai.guardrails.rules[]` and compiled once at dataplane refresh
+  (regex patterns into a `RegexSet`, JSON schemas into a
+  `jsonschema::Validator` behind the existing `openapi_validation`
+  feature). Prompt-phase rules run after governance and before the
+  provider call; response-phase rules run after the response is
+  parsed. Actions: `block` (400 `guardrail_blocked` or
+  `response_schema_violation`), `redact` (scrubs PII from the prompt
+  using the DW-081 Redactor, prompt-phase only), `log` (dry-run).
+  Kinds: `injection` (built-in conservative phrase-level patterns +
+  custom), `pii` (built-in structured-PII patterns + custom, reuses
+  the DW-081 Redactor), `banned` (deployment-defined patterns, runs
+  per-chunk on streaming responses with mid-stream cutoff),
+  `schema` (JSON Schema validation, response-phase only, inert
+  without the `openapi_validation` feature). Rules can be
+  policy-scoped (`policies: [names]` -- applies only to consumers
+  with a matching policy in the consumer > route > service > listener
+  > global chain). New metric
+  `dwara_ai_guardrail_blocked_total{rule,kind}` (config-bounded
+  labels). Validation rejects duplicate rule names, invalid regex
+  patterns, schema rules without a schema, and redact actions outside
+  the prompt phase. New `ai::guardrails` module; no new dependencies
+  (regex and jsonschema already in-tree).
+
 - AI prompt/response logging (DW-081): opt-in capture of prompts and
   responses with PII redaction, sampling, and retention. Capture is
   OFF by default (privacy-first). When enabled (`ai.logging.enabled:

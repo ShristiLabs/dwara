@@ -265,6 +265,7 @@ fn pricing_table_computes_correct_cost() {
         pricing,
         governance: None,
         logging: None,
+        guardrails: None,
     };
     let table = PricingTable::compile(Some(&cfg));
 

@@ -436,6 +436,17 @@
             }
           ]
         },
+        "guardrails": {
+          "description": "Guardrails (DW-082): prompt-injection heuristics, PII\ndetection, banned-content filters, and output schema\nenforcement as a middleware chain on the AI proxy action.\nAbsent (the default): no guardrails — every prompt and\nresponse passes through uninspected. When present, each rule\ninspects the prompt (before the provider call) and/or the\nresponse (after), and blocks, redacts, or logs per its\n`action`. Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies\nto all. Schema enforcement requires the `openapi_validation`\ncargo feature (jsonschema); without it, schema rules are\naccepted but inert.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiGuardrails"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "logging": {
           "description": "Prompt/response logging (DW-081): opt-in capture of the\ncanonical prompt and response with PII redaction, sampling,\nand retention. Absent (the default): no capture — privacy-first\n(no prompt or response text is ever stored). When present and\n`enabled: true`, a redaction pass scrubs PII/secrets before\nstorage, `sample_rate` controls volume, and `retention_secs`\nages records out. Per-consumer `ai_logging` overrides respect\ntenant preference (see [`crate::config::Consumer::ai_logging`]).",
           "anyOf": [
@@ -487,6 +498,131 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiGuardrailAction": {
+      "description": "Guardrail action (DW-082 `ai.guardrails.rules[].action`).",
+      "oneOf": [
+        {
+          "description": "Block the request/response: return a 400 error to the client\nwith code `guardrail_blocked` (prompt) or\n`response_schema_violation` / `guardrail_blocked` (response).",
+          "type": "string",
+          "const": "block"
+        },
+        {
+          "description": "Redact the match and continue: scrub the PII/banned content\nfrom the prompt before the provider call. Prompt phase only.",
+          "type": "string",
+          "const": "redact"
+        },
+        {
+          "description": "Log only (dry-run): record the match but allow the request\nthrough. Use to tune thresholds before switching to `block`.",
+          "type": "string",
+          "const": "log"
+        }
+      ]
+    },
+    "AiGuardrailKind": {
+      "description": "Guardrail kind (DW-082 `ai.guardrails.rules[].kind`).",
+      "oneOf": [
+        {
+          "description": "Prompt-injection heuristics: pattern matching for common\ninjection attempts (\"ignore previous instructions\", role\ninjection, instruction override). Applied at the prompt\nphase.",
+          "type": "string",
+          "const": "injection"
+        },
+        {
+          "description": "PII detection: the built-in PII patterns (email, phone, API\nkey, credit card) plus any custom patterns. Applied at the\nprompt phase; `redact` action scrubs the PII before the\nprovider call.",
+          "type": "string",
+          "const": "pii"
+        },
+        {
+          "description": "Banned-content filter: pattern matching against a banned\ncontent list. Applied at the prompt and/or response phase per\nthe rule's `phase`.",
+          "type": "string",
+          "const": "banned"
+        },
+        {
+          "description": "Output schema enforcement: the response content is validated\nagainst the declared JSON schema. Applied at the response\nphase (non-streaming only — streaming cannot validate a\nschema on partial content). Requires the\n`openapi_validation` cargo feature.",
+          "type": "string",
+          "const": "schema"
+        }
+      ]
+    },
+    "AiGuardrailPhase": {
+      "description": "Guardrail phase (DW-082 `ai.guardrails.rules[].phase`).",
+      "oneOf": [
+        {
+          "description": "Apply at the prompt phase (before the provider call).",
+          "type": "string",
+          "const": "prompt"
+        },
+        {
+          "description": "Apply at the response phase (after the provider call, before\nthe response is returned to the client).",
+          "type": "string",
+          "const": "response"
+        },
+        {
+          "description": "Apply at both phases.",
+          "type": "string",
+          "const": "both"
+        }
+      ]
+    },
+    "AiGuardrailRule": {
+      "description": "One guardrail rule (DW-082 `ai.guardrails.rules[]`). A rule\ndeclares a `kind` (what to check), an `action` (what to do on a\nmatch), a `phase` (prompt, response, or both), the patterns or\nschema to check against, and the policies it attaches to.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Action on match: `block` (return an error to the client),\n`redact` (scrub the match and continue — prompt phase only),\nor `log` (observe only, dry-run — the request proceeds).",
+          "$ref": "#/$defs/AiGuardrailAction"
+        },
+        "kind": {
+          "description": "Guardrail kind: what the rule checks.",
+          "$ref": "#/$defs/AiGuardrailKind"
+        },
+        "name": {
+          "description": "Rule name (for logging/metrics attribution). Must be unique\nwithin the guardrails block (validation rejects duplicates).",
+          "type": "string"
+        },
+        "patterns": {
+          "description": "Patterns for injection/pii/banned kinds (regex strings). Each\nis a Rust `regex` crate pattern; invalid patterns fail\nvalidation at publish time. For `pii` kind, the built-in PII\npatterns (email, phone, API key, credit card) are always\nactive alongside any custom patterns declared here.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "phase": {
+          "description": "When to apply: `prompt` (before the provider call), `response`\n(after), or `both`. Default `both`.",
+          "$ref": "#/$defs/AiGuardrailPhase",
+          "default": "both"
+        },
+        "policies": {
+          "description": "Policy names this rule attaches to. Empty (the default) means\nthe rule applies to ALL consumers. When non-empty, the rule\napplies only to consumers whose attached policies (the\nconsumer > route > service > listener > global chain) include\nat least one listed name.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "schema": {
+          "description": "JSON schema for output schema enforcement (`schema` kind\nonly). The response content (parsed as JSON) is validated\nagainst this schema; a violation blocks the response.\nRequires the `openapi_validation` cargo feature (jsonschema);\nwithout it, schema rules are accepted but inert."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "action"
+      ]
+    },
+    "AiGuardrails": {
+      "description": "Guardrails (DW-082 `ai.guardrails`): a list of rules that inspect\nprompts and responses for prompt-injection, PII, banned content,\nand output schema conformance. Each rule is one check applied at\nthe prompt phase (before the provider call) and/or the response\nphase (after). Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies to\nall. See [`AiGuardrailRule`] for the per-rule shape.",
+      "type": "object",
+      "properties": {
+        "rules": {
+          "description": "Guardrail rules. Each rule is one check applied to prompts\nand/or responses, in declaration order. Rule names must be\nunique (validation rejects duplicates).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiGuardrailRule"
           }
         }
       },
