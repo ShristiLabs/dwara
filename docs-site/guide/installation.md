@@ -64,4 +64,4 @@ systemctl daemon-reload && systemctl enable --now dwara
 
 [Getting started](./getting-started) walks through running the binary
 against a first config, and [Deployment](./deployment) covers the
-one-command TLS demo in `quickstart/`.
+one-command TLS demo in `quickstart/oss/`.

@@ -99,5 +99,9 @@ enabled): timestamp, method, path, status, latency, consumer, route.
 - **No historical data**: the console shows the current state and
   recent requests only. For historical analysis, use the analytics
   API or an external dashboard.
-- **mTLS only**: there is no plaintext or token-based access. The
-  console is only accessible via the mTLS admin listener.
+- **No separate auth**: the console has no login or token of its own
+  -- it is exactly as accessible as the admin listener serving it.
+  In production that means mTLS; on a developer machine,
+  `DWARA_ADMIN_DEV=1` (loopback-only plaintext admin, see
+  [Admin API](./admin-api#dev-fallback-never-in-production)) also
+  serves the console in plaintext.

@@ -62,7 +62,7 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
 | `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
 | `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |
-| `quickstart/` | One-command docker-compose TLS demo |
+| `quickstart/` | Runnable demos per edition: `oss/` (one-command TLS proxy compose) and `enterprise/` (CP/DP split compose); shared `gen-certs.sh` + `certs/` + demo `upstream/` at the root |
 | `packaging/` | systemd unit + packaging notes |
 | `grafana/` | Starter dashboard for the /metrics families |
 | `scripts/` | Macro bench rig + baseline gate + dependency-direction guard |
@@ -469,7 +469,11 @@ comment would.
 
 ## Quickstart sanity check
 
-`quickstart/` boots the gateway + a demo upstream over TLS:
-`gen-certs.sh && docker compose up`, then
-`curl --cacert certs/server.crt https://localhost:8443/`.
-Linux hosts need `sudo chown -R 65532:65532 certs` (see quickstart/README).
+`quickstart/oss/` boots the gateway + a demo upstream over TLS (certs
+and upstream are shared from the quickstart root):
+`cd quickstart/oss && ../gen-certs.sh && docker compose up`, then
+`curl --cacert ../certs/server.crt https://localhost:8443/`.
+Linux hosts need `sudo chown -R 65532:65532 quickstart/certs`
+(see quickstart/README). The `quickstart/enterprise/` compose runs the
+CP/DP split topology instead (controller + edge fleet, ports
+9443/9444) and needs `vendor-licensing.sh` first.

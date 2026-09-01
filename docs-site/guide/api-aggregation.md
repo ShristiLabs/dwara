@@ -6,6 +6,17 @@ response to the client. This is useful for BFF (backend-for-frontend)
 patterns, mobile API consolidation, and reducing client-side request
 chattiness.
 
+::: info Status
+Aggregation is a compile-time feature pack (`aggregation`, default
+OFF; see [Editions](./editions#compile-time-feature-packs)) and is
+not included in the published OSS binaries. The composition core
+(specs, JSONPath shaping, fail policies, size caps) is complete and
+test-covered as a library component. The config wiring has not landed
+yet -- the `aggregations:` block and `type: aggregate` route action
+below illustrate the target surface and are not in the generated
+[configuration schema](../reference/configuration-schema).
+:::
+
 ## When to use this
 
 Use API aggregation when:
@@ -116,8 +127,10 @@ composed response is:
 }
 ```
 
-JSONPath expressions support the standard syntax: `$.field`,
-`$.field.subfield`, `$.array[0]`, `$.array[*]`, etc.
+JSONPath support is deliberately simplified to what fragment shaping
+needs: the root (`$`), field access (`$.field`), nested fields
+(`$.field.subfield`), and array indexing (`$.items[0]`). Wildcards,
+filters, and recursive descent are not supported.
 
 ## Size limits
 

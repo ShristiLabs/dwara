@@ -4,6 +4,17 @@ Dwara can validate upstream responses against OpenAPI response
 schemas. When enabled, responses that don't match the schema are
 flagged -- either rejected (fail-closed) or logged (dry-run mode).
 
+::: info Status
+Response validation is a compile-time feature pack
+(`openapi_validation`, default OFF; see
+[Editions](./editions#compile-time-feature-packs)) and is not included
+in the published OSS binaries. The validation engine is complete and
+test-covered as a library component. The route-level config wiring
+has not landed yet -- the `openapi_validation:` block below
+illustrates the target surface and is not in the generated
+[configuration schema](../reference/configuration-schema).
+:::
+
 ## When to use this
 
 Use response validation when:

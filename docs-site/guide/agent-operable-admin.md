@@ -1,121 +1,92 @@
 # Agent-operable administration
 
-Dwara exposes an [MCP](https://modelcontextprotocol.io/) (Model
-Context Protocol) server on the admin listener, allowing AI agents
-and LLM-powered tools to inspect and operate the gateway through a
-typed, permissioned tool interface.
+Dwara ships an [MCP](https://modelcontextprotocol.io/) (Model Context
+Protocol) server implementation for AI agents that inspect and operate
+the gateway: a typed tool surface over the admin data model, per-agent
+permissions (RBAC), argument validation against each tool's JSON
+Schema, and typed error responses.
 
-## When to use this
+::: info Status
+The MCP server is a compile-time feature pack (`mcp`, default OFF; see
+[Editions](./editions#compile-time-feature-packs)) and is not included
+in the published OSS binaries. It is currently a library surface in
+`dwara-core`: the server, protocol types, standard tools, and RBAC
+checks are complete and test-covered, but no transport is mounted yet
+-- there is no `/mcp` endpoint on the admin listener and no stdio
+bridge. An embedding (or a future dwara release) constructs the
+`McpServer`, connects it to a transport, and supplies a `ToolHandler`
+that performs the actual operations. Until a transport ships, this
+page documents the tool surface such an integration exposes.
+:::
 
-Use the MCP server when:
+## The tool surface
 
-- You want an AI agent (e.g. a coding assistant or ops bot) to
-  inspect gateway state as part of a debugging workflow.
-- You want to automate gateway operations (create routes, purge
-  cache, check health) from an LLM-powered tool.
-- You want a structured, typed interface for programmatic access
-  (instead of raw HTTP calls to the admin API).
+`McpServer::new()` registers ten standard tools:
 
-## Enabling
-
-The MCP server is served from the admin listener. Enable the admin
-listener with mTLS (see [Admin API](./admin-api)):
-
-```yaml
-admin:
-  bind: 127.0.0.1:2019
-  tls:
-    cert_file: /etc/dwara/admin.crt.pem
-    key_file: /etc/dwara/admin.key.pem
-    client_ca_file: /etc/dwara/admin-clients.ca.pem
-```
-
-The MCP endpoint is at `/mcp` on the admin listener:
-
-```
-https://127.0.0.1:2019/mcp
-```
+| Tool | Permission | Description |
+| --- | --- | --- |
+| `list_routes` | `read` | List all routes in the current config. |
+| `get_route` | `read` | Get a single route's full config. |
+| `list_services` | `read` | List all services. |
+| `get_stats` | `read` | Runtime stats (requests, errors, latency). |
+| `get_health` | `read` | Gateway health. |
+| `get_config` | `read` | The current gateway config. |
+| `create_route` | `write` | Create a route. |
+| `update_route` | `write` | Update a route. |
+| `delete_route` | `write` | Delete a route. |
+| `purge_cache` | `admin` | Purge the response cache. |
 
 ## Agent identity and permissions
 
-Each agent is identified by its mTLS client certificate subject and
-assigned a permission level:
+Every tool declares the permission it requires. Permissions are
+`read`, `write`, and `admin`, and an agent identity (`AgentIdentity`)
+is a name plus a set of permissions:
 
-| Permission | Description |
-|---|---|
-| `read` | Can call read-only tools (list routes, get health, view config). |
-| `read_write` | Can call read and write tools (create/modify routes, services, consumers). |
-| `admin` | Can call all tools including admin tools (purge cache, delete workspace, reload config). |
+| Constructor | Permissions | Can call |
+| --- | --- | --- |
+| `AgentIdentity::read_only(name)` | `read` | read tools only |
+| `AgentIdentity::read_write(name)` | `read`, `write` | read + write tools |
+| `AgentIdentity::admin(name)` | `read`, `write`, `admin` | all tools |
 
-The permission level is determined by the agent's mTLS certificate
-subject, mapped via the admin API's RBAC (see [Workspaces, RBAC, and
-audit](./workspaces-rbac-audit)).
+`McpServer::list_tools_for(agent)` returns only the tools the agent
+may call, so an agent's tool listing never advertises operations it
+cannot execute.
 
-## Tools
+## Tool calls
 
-The MCP server exposes the following tools:
-
-### Read tools (permission: `read`)
-
-| Tool | Description |
-|---|---|
-| `list_routes` | List all routes in a workspace. |
-| `get_route` | Get a single route's full config. |
-| `list_services` | List all services. |
-| `list_upstreams` | List all upstreams with endpoints and health. |
-| `get_health` | Get health state for an upstream. |
-| `get_config` | Get the current gateway config. |
-| `get_stats` | Get runtime stats (requests, errors, latency). |
-| `list_consumers` | List all consumers. |
-
-### Write tools (permission: `read_write`)
-
-| Tool | Description |
-|---|---|
-| `create_route` | Create a new route. |
-| `update_route` | Update an existing route. |
-| `delete_route` | Delete a route. |
-| `create_service` | Create a new service. |
-| `create_consumer` | Create a new consumer. |
-| `create_credential` | Create a credential for a consumer. |
-
-### Admin tools (permission: `admin`)
-
-| Tool | Description |
-|---|---|
-| `purge_cache` | Purge the response cache. |
-| `reload_config` | Trigger a config reload. |
-| `delete_workspace` | Delete a workspace. |
-
-## Tool call format
-
-Tools are called via the MCP protocol (JSON-RPC over HTTP). Each
-tool call includes:
+Tool calls follow the MCP `tools/call` shape:
 
 ```json
 {
-  "method": "tools/call",
-  "params": {
-    "name": "list_routes",
-    "arguments": {
-      "workspace": "default"
-    }
-  }
+  "name": "list_routes",
+  "arguments": {}
 }
 ```
 
-The server validates the arguments against the tool's JSON Schema
-before executing. Invalid arguments return a typed error.
+`McpServer::execute(request, agent, handler)` runs the pure RBAC and
+dispatch step:
 
-## Audit
+1. Unknown tool name -> `{"success": false, "error_code": "unknown_tool"}`.
+2. Agent lacks the tool's required permission ->
+   `error_code: "permission_denied"` (the error names the tool, the
+   required permission, and the agent's permissions).
+3. Arguments fail the tool's JSON Schema ->
+   `error_code: "invalid_arguments"`.
+4. Otherwise the call is delegated to the caller-supplied `ToolHandler`,
+   which executes the operation (calling the admin API, reading
+   config) and returns a `ToolCallResponse`.
 
-All MCP tool calls are recorded in the audit log (see [Workspaces,
-RBAC, and audit](./workspaces-rbac-audit)), with the agent's
-identity as the principal. This provides a full trail of what each
-agent did and when.
+A failing tool call returns a typed error response; the server itself
+keeps serving subsequent calls. All tool inputs and outputs are JSON.
 
-## Failure isolation
+## Enabling
 
-A tool call that fails (invalid arguments, permission denied,
-internal error) returns a typed error response. The MCP server
-itself is not affected -- subsequent tool calls continue to work.
+Build the library with the feature on (for embedding or running the
+test suites):
+
+```sh
+cargo build -p dwara-core --features mcp
+```
+
+See [Admin API](./admin-api) for the underlying operator surface and
+[Editions](./editions) for how feature packs are built and licensed.

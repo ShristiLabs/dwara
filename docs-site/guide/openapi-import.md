@@ -12,7 +12,7 @@ OpenAPI import scaffolds a gateway config from an existing API spec — faster t
 Generate a Dwara config from an OpenAPI 3.x spec:
 
 ```sh
-dwara import openapi petstore.yaml --output dwara.yaml
+dwara-cli import openapi petstore.yaml --output dwara.yaml
 ```
 
 The generated config has one route per unique path, a placeholder

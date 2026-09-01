@@ -119,7 +119,7 @@ default-OFF compile-time flag (no license; see
 | Feature | OSS | Enterprise |
 |---|---|---|
 | Structured logs, access logs, spans, `/metrics` | OSS | — |
-| OTel metrics export | OSS | — |
+| OTel metrics export | Pack | — |
 | Embedded analytics (request records, rollups, bounded disk) | OSS | — |
 | Analytics stream (NDJSON firehose to external sinks) | OSS | — |
 | Alert and event webhooks | OSS | — |
@@ -146,6 +146,7 @@ adds binary size or a heavy dependency. Enable them per build:
 
 | Flag | What it adds | Why default OFF |
 |---|---|---|
+| `otlp` | OTLP trace/metrics export to a collector (build with `-p dwara-bin`) | the opentelemetry stack adds ~405 KiB to the binary |
 | `wasm` | proxy-wasm host | wasmtime + cranelift are a large binary-size cost |
 | `plugins` | native Rust filter chain | the compile-in extension path, opt-in by design |
 | `cel` | CEL expression evaluation | cel-interpreter adds binary size |
@@ -158,6 +159,16 @@ adds binary size or a heavy dependency. Enable them per build:
 Enterprise builds can enable any of these packs alongside `ent` — for
 example `--features ent,wasm` for an enterprise fleet running
 proxy-wasm filters.
+
+Packs ship iteratively. `otlp`, `k8s`, and `ent` are wired end to
+end — when the feature is on, the export path, controller binaries,
+CLI subcommands, and config surfaces work. The remaining packs
+currently ship as library-complete components in `dwara-core` —
+engines, registries, and protocol types, test-covered — with their
+gateway wiring (config keys, proxy dispatch, transports) still
+landing; each pack's guide page carries a status note saying exactly
+what is wired today. The published OSS binaries and images are built
+with no packs enabled.
 
 ## How gating works
 

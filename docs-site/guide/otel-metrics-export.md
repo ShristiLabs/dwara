@@ -17,10 +17,12 @@ Use OTLP export when:
 
 ## Enabling
 
-OTLP export is feature-gated. Build with the `otlp` feature:
+OTLP export is feature-gated (`otlp`, default OFF -- the
+opentelemetry stack costs ~405 KiB of binary size; the published OSS
+binaries do not include it). Build the gateway with the feature:
 
 ```sh
-cargo build --features otlp
+cargo build -p dwara-bin --features otlp
 ```
 
 Set the `DWARA_OTLP_ENDPOINT` environment variable to enable export.

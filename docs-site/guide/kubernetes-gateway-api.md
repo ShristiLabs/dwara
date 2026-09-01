@@ -87,7 +87,7 @@ cargo test -p dwara-core --features k8s --test k8s_controller
 Generate the upstream Gateway API conformance report YAML:
 
 ```sh
-dwara k8s conformance-report
+dwara-cli k8s conformance-report
 ```
 
 ### Running the upstream conformance suite

@@ -9,10 +9,21 @@ Dwara supports two external policy engines for authorization:
   a general-purpose policy engine with Rego policies, queried over
   HTTP.
 
-Both are compile-time feature packs (default OFF, no license) that
-complement the built-in authz (consumer/route/service policies). See
+Both are behind a single compile-time feature pack (`cedar`, default
+OFF, no license) that complements the built-in authz
+(consumer/route/service policies). See
 [Editions: OSS vs Enterprise](./editions) for how feature packs differ
 from enterprise features.
+
+::: info Status
+The pack is not included in the published OSS binaries. The in-process
+Cedar authorizer and the OPA HTTP client (with decision caching and a
+`fail_closed` mode) are complete and test-covered as library
+components. The config wiring has not landed yet -- the `authz:`
+blocks below illustrate the target surface (the built-in rules live
+under `authorization:` today) and the Cedar/OPA keys are not in the
+generated [configuration schema](../reference/configuration-schema).
+:::
 
 ## When to use this
 
@@ -30,10 +41,12 @@ that.
 
 ## Enabling
 
-Cedar and OPA support are feature-gated. Build with the `cedar` feature:
+Cedar and OPA support are feature-gated behind the single `cedar`
+feature (it compiles in the Cedar authorizer and the OPA client
+together):
 
 ```sh
-cargo build --features cedar
+cargo build -p dwara-core --features cedar
 ```
 
 ## Cedar

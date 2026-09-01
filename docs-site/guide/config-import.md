@@ -7,7 +7,7 @@ lever for teams migrating to Dwara.
 ## NGINX import
 
 ```sh
-dwara import nginx nginx.conf --output dwara.yaml
+dwara-cli import nginx nginx.conf --output dwara.yaml
 ```
 
 Parses NGINX `server` and `location` blocks with `proxy_pass` and
@@ -18,7 +18,7 @@ generated config.
 ## Kong import
 
 ```sh
-dwara import kong kong.yaml --output dwara.yaml
+dwara-cli import kong kong.yaml --output dwara.yaml
 ```
 
 Reads a Kong declarative config (decK/YAML or JSON) and maps Kong
@@ -47,7 +47,7 @@ routes:
 ## Envoy import
 
 ```sh
-dwara import envoy envoy.yaml --output dwara.yaml
+dwara-cli import envoy envoy.yaml --output dwara.yaml
 ```
 
 Reads an Envoy static config (YAML) and maps listeners, clusters, and
@@ -96,7 +96,7 @@ static_resources:
 ## OpenAPI import
 
 ```sh
-dwara import openapi petstore.yaml --output dwara.yaml
+dwara-cli import openapi petstore.yaml --output dwara.yaml
 ```
 
 Reads an OpenAPI 3.x spec and generates a Dwara config with one route
@@ -107,5 +107,5 @@ for details.
 
 All importers append unsupported-construct warnings as YAML comments at
 the end of the generated config. The generated config is always valid
-(it passes `dwara validate`); the warnings are advisory, telling you
+(it passes `dwara-cli validate`); the warnings are advisory, telling you
 what to review and handle manually.

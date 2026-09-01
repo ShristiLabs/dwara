@@ -1,6 +1,6 @@
 # Terraform State Tool
 
-`dwara tf` is a CLI-based Terraform state tool that exports and imports
+`dwara-cli tf` is a CLI-based Terraform state tool that exports and imports
 Terraform-compatible JSON state and generates HCL, performing
 plan/apply round-trips directly over the admin API. This brings a
 running gateway's config under Infrastructure-as-Code management
@@ -8,15 +8,15 @@ without requiring a Terraform binary or a gRPC plugin.
 
 ## When to use this
 
-Use `dwara tf` when you want to manage your gateway config with the
+Use `dwara-cli tf` when you want to manage your gateway config with the
 same Infrastructure-as-Code workflow as the rest of your
 infrastructure. Export a running gateway's config as tfstate, track it
 in version control, and apply changes through the plan/apply cycle.
 
-## `dwara tf export`
+## `dwara-cli tf export`
 
 ```sh
-dwara tf export --admin http://127.0.0.1:2019 \
+dwara-cli tf export --admin http://127.0.0.1:2019 \
   --out-state dwara.tfstate \
   --out-hcl dwara.tf
 ```
@@ -25,20 +25,20 @@ Fetches the current config from the admin API and writes a tfstate JSON
 file and an HCL `.tf` file. This is the "state import" step: bring a
 running gateway's config under management.
 
-## `dwara tf plan`
+## `dwara-cli tf plan`
 
 ```sh
-dwara tf plan --admin http://127.0.0.1:2019 --state dwara.tfstate
+dwara-cli tf plan --admin http://127.0.0.1:2019 --state dwara.tfstate
 ```
 
 Compares the local tfstate against the running gateway and prints the
 diff (added, removed, and changed resources). Exit code 0 if no diff,
 1 if a diff is present.
 
-## `dwara tf apply`
+## `dwara-cli tf apply`
 
 ```sh
-dwara tf apply --admin http://127.0.0.1:2019 --state dwara.tfstate
+dwara-cli tf apply --admin http://127.0.0.1:2019 --state dwara.tfstate
 ```
 
 Pushes the desired config to the gateway via `PATCH /config`. If

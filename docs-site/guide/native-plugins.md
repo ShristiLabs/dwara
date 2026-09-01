@@ -17,6 +17,17 @@ referenced by name from routes, and both declare the same phase
 contract. Only the implementation differs -- compiled-in vs
 sandboxed-and-hot-loaded.
 
+::: info Status
+Native filters are a compile-time feature pack (`plugins`, default
+OFF; see [Editions](./editions#compile-time-feature-packs)) and are
+not included in the published OSS binaries. The `NativeFilter` trait,
+registry, and unified `PluginChain` are complete and test-covered as
+library components; dispatching the chain from the gateway's request
+path is landing iteratively. The `plugins:` config below (including
+the `native:`/`wasm:` mutual-exclusion validation) parses and
+validates in any build.
+:::
+
 ## When to use this
 
 Use native plugin filters when you need:
@@ -34,13 +45,13 @@ Native filters are feature-gated behind the `plugins` cargo feature
 (default OFF):
 
 ```sh
-cargo build --features plugins
+cargo build -p dwara-core --features plugins
 ```
 
 Combine with `wasm` for both paths:
 
 ```sh
-cargo build --features plugins,wasm
+cargo build -p dwara-core --features plugins,wasm
 ```
 
 When `plugins` is on but `wasm` is off, only native filters work. When

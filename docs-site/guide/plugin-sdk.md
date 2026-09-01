@@ -1,7 +1,7 @@
 # Plugin SDK
 
 The Plugin SDK provides scaffolding for new proxy-wasm plugin
-projects. The `dwara plugin new` command generates a ready-to-build
+projects. The `dwara-cli plugin new` command generates a ready-to-build
 plugin crate with the proxy-wasm ABI, a `dwara.yaml` manifest, and a
 README.
 
@@ -20,7 +20,7 @@ scaffold gives you:
 ## Scaffolding a plugin
 
 ```sh
-dwara plugin new my-plugin
+dwara-cli plugin new my-plugin
 ```
 
 This creates a `my-plugin/` directory:

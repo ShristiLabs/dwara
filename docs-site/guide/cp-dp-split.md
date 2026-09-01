@@ -48,6 +48,7 @@ Environment variables:
 | `DWARA_CP_CONFIG_SOURCE` | `./dwara.yaml` | config source file to watch |
 | `DWARA_CP_LEADER` | `true` | whether this controller is the leader |
 | `DWARA_CP_POLL_INTERVAL_SECS` | `2` | config source poll interval |
+| `DWARA_LOG` | `dwara=info,dwara_core=info` | tracing filter; the controller's own events (leader election, generation publishes, compile failures) log as JSON, same pipeline as the gateway |
 
 ## Running an edge
 
@@ -66,6 +67,7 @@ Environment variables:
 | `DWARA_CP_EDGE_ID` | `edge-1` | edge instance ID |
 | `DWARA_CP_EDGE_VERSION` | `0.1.0` | edge version string |
 | `DWARA_CP_CONFIG_OUTPUT` | `/etc/dwara/dwara.yaml` | local config output path |
+| `DWARA_LOG` | `dwara=info,dwara_core=info` | tracing filter; the edge's own events (connect, receive, apply, ack, reconnect) log as JSON, same pipeline as the gateway |
 
 ## Edge survives CP outage
 
@@ -106,3 +108,11 @@ documented follow-up.
 - mTLS for the gRPC transport
 - Additional config sources (etcd, Consul, K8s API) beyond file
   watching
+
+## Try it
+
+The repository ships a runnable CP/DP topology under
+[quickstart/enterprise/](https://github.com/shristilabs/dwara/tree/main/quickstart/enterprise):
+one controller and a fleet of two edges/gateways on a docker network,
+with a documented walkthrough of fleet convergence (edit one file,
+watch every data plane reload) and controller-outage survival.
