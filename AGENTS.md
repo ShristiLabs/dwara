@@ -115,8 +115,15 @@ crates/dwara-core/src/
   security/           tls, authn, authz
   resilience/         health, retries, breaker (passive observation)
   dataplane/          proxy, upstream, balance, hardening, cors,
-                      compression, and active.rs (probe loops drive
+                      compression, ai_proxy (the DW-075 AI route
+                      action), and active.rs (probe loops drive
                       the registry — dataplane lifecycle)
+  ai/                 the DW-075 provider-adapter pack: canonical
+                      chat types, the pure-translation
+                      ProviderAdapter trait + OpenAI/Anthropic/Gemini
+                      adapters, the OpenAI-compat facade, hand-rolled
+                      SSE framing, and the compiled model-alias table
+                      (transport lives in dataplane/ai_proxy)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind
@@ -142,6 +149,9 @@ plugins         <- config (native filter trait + unified dispatch chain;
                  adapter, so plugins never imports wasm -- see DW-119)
 wasm            <- config, plugins (proxy-wasm host; the adapter
                  implements plugins::WasmDispatch)
+ai              <- config (DW-075 pure translation: adapters + the
+                 compiled alias table; the transport is the provider's
+                 upstream, driven from dataplane/ai_proxy)
 dataplane       <- all of the above
 bin/admin/cli   <- dwara-core (presentation layer)
 ```
@@ -337,6 +347,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | SLO & error-budget export (DW-052) | dwara-core | `observability` (SLO e2e: config→refresh→traffic→/metrics series), `tests/unit/observability.rs` SLO cases (window math, expiry, ring wrap+reset, unconfigured/removal, empty-family safety), `config_schema_extended` slo validation matrix |
 | Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
+| AI provider adapters (DW-075) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction) |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |

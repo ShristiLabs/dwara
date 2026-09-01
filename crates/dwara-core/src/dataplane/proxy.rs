@@ -450,6 +450,11 @@ pub(super) struct Generation {
     /// generation (the TLS config / client cert may change); the token
     /// CACHE lives on the dataplane and persists across reloads.
     oauth2_clients: HashMap<String, Arc<crate::security::oauth2::OAuth2Client>>,
+    /// The compiled AI provider/model table (DW-075), built from the
+    /// `ai:` block with auth references resolved. None when the config
+    /// has no `ai:` block. Rebuilt every generation (a reload picks up
+    /// rotated secrets and model-table changes).
+    ai: Option<Arc<crate::ai::AiRuntime>>,
 }
 
 impl Generation {
@@ -460,6 +465,18 @@ impl Generation {
         upstream_name: &str,
     ) -> Option<&Arc<crate::security::oauth2::OAuth2Client>> {
         self.oauth2_clients.get(upstream_name)
+    }
+
+    /// The upstream registry coupled to this generation (DW-075: the
+    /// AI proxy action resolves provider transports through the SAME
+    /// generation the route table came from).
+    pub(super) fn registry(&self) -> &Arc<UpstreamRegistry> {
+        &self.registry
+    }
+
+    /// The compiled AI table (DW-075); None when no `ai:` block.
+    pub(super) fn ai(&self) -> Option<&Arc<crate::ai::AiRuntime>> {
+        self.ai.as_ref()
     }
 }
 
@@ -819,11 +836,13 @@ impl DataPlane {
         let oidc_introspection_cache =
             Arc::new(crate::security::oidc::OidcIntrospectionCache::new());
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
+        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
         let dp = DataPlane {
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
                 oauth2_clients,
+                ai,
             }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
@@ -1226,10 +1245,12 @@ impl DataPlane {
         self.response_cache
             .note_generation(Some(previous.snapshot.as_ref()), &snapshot);
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
+        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
             oauth2_clients,
+            ai,
         }));
         self.obs.set_config_generation(generation);
         // DW-052: the new generation's SLO set (plain targets, converted
@@ -5031,6 +5052,9 @@ where
     match &route.action {
         RouteAction::Mock { mock } => {
             serve_mock(mock, gen.snapshot.route_table().mock_body(idx), rid).await
+        }
+        RouteAction::Ai => {
+            crate::dataplane::ai_proxy::serve_ai(req, &route.name, gen, dp, rid, rec).await
         }
         RouteAction::Proxy { .. } => {
             // DW-062: fault injection — abort and delay are evaluated

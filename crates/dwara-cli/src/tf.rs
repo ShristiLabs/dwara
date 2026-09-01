@@ -248,6 +248,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     })
 }
 
@@ -327,6 +328,7 @@ fn route_attrs(r: &Route) -> Value {
         RouteAction::Redirect { .. } => "redirect",
         RouteAction::Respond { .. } => "respond",
         RouteAction::Mock { .. } => "mock",
+        RouteAction::Ai => "ai",
     };
     m.insert("action_type".to_string(), json!(action_type));
     if r.auth_required {
@@ -600,6 +602,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             RouteAction::Redirect { .. } => "redirect",
             RouteAction::Respond { .. } => "respond",
             RouteAction::Mock { .. } => "mock",
+            RouteAction::Ai => "ai",
         };
         out.push_str(&format!("  action_type = \"{}\"\n", action_type));
         if r.auth_required {
@@ -1143,6 +1146,7 @@ mod tests {
             redis_rate_limiter: None,
             config_convergence: None,
             plugins: Vec::new(),
+            ai: None,
         }
     }
 
@@ -1318,6 +1322,7 @@ mod tests {
             redis_rate_limiter: None,
             config_convergence: None,
             plugins: Vec::new(),
+            ai: None,
         };
         let state = gateway_to_state(&gw);
         assert!(state.resources.is_empty());

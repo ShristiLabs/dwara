@@ -9,6 +9,35 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI provider adapters (DW-075): an OpenAI-compatible chat-completions
+  facade with per-provider wire translation — the same client request
+  (OpenAI shape) serves OpenAI, Anthropic, and Gemini via the new
+  `ai:` config block's model-alias table (`models: alias ->
+  {provider, provider_model}`); responses, provider errors, and
+  streaming deltas are normalized back to the OpenAI shape (the
+  provider's model id never reaches the client, the client's alias
+  never reaches the provider). New `ai` domain in dwara-core behind a
+  pure-translation `ProviderAdapter` trait (request build / response
+  parse / error parse / SSE delta parse — no I/O, so DW-076 failover
+  composes on the call without adapter changes); a provider names a
+  standard `upstreams:` entry for its transport (pooling, TLS, breaker
+  — no second HTTP client), with a verbatim auth header whose value is
+  secret-ref resolved at compile time (DW-045) and redacted in config
+  echoes. New `ai` route action; new metrics
+  `dwara_ai_requests_total{provider,route,outcome}` and
+  `dwara_ai_tokens_total{provider,kind}` (provider-reported usage
+  only — the locked no-estimation decision); hand-rolled SSE framing
+  (no new dependency). Tool-call translation (id/fragment assembly)
+  and streaming-delta translation are implemented and verified per
+  adapter against recorded provider streams; the GATEWAY streaming
+  path (`stream: true`) answers 400 `streaming_not_supported` until
+  DW-077 lands the zero-buffer pass-through. Known translation limits:
+  dialect-specific request params survive only the OpenAI-to-OpenAI
+  path; remote image URLs are dropped for Gemini (data: URIs only).
+  Body bounds are incremental (16 MiB in / 32 MiB provider / 1 MiB
+  provider error). Tests: 17 adapter translation cases + 7 gateway
+  end-to-end cases with mock providers speaking each dialect.
+
 - CP/DP split gRPC transport (DW-066, Enterprise): a tonic-based gRPC
   transport for the control plane / data plane split. The
   `ControllerServer` implements the `DwaraControlPlane` service: edges

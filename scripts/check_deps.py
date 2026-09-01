@@ -77,6 +77,12 @@ ALLOWED = {
     # domain may depend on config and snapshot. The gRPC transport
     # (tonic) is feature-gated behind `ent`.
     "cp_dp": {"config", "snapshot"},
+    # DW-075: AI provider-adapter pack. Pure translation over the
+    # canonical chat types plus the compiled alias table; the config
+    # block's schema lives in config. The HTTP transport is the
+    # provider's named upstream, driven from dataplane (ai_proxy), so
+    # the ai domain itself needs nothing else.
+    "ai": {"config"},
     "dataplane": {
         "config",
         "extensions",
@@ -89,6 +95,7 @@ ALLOWED = {
         "resilience",
         "plugins",
         "wasm",
+        "ai",
     },
 }
 

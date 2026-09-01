@@ -25,8 +25,10 @@
 //! versioning aids (DW-048), and [`transforms`] the JSON-pointer
 //! grammar and shapes of the request/response transforms and
 //! security-header injection (DW-028). [`cache`] carries the
-//! route-scoped response-caching grammar (DW-037).
+//! route-scoped response-caching grammar (DW-037), and [`ai`] the
+//! AI provider/model grammar of the provider-adapter pack (DW-075).
 
+pub mod ai;
 pub mod cache;
 pub mod credentials;
 pub mod limits;
@@ -338,6 +340,16 @@ pub struct Gateway {
     /// accepted but inert (plugins are not instantiated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
+    /// The AI provider-adapter pack (DW-075): the provider pool and the
+    /// model alias table behind every `ai` route action. Absent (the
+    /// default): no AI surface — an `ai` route action is rejected by
+    /// validation. When present, clients send OpenAI chat-completions
+    /// shaped requests to an `ai` route and the gateway translates to
+    /// the target provider's wire format (OpenAI, Anthropic, Gemini),
+    /// normalizing responses (and streaming deltas) back to the OpenAI
+    /// shape. See [`ai::AiConfig`] and the `ai` domain docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<ai::AiConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -1214,6 +1226,16 @@ impl Gateway {
         for webhook in &mut redacted.webhooks {
             for value in webhook.headers.values_mut() {
                 *value = credentials::redact_inline_secret(value);
+            }
+        }
+        // DW-075: AI provider auth values are inline secret material
+        // exactly like api keys — the same placeholder, the same
+        // reference passthrough.
+        if let Some(ai) = &mut redacted.ai {
+            for provider in &mut ai.providers {
+                if let Some(auth) = &mut provider.auth {
+                    auth.value = credentials::redact_inline_secret(&auth.value);
+                }
             }
         }
         redacted
@@ -2881,6 +2903,16 @@ pub enum RouteAction {
         #[serde(flatten)]
         mock: MockAction,
     },
+    /// AI provider translation (DW-075): the request body is parsed as
+    /// an OpenAI chat-completions request, its `model` resolved through
+    /// the gateway's `ai:` block to a provider, translated to that
+    /// provider's wire format (OpenAI/Anthropic/Gemini), sent through
+    /// the provider's upstream, and the response translated back to the
+    /// OpenAI shape. The route's `service` is still required by the
+    /// schema but never dialed. Requires an `ai:` block (validation
+    /// rejects the pairing otherwise). `stream: true` requests answer
+    /// 400 until the streaming pipeline lands (DW-077).
+    Ai,
 }
 
 /// A canned response served without any upstream contact (DW-047,

@@ -2224,6 +2224,128 @@ fn is_cookie_name(name: &str) -> bool {
 }
 
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
+/// Validate the `ai:` block (DW-075): provider names unique and
+/// non-empty, provider `upstream` references resolve, auth headers are
+/// valid and their values RESOLVE (the DW-045 compile-time contract —
+/// an unresolvable reference fails the generation closed), and model
+/// aliases reference known providers with non-empty provider model
+/// ids. Issues name the offending field; never a resolved value.
+fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(ai) = &gateway.ai else { return };
+    if ai.providers.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "ai.providers",
+            "the ai block is present but declares no providers: it could never \
+             serve a model (remove the block, or declare at least one provider)",
+        ));
+    }
+    if ai.models.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "ai.models",
+            "the ai block is present but declares no models: no client model \
+             could ever resolve (remove the block, or map at least one alias)",
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for p in &ai.providers {
+        if p.name.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "ai.providers[].name",
+                "provider name must be non-empty",
+            ));
+            continue;
+        }
+        if !names.insert(p.name.as_str()) {
+            issues.push(issue(
+                "gateway",
+                &p.name,
+                "ai.providers[].name",
+                "duplicate ai provider name",
+            ));
+        }
+        if !gateway.upstreams.iter().any(|u| u.name == p.upstream) {
+            issues.push(issue(
+                "gateway",
+                &p.name,
+                "ai.providers[].upstream",
+                format!(
+                    "references unknown upstream '{}' (the provider's transport \
+                     is a standard upstreams entry)",
+                    p.upstream
+                ),
+            ));
+        }
+        if let Some(auth) = &p.auth {
+            if hyper::header::HeaderName::from_bytes(auth.header.as_bytes()).is_err() {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].auth.header",
+                    format!("'{}' is not a valid HTTP header name", auth.header),
+                ));
+            }
+            // DW-45 compile-time contract: the value must resolve AND
+            // be representable as a header value. Issues name the
+            // provider and reason, never the value.
+            let problem = match crate::config::credentials::resolve_configured_secret(&auth.value) {
+                Ok(resolved) => {
+                    if hyper::header::HeaderValue::from_str(&resolved).is_err() {
+                        Some(
+                            "the auth value (after secret-reference resolution) \
+                             contains characters that cannot appear in an HTTP \
+                             header value"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+                Err(message) => Some(message),
+            };
+            if let Some(message) = problem {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].auth.value",
+                    format!("provider auth: {message}"),
+                ));
+            }
+        }
+    }
+    for (alias, m) in &ai.models {
+        if alias.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "ai.models",
+                "model alias must be non-empty",
+            ));
+        }
+        if !names.contains(m.provider.as_str()) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}].provider"),
+                format!("references unknown ai provider '{}'", m.provider),
+            ));
+        }
+        if m.provider_model.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                &format!("ai.models[{alias}].provider_model"),
+                "provider_model must be non-empty",
+            ));
+        }
+    }
+}
+
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
 
@@ -2376,6 +2498,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // DW-034: OIDC providers (issuer URL shape, introspection cache TTL
     // bounds, consumer references, trusted_ca_file readability).
     validate_oidc_providers(gateway, &mut issues);
+
+    // DW-075: the AI provider-adapter block (provider upstream refs,
+    // auth resolvability, model alias refs).
+    validate_ai(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -3454,6 +3580,20 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 rewrite: Some(ref rw),
             } => validate_rewrite(&r.name, rw, &mut issues),
             RouteAction::Mock { ref mock } => validate_mock(&r.name, mock, &mut issues),
+            RouteAction::Ai => {
+                // The action needs the gateway-level alias table; a
+                // route declaring `ai` without one answers 500s for
+                // every request and is an authoring error caught here.
+                if gateway.ai.is_none() {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "action.type",
+                        "an ai action requires a gateway-level ai block \
+                         (ai.providers + ai.models define what it can serve)",
+                    ));
+                }
+            }
         }
         // Request validation (DW-047): the JSON schema must be
         // well-formed (known type names, non-negative bounds). An
@@ -4841,6 +4981,7 @@ impl Snapshot {
                 redis_rate_limiter: None,
                 config_convergence: None,
                 plugins: Vec::new(),
+                ai: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

@@ -35,11 +35,16 @@
 //! | `events` | `config`, `observability` |
 //! | `snapshot` | `config`, `events` |
 //! | `state` | `config` |
+//! | `analytics` | `config`, `observability`, `extensions` |
 //! | `security` | `config`, `state`, `observability` |
 //! | `resilience` | `config`, `snapshot`, `extensions`, `observability`, `events` |
 //! | `plugins` | `config` (native filter trait + unified dispatch chain;
 //!   the `wasm` domain bridges its instances in via a generic adapter,
 //!   so `plugins` never imports `wasm` — see DW-119) |
+//! | `ai` | `config` (provider-adapter pack, DW-075: the canonical chat
+//!   vocabulary, the pure-translation [`ai::adapter::ProviderAdapter`]
+//!   seam, and the compiled alias table; the transport lives in
+//!   `dataplane`, which calls into it) |
 //! | `dataplane` | all of the above |
 //! | `supervision` | (nothing — pure task plumbing, no domain imports) |
 //!
@@ -58,6 +63,7 @@
 //! stay out of the rendered docs. Use the domain-qualified path in new
 //! code (`dwara_core::dataplane::proxy`, `dwara_core::security::tls`).
 
+pub mod ai;
 pub mod analytics;
 // DW-058: CEL engine. Feature-gated behind the `cel` cargo feature
 // (default OFF) because cel-interpreter adds binary size.

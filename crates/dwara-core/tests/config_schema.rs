@@ -222,6 +222,7 @@ fn empty_document_is_valid() {
             redis_rate_limiter: None,
             config_convergence: None,
             plugins: Vec::new(),
+            ai: None,
         }
     );
 }

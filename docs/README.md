@@ -20,6 +20,10 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [Architecture](./architecture.md) — bounded-context layout, the
   config pipeline, dependency direction, and the request/reload
   lifecycles.
+- [AI provider adapters](./features/ai-provider-adapters.md) — the
+  DW-075 translation layer: OpenAI facade in, OpenAI/Anthropic/Gemini
+  adapters out, providers-as-upstreams, the pure `ProviderAdapter`
+  seam DW-076+ compose on.
 - [TLS](./features/tls.md) — termination (multi-SNI), passthrough, hot
   reload, outbound trust.
 - [Dataplane and proxy](./features/dataplane-proxy.md) — routing,

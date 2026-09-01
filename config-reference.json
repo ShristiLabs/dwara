@@ -26,6 +26,17 @@
         }
       ]
     },
+    "ai": {
+      "description": "The AI provider-adapter pack (DW-075): the provider pool and the\nmodel alias table behind every `ai` route action. Absent (the\ndefault): no AI surface — an `ai` route action is rejected by\nvalidation. When present, clients send OpenAI chat-completions\nshaped requests to an `ai` route and the gateway translates to\nthe target provider's wire format (OpenAI, Anthropic, Gemini),\nnormalizing responses (and streaming deltas) back to the OpenAI\nshape. See [`ai::AiConfig`] and the `ai` domain docs.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AiConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "allow_empty_routes": {
       "description": "Deliberate opt-in to running a gateway with ZERO routes (#129,\nmaintainer decision). Default false: validation rejects a\nroute-less config. An empty route set is schema-valid (every\ncollection defaults empty), and a truncated or torn config\nwrite (truncate-then-save, common in naive editors) is\nschema-valid too — publishing it would drop ALL routing\nmid-run (every request 404s while the file \"looks fine\"). The\nguard applies to cold start AND hot reload alike; a rejected\nreload keeps the running generation serving. Set this to true\nonly for deliberate route-less shapes (e.g. a gateway whose\nsole job is the admin API): with the flag set, unrouted\nrequests answer 404 after listener/global policy checks, per\nthe documented request-path order.",
       "type": "boolean"
@@ -377,6 +388,120 @@
       "required": [
         "max_queue_size",
         "queue_timeout_ms"
+      ]
+    },
+    "AiConfig": {
+      "description": "The `ai:` top-level block (DW-075). Absent: no AI surface. Present:\nvalidation requires at least one provider and at least one model —\nan `ai:` block that can never serve a model is an authoring error,\nnot a silently inert config.",
+      "type": "object",
+      "properties": {
+        "models": {
+          "description": "Model alias table: the `model` value a client puts in its request\nbody maps to the provider that serves it and the provider's own\nmodel identifier. The alias is echoed back to the client; the\n`provider_model` never leaves the gateway.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiModel"
+          }
+        },
+        "providers": {
+          "description": "The provider pool. Each entry names an upstream that carries the\ntransport and the adapter `kind` that carries the wire translation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiProvider"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiModel": {
+      "description": "One model alias mapping (DW-075 `ai.models{alias}`).",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "Name of the `ai.providers[]` entry that serves this alias.",
+          "type": "string"
+        },
+        "provider_model": {
+          "description": "The provider's own model identifier (e.g. `gpt-4o-mini`,\n`claude-sonnet-4-5`, `gemini-2.5-flash`), sent to the provider\nin place of the alias.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "provider_model"
+      ]
+    },
+    "AiProvider": {
+      "description": "One AI provider (DW-075 `ai.providers[]`).",
+      "type": "object",
+      "properties": {
+        "auth": {
+          "description": "Authentication attached to every call to this provider: a\nverbatim header. Optional — a provider behind an internal network\n(a self-hosted gateway fronting an Ollama-style endpoint, for\nexample) may need none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiProviderAuth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "description": "Wire-protocol adapter kind. Selects the request/response\ntranslation applied to every call routed to this provider.",
+          "$ref": "#/$defs/AiProviderKind"
+        },
+        "name": {
+          "description": "Provider name; unique within the `ai:` block. Referenced by\n`ai.models[].provider`.",
+          "type": "string"
+        },
+        "upstream": {
+          "description": "Name of the `upstreams:` entry that carries this provider's\ntransport (endpoints, TLS trust, pooling, timeouts, breaker).\nThe adapter builds provider-specific paths; the endpoint's\nauthority becomes the dialed host, exactly like a proxy route.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "upstream"
+      ]
+    },
+    "AiProviderAuth": {
+      "description": "Verbatim authentication header for a provider (DW-075\n`ai.providers[].auth`). `value` is SECRET-BEARING: an inline value is\nreplaced by the redaction placeholder in every config echo, and a\n`${...}` reference is resolved at config-compile time (DW-045).",
+      "type": "object",
+      "properties": {
+        "header": {
+          "description": "Header name (e.g. `Authorization`, `x-api-key`,\n`x-goog-api-key`). Must be a valid HTTP header name.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Header value, verbatim (e.g. `Bearer ${OPENAI_API_KEY}` —\nreference resolution covers the whole value, so the `Bearer `\nprefix belongs INSIDE the referenced variable or the literal).\nInline values are redacted in config echoes; never logged.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "header",
+        "value"
+      ]
+    },
+    "AiProviderKind": {
+      "description": "The wire protocol an adapter speaks (DW-075).",
+      "oneOf": [
+        {
+          "description": "OpenAI chat-completions API (`POST /v1/chat/completions`). Also\nthe dialect spoken by OpenAI-compatible servers (vLLM, Ollama's\ncompatibility endpoint, and others) — point the upstream at one\nof those and this adapter speaks to it unchanged.",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "Anthropic messages API (`POST /v1/messages`).",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Google Gemini `generateContent` API\n(`POST /v1beta/models/{model}:generateContent`).",
+          "type": "string",
+          "const": "gemini"
+        }
       ]
     },
     "AnalyticsConfig": {
@@ -3280,6 +3405,20 @@
           "required": [
             "type",
             "status"
+          ]
+        },
+        {
+          "description": "AI provider translation (DW-075): the request body is parsed as\nan OpenAI chat-completions request, its `model` resolved through\nthe gateway's `ai:` block to a provider, translated to that\nprovider's wire format (OpenAI/Anthropic/Gemini), sent through\nthe provider's upstream, and the response translated back to the\nOpenAI shape. The route's `service` is still required by the\nschema but never dialed. Requires an `ai:` block (validation\nrejects the pairing otherwise). `stream: true` requests answer\n400 until the streaming pipeline lands (DW-077).",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ai"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
           ]
         }
       ]

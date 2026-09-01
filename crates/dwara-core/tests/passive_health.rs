@@ -624,6 +624,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -831,6 +832,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1098,6 +1100,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     }
 }
 

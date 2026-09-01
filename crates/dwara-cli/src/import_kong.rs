@@ -467,6 +467,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
 
     (gateway, warnings)

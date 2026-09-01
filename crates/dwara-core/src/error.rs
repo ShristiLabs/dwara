@@ -30,6 +30,7 @@
 //! assert!(std::error::Error::source(&e).is_some());
 //! ```
 
+use crate::ai::adapter::AiError;
 use crate::dataplane::hardening::InboundBodyError;
 use crate::dataplane::upstream::{UpstreamBodyError, UpstreamError};
 use crate::extensions::ExtensionsError;
@@ -61,6 +62,8 @@ pub enum Error {
     Auth(AuthError),
     /// Extension subsystem failure.
     Extensions(ExtensionsError),
+    /// AI domain failure (request translation or provider error, DW-075).
+    Ai(AiError),
 }
 
 impl std::fmt::Display for Error {
@@ -76,6 +79,7 @@ impl std::fmt::Display for Error {
             Error::InboundBody(e) => e.fmt(f),
             Error::Auth(e) => e.fmt(f),
             Error::Extensions(e) => e.fmt(f),
+            Error::Ai(e) => e.fmt(f),
         }
     }
 }
@@ -91,6 +95,7 @@ impl std::error::Error for Error {
             Error::InboundBody(e) => Some(e),
             Error::Auth(e) => Some(e),
             Error::Extensions(e) => Some(e),
+            Error::Ai(e) => Some(e),
         }
     }
 }
@@ -140,6 +145,12 @@ impl From<AuthError> for Error {
 impl From<ExtensionsError> for Error {
     fn from(e: ExtensionsError) -> Self {
         Error::Extensions(e)
+    }
+}
+
+impl From<AiError> for Error {
+    fn from(e: AiError) -> Self {
+        Error::Ai(e)
     }
 }
 // retrigger CI after a lost push event (path-filtered workflows

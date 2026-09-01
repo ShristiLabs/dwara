@@ -428,6 +428,7 @@ async fn dataplane_reload_changes_weights_without_restart() {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
     st.compile_and_publish(&g).expect("publish A");
     let dp = DataPlane::new(Arc::clone(&st));

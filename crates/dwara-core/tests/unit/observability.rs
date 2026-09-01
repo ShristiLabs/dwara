@@ -137,6 +137,7 @@ fn render_contains_families() {
             redis_rate_limiter: None,
             config_convergence: None,
             plugins: Vec::new(),
+            ai: None,
         })
         .expect("publish");
     let registry =

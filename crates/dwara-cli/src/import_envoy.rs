@@ -445,6 +445,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     };
 
     (gateway, warnings)

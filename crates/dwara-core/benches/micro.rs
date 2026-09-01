@@ -146,6 +146,7 @@ fn bench_gateway() -> Gateway {
         redis_rate_limiter: None,
         config_convergence: None,
         plugins: Vec::new(),
+        ai: None,
     }
 }
 

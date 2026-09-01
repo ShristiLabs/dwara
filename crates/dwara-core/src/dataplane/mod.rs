@@ -18,11 +18,14 @@
 //! ([`versioning`]), the request/response transforms and
 //! security-header injection of DW-028 ([`transforms`]), and the local
 //! response cache of DW-037 ([`response_cache`], behind the
-//! `extensions::cache::CacheStore` seam). This is the top of the core
+//! `extensions::cache::CacheStore` seam), and the AI proxy action of
+//! DW-075 ([`ai_proxy`], which drives the `ai` domain's adapters over
+//! the provider's upstream). This is the top of the core
 //! dependency graph: it may depend on every other domain; nothing
 //! depends on it.
 
 pub mod active;
+pub mod ai_proxy;
 pub mod balance;
 pub mod compression;
 pub mod cors;

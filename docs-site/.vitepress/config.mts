@@ -159,6 +159,10 @@ export default withMermaid(
                   link: "/guide/api-aggregation",
                 },
                 {
+                  text: "AI gateway",
+                  link: "/guide/ai-gateway",
+                },
+                {
                   text: "OpenAPI response validation",
                   link: "/guide/openapi-response-validation",
                 },

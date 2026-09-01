@@ -511,6 +511,18 @@ pub struct Observability {
     /// returned malformed data). Aggregate counter -- cardinality is
     /// one series.
     config_convergence_refresh_failures_total: IntCounter,
+    /// DW-075: AI route requests, by provider/route/outcome. The
+    /// provider label is the `ai.providers[].name` (config-bounded);
+    /// outcomes: success, provider_error, transport_error,
+    /// translation_error. Client-side rejections (malformed body,
+    /// unknown model) are NOT counted here — they never reach a
+    /// provider and are already visible in requests_total's status
+    /// classes.
+    ai_requests_total: IntCounterVec,
+    /// DW-075: provider-reported token usage, by provider and
+    /// direction (prompt|completion). Provider-reported only (the
+    /// locked M4 decision: the gateway never estimates).
+    ai_tokens_total: IntCounterVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -965,6 +977,27 @@ impl Observability {
              unreachable or returned malformed data.",
         )
         .expect("valid metric definition");
+        let ai_requests_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_requests_total",
+                "AI route requests (DW-075), by provider/route/outcome. Outcomes: \
+                 success, provider_error, transport_error, translation_error. \
+                 Client-side rejections never reach a provider and are not counted \
+                 here.",
+            ),
+            &["provider", "route", "outcome"],
+        )
+        .expect("valid metric definition");
+        let ai_tokens_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_tokens_total",
+                "Provider-reported AI token usage (DW-075), by provider and \
+                 direction (prompt|completion). Provider-reported only; the \
+                 gateway never estimates.",
+            ),
+            &["provider", "kind"],
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -1019,6 +1052,8 @@ impl Observability {
             Box::new(config_convergence_drift.clone()),
             Box::new(config_convergence_refresh_total.clone()),
             Box::new(config_convergence_refresh_failures_total.clone()),
+            Box::new(ai_requests_total.clone()),
+            Box::new(ai_tokens_total.clone()),
         ] {
             registry
                 .register(m)
@@ -1077,6 +1112,8 @@ impl Observability {
             config_convergence_drift,
             config_convergence_refresh_total,
             config_convergence_refresh_failures_total,
+            ai_requests_total,
+            ai_tokens_total,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1396,6 +1433,29 @@ impl Observability {
     /// `dwara_config_convergence_refresh_failures_total`.
     pub fn record_config_convergence_refresh_failure(&self) {
         self.config_convergence_refresh_failures_total.inc();
+    }
+
+    /// Count one AI route request outcome (DW-075) in
+    /// `dwara_ai_requests_total{provider,route,outcome}`. The provider
+    /// and route labels are config-bounded.
+    pub fn record_ai_request(&self, provider: &str, route: &str, outcome: &str) {
+        self.ai_requests_total
+            .with_label_values(&[provider, route, outcome])
+            .inc();
+    }
+
+    /// Add provider-reported token usage (DW-075) to
+    /// `dwara_ai_tokens_total{provider,kind}` (kind: prompt |
+    /// completion). Provider-reported values only.
+    pub fn record_ai_tokens(&self, provider: &str, prompt: u64, completion: u64) {
+        let counters = self
+            .ai_tokens_total
+            .with_label_values(&[provider, "prompt"]);
+        counters.inc_by(prompt);
+        let counters = self
+            .ai_tokens_total
+            .with_label_values(&[provider, "completion"]);
+        counters.inc_by(completion);
     }
 
     /// The current `dwara_config_convergence_drift` gauge value (DW-054):
