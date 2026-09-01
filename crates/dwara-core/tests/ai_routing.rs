@@ -428,6 +428,7 @@ fn runtime_route_plans_chains_and_canaries() {
         governance: None,
         logging: None,
         guardrails: None,
+        semantic_cache: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
 

@@ -622,6 +622,13 @@ pub struct DataPlane {
     /// prompt and response passes through) when guardrails are not
     /// configured — fail-open.
     ai_guardrails: ArcSwap<crate::ai::guardrails::GuardrailEngine>,
+    /// AI semantic cache (DW-083): embedding-similarity cache for AI
+    /// prompts. None when semantic caching is not configured or
+    /// disabled. PERSISTS across reloads (the HNSW index and cached
+    /// entries survive config refreshes); config is updated in place
+    /// via `update_config` so a threshold/TTL change applies to the
+    /// next lookup with no cache reset.
+    ai_semantic_cache: arc_swap::ArcSwapOption<crate::ai::semantic_cache::SemanticCacheEngine>,
     /// Observability state (DW-021): metrics families plus the access-log
     /// sampling knob. Per-dataplane (not global) so parallel tests never
     /// share a registry.
@@ -892,12 +899,16 @@ impl DataPlane {
         let ai_guardrails = ArcSwap::from_pointee(crate::ai::guardrails::GuardrailEngine::compile(
             snapshot.gateway().ai.as_ref(),
         ));
+        let ai_semantic_cache =
+            crate::ai::semantic_cache::SemanticCacheEngine::compile(snapshot.gateway().ai.as_ref())
+                .map(Arc::new);
         let dp = DataPlane {
             ai_budgets,
             ai_pricing,
             ai_governance,
             ai_logging: arc_swap::ArcSwapOption::new(ai_logging),
             ai_guardrails,
+            ai_semantic_cache: arc_swap::ArcSwapOption::new(ai_semantic_cache),
             current: ArcSwap::from_pointee(Generation {
                 snapshot,
                 registry,
@@ -1351,6 +1362,26 @@ impl DataPlane {
             .store(Arc::new(crate::ai::guardrails::GuardrailEngine::compile(
                 snapshot.gateway().ai.as_ref(),
             )));
+        // DW-083: the semantic cache config updates IN PLACE (the
+        // HNSW index and cached entries persist across reloads). A
+        // config that newly enables the cache constructs a fresh
+        // engine; a config that removes the block clears it.
+        let sem_cache_cfg = crate::ai::semantic_cache::SemanticCacheEngine::config_of(
+            snapshot.gateway().ai.as_ref(),
+        );
+        match (sem_cache_cfg, self.ai_semantic_cache.load_full()) {
+            (Some(new_cfg), Some(existing)) => {
+                existing.update_config(new_cfg);
+            }
+            (Some(new_cfg), None) => {
+                self.ai_semantic_cache.store(Some(Arc::new(
+                    crate::ai::semantic_cache::SemanticCacheEngine::new(new_cfg),
+                )));
+            }
+            (None, _) => {
+                self.ai_semantic_cache.store(None);
+            }
+        }
         self.current.store(Arc::new(Generation {
             snapshot,
             registry,
@@ -1628,6 +1659,14 @@ impl DataPlane {
     /// prompt and response passes through — fail-open).
     pub fn ai_guardrails(&self) -> Arc<crate::ai::guardrails::GuardrailEngine> {
         self.ai_guardrails.load_full()
+    }
+
+    /// The AI semantic cache engine (DW-083): the embedding-similarity
+    /// cache. None when semantic caching is not configured or disabled.
+    /// Persists across reloads (the HNSW index and cached entries
+    /// survive config refreshes).
+    pub fn ai_semantic_cache(&self) -> Option<Arc<crate::ai::semantic_cache::SemanticCacheEngine>> {
+        self.ai_semantic_cache.load_full()
     }
 
     /// The current generation's upstream registry. Used by the

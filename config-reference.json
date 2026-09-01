@@ -478,6 +478,17 @@
           "items": {
             "$ref": "#/$defs/AiProvider"
           }
+        },
+        "semantic_cache": {
+          "description": "Semantic cache (DW-083 `ai.semantic_cache`): an\nembedding-similarity cache for AI prompts. A paraphrased\nprompt within the cosine-similarity threshold returns the\ncached response with no provider call and no token spend.\nUses an external embedding service (OpenAI-compatible\n/v1/embeddings API) and a pure-Rust HNSW ANN index\n(`hnsw_rs`). Feature-gated behind the `semantic_cache` cargo\nfeature; without it the config is accepted but the cache is a\nno-op. Absent (the default): no semantic cache.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SemanticCacheConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -4016,6 +4027,70 @@
         }
       },
       "additionalProperties": false
+    },
+    "SemanticCacheConfig": {
+      "description": "Semantic cache config (DW-083 `ai.semantic_cache`): an\nembedding-similarity cache for AI prompts. A paraphrased prompt\nwithin the cosine-similarity threshold returns the cached response\nwith no provider call and no token spend. Uses an external\nembedding service (OpenAI-compatible /v1/embeddings API) to\nvectorize prompts and `hnsw_rs` (pure Rust HNSW) for approximate\nnearest neighbor search. Feature-gated behind the\n`semantic_cache` cargo feature; without it the config is accepted\nbut the cache is a no-op.",
+      "type": "object",
+      "properties": {
+        "embedding_api_key": {
+          "description": "Optional API key for the embedding service (sent as\n`Authorization: Bearer <key>`). Can be a `${...}` secret\nreference (resolved at config-compile time). Inline values\nare redacted in config echoes; never logged.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding_dim": {
+          "description": "The dimension of the embedding vectors. Must match what the\nembedding service returns for the configured model;\nvalidation rejects 0.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "embedding_model": {
+          "description": "The model name passed to the embedding service in the\n`model` field of the POST body.",
+          "type": "string"
+        },
+        "embedding_timeout_ms": {
+          "description": "Timeout for the embedding service HTTP call in milliseconds.\nDefault 5000 (5 seconds).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 0
+        },
+        "embedding_url": {
+          "description": "The URL of the external embedding service (OpenAI-compatible\n/v1/embeddings API). Required when enabled. Validation\nrejects an empty or non-http(s) URL.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Whether the semantic cache is enabled. Default false: an\n`ai.semantic_cache` block without `enabled: true` caches\nnothing (the engine compiles but stays inert).",
+          "type": "boolean"
+        },
+        "max_entries": {
+          "description": "Maximum number of entries to cache. When the cache is full,\nit is reset (all entries evicted, the HNSW index rebuilt).\nDefault 10 000.",
+          "type": "integer",
+          "format": "uint",
+          "default": 10000,
+          "minimum": 0
+        },
+        "threshold": {
+          "description": "Cosine similarity threshold (0.0 to 1.0, inclusive). A cached\nentry is returned only if its cosine similarity to the query\nembedding is >= this threshold. Higher = stricter matching\n(fewer hits, more accurate). Default 0.85.",
+          "type": "number",
+          "format": "double",
+          "default": 0.85
+        },
+        "ttl_secs": {
+          "description": "TTL for cached entries in seconds. Entries older than this are\nconsidered stale and not returned. Default 3600 (1 hour).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "embedding_url",
+        "embedding_model",
+        "embedding_dim"
+      ]
     },
     "Service": {
       "description": "The logical API being exposed: base path, version, default policies;\ntargets exactly one upstream, or a weighted split of upstreams\nsince DW-040 (canary / blue-green).",

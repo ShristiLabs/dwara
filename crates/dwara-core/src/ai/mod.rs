@@ -24,6 +24,9 @@
 //!   dependency decision)
 //! - [`guardrails`] — the DW-082 guardrail engine (prompt-injection,
 //!   PII, banned-content, output schema enforcement)
+//! - [`semantic_cache`] — the DW-083 semantic cache
+//!   (embedding-similarity cache for AI prompts; feature-gated behind
+//!   the `semantic_cache` cargo feature)
 //!
 //! # Dependency direction
 //!
@@ -43,6 +46,7 @@ pub mod logging;
 pub mod openai_compat;
 pub mod redaction;
 pub mod routing;
+pub mod semantic_cache;
 pub mod sse;
 pub mod stream;
 pub mod types;

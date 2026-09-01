@@ -9,6 +9,29 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- AI semantic caching (DW-083): embedding-similarity cache that returns
+  cached responses for paraphrased prompts within a configurable
+  cosine-similarity threshold, avoiding provider calls and token spend.
+  Uses an external embedding service (OpenAI-compatible
+  `/v1/embeddings` API) to vectorize prompts and `hnsw_rs` (pure Rust
+  HNSW ANN index) for approximate nearest-neighbor search. Feature-gated
+  behind the `semantic_cache` cargo feature (OFF by default; `hnsw_rs`
+  adds binary size). Config under `ai.semantic_cache`: `embedding_url`,
+  `embedding_model`, `embedding_dim`, `threshold` (default 0.85),
+  `ttl_secs` (default 3600), `max_entries` (default 10000),
+  `embedding_timeout_ms` (default 5000), `embedding_api_key` (optional,
+  supports `${...}` refs). The cache lookup runs after guardrails and
+  before model routing (non-streaming only); the store path is
+  fire-and-forget (spawned task, never blocks the response). The HNSW
+  index and cached entries persist across config reloads (config updates
+  in place); the cache resets when `max_entries` is reached. Fails open
+  on any embedding service error (miss, never blocks). New metrics
+  `dwara_ai_semantic_cache_hits_total{model}` and
+  `dwara_ai_semantic_cache_misses_total{model}` (config-bounded labels).
+  Validation rejects invalid configs (empty URL, bad threshold, etc.).
+  New `ai::semantic_cache` module; new dependency `hnsw_rs` (MIT/Apache-
+  2.0, feature-gated, not in the default build).
+
 - AI guardrails (DW-082): prompt-injection heuristics, PII detection,
   banned-content filters, and output-schema enforcement as a
   middleware chain on the AI proxy action. Rules are configured under

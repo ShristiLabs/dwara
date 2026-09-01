@@ -97,6 +97,17 @@ pub struct AiConfig {
     /// accepted but inert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<AiGuardrails>,
+    /// Semantic cache (DW-083 `ai.semantic_cache`): an
+    /// embedding-similarity cache for AI prompts. A paraphrased
+    /// prompt within the cosine-similarity threshold returns the
+    /// cached response with no provider call and no token spend.
+    /// Uses an external embedding service (OpenAI-compatible
+    /// /v1/embeddings API) and a pure-Rust HNSW ANN index
+    /// (`hnsw_rs`). Feature-gated behind the `semantic_cache` cargo
+    /// feature; without it the config is accepted but the cache is a
+    /// no-op. Absent (the default): no semantic cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_cache: Option<SemanticCacheConfig>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -456,4 +467,79 @@ pub enum AiGuardrailPhase {
     Response,
     /// Apply at both phases.
     Both,
+}
+
+/// Default semantic-cache cosine-similarity threshold: 0.85.
+fn default_semantic_cache_threshold() -> f64 {
+    0.85
+}
+
+/// Default semantic-cache TTL: 1 hour (3600 s).
+fn default_semantic_cache_ttl() -> u64 {
+    3600
+}
+
+/// Default semantic-cache max entries: 10 000.
+fn default_semantic_cache_max_entries() -> usize {
+    10_000
+}
+
+/// Default semantic-cache embedding-service timeout: 5 s (5000 ms).
+fn default_semantic_cache_embedding_timeout_ms() -> u64 {
+    5000
+}
+
+/// Semantic cache config (DW-083 `ai.semantic_cache`): an
+/// embedding-similarity cache for AI prompts. A paraphrased prompt
+/// within the cosine-similarity threshold returns the cached response
+/// with no provider call and no token spend. Uses an external
+/// embedding service (OpenAI-compatible /v1/embeddings API) to
+/// vectorize prompts and `hnsw_rs` (pure Rust HNSW) for approximate
+/// nearest neighbor search. Feature-gated behind the
+/// `semantic_cache` cargo feature; without it the config is accepted
+/// but the cache is a no-op.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticCacheConfig {
+    /// Whether the semantic cache is enabled. Default false: an
+    /// `ai.semantic_cache` block without `enabled: true` caches
+    /// nothing (the engine compiles but stays inert).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The URL of the external embedding service (OpenAI-compatible
+    /// /v1/embeddings API). Required when enabled. Validation
+    /// rejects an empty or non-http(s) URL.
+    pub embedding_url: String,
+    /// The model name passed to the embedding service in the
+    /// `model` field of the POST body.
+    pub embedding_model: String,
+    /// The dimension of the embedding vectors. Must match what the
+    /// embedding service returns for the configured model;
+    /// validation rejects 0.
+    pub embedding_dim: usize,
+    /// Cosine similarity threshold (0.0 to 1.0, inclusive). A cached
+    /// entry is returned only if its cosine similarity to the query
+    /// embedding is >= this threshold. Higher = stricter matching
+    /// (fewer hits, more accurate). Default 0.85.
+    #[serde(default = "default_semantic_cache_threshold")]
+    pub threshold: f64,
+    /// TTL for cached entries in seconds. Entries older than this are
+    /// considered stale and not returned. Default 3600 (1 hour).
+    #[serde(default = "default_semantic_cache_ttl")]
+    pub ttl_secs: u64,
+    /// Maximum number of entries to cache. When the cache is full,
+    /// it is reset (all entries evicted, the HNSW index rebuilt).
+    /// Default 10 000.
+    #[serde(default = "default_semantic_cache_max_entries")]
+    pub max_entries: usize,
+    /// Timeout for the embedding service HTTP call in milliseconds.
+    /// Default 5000 (5 seconds).
+    #[serde(default = "default_semantic_cache_embedding_timeout_ms")]
+    pub embedding_timeout_ms: u64,
+    /// Optional API key for the embedding service (sent as
+    /// `Authorization: Bearer <key>`). Can be a `${...}` secret
+    /// reference (resolved at config-compile time). Inline values
+    /// are redacted in config echoes; never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_api_key: Option<String>,
 }

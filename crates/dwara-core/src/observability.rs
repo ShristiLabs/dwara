@@ -551,6 +551,14 @@ pub struct Observability {
     /// string). No consumer label (cardinality); the consumer is in
     /// the access log.
     ai_guardrail_blocked_total: IntCounterVec,
+    /// DW-083: AI semantic cache hits, by model alias
+    /// (config-bounded label). No consumer label (cardinality); the
+    /// consumer is in the access log.
+    ai_semantic_cache_hits_total: IntCounterVec,
+    /// DW-083: AI semantic cache misses, by model alias
+    /// (config-bounded label). No consumer label (cardinality); the
+    /// consumer is in the access log.
+    ai_semantic_cache_misses_total: IntCounterVec,
     /// DW-077: forwarded streaming chunks (SSE frames), by provider.
     /// One per client-visible delta chunk — the per-chunk
     /// observability of the streaming path.
@@ -1059,6 +1067,26 @@ impl Observability {
             &["rule", "kind"],
         )
         .expect("valid metric definition");
+        let ai_semantic_cache_hits_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_semantic_cache_hits_total",
+                "AI semantic cache hits (DW-083), by model alias. The model \
+                 is the client-facing alias (config-bounded label). No consumer \
+                 label — cardinality rule.",
+            ),
+            &["model"],
+        )
+        .expect("valid metric definition");
+        let ai_semantic_cache_misses_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_semantic_cache_misses_total",
+                "AI semantic cache misses (DW-083), by model alias. The model \
+                 is the client-facing alias (config-bounded label). No consumer \
+                 label — cardinality rule.",
+            ),
+            &["model"],
+        )
+        .expect("valid metric definition");
         let ai_stream_chunks_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_stream_chunks_total",
@@ -1170,6 +1198,8 @@ impl Observability {
             Box::new(ai_budget_denied_total.clone()),
             Box::new(ai_governance_denied_total.clone()),
             Box::new(ai_guardrail_blocked_total.clone()),
+            Box::new(ai_semantic_cache_hits_total.clone()),
+            Box::new(ai_semantic_cache_misses_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
         ] {
@@ -1237,6 +1267,8 @@ impl Observability {
             ai_budget_denied_total,
             ai_governance_denied_total,
             ai_guardrail_blocked_total,
+            ai_semantic_cache_hits_total,
+            ai_semantic_cache_misses_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
@@ -1577,6 +1609,26 @@ impl Observability {
     pub fn record_ai_guardrail_blocked(&self, rule: &str, kind: &str) {
         self.ai_guardrail_blocked_total
             .with_label_values(&[rule, kind])
+            .inc();
+    }
+
+    /// Count one AI semantic cache hit (DW-083) in
+    /// `dwara_ai_semantic_cache_hits_total{model}` (model: the
+    /// client-facing alias, config-bounded). No consumer label
+    /// (cardinality rule).
+    pub fn record_ai_semantic_cache_hit(&self, model: &str) {
+        self.ai_semantic_cache_hits_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Count one AI semantic cache miss (DW-083) in
+    /// `dwara_ai_semantic_cache_misses_total{model}` (model: the
+    /// client-facing alias, config-bounded). No consumer label
+    /// (cardinality rule).
+    pub fn record_ai_semantic_cache_miss(&self, model: &str) {
+        self.ai_semantic_cache_misses_total
+            .with_label_values(&[model])
             .inc();
     }
 

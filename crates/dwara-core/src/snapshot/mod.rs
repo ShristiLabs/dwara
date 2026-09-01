@@ -2657,6 +2657,87 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+    // DW-083: semantic cache validation. When enabled, the embedding
+    // URL/model/dim must be valid, the threshold in [0.0, 1.0], and
+    // the TTL/max-entries/timeout positive. A disabled block is
+    // accepted without further checks (it is inert).
+    if let Some(sem_cache) = &ai.semantic_cache {
+        if sem_cache.enabled {
+            if sem_cache.embedding_url.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.embedding_url",
+                    "the semantic cache embedding_url must be non-empty when \
+                     enabled (the OpenAI-compatible /v1/embeddings endpoint)",
+                ));
+            } else if !sem_cache.embedding_url.starts_with("http://")
+                && !sem_cache.embedding_url.starts_with("https://")
+            {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.embedding_url",
+                    "the semantic cache embedding_url must be an http or https \
+                     URL",
+                ));
+            }
+            if sem_cache.embedding_model.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.embedding_model",
+                    "the semantic cache embedding_model must be non-empty when \
+                     enabled (the model name passed to the embedding service)",
+                ));
+            }
+            if sem_cache.embedding_dim == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.embedding_dim",
+                    "the semantic cache embedding_dim must be > 0 (it must \
+                     match the embedding service's vector dimension)",
+                ));
+            }
+            if !(0.0..=1.0).contains(&sem_cache.threshold) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.threshold",
+                    format!(
+                        "the semantic cache threshold must be in [0.0, 1.0] \
+                         (got {})",
+                        sem_cache.threshold
+                    ),
+                ));
+            }
+            if sem_cache.ttl_secs == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.ttl_secs",
+                    "the semantic cache ttl_secs must be > 0",
+                ));
+            }
+            if sem_cache.max_entries == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.max_entries",
+                    "the semantic cache max_entries must be > 0",
+                ));
+            }
+            if sem_cache.embedding_timeout_ms == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.semantic_cache.embedding_timeout_ms",
+                    "the semantic cache embedding_timeout_ms must be > 0",
+                ));
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {

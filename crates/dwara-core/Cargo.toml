@@ -126,6 +126,10 @@ prost = { workspace = true, optional = true }
 # CP/DP gRPC server-streaming transport (ent feature only). Already pulled
 # in transitively by tonic; this makes it a direct dep. MIT.
 tokio-stream = { workspace = true, optional = true }
+# DW-083: HNSW ANN index for semantic caching (embedding-similarity cache
+# for AI prompts). Optional so the default build never pulls it in;
+# enabled via the `semantic_cache` feature. MIT OR Apache-2.0.
+hnsw_rs = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -188,6 +192,12 @@ aggregation = []
 # -- AI agents operate dwara. Default OFF. Build with
 # `cargo build --features mcp`.
 mcp = []
+# DW-083: Semantic caching (embedding-similarity cache for AI prompts).
+# When enabled, the gateway can cache AI responses by prompt embedding
+# similarity (paraphrased prompts hit the cache). Default OFF: hnsw_rs
+# + its transitive deps (rayon, mmap-rs, anndists) add binary size.
+# Build with `cargo build --features semantic_cache`.
+semantic_cache = ["dep:hnsw_rs"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

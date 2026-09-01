@@ -691,6 +691,7 @@ mod tests {
             governance: None,
             logging: None,
             guardrails: Some(AiGuardrails { rules }),
+            semantic_cache: None,
         };
         GuardrailEngine::compile(Some(&cfg))
     }

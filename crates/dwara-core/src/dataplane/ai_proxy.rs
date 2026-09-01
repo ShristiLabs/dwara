@@ -384,6 +384,41 @@ where
         chat_req.stream_options_include_usage = true;
     }
 
+    // DW-083: semantic cache lookup. AFTER guardrails (the prompt may
+    // have been redacted) and AFTER the stream flag is known, BEFORE
+    // model routing + the provider call. A cache hit returns the
+    // cached response with no provider call and no token spend.
+    // Non-streaming only (streaming responses cannot be cached — the
+    // zero-buffer design precludes full content reassembly). The
+    // lookup is async (it calls the embedding service) but runs in
+    // the already-async serve_ai; a miss or error fails open.
+    let sem_cache = dp.ai_semantic_cache();
+    let can_cache = !stream_requested && sem_cache.is_some();
+    if can_cache {
+        if let Some(sem_cache) = &sem_cache {
+            let prompt_text = chat_req
+                .messages
+                .iter()
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(cached) = sem_cache.lookup(&prompt_text, &chat_req.model).await {
+                dp.observability_arc()
+                    .record_ai_semantic_cache_hit(&chat_req.model);
+                tracing::info!(
+                    code = "semantic_cache_hit",
+                    request_id = %rid,
+                    route = %route_name,
+                    model = %chat_req.model,
+                    "AI semantic cache hit; returning cached response with no provider call"
+                );
+                return response_with_json(StatusCode::OK, &cached, &HeaderMap::new());
+            }
+            dp.observability_arc()
+                .record_ai_semantic_cache_miss(&chat_req.model);
+        }
+    }
+
     // 4. Route (DW-076): the ordered candidate list for this alias —
     // [primary, failover...] for a chained alias, the deterministic
     // canary pick for a split alias. Empty means the alias does not
@@ -849,6 +884,28 @@ where
             upstream = %provider.upstream,
             "ai chat completion translated and served"
         );
+        // DW-083: store the response in the semantic cache
+        // (non-streaming only). Fire-and-forget — the embedding call
+        // and HNSW insert happen in a spawned task so they never
+        // block the response path. The prompt text is the joined
+        // message text (the same shape the lookup used); the body is
+        // the OpenAI-shaped response JSON.
+        if can_cache {
+            if let Some(sem_cache) = &sem_cache {
+                let sem_cache = Arc::clone(sem_cache);
+                let prompt_text = chat_req
+                    .messages
+                    .iter()
+                    .map(|m| m.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let body_clone = body.clone();
+                let model = chat_req.model.clone();
+                tokio::spawn(async move {
+                    sem_cache.store(&prompt_text, &body_clone, &model).await;
+                });
+            }
+        }
         return response_with_json(StatusCode::OK, &body, &up_parts.headers);
     }
 

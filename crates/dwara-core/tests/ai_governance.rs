@@ -649,6 +649,7 @@ fn governance_engine_deny_when_model_not_in_allowlist() {
         }),
         logging: None,
         guardrails: None,
+        semantic_cache: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     assert!(!engine.is_empty());
@@ -702,6 +703,7 @@ fn governance_engine_deny_wins_across_multiple_policies() {
         }),
         logging: None,
         guardrails: None,
+        semantic_cache: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     // Consumer attaches both broad + strict. cheap is in both -> allow.

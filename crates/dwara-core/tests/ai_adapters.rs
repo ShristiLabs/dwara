@@ -589,6 +589,7 @@ fn ai_runtime_compiles_and_resolves() {
         governance: None,
         logging: None,
         guardrails: None,
+        semantic_cache: None,
     };
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
     assert_eq!(rt.provider_count(), 1);

@@ -274,6 +274,13 @@ tonic = { version = "0.12", default-features = false, features = [
 # CP/DP gRPC server-streaming transport (ent feature only). Already pulled
 # in transitively by tonic; this makes it a direct dep. MIT.
 tokio-stream = { version = "0.1", features = ["net"] }
+# DW-083: Semantic caching (embedding-similarity cache for AI prompts).
+# hnsw_rs is a pure-Rust HNSW (Hierarchical Navigable Small World) ANN
+# index. MIT OR Apache-2.0 (both allow-listed in deny.toml). Version
+# 0.3.4 published 2026-02-28, well-vetted (515K downloads). Feature-gated
+# behind the `semantic_cache` feature on dwara-core so the default build
+# never pulls it in (rayon + mmap-rs + anndists add binary size).
+hnsw_rs = { version = "0.3", default-features = false }
 
 [profile.release]
 lto = true
