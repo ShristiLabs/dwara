@@ -273,6 +273,7 @@ fn listener_attrs(l: &Listener) -> Value {
         "protocol": match l.protocol {
             ListenerProtocol::Http => "http",
             ListenerProtocol::Https => "https",
+            ListenerProtocol::H3 => "h3",
         },
     })
 }
@@ -305,6 +306,7 @@ fn parse_listener_attrs(v: &Value) -> Result<Listener, String> {
         proxy_protocol: false,
         policies: Vec::new(),
         authorization: None,
+        alt_svc: None,
     })
 }
 
@@ -569,6 +571,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             match l.protocol {
                 ListenerProtocol::Http => "http",
                 ListenerProtocol::Https => "https",
+                ListenerProtocol::H3 => "h3",
             }
         ));
     }
@@ -1052,6 +1055,7 @@ mod tests {
                 proxy_protocol: false,
                 policies: Vec::new(),
                 authorization: None,
+                alt_svc: None,
             }],
             routes: vec![Route {
                 name: "api".to_string(),

@@ -11,7 +11,7 @@ use dwara_core::config::{
     Compression, CompressionAlgorithm, Cors, Credential, Endpoint, Gateway, JwtProvider, Listener,
     ListenerProtocol, ListenerTls, LoadBalancer, NameValueMatch, PathMatch, PathMatchKind,
     PathRewrite, Policy, RateLimit, RequestLimits, Route, RouteAction, RouteMatch, Service,
-    TlsMode, Upstream, UpstreamProtocol,
+    TlsMode, Upstream, UpstreamProtocol, ZeroRttPolicy,
 };
 use dwara_core::snapshot::{compile, validate, CompileError, ConfigState};
 
@@ -29,6 +29,7 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
         proxy_protocol: false,
         policies: vec![],
         authorization: None,
+        alt_svc: None,
     }
 }
 
@@ -924,6 +925,7 @@ fn validation_rejects_terminate_without_cert_file() {
         key_file: Some("/etc/certs/key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.cert_file");
 }
@@ -937,6 +939,7 @@ fn validation_rejects_terminate_without_key_file() {
         key_file: None,
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.key_file");
 }
@@ -950,6 +953,7 @@ fn validation_accepts_terminate_with_cert_and_key() {
         key_file: Some("/etc/certs/key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1058,6 +1062,7 @@ fn validation_accepts_passthrough_without_cert_or_key() {
         key_file: None,
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1071,6 +1076,7 @@ fn validation_rejects_passthrough_with_cert_and_key() {
         key_file: Some("/etc/certs/key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }));
     assert_single_issue(&gw, "listener", "l", "tls");
 }
@@ -1085,6 +1091,7 @@ fn validation_rejects_http_listener_with_tls_block() {
         key_file: Some("/etc/certs/key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     });
     assert_single_issue(&gw, "listener", "l", "tls");
 }

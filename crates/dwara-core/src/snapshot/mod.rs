@@ -43,7 +43,7 @@ use arc_swap::ArcSwap;
 
 use crate::config::{
     gateway_to_yaml, Credential, Gateway, ListenerProtocol, PathMatchKind, PathRewrite, Route,
-    RouteAction, TlsMode,
+    RouteAction, TlsMode, ZeroRttPolicy,
 };
 
 /// One semantic-validation finding. Operators get every issue at once, not a
@@ -3955,175 +3955,203 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             issues.push(issue("listener", &l.name, "address", "address is empty"));
         }
         match l.protocol {
-            ListenerProtocol::Https => match &l.tls {
-                None => issues.push(issue(
-                    "listener",
-                    &l.name,
-                    "tls",
-                    "protocol https requires a tls block",
-                )),
-                Some(t) => match t.mode {
-                    TlsMode::Terminate => {
-                        let has_pair = t.cert_file.is_some() || t.key_file.is_some();
-                        if t.certificates.is_empty() || has_pair {
-                            if t.cert_file.as_deref().unwrap_or("").trim().is_empty() {
-                                issues.push(issue(
-                                    "listener",
-                                    &l.name,
-                                    "tls.cert_file",
-                                    "tls mode terminate requires a non-empty cert_file",
-                                ));
-                            }
-                            if t.key_file.as_deref().unwrap_or("").trim().is_empty() {
-                                issues.push(issue(
-                                    "listener",
-                                    &l.name,
-                                    "tls.key_file",
-                                    "tls mode terminate requires a non-empty key_file",
-                                ));
-                            }
-                        }
-                        if !t.sni_routes.is_empty() {
-                            issues.push(issue(
-                                "listener",
-                                &l.name,
-                                "tls.sni_routes",
-                                "sni_routes only apply to tls mode passthrough",
-                            ));
-                        }
-                        // #124: a client-CA bundle turns the terminate
-                        // listener into one that verifies client
-                        // certificates (optional at the TLS layer, matched
-                        // against mtls credentials at authn). The same
-                        // compile-time PEM check as trusted_ca_file: a
-                        // broken bundle would otherwise surface as a
-                        // listener-build failure at startup.
-                        if let Some(ca) = &t.client_ca_file {
-                            check_trusted_ca_file(
-                                "listener",
-                                &l.name,
-                                "tls.client_ca_file",
-                                ca,
-                                &mut issues,
-                            );
-                        }
-                        let mut seen_names = std::collections::BTreeSet::new();
-                        for (i, c) in t.certificates.iter().enumerate() {
-                            if c.server_names.is_empty() {
-                                issues.push(issue(
-                                    "listener",
-                                    &l.name,
-                                    &format!("tls.certificates[{i}].server_names"),
-                                    "certificate entry lists no server_names",
-                                ));
-                            }
-                            for n in &c.server_names {
-                                if n.trim().is_empty() {
+            ListenerProtocol::Https => {
+                match &l.tls {
+                    None => issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "tls",
+                        "protocol https requires a tls block",
+                    )),
+                    Some(t) => match t.mode {
+                        TlsMode::Terminate => {
+                            let has_pair = t.cert_file.is_some() || t.key_file.is_some();
+                            if t.certificates.is_empty() || has_pair {
+                                if t.cert_file.as_deref().unwrap_or("").trim().is_empty() {
                                     issues.push(issue(
                                         "listener",
                                         &l.name,
-                                        &format!("tls.certificates[{i}].server_names"),
-                                        "server name is empty",
+                                        "tls.cert_file",
+                                        "tls mode terminate requires a non-empty cert_file",
                                     ));
-                                } else if !seen_names.insert(n.to_ascii_lowercase()) {
+                                }
+                                if t.key_file.as_deref().unwrap_or("").trim().is_empty() {
                                     issues.push(issue(
                                         "listener",
                                         &l.name,
-                                        &format!("tls.certificates[{i}].server_names"),
-                                        format!("duplicate server name '{n}'"),
+                                        "tls.key_file",
+                                        "tls mode terminate requires a non-empty key_file",
                                     ));
                                 }
                             }
-                            if c.cert_file.trim().is_empty() {
+                            if !t.sni_routes.is_empty() {
                                 issues.push(issue(
                                     "listener",
                                     &l.name,
-                                    &format!("tls.certificates[{i}].cert_file"),
-                                    "certificate entry requires a non-empty cert_file",
+                                    "tls.sni_routes",
+                                    "sni_routes only apply to tls mode passthrough",
                                 ));
                             }
-                            if c.key_file.trim().is_empty() {
-                                issues.push(issue(
+                            // #124: a client-CA bundle turns the terminate
+                            // listener into one that verifies client
+                            // certificates (optional at the TLS layer, matched
+                            // against mtls credentials at authn). The same
+                            // compile-time PEM check as trusted_ca_file: a
+                            // broken bundle would otherwise surface as a
+                            // listener-build failure at startup.
+                            if let Some(ca) = &t.client_ca_file {
+                                check_trusted_ca_file(
                                     "listener",
                                     &l.name,
-                                    &format!("tls.certificates[{i}].key_file"),
-                                    "certificate entry requires a non-empty key_file",
-                                ));
+                                    "tls.client_ca_file",
+                                    ca,
+                                    &mut issues,
+                                );
+                            }
+                            let mut seen_names = std::collections::BTreeSet::new();
+                            for (i, c) in t.certificates.iter().enumerate() {
+                                if c.server_names.is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.certificates[{i}].server_names"),
+                                        "certificate entry lists no server_names",
+                                    ));
+                                }
+                                for n in &c.server_names {
+                                    if n.trim().is_empty() {
+                                        issues.push(issue(
+                                            "listener",
+                                            &l.name,
+                                            &format!("tls.certificates[{i}].server_names"),
+                                            "server name is empty",
+                                        ));
+                                    } else if !seen_names.insert(n.to_ascii_lowercase()) {
+                                        issues.push(issue(
+                                            "listener",
+                                            &l.name,
+                                            &format!("tls.certificates[{i}].server_names"),
+                                            format!("duplicate server name '{n}'"),
+                                        ));
+                                    }
+                                }
+                                if c.cert_file.trim().is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.certificates[{i}].cert_file"),
+                                        "certificate entry requires a non-empty cert_file",
+                                    ));
+                                }
+                                if c.key_file.trim().is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        &format!("tls.certificates[{i}].key_file"),
+                                        "certificate entry requires a non-empty key_file",
+                                    ));
+                                }
                             }
                         }
-                    }
-                    TlsMode::Passthrough => {
-                        if t.cert_file.is_some() || t.key_file.is_some() {
-                            issues.push(issue(
+                        TlsMode::Passthrough => {
+                            if t.cert_file.is_some() || t.key_file.is_some() {
+                                issues.push(issue(
                                 "listener",
                                 &l.name,
                                 "tls",
                                 "tls mode passthrough ignores cert_file/key_file; remove them or use mode terminate",
                             ));
-                        }
-                        // DW-030: PROXY acceptance needs the HTTP pipeline
-                        // that consumes the client address (ACL, rate
-                        // keys, XFF); a passthrough listener splices raw
-                        // bytes and would silently ignore the knob.
-                        if l.proxy_protocol {
-                            issues.push(issue(
-                                "listener",
-                                &l.name,
-                                "proxy_protocol",
-                                "proxy_protocol cannot be combined with tls mode passthrough: \
+                            }
+                            // DW-030: PROXY acceptance needs the HTTP pipeline
+                            // that consumes the client address (ACL, rate
+                            // keys, XFF); a passthrough listener splices raw
+                            // bytes and would silently ignore the knob.
+                            if l.proxy_protocol {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "proxy_protocol",
+                                    "proxy_protocol cannot be combined with tls mode passthrough: \
                                  passthrough splices raw bytes and never runs the pipeline that \
                                  consumes the PROXY client address (use protocol http, or https \
                                  with mode terminate)",
-                            ));
-                        }
-                        if !t.certificates.is_empty() {
-                            issues.push(issue(
+                                ));
+                            }
+                            if !t.certificates.is_empty() {
+                                issues.push(issue(
                                 "listener",
                                 &l.name,
                                 "tls.certificates",
                                 "tls mode passthrough does not terminate TLS; certificates do not apply",
                             ));
-                        }
-                        if t.client_ca_file.is_some() {
-                            issues.push(issue(
+                            }
+                            if t.client_ca_file.is_some() {
+                                issues.push(issue(
                                 "listener",
                                 &l.name,
                                 "tls.client_ca_file",
                                 "tls mode passthrough does not terminate TLS; client certificates \
                                  cannot be verified (use mode terminate)",
                             ));
-                        }
-                        let mut seen_names = std::collections::BTreeSet::new();
-                        for (i, r) in t.sni_routes.iter().enumerate() {
-                            if r.server_names.is_empty() {
-                                issues.push(issue(
-                                    "listener",
-                                    &l.name,
-                                    &format!("tls.sni_routes[{i}].server_names"),
-                                    "sni route lists no server_names",
-                                ));
                             }
-                            for n in &r.server_names {
-                                if n.trim().is_empty() {
+                            let mut seen_names = std::collections::BTreeSet::new();
+                            for (i, r) in t.sni_routes.iter().enumerate() {
+                                if r.server_names.is_empty() {
                                     issues.push(issue(
                                         "listener",
                                         &l.name,
                                         &format!("tls.sni_routes[{i}].server_names"),
-                                        "server name is empty",
+                                        "sni route lists no server_names",
                                     ));
-                                } else if !seen_names.insert(n.to_ascii_lowercase()) {
-                                    issues.push(issue(
-                                        "listener",
-                                        &l.name,
-                                        &format!("tls.sni_routes[{i}].server_names"),
-                                        format!("duplicate server name '{n}'"),
-                                    ));
+                                }
+                                for n in &r.server_names {
+                                    if n.trim().is_empty() {
+                                        issues.push(issue(
+                                            "listener",
+                                            &l.name,
+                                            &format!("tls.sni_routes[{i}].server_names"),
+                                            "server name is empty",
+                                        ));
+                                    } else if !seen_names.insert(n.to_ascii_lowercase()) {
+                                        issues.push(issue(
+                                            "listener",
+                                            &l.name,
+                                            &format!("tls.sni_routes[{i}].server_names"),
+                                            format!("duplicate server name '{n}'"),
+                                        ));
+                                    }
                                 }
                             }
                         }
+                    },
+                } // close match &l.tls
+                  // DW-088: zero_rtt is an H3-only policy; on H1/H2
+                  // listeners it has no effect (TLS 1.3 early data over
+                  // TCP is not exposed here). Reject it to avoid silent
+                  // misconfiguration.
+                if let Some(t) = &l.tls {
+                    if t.zero_rtt != ZeroRttPolicy::Reject {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "tls.zero_rtt",
+                            "zero_rtt only applies to protocol h3 listeners (TLS 1.3 early data over QUIC); remove it or use protocol h3",
+                        ));
                     }
-                },
-            },
+                }
+                // DW-088: alt_svc on https listeners advertises the H3
+                // port. Validate non-empty (same as http).
+                if let Some(alt_svc) = &l.alt_svc {
+                    if alt_svc.trim().is_empty() {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "alt_svc",
+                            "alt_svc is set but empty; provide a valid alt-svc value or remove the field",
+                        ));
+                    }
+                }
+            }
             ListenerProtocol::Http => {
                 if l.tls.is_some() {
                     issues.push(issue(
@@ -4131,6 +4159,107 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                         &l.name,
                         "tls",
                         "protocol http must not carry a tls block (use protocol https for TLS)",
+                    ));
+                }
+                // DW-088: alt_svc is meaningful on H1/H2 listeners (they
+                // advertise the H3 port to clients). An H3 listener
+                // advertising itself is a no-op.
+                if let Some(alt_svc) = &l.alt_svc {
+                    if alt_svc.trim().is_empty() {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "alt_svc",
+                            "alt_svc is set but empty; provide a valid alt-svc value or remove the field",
+                        ));
+                    }
+                }
+            }
+            ListenerProtocol::H3 => {
+                // DW-088: HTTP/3 (QUIC) ingress. Requires the `h3` cargo
+                // feature on dwara-bin; when the feature is off, the H3
+                // module does not exist and the QUIC stack is not linked.
+                // Validation rejects the protocol with a clear message so
+                // a config authored for an H3 build does not silently
+                // no-op on a default build.
+                if !cfg!(feature = "h3") {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "protocol",
+                        "protocol h3 requires the `h3` cargo feature on dwara-bin \
+                         (build with --features h3); the default build does not link the QUIC stack",
+                    ));
+                }
+                match &l.tls {
+                    None => issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "tls",
+                        "protocol h3 requires a tls block with cert_file and key_file (QUIC uses TLS 1.3)",
+                    )),
+                    Some(t) => {
+                        if t.mode == TlsMode::Passthrough {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "tls.mode",
+                                "protocol h3 does not support tls mode passthrough (QUIC terminates TLS in the handshake)",
+                            ));
+                        } else {
+                            // Terminate mode: require cert/key (same as
+                            // https terminate, but H3 has no SNI routes).
+                            if t.cert_file.as_deref().unwrap_or("").trim().is_empty()
+                                && t.certificates.is_empty()
+                            {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.cert_file",
+                                    "protocol h3 requires a non-empty cert_file or certificates (QUIC handshake needs a server certificate)",
+                                ));
+                            }
+                            if t.key_file.as_deref().unwrap_or("").trim().is_empty()
+                                && t.certificates.is_empty()
+                            {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.key_file",
+                                    "protocol h3 requires a non-empty key_file or certificates (QUIC handshake needs a private key)",
+                                ));
+                            }
+                            if !t.sni_routes.is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.sni_routes",
+                                    "sni_routes only apply to tls mode passthrough (H3 uses SNI for cert selection, not routing)",
+                                ));
+                            }
+                        }
+                        // zero_rtt is only meaningful on H3 listeners.
+                        // On H1/H2 listeners it is rejected below.
+                    }
+                }
+                // H3 listeners must not advertise alt_svc (they ARE the
+                // alt-svc target; advertising themselves is a no-op).
+                if l.alt_svc.is_some() {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "alt_svc",
+                        "alt_svc must not be set on an h3 listener (the h3 listener is the alt-svc target, not the advertiser)",
+                    ));
+                }
+                // PROXY protocol on H3 is not supported (QUIC has no
+                // pre-handshake byte stream to read a PROXY header from).
+                if l.proxy_protocol {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "proxy_protocol",
+                        "proxy_protocol is not supported on h3 listeners (QUIC has no pre-handshake byte stream)",
                     ));
                 }
             }

@@ -69,6 +69,11 @@ pub(crate) struct BoundListener {
     /// captured at bind time and is NOT hot-reloaded (toggling it takes a
     /// restart, exactly like address/port).
     pub(crate) proxy_protocol: bool,
+    /// DW-088: Alt-Svc header value to advertise on H1/H2 responses
+    /// (tells clients that HTTP/3 is available). None = no alt-svc
+    /// header. Hot-reloaded (read from the current snapshot at bind
+    /// time; a config reload rebinds with the new value).
+    pub(crate) alt_svc: Option<Arc<str>>,
 }
 
 /// Bind one configured listener into its runtime face. Fails startup on
@@ -96,6 +101,17 @@ pub(crate) async fn bind_listener(
                 ListenerMode::Terminate(Arc::new(term))
             }
         },
+        // DW-088: H3 listeners are handled separately in main.rs (they
+        // bind UDP, not TCP). bind_listener is never called for H3
+        // listeners; this arm is unreachable (main.rs skips H3 before
+        // calling bind_listener). If reached, return an error.
+        ListenerProtocol::H3 => {
+            return Err(format!(
+                "h3 listener {} should not reach bind_listener (handled in main.rs)",
+                l.name
+            )
+            .into());
+        }
     };
     Ok((
         listener,
@@ -104,6 +120,7 @@ pub(crate) async fn bind_listener(
             addr,
             mode,
             proxy_protocol: l.proxy_protocol,
+            alt_svc: l.alt_svc.as_ref().map(|s| Arc::from(s.as_str())),
         },
     ))
 }
@@ -136,6 +153,9 @@ pub(crate) async fn run_listener(
             },
             _ = shutdown.changed() => break,
         };
+        // DW-088: clone alt_svc once per iteration so it can be moved
+        // into spawned tasks without borrowing bound across the spawn.
+        let alt_svc = bound.alt_svc.clone();
         match &bound.mode {
             ListenerMode::Cleartext => {
                 // DW-030: on a proxy_protocol listener the header phase
@@ -147,6 +167,7 @@ pub(crate) async fn run_listener(
                     let hardening_phase = Arc::clone(&hardening);
                     let listener: std::sync::Arc<str> = std::sync::Arc::from(bound.name.as_str());
                     let hardening = Arc::clone(&hardening);
+                    let alt_svc = alt_svc.clone();
                     tokio::spawn(async move {
                         let mut stream = stream;
                         let Some((peer, prefix)) = proxy_phase(
@@ -160,7 +181,9 @@ pub(crate) async fn run_listener(
                         };
                         let stream =
                             dwara_core::dataplane::hardening::PrefixedStream::new(stream, prefix);
-                        serve_http_tls(watcher, dp, stream, peer, listener, hardening, None);
+                        serve_http_tls(
+                            watcher, dp, stream, peer, listener, hardening, None, alt_svc,
+                        );
                     });
                 } else {
                     serve_http_tls(
@@ -171,6 +194,7 @@ pub(crate) async fn run_listener(
                         std::sync::Arc::from(bound.name.as_str()),
                         Arc::clone(&hardening),
                         None,
+                        alt_svc.clone(),
                     );
                 }
             }
@@ -284,6 +308,7 @@ pub(crate) async fn run_listener(
                                 listener,
                                 hardening,
                                 client_cert,
+                                alt_svc.clone(),
                             );
                         }
                         Err(err) => tracing::warn!("tls handshake error: {err}"),
@@ -316,6 +341,7 @@ pub(crate) async fn run_listener(
                 match listener.poll_accept(&mut cx) {
                     Poll::Ready(Ok((stream, peer))) => {
                         accepted += 1;
+                        let alt_svc = bound.alt_svc.clone();
                         match &bound.mode {
                             ListenerMode::Passthrough => {}
                             ListenerMode::Cleartext => {
@@ -326,6 +352,7 @@ pub(crate) async fn run_listener(
                                     let hardening = Arc::clone(&hardening);
                                     let listener: std::sync::Arc<str> =
                                         std::sync::Arc::from(bound.name.as_str());
+                                    let alt_svc = alt_svc.clone();
                                     tokio::spawn(async move {
                                         let mut stream = stream;
                                         let Some((peer, prefix)) = proxy_phase(
@@ -343,6 +370,7 @@ pub(crate) async fn run_listener(
                                             );
                                         serve_http_tls(
                                             watcher, dp, stream, peer, listener, hardening, None,
+                                            alt_svc,
                                         );
                                     });
                                 } else {
@@ -354,6 +382,7 @@ pub(crate) async fn run_listener(
                                         std::sync::Arc::from(bound.name.as_str()),
                                         Arc::clone(&hardening),
                                         None,
+                                        alt_svc.clone(),
                                     );
                                 }
                             }
@@ -408,6 +437,7 @@ pub(crate) async fn run_listener(
                                                 listener,
                                                 hardening,
                                                 client_cert,
+                                                alt_svc.clone(),
                                             )
                                         }
                                         Err(err) => {
@@ -548,6 +578,7 @@ fn serve_http_tls<S>(
     listener: std::sync::Arc<str>,
     hardening: Arc<HttpHardening>,
     client_cert: Option<Arc<dwara_core::authn::ClientCertificate>>,
+    alt_svc: Option<std::sync::Arc<str>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -573,6 +604,7 @@ fn serve_http_tls<S>(
                 let peer_ip = peer.ip();
                 let listener = Arc::clone(&listener);
                 let client_cert = client_cert.clone();
+                let alt_svc = alt_svc.clone();
                 // The listener label rides the request extensions so
                 // the per-request metrics/logs can attribute traffic
                 // to the accepting listener (DW-021); the verified
@@ -590,7 +622,16 @@ fn serve_http_tls<S>(
                     // buffering) is bounded by the same gap.
                     let (parts, body) = req.into_parts();
                     let req = hyper::Request::from_parts(parts, hardening.wrap_request_body(body));
-                    Ok::<_, std::convert::Infallible>(proxy::handle(&dp, peer_ip, req).await)
+                    let mut resp = proxy::handle(&dp, peer_ip, req).await;
+                    // DW-088: inject the Alt-Svc header on every
+                    // response from this listener (the listener's
+                    // alt_svc config advertises the H3 port).
+                    if let Some(alt_svc) = &alt_svc {
+                        if let Ok(value) = hyper::header::HeaderValue::from_str(alt_svc) {
+                            resp.headers_mut().insert(hyper::header::ALT_SVC, value);
+                        }
+                    }
+                    Ok::<_, std::convert::Infallible>(resp)
                 }
             }),
         ));

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use dwara_core::config::{
     Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer, SniRoute,
-    TlsCertificate, TlsMode, Upstream, UpstreamProtocol,
+    TlsCertificate, TlsMode, Upstream, UpstreamProtocol, ZeroRttPolicy,
 };
 use dwara_core::security::tls::*;
 
@@ -375,6 +375,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             server_names: vec!["a.example.com".into()],
             upstream: "backend-a".into(),
         }],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     let gateway = Gateway {
         trusted_proxies: vec![],
@@ -387,6 +388,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             policies: vec![],
             authorization: None,
             proxy_protocol: false,
+            alt_svc: None,
         }],
         routes: vec![],
         services: vec![],
@@ -512,6 +514,7 @@ fn resolver_selects_by_sni_and_falls_back() {
             key_file: ak.display().to_string(),
         }],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     let term = TlsTermination::build(&tls).expect("builds");
     assert_eq!(term.watched_paths.len(), 4);
@@ -533,6 +536,7 @@ fn build_rejects_mismatched_cert_key_pair() {
         key_file: Some(bk.display().to_string()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     assert!(matches!(
         TlsTermination::build(&tls),
@@ -563,6 +567,7 @@ fn build_rejects_mismatched_cert_key_pair() {
         key_file: Some(ak.display().to_string()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     let term = TlsTermination::build(&good).expect("matching pair builds");
     let torn = ListenerTls {
@@ -588,6 +593,7 @@ fn build_fails_on_missing_files() {
         key_file: Some("/nonexistent/key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     assert!(matches!(TlsTermination::build(&tls), Err(TlsError::Io(_))));
     assert!(matches!(
@@ -598,6 +604,7 @@ fn build_fails_on_missing_files() {
             key_file: None,
             certificates: vec![],
             sni_routes: vec![],
+            zero_rtt: ZeroRttPolicy::Reject,
         }),
         Err(TlsError::NoCertificates)
     ));
@@ -623,6 +630,7 @@ fn build_fails_when_key_file_carries_no_private_key_material() {
         key_file: Some(cert_only.display().to_string()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     match TlsTermination::build(&tls) {
         Err(TlsError::EmptyPem { what, .. }) => assert_eq!(what, "private keys"),
@@ -683,6 +691,7 @@ fn build_fails_on_corrupt_private_key_pem_without_leaking_material() {
         key_file: Some(corrupt.display().to_string()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     // TlsTermination is not Debug, so expect_err is unavailable here;
     // the match keeps the error and rejects the success branch.

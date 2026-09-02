@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use dwara_core::balance::UpstreamLb;
-use dwara_core::config::{parse_gateway, Endpoint, ListenerTls, LoadBalancer, SniRoute, TlsMode};
+use dwara_core::config::{
+    parse_gateway, Endpoint, ListenerTls, LoadBalancer, SniRoute, TlsMode, ZeroRttPolicy,
+};
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::ConfigState;
 use dwara_core::tls::resolve_passthrough;
@@ -457,6 +459,7 @@ async fn passthrough_sni_resolution_alternates_endpoints_via_registry() {
             server_names: vec!["a.example.com".into()],
             upstream: "up".into(),
         }],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     let hosts: Vec<String> = {
         // The dataplane's resolver: pick through the registry's balancers

@@ -31,7 +31,7 @@ use crate::config::{
     Endpoint as DwaraEndpoint, Gateway as DwaraGateway, Listener as DwaraListener,
     ListenerProtocol, ListenerTls, LoadBalancer, PathMatch, PathMatchKind, Route as DwaraRoute,
     RouteAction, RouteMatch, Service as DwaraService, TlsCertificate, TlsMode,
-    Upstream as DwaraUpstream, UpstreamProtocol,
+    Upstream as DwaraUpstream, UpstreamProtocol, ZeroRttPolicy,
 };
 
 // ---------------------------------------------------------------------------
@@ -439,6 +439,7 @@ pub fn translate_ingress(
             certificates,
             sni_routes: Vec::new(),
             client_ca_file: None,
+            zero_rtt: ZeroRttPolicy::Reject,
         };
 
         listeners.push(DwaraListener {

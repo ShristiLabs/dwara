@@ -3,7 +3,7 @@
 use dwara_core::config::{
     AdaptiveRateLimit, Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer,
     PathMatch, PathMatchKind, PathRewrite, Route, RouteAction, RouteMatch, Service, SniRoute,
-    Timeouts, TlsMode, Upstream, UpstreamProtocol,
+    Timeouts, TlsMode, Upstream, UpstreamProtocol, ZeroRttPolicy,
 };
 use dwara_core::snapshot::*;
 
@@ -19,6 +19,7 @@ fn good_gateway() -> Gateway {
             policies: vec![],
             authorization: None,
             proxy_protocol: false,
+            alt_svc: None,
         }],
         routes: vec![
             Route {
@@ -214,6 +215,7 @@ fn validate_reports_all_semantic_issues() {
         policies: vec![],
         authorization: None,
         proxy_protocol: false,
+        alt_svc: None,
     });
     let issues = validate(&gw);
     assert!(issues
@@ -544,6 +546,7 @@ fn validate_rejects_proxy_protocol_with_tls_passthrough() {
             upstream: "users-pool".into(),
         }],
         client_ca_file: None,
+        zero_rtt: ZeroRttPolicy::Reject,
     });
     gw.listeners[0].proxy_protocol = true;
     let issues = validate(&gw);

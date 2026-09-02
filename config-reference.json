@@ -3057,6 +3057,13 @@
           "description": "Bind address, e.g. `0.0.0.0` or `127.0.0.1`.",
           "type": "string"
         },
+        "alt_svc": {
+          "description": "Alt-Svc header value advertised on H1/H2 responses for this\nlistener (DW-088). When set, an `Alt-Svc` response header is\nadded telling clients that HTTP/3 is available. The value is\nthe alt-svc payload (e.g. `h3=\":8443\"; ma=86400`). Only\nmeaningful on `http` and `https` listeners (an H3 listener\nadvertising itself is a no-op and rejected by validation).\nThe header is added after all other response processing (it\nis a transport-level advertisement, not a route-level\ntransform).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "authorization": {
           "description": "Listener-level authorization rules (#123): applies to every\nrequest this listener accepts that resolved a route (authorization\nruns after route resolution per the documented request-path\norder). Link of the frozen chain consumer > route > service >\nlistener > global; see [`Authz`] for the rule semantics and the\n`authz` module for the merge.",
           "anyOf": [
@@ -3111,10 +3118,19 @@
       ]
     },
     "ListenerProtocol": {
-      "type": "string",
-      "enum": [
-        "http",
-        "https"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        {
+          "description": "HTTP/3 (QUIC) ingress (DW-088). A UDP socket is bound on the\nlistener's address:port; the QUIC handshake uses the `tls`\nblock's certificates (terminate mode only — passthrough is\nrejected). Feature-gated behind the `h3` cargo feature on\n`dwara-bin`; when the feature is off, validation rejects\n`protocol: h3` with a clear message. The `alt_svc` field on\nsibling H1/H2 listeners advertises this listener's H3 port to\nclients for protocol upgrade discovery.",
+          "type": "string",
+          "const": "h3"
+        }
       ]
     },
     "ListenerTls": {
@@ -3159,6 +3175,10 @@
           "items": {
             "$ref": "#/$defs/SniRoute"
           }
+        },
+        "zero_rtt": {
+          "description": "0-RTT (early data) policy for HTTP/3 listeners (DW-088). When\n`accept`, the QUIC handshake accepts 0-RTT early data from\nclients with a saved session ticket — at the cost of replay\nrisk. Non-idempotent requests (POST, PUT, PATCH, DELETE) are\nrejected under 0-RTT with a 425 Too Early response (the client\nretries over a 1-RTT connection). When `reject` (the default),\n0-RTT early data is refused and the client must complete a\nfull 1-RTT handshake before sending a request. Only meaningful\non `protocol: h3` listeners; ignored (and rejected by\nvalidation) on H1/H2 listeners.",
+          "$ref": "#/$defs/ZeroRttPolicy"
         }
       },
       "additionalProperties": false
@@ -5548,6 +5568,21 @@
       "required": [
         "url",
         "events"
+      ]
+    },
+    "ZeroRttPolicy": {
+      "description": "0-RTT (early data) acceptance policy for HTTP/3 (DW-088).",
+      "oneOf": [
+        {
+          "description": "Accept 0-RTT early data. Non-idempotent requests are rejected\nwith 425 Too Early (replay-safe).",
+          "type": "string",
+          "const": "accept"
+        },
+        {
+          "description": "Reject 0-RTT early data (default). The client must complete a\nfull 1-RTT handshake before sending a request.",
+          "type": "string",
+          "const": "reject"
+        }
       ]
     }
   }

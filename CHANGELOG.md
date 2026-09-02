@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- HTTP/3 (QUIC) ingress (DW-088): a new `protocol: h3` listener type
+  serves HTTP/3 over QUIC using `quinn` (QUIC transport) + `h3`
+  (HTTP/3 framing) + `h3-quinn` (the bridge). The QUIC handshake reuses
+  the same `rustls` certificate material as the H1/H2 TLS listeners
+  (terminate mode only — passthrough is rejected). Once an H3 request
+  is decoded, it is handed to the same `proxy::handle` dataplane entry
+  point — routing, auth, rate limits, and policies are identical across
+  H1/H2/H3. Feature-gated behind the `h3` cargo feature on `dwara-bin`
+  (default OFF: quinn+h3 add significant compile time and binary size;
+  build with `cargo build --features h3`). When the feature is off,
+  `protocol: h3` in config is rejected at validation with a clear
+  message. Two new config fields: `alt_svc` on `Listener` (the Alt-Svc
+  header value advertised on H1/H2 responses, e.g.
+  `h3=":8443"; ma=86400`) and `zero_rtt` on `ListenerTls` (0-RTT early
+  data policy for H3: `accept` or `reject` (default); non-idempotent
+  requests under 0-RTT are rejected with 425 Too Early per RFC 8470).
+  New dependencies (feature-gated, MIT-licensed, allow-listed in
+  deny.toml): `quinn`, `h3`, `h3-quinn`.
 - Streaming analytics + ML insights (DW-092): sub-second-freshness
   aggregation with live in-process sketches, plus ML traffic insights
   (anomaly detection on traffic shapes, capacity forecasting, seasonal

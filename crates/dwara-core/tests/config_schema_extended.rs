@@ -495,10 +495,12 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 key_file: None,
                 certificates: vec![],
                 sni_routes: vec![],
+                zero_rtt: ZeroRttPolicy::Reject,
             }),
             proxy_protocol: false,
             policies: vec![],
             authorization: None,
+            alt_svc: None,
         }],
         routes: vec![Route {
             name: "r".into(),

@@ -52,6 +52,16 @@ redis = { workspace = true, optional = true }
 # SIGUSR2 hand-off window. Already in the tree transitively; this only
 # makes it a direct one. MIT OR Apache-2.0.
 socket2 = { workspace = true }
+# DW-088 (feature `h3`, default OFF): HTTP/3 (QUIC) ingress. quinn is
+# the QUIC transport, h3 is the HTTP/3 framing, h3-quinn bridges them.
+# Optional so the default build never pulls them in; the wiring lives
+# in src/h3.rs. All three are MIT-licensed (allow-listed in deny.toml).
+quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
+# bytes is shared by the `otlp` and `h3` features (OTLP export + H3
+# body adaptation). Already in the tree transitively; this makes it a
+# direct one. The `dep:bytes` key is listed in both feature sets.
 
 [features]
 # #126: OTLP trace export (http/protobuf) of the existing root/phase
@@ -79,6 +89,12 @@ otlp = [
 # none()). Build with `cargo build --features ent` (or
 # `--features dwara-bin/ent`) to enable license verification.
 ent = ["dwara-core/ent", "dep:redis"]
+# DW-088: HTTP/3 (QUIC) ingress. Default-off: quinn+h3 add significant
+# compile time and binary size. Build with `cargo build --features h3`
+# (or `--features dwara-bin/h3`) to enable the H3 listener. When the
+# feature is off, `protocol: h3` in config is rejected at validation
+# (the H3 module does not exist and the QUIC stack is not linked).
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:bytes", "dwara-core/h3"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

@@ -35,6 +35,7 @@ features) are not yet implemented.
 cargo build --workspace
 cargo test --workspace            # ~1188 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
+cargo build -p dwara-bin --features h3   # HTTP/3 (QUIC) ingress (default OFF)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
@@ -58,7 +59,7 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 | Path | Contents |
 |---|---|
 | `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
-| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (feature-gated OTLP trace export) |
+| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (feature-gated OTLP trace export), `h3.rs` (feature-gated HTTP/3 QUIC ingress) |
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
 | `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
 | `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |

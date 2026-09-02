@@ -1691,6 +1691,17 @@ pub struct Listener {
     /// `authz` module for the merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+    /// Alt-Svc header value advertised on H1/H2 responses for this
+    /// listener (DW-088). When set, an `Alt-Svc` response header is
+    /// added telling clients that HTTP/3 is available. The value is
+    /// the alt-svc payload (e.g. `h3=":8443"; ma=86400`). Only
+    /// meaningful on `http` and `https` listeners (an H3 listener
+    /// advertising itself is a no-op and rejected by validation).
+    /// The header is added after all other response processing (it
+    /// is a transport-level advertisement, not a route-level
+    /// transform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_svc: Option<String>,
 }
 
 fn default_listener_protocol() -> ListenerProtocol {
@@ -1702,6 +1713,15 @@ fn default_listener_protocol() -> ListenerProtocol {
 pub enum ListenerProtocol {
     Http,
     Https,
+    /// HTTP/3 (QUIC) ingress (DW-088). A UDP socket is bound on the
+    /// listener's address:port; the QUIC handshake uses the `tls`
+    /// block's certificates (terminate mode only — passthrough is
+    /// rejected). Feature-gated behind the `h3` cargo feature on
+    /// `dwara-bin`; when the feature is off, validation rejects
+    /// `protocol: h3` with a clear message. The `alt_svc` field on
+    /// sibling H1/H2 listeners advertises this listener's H3 port to
+    /// clients for protocol upgrade discovery.
+    H3,
 }
 
 /// TLS handling for a listener: terminate at the edge or pass through.
@@ -1741,6 +1761,35 @@ pub struct ListenerTls {
     /// config compile time; validation names this field otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_ca_file: Option<String>,
+    /// 0-RTT (early data) policy for HTTP/3 listeners (DW-088). When
+    /// `accept`, the QUIC handshake accepts 0-RTT early data from
+    /// clients with a saved session ticket — at the cost of replay
+    /// risk. Non-idempotent requests (POST, PUT, PATCH, DELETE) are
+    /// rejected under 0-RTT with a 425 Too Early response (the client
+    /// retries over a 1-RTT connection). When `reject` (the default),
+    /// 0-RTT early data is refused and the client must complete a
+    /// full 1-RTT handshake before sending a request. Only meaningful
+    /// on `protocol: h3` listeners; ignored (and rejected by
+    /// validation) on H1/H2 listeners.
+    #[serde(default, skip_serializing_if = "is_default_zero_rtt")]
+    pub zero_rtt: ZeroRttPolicy,
+}
+
+fn is_default_zero_rtt(p: &ZeroRttPolicy) -> bool {
+    *p == ZeroRttPolicy::Reject
+}
+
+/// 0-RTT (early data) acceptance policy for HTTP/3 (DW-088).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ZeroRttPolicy {
+    /// Accept 0-RTT early data. Non-idempotent requests are rejected
+    /// with 425 Too Early (replay-safe).
+    Accept,
+    /// Reject 0-RTT early data (default). The client must complete a
+    /// full 1-RTT handshake before sending a request.
+    #[default]
+    Reject,
 }
 
 /// One SNI-scoped certificate pair for TLS termination.

@@ -12,7 +12,7 @@
 use dwara_core::config::{
     Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer, PathMatch,
     PathMatchKind, Route, RouteAction, RouteMatch, Service, SniRoute, TlsCertificate, TlsMode,
-    Upstream, UpstreamProtocol,
+    Upstream, UpstreamProtocol, ZeroRttPolicy,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
         proxy_protocol: false,
         policies: vec![],
         authorization: None,
+        alt_svc: None,
     }
 }
 
@@ -40,6 +41,7 @@ fn terminate_tls() -> ListenerTls {
         key_file: Some("/certs/edge.key.pem".into()),
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     }
 }
 
@@ -51,6 +53,7 @@ fn passthrough_tls(routes: Vec<SniRoute>) -> ListenerTls {
         key_file: None,
         certificates: vec![],
         sni_routes: routes,
+        zero_rtt: ZeroRttPolicy::Reject,
     }
 }
 
@@ -257,6 +260,7 @@ fn validation_rejects_terminate_with_neither_single_pair_nor_certificates() {
         key_file: None,
         certificates: vec![],
         sni_routes: vec![],
+        zero_rtt: ZeroRttPolicy::Reject,
     };
     let issues = dwara_core::snapshot::validate(&base_gateway(https_listener("edge", 8443, tls)));
     assert_eq!(issues.len(), 2, "got: {issues:?}");

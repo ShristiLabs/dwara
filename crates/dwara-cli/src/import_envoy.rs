@@ -327,6 +327,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
             proxy_protocol: false,
             policies: Vec::new(),
             authorization: None,
+            alt_svc: None,
         });
 
         // Extract routes from the HTTP connection manager filter chain.

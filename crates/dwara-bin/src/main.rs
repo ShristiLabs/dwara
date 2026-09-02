@@ -104,6 +104,13 @@ mod upgrade;
 #[cfg(feature = "otlp")]
 mod otlp;
 
+// DW-088: HTTP/3 (QUIC) ingress lives behind the default-off `h3`
+// cargo feature (quinn+h3 add significant compile time and binary
+// size). Feature OFF = the module does not exist and `protocol: h3`
+// is rejected at config validation.
+#[cfg(feature = "h3")]
+mod h3;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -341,6 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 policies: Vec::new(),
                 authorization: None,
                 proxy_protocol: false,
+                alt_svc: None,
             }]
         }
         None => state.snapshot().gateway().listeners.clone(),
@@ -352,7 +360,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut tls_states: BTreeMap<String, Arc<TlsTermination>> = BTreeMap::new();
     let mut bound_listeners = Vec::new();
+    // DW-088: H3 (QUIC) listeners are collected separately — they bind
+    // UDP sockets and run a QUIC accept loop, not a TCP accept loop.
+    // They reuse the TlsTermination cert material for the QUIC handshake.
+    #[cfg(feature = "h3")]
+    let mut h3_listeners: Vec<(Listener, Arc<TlsTermination>)> = Vec::new();
     for l in &configured {
+        // DW-088: H3 listeners are handled separately (UDP/QUIC, not
+        // TCP). Skip them in the TCP bind loop.
+        #[cfg(feature = "h3")]
+        if l.protocol == ListenerProtocol::H3 {
+            let tls_cfg = l.tls.as_ref().expect("validated h3 listener has tls");
+            let term = TlsTermination::build(tls_cfg).map_err(
+                |err| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("h3 listener {}: TLS build failed: {err}", l.name).into()
+                },
+            )?;
+            let term = Arc::new(term);
+            tls_states.insert(l.name.clone(), Arc::clone(&term));
+            h3_listeners.push((l.clone(), term));
+            tracing::info!(
+                code = "listening_h3",
+                addr = %format!("{}:{}", l.address, l.port),
+                listener = %l.name,
+                mode = "h3 (quic)",
+                config = %config_path.display().to_string(),
+                generation = info.generation,
+                routes = info.route_count,
+                "dwara listening (h3)"
+            );
+            continue;
+        }
         let (tcp, bound) = bind_listener(l).await?;
         if let ListenerMode::Terminate(term) = &bound.mode {
             tls_states.insert(bound.name.clone(), Arc::clone(term));
@@ -943,6 +981,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             timeout,
             hardening,
         )));
+    }
+
+    // DW-088: Spawn H3 (QUIC) listener tasks. Each H3 listener runs its
+    // own QUIC accept loop with the same shutdown signal.
+    #[cfg(feature = "h3")]
+    {
+        for (listener, tls) in h3_listeners {
+            let dp = Arc::clone(&dp);
+            let rx = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(err) = h3::run_h3_listener(&listener, dp, tls, rx).await {
+                    tracing::error!(
+                        code = "h3_listener_failed",
+                        listener = %listener.name,
+                        "h3 listener ended: {err}"
+                    );
+                }
+            }));
+        }
     }
 
     // DW-049: PID file + upgrade readiness. If this process is an upgrade

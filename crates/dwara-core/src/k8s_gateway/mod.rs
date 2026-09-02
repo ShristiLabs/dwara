@@ -41,7 +41,7 @@ use crate::config::{
     Endpoint as DwaraEndpoint, Gateway as DwaraGateway, Listener as DwaraListener,
     ListenerProtocol, ListenerTls, LoadBalancer, NameValueMatch, PathMatch, PathMatchKind,
     PathRewrite, Route as DwaraRoute, RouteAction, RouteMatch, Service as DwaraService,
-    TlsCertificate, TlsMode, Upstream as DwaraUpstream, UpstreamProtocol,
+    TlsCertificate, TlsMode, Upstream as DwaraUpstream, UpstreamProtocol, ZeroRttPolicy,
 };
 
 pub mod controller;
@@ -659,6 +659,7 @@ fn translate_listener_tls(
         certificates,
         sni_routes: Vec::new(),
         client_ca_file: None,
+        zero_rtt: ZeroRttPolicy::Reject,
     })
 }
 

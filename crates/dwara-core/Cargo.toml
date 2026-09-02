@@ -198,6 +198,13 @@ mcp = []
 # + its transitive deps (rayon, mmap-rs, anndists) add binary size.
 # Build with `cargo build --features semantic_cache`.
 semantic_cache = ["dep:hnsw_rs"]
+# DW-088: HTTP/3 (QUIC) ingress. This is a flag-only feature on
+# dwara-core (no dependencies): it lets snapshot validation accept
+# `protocol: h3` listeners. The actual QUIC stack (quinn, h3, h3-quinn)
+# lives behind the `h3` feature on dwara-bin, which forwards to this
+# flag. Build with `cargo build --features h3` (or
+# `--features dwara-bin/h3`).
+h3 = []
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
