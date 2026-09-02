@@ -59,6 +59,16 @@
 //! - `dwara_mirror_sent_total{upstream}` counter (DW-062) — shadow
 //!   traffic mirror requests sent to a mirror upstream
 //! - `rate_limited_total{route}` counter
+//! - `dwara_rate_limiter_adaptive_factor{policy}` gauge (DW-089) — the
+//!   current adaptive rate-limit factor per policy (1.0 = configured
+//!   rate; < 1.0 tightens, > 1.0 relaxes; bounded [min, max])
+//! - `dwara_rate_limiter_origin_signal_total{policy,signal}` counter
+//!   (DW-089) — upstream origin signals received (`retry_after`), by
+//!   policy and signal (both config-bounded)
+//! - `dwara_rate_limiter_adaptive_tightened_total{policy}` counter
+//!   (DW-089) — adaptive factor decreases, by policy
+//! - `dwara_rate_limiter_adaptive_relaxed_total{policy}` counter
+//!   (DW-089) — adaptive factor increases, by policy
 //! - `shed_total{priority}` counter
 //! - `dwara_policy_dry_run_total{phase,route}` counter (DW-041) —
 //!   requests a dry-run (monitor) policy would have rejected, by phase
@@ -173,8 +183,8 @@ use std::time::Duration;
 
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 /// Request header carrying the correlation ID (inbound respected,
@@ -617,6 +627,22 @@ pub struct Observability {
     /// DW-087: MCP tool call duration (authz check through upstream
     /// response), by tool (config-bounded label), in seconds.
     mcp_tool_duration_seconds: HistogramVec,
+    /// DW-089: current adaptive rate-limit factor, by policy
+    /// (config-bounded label). A factor of 1.0 = the configured rate;
+    /// < 1.0 tightens, > 1.0 relaxes. Set on every `record_outcome`.
+    rate_limiter_adaptive_factor: GaugeVec,
+    /// DW-089: upstream origin signals received, by policy and signal
+    /// (both config-bounded labels; `signal` is the closed set
+    /// `retry_after`). Counted when the controller honors the signal.
+    rate_limiter_origin_signal_total: IntCounterVec,
+    /// DW-089: adaptive factor decreased (tightened) for a policy
+    /// (config-bounded label). Counted once per stressed update that
+    /// moved the factor down.
+    rate_limiter_adaptive_tightened_total: IntCounterVec,
+    /// DW-089: adaptive factor increased (relaxed) for a policy
+    /// (config-bounded label). Counted once per healthy update that
+    /// moved the factor up.
+    rate_limiter_adaptive_relaxed_total: IntCounterVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -1252,6 +1278,46 @@ impl Observability {
             &["tool"],
         )
         .expect("valid metric definition");
+        let rate_limiter_adaptive_factor = GaugeVec::new(
+            Opts::new(
+                "dwara_rate_limiter_adaptive_factor",
+                "Current adaptive rate-limit factor (DW-089), by policy \
+                 (config-bounded). 1.0 = configured rate; < 1.0 tightens, \
+                 > 1.0 relaxes. Bounded [min_factor, max_factor].",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
+        let rate_limiter_origin_signal_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_rate_limiter_origin_signal_total",
+                "Upstream origin signals received by the adaptive controller \
+                 (DW-089), by policy and signal (both config-bounded; signal \
+                 is the closed set retry_after).",
+            ),
+            &["policy", "signal"],
+        )
+        .expect("valid metric definition");
+        let rate_limiter_adaptive_tightened_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_rate_limiter_adaptive_tightened_total",
+                "Adaptive rate-limit factor decreased / tightened (DW-089), by \
+                 policy (config-bounded). Counted once per stressed update that \
+                 moved the factor down.",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
+        let rate_limiter_adaptive_relaxed_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_rate_limiter_adaptive_relaxed_total",
+                "Adaptive rate-limit factor increased / relaxed (DW-089), by \
+                 policy (config-bounded). Counted once per healthy update that \
+                 moved the factor up.",
+            ),
+            &["policy"],
+        )
+        .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
@@ -1346,6 +1412,10 @@ impl Observability {
             Box::new(mcp_sessions_total.clone()),
             Box::new(mcp_tool_calls_total.clone()),
             Box::new(mcp_tool_duration_seconds.clone()),
+            Box::new(rate_limiter_adaptive_factor.clone()),
+            Box::new(rate_limiter_origin_signal_total.clone()),
+            Box::new(rate_limiter_adaptive_tightened_total.clone()),
+            Box::new(rate_limiter_adaptive_relaxed_total.clone()),
         ] {
             registry
                 .register(m)
@@ -1423,6 +1493,10 @@ impl Observability {
             mcp_sessions_total,
             mcp_tool_calls_total,
             mcp_tool_duration_seconds,
+            rate_limiter_adaptive_factor,
+            rate_limiter_origin_signal_total,
+            rate_limiter_adaptive_tightened_total,
+            rate_limiter_adaptive_relaxed_total,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1488,6 +1562,37 @@ impl Observability {
     /// Count one rate-limit denial (429).
     pub fn record_rate_limited(&self, route: &str) {
         self.rate_limited_total.with_label_values(&[route]).inc();
+    }
+
+    /// Set the current adaptive rate-limit factor for a policy (DW-089).
+    /// `factor` is the bounded `[min_factor, max_factor]` value the
+    /// controller computed on its last `record_outcome`.
+    pub fn set_adaptive_factor(&self, policy: &str, factor: f64) {
+        self.rate_limiter_adaptive_factor
+            .with_label_values(&[policy])
+            .set(factor);
+    }
+
+    /// Count one upstream origin signal received by the adaptive
+    /// controller (DW-089). `signal` is the closed set `retry_after`.
+    pub fn record_adaptive_origin_signal(&self, policy: &str, signal: &str) {
+        self.rate_limiter_origin_signal_total
+            .with_label_values(&[policy, signal])
+            .inc();
+    }
+
+    /// Count one adaptive factor decrease / tighten (DW-089).
+    pub fn record_adaptive_tightened(&self, policy: &str) {
+        self.rate_limiter_adaptive_tightened_total
+            .with_label_values(&[policy])
+            .inc();
+    }
+
+    /// Count one adaptive factor increase / relax (DW-089).
+    pub fn record_adaptive_relaxed(&self, policy: &str) {
+        self.rate_limiter_adaptive_relaxed_total
+            .with_label_values(&[policy])
+            .inc();
     }
 
     /// Count one quota denial (429, DW-033) by consumer and binding

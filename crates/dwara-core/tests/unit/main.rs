@@ -1,6 +1,7 @@
 //! Unit tests relocated from src (see AGENTS.md). One binary to keep
 //! link time bounded on CI runners.
 mod active;
+mod adaptive;
 mod admission_queue;
 #[cfg(feature = "aggregation")]
 mod aggregation;

@@ -1005,7 +1005,7 @@ async fn engine_dry_bundle_reports_denials_without_enforcing() {
     // enforcement outcome reads NotLimited (no live rule applied) with
     // nothing to report.
     let e = engine
-        .evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[])
+        .evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[], |_| 1.0)
         .await;
     assert!(
         matches!(e.outcome, RateLimitOutcome::NotLimited),
@@ -1016,7 +1016,7 @@ async fn engine_dry_bundle_reports_denials_without_enforcing() {
     // enforcement outcome stays NotLimited (no live rule applied) and
     // the would-deny is reported.
     let e = engine
-        .evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[])
+        .evaluate(&ctx("10.0.0.1", "a"), &[], &[], &dry, &[], &[], |_| 1.0)
         .await;
     assert!(
         matches!(e.outcome, RateLimitOutcome::NotLimited),
@@ -1041,7 +1041,7 @@ async fn engine_live_bundle_binds_headers_and_enforces_alongside_dry_sibling() {
     let both: Vec<String> = vec!["dry-one".into(), "live-five".into()];
     for i in 0..5u32 {
         let e = engine
-            .evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[])
+            .evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[], |_| 1.0)
             .await;
         match e.outcome {
             RateLimitOutcome::Allowed { limit, .. } => assert_eq!(
@@ -1062,7 +1062,7 @@ async fn engine_live_bundle_binds_headers_and_enforces_alongside_dry_sibling() {
     // Sixth request: the live rule denies (enforced) and the dry
     // sibling's would-deny is reported on the same evaluation.
     let e = engine
-        .evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[])
+        .evaluate(&ctx("10.9.9.9", "a"), &[], &[], &both, &[], &[], |_| 1.0)
         .await;
     assert!(matches!(e.outcome, RateLimitOutcome::Denied { .. }));
     assert!(e.dry_denied.is_some());

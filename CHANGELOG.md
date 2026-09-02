@@ -9,6 +9,27 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Adaptive + origin-driven rate-limit tuning (DW-089): an EWMA of
+  upstream error rate and latency dynamically scales a policy's
+  rate-limit quotas at check time. The adaptive factor (bounded
+  `[min_factor, max_factor]`, never 0, never unbounded) multiplies the
+  per-request cost against the GCRA bucket: under stress (error EWMA
+  above `error_threshold` or latency EWMA above `latency_threshold_ms`)
+  the factor tightens toward `min_factor` (effective rate drops);
+  when healthy it relaxes toward `max_factor` (effective rate rises).
+  Tightening is faster than relaxing (asymmetric, so the gateway errs
+  toward protecting upstreams). Upstream-originated `Retry-After`
+  headers (the `retry_after` origin signal) drop the factor to
+  `min_factor` immediately and pin it there for the advertised window.
+  Configured via `policies[].adaptive` (`ewma_window_secs`,
+  `min_factor`, `max_factor`, `error_threshold`,
+  `latency_threshold_ms`, `origin_signals`). New metrics:
+  `dwara_adaptive_factor`, `dwara_adaptive_min_factor`,
+  `dwara_adaptive_max_factor`, `dwara_adaptive_origin_signal_total`,
+  `dwara_adaptive_tightened_total`, `dwara_adaptive_relaxed_total`.
+  No new dependencies (lock-free `AtomicU64` EWMA, the same pattern as
+  the balancer's `PeakEwmaTracker`).
+
 - Peak-EWMA latency-aware load balancing (DW-090): a new
   `LoadBalancer::PeakEwma` variant implementing Finagle-style
   peak-EWMA latency-aware endpoint selection. Each endpoint tracks an

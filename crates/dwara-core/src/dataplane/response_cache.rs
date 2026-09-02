@@ -612,6 +612,7 @@ impl ResponseCache {
             &dp.observability_arc(),
             None,
             dp.oauth2_token_cache(),
+            &[],
         )
         .await;
         // The foreground store stage expects post-masking/

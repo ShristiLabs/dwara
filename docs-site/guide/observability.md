@@ -60,6 +60,12 @@ and cleartext listener just like `/healthz` (see
 | `dwara_events_emitted_total` | gauge | — |
 | `dwara_slo_burn_rate` | gauge | `route`, `objective`, `window` |
 | `dwara_slo_target` | gauge | `route`, `objective` |
+| `dwara_adaptive_factor` | gauge | `policy` |
+| `dwara_adaptive_min_factor` | gauge | `policy` |
+| `dwara_adaptive_max_factor` | gauge | `policy` |
+| `dwara_adaptive_origin_signal_total` | counter | `policy`, `signal` |
+| `dwara_adaptive_tightened_total` | counter | `policy` |
+| `dwara_adaptive_relaxed_total` | counter | `policy` |
 
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are

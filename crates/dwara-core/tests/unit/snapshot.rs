@@ -1,9 +1,9 @@
 //! Unit tests for `snapshot` (relocated from src).
 
 use dwara_core::config::{
-    Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer, PathMatch,
-    PathMatchKind, PathRewrite, Route, RouteAction, RouteMatch, Service, SniRoute, Timeouts,
-    TlsMode, Upstream, UpstreamProtocol,
+    AdaptiveRateLimit, Endpoint, Gateway, Listener, ListenerProtocol, ListenerTls, LoadBalancer,
+    PathMatch, PathMatchKind, PathRewrite, Route, RouteAction, RouteMatch, Service, SniRoute,
+    Timeouts, TlsMode, Upstream, UpstreamProtocol,
 };
 use dwara_core::snapshot::*;
 
@@ -332,6 +332,7 @@ fn validate_rejects_malformed_rate_limit_rules() {
             dry_run: false,
             token_budget: None,
             anomaly: None,
+            adaptive: None,
         }];
         gw
     }
@@ -380,6 +381,122 @@ fn validate_rejects_malformed_rate_limit_rules() {
     assert!(validate(&gw)
         .iter()
         .any(|i| i.field == "rate_limits[0].burst"));
+}
+
+#[test]
+fn adaptive_validation_catches_bad_config() {
+    fn with_adaptive(mut gw: Gateway, ad: AdaptiveRateLimit) -> Gateway {
+        gw.policies = vec![dwara_core::config::Policy {
+            name: "p".into(),
+            rate_limit: None,
+            rate_limits: vec![],
+            timeouts: None,
+            dry_run: false,
+            token_budget: None,
+            anomaly: None,
+            adaptive: Some(ad),
+        }];
+        gw
+    }
+    let good_adaptive = || AdaptiveRateLimit {
+        enabled: true,
+        ewma_window_secs: 60,
+        min_factor: 0.1,
+        max_factor: 2.0,
+        error_threshold: 0.05,
+        latency_threshold_ms: 500,
+        origin_signals: vec![],
+    };
+
+    // Baseline: a well-formed adaptive block adds no issues.
+    let gw = with_adaptive(good_gateway(), good_adaptive());
+    assert!(!validate(&gw)
+        .iter()
+        .any(|i| i.field.starts_with("adaptive.")));
+
+    // ewma_window_secs == 0.
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            ewma_window_secs: 0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.ewma_window_secs"));
+
+    // min_factor <= 0.
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            min_factor: 0.0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.min_factor"));
+
+    // max_factor <= 0.
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            max_factor: 0.0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.max_factor"));
+
+    // min_factor > max_factor.
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            min_factor: 3.0,
+            max_factor: 1.0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.min_factor"));
+
+    // error_threshold out of (0, 1].
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            error_threshold: 0.0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.error_threshold"));
+
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            error_threshold: 1.5,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.error_threshold"));
+
+    // latency_threshold_ms == 0.
+    let gw = with_adaptive(
+        good_gateway(),
+        AdaptiveRateLimit {
+            latency_threshold_ms: 0,
+            ..good_adaptive()
+        },
+    );
+    assert!(validate(&gw)
+        .iter()
+        .any(|i| i.field == "adaptive.latency_threshold_ms"));
 }
 
 #[test]

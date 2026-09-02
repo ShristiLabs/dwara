@@ -302,6 +302,57 @@
       },
       "additionalProperties": false
     },
+    "AdaptiveRateLimit": {
+      "description": "Adaptive + origin-driven rate-limit tuning (DW-089,\n`policies[].adaptive`): an EWMA of upstream error rate and latency\ndynamically scales this policy's rate-limit quotas at check time\n(the factor multiplies the effective cost of each request against\nthe GCRA bucket), and upstream-originated signals trigger an\nimmediate backoff. The factor is bounded `[min_factor, max_factor]`\n(never 0, never unbounded); tightening under stress is faster than\nrelaxing when healthy (asymmetric, so the gateway errs toward\nprotecting upstreams). `origin_signals` selects which upstream\nresponse signals the controller honors (currently `retry_after`).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether adaptive tuning is enabled (default true). A\n`policies[].adaptive` block with `enabled: false` is a no-op\n(the controller is not compiled for that policy).",
+          "type": "boolean",
+          "default": true
+        },
+        "error_threshold": {
+          "description": "Error-rate EWMA threshold that triggers tightening (default 0.05\n= 5% 5xx rate). When the error EWMA exceeds this, the factor\ndecreases toward `min_factor`. Must be in (0, 1].",
+          "type": "number",
+          "format": "double",
+          "default": 0.05
+        },
+        "ewma_window_secs": {
+          "description": "EWMA decay window in seconds for error-rate and latency tracking\n(default 60). A larger window smooths transient spikes; a smaller\nwindow reacts faster. Must be > 0.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "latency_threshold_ms": {
+          "description": "Latency EWMA threshold in milliseconds that triggers tightening\n(default 500). When the latency EWMA exceeds this, the factor\ndecreases toward `min_factor`. Must be > 0.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 500,
+          "minimum": 0
+        },
+        "max_factor": {
+          "description": "Maximum adaptive factor (default 2.0): the loosest the quotas\ncan grow to (200% of the configured rate). Must be > 0 and >=\n`min_factor`. The factor is never unbounded.",
+          "type": "number",
+          "format": "double",
+          "default": 2.0
+        },
+        "min_factor": {
+          "description": "Minimum adaptive factor (default 0.1): the tightest the quotas\ncan shrink to (10% of the configured rate). Must be > 0 and <=\n`max_factor`. The factor is never 0.",
+          "type": "number",
+          "format": "double",
+          "default": 0.1
+        },
+        "origin_signals": {
+          "description": "Upstream-originated signals the controller honors (default\nempty: EWMA-only tuning). Currently supported: `retry_after`\n(parse the upstream `Retry-After` header and back off for the\nadvertised window).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OriginSignal"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "AdditionalProperties": {
       "description": "The `additionalProperties` keyword accepts either a boolean or a\nnested schema; this union models both.",
       "anyOf": [
@@ -3254,6 +3305,16 @@
         "path"
       ]
     },
+    "OriginSignal": {
+      "description": "One upstream-originated signal the adaptive controller honors\n(DW-089).",
+      "oneOf": [
+        {
+          "description": "Parse the upstream `Retry-After` header (integer seconds or\nHTTP-date) and back off for the advertised window: the factor\ndrops to `min_factor` immediately and stays there until the\nwindow elapses.",
+          "type": "string",
+          "const": "retry_after"
+        }
+      ]
+    },
     "PassiveHealth": {
       "description": "Passive health / outlier detection knobs (DW-012). All fields default;\na `health:` block with no keys enables ejection with the defaults.\n\nFailure classification: transport errors (connect timeout, refusal,\nreset) and HTTP statuses >= 500 are failures; 1xx-4xx are successes.\n429/408 are deliberately successes in v1 (they describe the caller or\nqueueing, not endpoint health).",
       "type": "object",
@@ -3532,6 +3593,17 @@
       "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
       "type": "object",
       "properties": {
+        "adaptive": {
+          "description": "Adaptive + origin-driven rate-limit tuning (DW-089): an EWMA of\nupstream error rate and latency dynamically scales this policy's\nrate-limit quotas, and upstream-originated signals (`Retry-After`)\ntrigger an immediate backoff for the advertised window. The\nadaptive factor is bounded `[min_factor, max_factor]` (never 0,\nnever unbounded); tightening under stress is faster than relaxing\nwhen healthy (asymmetric). Absent (the default): no adaptive\ntuning, the policy's quotas apply as configured.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdaptiveRateLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "anomaly": {
           "description": "Anomaly scoring (DW-090): lightweight statistical detection of\nabusive request patterns (header entropy, request-shape outliers).\nWhen enabled, every matched request is scored against the\nconfigured signals; a score at or above `threshold` is blocked\n(403 `anomaly_blocked`) unless `dry_run` is set (scored and\nlogged, request proceeds). Resolution follows the frozen\nprecedence chain (consumer > route > service > listener > global);\nevery level with an attachment applies and the applicable rules\nAND together. Absent (the default): no anomaly scoring.",
           "anyOf": [

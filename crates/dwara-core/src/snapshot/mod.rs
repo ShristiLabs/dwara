@@ -5579,6 +5579,78 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // DW-089: adaptive rate-limit tuning validation.
+        if let Some(ad) = &p.adaptive {
+            if ad.ewma_window_secs == 0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.ewma_window_secs",
+                    "adaptive.ewma_window_secs must be > 0 (0 is a nonsensical decay window)",
+                ));
+            }
+            if !ad.min_factor.is_finite() || ad.min_factor <= 0.0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.min_factor",
+                    format!(
+                        "adaptive.min_factor must be > 0 (never 0); got {}",
+                        ad.min_factor
+                    ),
+                ));
+            }
+            if !ad.max_factor.is_finite() || ad.max_factor <= 0.0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.max_factor",
+                    format!(
+                        "adaptive.max_factor must be > 0 (never unbounded); got {}",
+                        ad.max_factor
+                    ),
+                ));
+            }
+            if ad.min_factor.is_finite()
+                && ad.max_factor.is_finite()
+                && ad.min_factor > 0.0
+                && ad.max_factor > 0.0
+                && ad.min_factor > ad.max_factor
+            {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.min_factor",
+                    format!(
+                        "adaptive.min_factor ({}) must be <= adaptive.max_factor ({})",
+                        ad.min_factor, ad.max_factor
+                    ),
+                ));
+            }
+            if !ad.error_threshold.is_finite()
+                || ad.error_threshold <= 0.0
+                || ad.error_threshold > 1.0
+            {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.error_threshold",
+                    format!(
+                        "adaptive.error_threshold must be in (0, 1]; got {}",
+                        ad.error_threshold
+                    ),
+                ));
+            }
+            if ad.latency_threshold_ms == 0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "adaptive.latency_threshold_ms",
+                    "adaptive.latency_threshold_ms must be > 0 (0 would mark every \
+                     response as slow)",
+                ));
+            }
+        }
     }
 
     issues

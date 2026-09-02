@@ -1013,6 +1013,7 @@ impl RateLimitEngine {
             service_policies,
             listener_policies,
             global_policies,
+            |_| 1.0,
         )
         .await
         .outcome
@@ -1028,7 +1029,17 @@ impl RateLimitEngine {
     /// `X-RateLimit-*` header values: a monitor never touches the
     /// response. A request can therefore be BOTH 429'd by a live rule
     /// and reported as a dry would-deny in the same evaluation.
-    pub async fn evaluate(
+    ///
+    /// `adaptive_factor` (DW-089) maps a policy name to its current
+    /// adaptive factor (1.0 = no tuning). The factor scales the
+    /// per-request COST against the GCRA bucket: a factor < 1.0
+    /// (tightened) increases the cost so the effective rate drops; a
+    /// factor > 1.0 (relaxed) decreases the cost so the effective rate
+    /// rises. The limiter is NOT rebuilt — the factor is applied at
+    /// check time. Extensions may not import resilience, so the caller
+    /// (the dataplane) supplies the factor lookup.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate<F>(
         &self,
         ctx: &RateLimitKeyContext<'_>,
         consumer_policies: &[String],
@@ -1036,7 +1047,11 @@ impl RateLimitEngine {
         service_policies: &[String],
         listener_policies: &[String],
         global_policies: &[String],
-    ) -> RateLimitEvaluation {
+        adaptive_factor: F,
+    ) -> RateLimitEvaluation
+    where
+        F: Fn(&str) -> f64,
+    {
         // Resolution order (precedence): consumer > route > service >
         // listener > global. One policy is ONE evaluation: a name listed
         // at several levels (or twice in one list) resolves its rules
@@ -1077,7 +1092,20 @@ impl RateLimitEngine {
                     continue;
                 }
                 let key = build_key(ctx, &rule.selectors);
-                match rate_outcome(rule.limiter.check(&key, 1).await) {
+                // DW-089: scale the per-request cost by the adaptive
+                // factor. A factor < 1.0 (tightened) increases the cost
+                // so the effective rate drops; a factor > 1.0 (relaxed)
+                // decreases the cost so the effective rate rises. The
+                // cost is never 0 (a request always costs at least one
+                // unit). The limiter is NOT rebuilt — the factor is
+                // applied at check time.
+                let factor = adaptive_factor(policy_name);
+                let cost = if factor > 0.0 {
+                    (1.0 / factor).round().max(1.0) as u32
+                } else {
+                    1
+                };
+                match rate_outcome(rule.limiter.check(&key, cost).await) {
                     RateLimitOutcome::Denied {
                         limit,
                         remaining,

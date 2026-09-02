@@ -583,6 +583,7 @@ mod tests {
             dry_run: false,
             token_budget: Some(budget),
             anomaly: None,
+            adaptive: None,
         }];
         g.consumers = vec![crate::config::Consumer {
             name: "acme".into(),
@@ -793,6 +794,7 @@ mod tests {
                 scope: TokenBudgetScope::Consumer,
             }),
             anomaly: None,
+            adaptive: None,
         });
         let engine = AiBudgetEngine::compile(&g);
         // Consumer-level (5) wins over route-level (999).
@@ -849,6 +851,7 @@ mod tests {
                 scope: TokenBudgetScope::Policy,
             }),
             anomaly: None,
+            adaptive: None,
         });
         let engine = AiBudgetEngine::compile(&g);
         // Anonymous: the consumer-scoped candidate cannot bind, the

@@ -14,7 +14,8 @@
 //! - [`events`] — the in-process event bus and webhook delivery (DW-044)
 //! - [`state`] — SQLite-backed durable state and schema migrations
 //! - [`security`] — TLS, authentication, authorization
-//! - [`resilience`] — passive health, retries, circuit breaker
+//! - [`resilience`] — passive health, retries, circuit breaker,
+//!   adaptive + origin-driven rate-limit tuning (DW-089)
 //! - [`dataplane`] — the reverse-proxy request path, its upstreams, and
 //!   active health probing
 //! - [`supervision`] — bounded panic-respawn supervision for accept
@@ -135,6 +136,8 @@ pub use dataplane::hardening;
 pub use dataplane::proxy;
 #[doc(hidden)]
 pub use dataplane::upstream;
+#[doc(hidden)]
+pub use resilience::adaptive;
 #[doc(hidden)]
 pub use resilience::breaker;
 #[doc(hidden)]

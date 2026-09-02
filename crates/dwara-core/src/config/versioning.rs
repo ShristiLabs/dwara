@@ -121,6 +121,29 @@ pub fn parse_http_date(value: &str) -> Option<HttpDate> {
     })
 }
 
+/// Parse an HTTP `Retry-After` header value (DW-089) into a duration
+/// from NOW. Per RFC 9110 the value is either a non-negative integer
+/// (seconds to wait) or an IMF-fixdate (the time at which to retry).
+/// Returns `None` for anything else (the caller treats a missing/invalid
+/// header as no backoff signal). For the HTTP-date form the duration is
+/// `max(0, date - now)`; a date in the past yields a zero duration (the
+/// advertised window has already elapsed).
+pub fn parse_retry_after(value: &str, now_unix_seconds: i64) -> Option<std::time::Duration> {
+    let trimmed = value.trim();
+    // Integer seconds form: a non-negative decimal integer.
+    if let Ok(secs) = trimmed.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(secs));
+    }
+    // HTTP-date form: parse the IMF-fixdate and compute the remaining
+    // window from the caller's "now".
+    let date = parse_http_date(trimmed)?;
+    let remaining = date.unix_seconds.saturating_sub(now_unix_seconds);
+    if remaining <= 0 {
+        return Some(std::time::Duration::ZERO);
+    }
+    Some(std::time::Duration::from_secs(remaining as u64))
+}
+
 /// Normalize a configured media type (DW-048): trim, lowercase, and
 /// require a bare `type/subtype` — both halves non-empty RFC 9110
 /// tokens, no parameters (`;...`), no whitespace, no wildcards. The

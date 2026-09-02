@@ -4139,6 +4139,16 @@ pub struct Policy {
     /// AND together. Absent (the default): no anomaly scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anomaly: Option<AnomalyPolicy>,
+    /// Adaptive + origin-driven rate-limit tuning (DW-089): an EWMA of
+    /// upstream error rate and latency dynamically scales this policy's
+    /// rate-limit quotas, and upstream-originated signals (`Retry-After`)
+    /// trigger an immediate backoff for the advertised window. The
+    /// adaptive factor is bounded `[min_factor, max_factor]` (never 0,
+    /// never unbounded); tightening under stress is faster than relaxing
+    /// when healthy (asymmetric). Absent (the default): no adaptive
+    /// tuning, the policy's quotas apply as configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<AdaptiveRateLimit>,
 }
 
 /// An AI token budget (DW-078, `policies[].token_budget`): limits of
@@ -4432,4 +4442,89 @@ fn default_anomaly_threshold() -> f64 {
 
 fn default_max_body_inspect() -> u64 {
     4096
+}
+
+// --- DW-089: adaptive + origin-driven rate-limit tuning -------------------
+
+/// Adaptive + origin-driven rate-limit tuning (DW-089,
+/// `policies[].adaptive`): an EWMA of upstream error rate and latency
+/// dynamically scales this policy's rate-limit quotas at check time
+/// (the factor multiplies the effective cost of each request against
+/// the GCRA bucket), and upstream-originated signals trigger an
+/// immediate backoff. The factor is bounded `[min_factor, max_factor]`
+/// (never 0, never unbounded); tightening under stress is faster than
+/// relaxing when healthy (asymmetric, so the gateway errs toward
+/// protecting upstreams). `origin_signals` selects which upstream
+/// response signals the controller honors (currently `retry_after`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveRateLimit {
+    /// Whether adaptive tuning is enabled (default true). A
+    /// `policies[].adaptive` block with `enabled: false` is a no-op
+    /// (the controller is not compiled for that policy).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// EWMA decay window in seconds for error-rate and latency tracking
+    /// (default 60). A larger window smooths transient spikes; a smaller
+    /// window reacts faster. Must be > 0.
+    #[serde(default = "default_ewma_window_secs")]
+    pub ewma_window_secs: u64,
+    /// Minimum adaptive factor (default 0.1): the tightest the quotas
+    /// can shrink to (10% of the configured rate). Must be > 0 and <=
+    /// `max_factor`. The factor is never 0.
+    #[serde(default = "default_adaptive_min_factor")]
+    pub min_factor: f64,
+    /// Maximum adaptive factor (default 2.0): the loosest the quotas
+    /// can grow to (200% of the configured rate). Must be > 0 and >=
+    /// `min_factor`. The factor is never unbounded.
+    #[serde(default = "default_adaptive_max_factor")]
+    pub max_factor: f64,
+    /// Error-rate EWMA threshold that triggers tightening (default 0.05
+    /// = 5% 5xx rate). When the error EWMA exceeds this, the factor
+    /// decreases toward `min_factor`. Must be in (0, 1].
+    #[serde(default = "default_adaptive_error_threshold")]
+    pub error_threshold: f64,
+    /// Latency EWMA threshold in milliseconds that triggers tightening
+    /// (default 500). When the latency EWMA exceeds this, the factor
+    /// decreases toward `min_factor`. Must be > 0.
+    #[serde(default = "default_adaptive_latency_threshold_ms")]
+    pub latency_threshold_ms: u64,
+    /// Upstream-originated signals the controller honors (default
+    /// empty: EWMA-only tuning). Currently supported: `retry_after`
+    /// (parse the upstream `Retry-After` header and back off for the
+    /// advertised window).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_signals: Vec<OriginSignal>,
+}
+
+/// One upstream-originated signal the adaptive controller honors
+/// (DW-089).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginSignal {
+    /// Parse the upstream `Retry-After` header (integer seconds or
+    /// HTTP-date) and back off for the advertised window: the factor
+    /// drops to `min_factor` immediately and stays there until the
+    /// window elapses.
+    RetryAfter,
+}
+
+fn default_ewma_window_secs() -> u64 {
+    60
+}
+
+fn default_adaptive_min_factor() -> f64 {
+    0.1
+}
+
+fn default_adaptive_max_factor() -> f64 {
+    2.0
+}
+
+fn default_adaptive_error_threshold() -> f64 {
+    0.05
+}
+
+fn default_adaptive_latency_threshold_ms() -> u64 {
+    500
 }

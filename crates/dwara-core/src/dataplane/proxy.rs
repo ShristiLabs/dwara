@@ -468,6 +468,14 @@ pub(super) struct Generation {
     /// anomaly scoring (or all are disabled). Rebuilt every generation
     /// so a config change takes effect on the next request.
     anomaly: Option<Arc<crate::dataplane::anomaly::AnomalyScorer>>,
+    /// Adaptive rate-limit controller (DW-089): compiled from the
+    /// `policies[].adaptive` blocks. Empty when no policy configures
+    /// adaptive tuning (the fast path: `factor_for` returns 1.0 for
+    /// every policy). Rebuilt every generation so a config change takes
+    /// effect on the next request; the EWMA state resets with the
+    /// generation (a reload is a fresh controller, like the rate-limit
+    /// engine).
+    adaptive: Arc<crate::resilience::adaptive::AdaptiveController>,
 }
 
 impl Generation {
@@ -497,6 +505,13 @@ impl Generation {
     pub(super) fn anomaly(&self) -> Option<&Arc<crate::dataplane::anomaly::AnomalyScorer>> {
         self.anomaly.as_ref()
     }
+
+    /// The compiled adaptive rate-limit controller (DW-089). Always
+    /// present (empty when no policy configures adaptive tuning); the
+    /// fast path returns 1.0 for every policy.
+    pub(super) fn adaptive(&self) -> &Arc<crate::resilience::adaptive::AdaptiveController> {
+        &self.adaptive
+    }
 }
 
 /// Compile the anomaly scorer (DW-090) from the gateway's policies.
@@ -514,6 +529,21 @@ fn compile_anomaly_scorer(
         }
     }
     None
+}
+
+/// Compile the adaptive rate-limit controller (DW-089) from the
+/// gateway's policies. The observability handle wires the metric
+/// families; the controller records adaptive-factor / origin-signal /
+/// tighten / relax metrics directly (resilience may import
+/// observability per the dependency direction).
+fn compile_adaptive_controller(
+    gateway: &crate::config::Gateway,
+    obs: &Arc<Observability>,
+) -> Arc<crate::resilience::adaptive::AdaptiveController> {
+    Arc::new(crate::resilience::adaptive::AdaptiveController::compile(
+        gateway,
+        Some(Arc::clone(obs)),
+    ))
 }
 
 /// Build the per-upstream OAuth2 client map (DW-035) from the gateway
@@ -914,6 +944,7 @@ impl DataPlane {
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
             .map(Arc::new);
         let anomaly = compile_anomaly_scorer(snapshot.gateway());
+        let adaptive = compile_adaptive_controller(snapshot.gateway(), &obs);
         let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
             snapshot.gateway(),
         ));
@@ -945,6 +976,7 @@ impl DataPlane {
                 oauth2_clients,
                 ai,
                 anomaly,
+                adaptive,
             }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
@@ -1350,6 +1382,7 @@ impl DataPlane {
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
             .map(Arc::new);
         let anomaly = compile_anomaly_scorer(snapshot.gateway());
+        let adaptive = compile_adaptive_controller(snapshot.gateway(), &self.obs);
         // DW-078: budget RULES swap with the generation; the LEDGER
         // (spent windows) carries over — a reload never resets a
         // live budget window.
@@ -1421,6 +1454,7 @@ impl DataPlane {
             oauth2_clients,
             ai,
             anomaly,
+            adaptive,
         }));
         self.obs.set_config_generation(generation);
         // DW-052: the new generation's SLO set (plain targets, converted
@@ -2452,8 +2486,19 @@ async fn unrouted_response(
     };
     // Dry-run bundles (DW-041) observe here exactly as on routed traffic
     // (route label "unrouted"); live bundles alone decide the 429.
+    // DW-089: the adaptive factor scales each policy's per-request cost
+    // at check time (the controller lives on the current generation).
+    let adaptive = Arc::clone(dp.current().adaptive());
     let evaluation = engine
-        .evaluate(&ctx, &[], &[], &[], listener_policies, global_policies)
+        .evaluate(
+            &ctx,
+            &[],
+            &[],
+            &[],
+            listener_policies,
+            global_policies,
+            |name| adaptive.factor_for(name),
+        )
         .await;
     if let Some(crate::extensions::rate_limiter::RateLimitOutcome::Denied {
         retry_after_s, ..
@@ -3256,6 +3301,10 @@ where
                 consumer: identity.as_ref().map(|id| id.consumer_name.as_str()),
                 route: &route.name,
             };
+            // DW-089: the adaptive factor scales each policy's
+            // per-request cost at check time (the controller lives on
+            // the current generation, same as the rate-limit engine).
+            let adaptive = Arc::clone(gen.adaptive());
             let evaluation = engine
                 .evaluate(
                     &ctx,
@@ -3264,6 +3313,7 @@ where
                     service_policies,
                     listener_policies,
                     &gateway.global_policies,
+                    |name| adaptive.factor_for(name),
                 )
                 .instrument(ratelimit_span)
                 .await;
@@ -3305,6 +3355,28 @@ where
                 RateLimitOutcome::NotLimited => None,
             }
         }
+    };
+
+    // DW-089: collect the deduplicated applicable policy names (the
+    // same resolution order as the rate-limit check) so the proxy path
+    // can feed upstream outcomes back to the adaptive controller. A
+    // policy attached at several levels is recorded once (its first
+    // chain position), matching the rate-limit evaluation's dedup.
+    let applicable_policies: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for name in consumer_policies
+            .iter()
+            .chain(&route.policies)
+            .chain(service_policies)
+            .chain(listener_policies)
+            .chain(&gateway.global_policies)
+        {
+            if seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        out
     };
 
     // Consumer request budgets (DW-033): after rate limiting — an
@@ -3732,6 +3804,7 @@ where
                         &mut global_permit,
                         dp,
                         client_cert.as_ref(),
+                        &applicable_policies,
                     )
                     .await
                 }
@@ -3767,6 +3840,7 @@ where
                 &mut global_permit,
                 dp,
                 client_cert.as_ref(),
+                &applicable_policies,
             )
             .await
         }
@@ -4455,6 +4529,7 @@ pub(super) async fn proxy_request<B>(
     obs_arc: &Arc<Observability>,
     client_cert: Option<&Arc<crate::security::authn::ClientCertificate>>,
     oauth2_token_cache: &Arc<crate::security::oauth2::OAuth2TokenCache>,
+    applicable_policies: &[String],
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -4962,6 +5037,10 @@ where
         // attempt's forward — the remaining slice, so a retry that
         // cannot fit before the deadline is cut by the timeout, not
         // started in vain. Non-gRPC requests are unwrapped (zero cost).
+        // DW-089: capture the attempt start for the adaptive
+        // controller's latency EWMA (measured to header resolution,
+        // the same point the breaker observes).
+        let attempt_started = std::time::Instant::now();
         let send = handle
             .send_with_hash_key_observed(out_req, Some(dispatch_hash_key), &mut picked)
             .instrument(attempt_span);
@@ -5077,6 +5156,22 @@ where
                     ))
                     .await;
                     continue;
+                }
+                // DW-089: feed the final (non-retried) upstream
+                // outcome to the adaptive controller for every
+                // applicable policy. The latency is measured to header
+                // resolution (the same point the breaker observes); the
+                // Retry-After header is parsed for the origin-signal
+                // backoff. The controller is a no-op for policies
+                // without an adaptive block.
+                if !applicable_policies.is_empty() {
+                    let latency = attempt_started.elapsed();
+                    let retry_after = parse_retry_after_header(resp.headers());
+                    let adaptive = Arc::clone(gen.adaptive());
+                    let status = resp.status().as_u16();
+                    for name in applicable_policies {
+                        adaptive.record_outcome(name, status, latency, retry_after);
+                    }
                 }
                 let mut resp = finish_proxy_response(
                     resp,
@@ -5809,6 +5904,7 @@ async fn dispatch_action<B>(
     global_permit: &mut Option<OwnedSemaphorePermit>,
     dp: &Arc<DataPlane>,
     client_cert: Option<&Arc<crate::security::authn::ClientCertificate>>,
+    applicable_policies: &[String],
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -5981,6 +6077,7 @@ where
                     &dp.observability_arc(),
                     client_cert,
                     dp.oauth2_token_cache(),
+                    applicable_policies,
                 )
                 .await
             }
@@ -6250,6 +6347,21 @@ fn simple(status: StatusCode, code: &str, msg: &str, rid: &str) -> Response<Prox
             code, msg, rid,
         ))))
         .expect("static error body is valid")
+}
+
+/// Parse the `Retry-After` header from an upstream response (DW-089)
+/// into a duration from now. Supports both the integer-seconds and
+/// HTTP-date forms (see `config::versioning::parse_retry_after`).
+/// Returns `None` when the header is absent or unparseable (the caller
+/// treats that as no origin-signal backoff).
+fn parse_retry_after_header(headers: &hyper::HeaderMap) -> Option<std::time::Duration> {
+    let value = headers.get(hyper::header::RETRY_AFTER)?;
+    let s = value.to_str().ok()?;
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::config::versioning::parse_retry_after(s, now_unix_seconds)
 }
 
 /// DW-062: sample a percentage (0..=100). Returns true with probability

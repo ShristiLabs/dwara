@@ -125,6 +125,36 @@ where
             )
         }
     };
+    // DW-089: collect the deduplicated applicable policy names (the
+    // same resolution order as the rate-limit check) so the AI proxy
+    // path can feed provider outcomes back to the adaptive controller.
+    let applicable_policies: Vec<String> = {
+        let gateway = gen.snapshot.gateway();
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, listener_name);
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for name in consumer_policies
+            .iter()
+            .chain(route_policies)
+            .chain(service_policies)
+            .chain(listener_policies)
+            .chain(&gateway.global_policies)
+        {
+            if seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        out
+    };
     if let Some(guard) = &budget {
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -638,6 +668,21 @@ where
         let status = upstream_resp.status();
         let (up_parts, up_body) = upstream_resp.into_parts();
         let retryable = status.as_u16() == 429 || status.is_server_error();
+        // DW-089: feed the provider outcome to the adaptive controller
+        // for every applicable policy. The latency is measured from the
+        // attempt start to header resolution; the Retry-After header is
+        // parsed from the provider response for the origin-signal
+        // backoff. The controller is a no-op for policies without an
+        // adaptive block.
+        if !applicable_policies.is_empty() {
+            let latency = attempt_started.elapsed();
+            let retry_after = parse_ai_retry_after(&up_parts.headers);
+            let adaptive = Arc::clone(gen.adaptive());
+            let status_u16 = status.as_u16();
+            for name in &applicable_policies {
+                adaptive.record_outcome(name, status_u16, latency, retry_after);
+            }
+        }
         if !status.is_success() {
             let err_bytes =
                 match bounded_collect(up_body, MAX_AI_ERROR_BYTES, "provider error", rid).await {
@@ -1207,6 +1252,20 @@ fn is_event_stream(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.starts_with("text/event-stream"))
         .unwrap_or(false)
+}
+
+/// Parse the `Retry-After` header from an AI provider response (DW-089)
+/// into a duration from now. Supports both the integer-seconds and
+/// HTTP-date forms (see `config::versioning::parse_retry_after`).
+/// Returns `None` when the header is absent or unparseable.
+fn parse_ai_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
+    let value = headers.get(hyper::header::RETRY_AFTER)?;
+    let s = value.to_str().ok()?;
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::config::versioning::parse_retry_after(s, now_unix_seconds)
 }
 
 /// Build a JSON response. The provider's `x-request-id` (when sent) is

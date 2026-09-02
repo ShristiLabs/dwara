@@ -127,7 +127,8 @@ crates/dwara-core/src/
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
   security/           tls, authn, authz
-  resilience/         health, retries, breaker (passive observation)
+  resilience/         health, retries, breaker (passive observation),
+                      adaptive (DW-089 EWMA-driven rate-limit tuning)
   dataplane/          proxy, upstream, balance, hardening, cors,
                       compression, ai_proxy (the DW-075 AI route
                       action), anomaly (DW-090 statistical anomaly
