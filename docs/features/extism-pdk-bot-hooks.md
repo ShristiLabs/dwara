@@ -146,7 +146,4 @@ off the block is accepted but inert (validation warns).
 | Signed URL verification | `signed_url` | OFF | `routes[].signed_url` |
 | Certificate pinning | `cert_pinning` | OFF | `upstreams[].cert_pinning` |
 
-The [native plugins](./native-plugins.md) page covers the unified
-dispatch chain (DW-119); the [proxy-wasm](./proxy-wasm.md) page covers
-the alternative WASM host; the [authn-authz](./authn-authz.md) page
-covers signed URL verification's request-path position.
+The [native plugins](./native-plugins.md) page covers the dispatch chain (DW-119); [proxy-wasm](./proxy-wasm.md) and [authn-authz](./authn-authz.md) cover the WASM host and signed URL.

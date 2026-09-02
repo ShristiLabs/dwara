@@ -147,5 +147,4 @@ feature (mirrors the FIPS/credential-pool ent-gate pattern). An OSS
 build with `mesh` alone compiles the scaffold, but the enterprise gate
 is the licensing seam.
 
-The [dataplane and proxy](./dataplane-proxy.md) page covers the request
-path the sidecar intercepts; [TLS](./tls.md) covers `security::tls`.
+The [dataplane and proxy](./dataplane-proxy.md) and [TLS](./tls.md) pages cover the request path and `security::tls`.

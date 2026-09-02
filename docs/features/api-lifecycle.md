@@ -147,6 +147,4 @@ match, so a debugging session can see which API version a request hit
 and how long each phase took. The profiles overlay can swap the entire
 route topology per environment. The three sub-concerns compose: the
 portal shows what APIs exist, the profiles select which topology is
-active, and the journey recorder traces how a request flows through
-it. The [versioning](./versioning.md) and [analytics](./analytics.md)
-pages cover the DW-048 system and the raw table.
+active, and the journey recorder traces how a request flows through it. See [versioning](./versioning.md) and [analytics](./analytics.md).
