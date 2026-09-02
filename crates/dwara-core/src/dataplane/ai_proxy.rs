@@ -461,8 +461,8 @@ where
         .map(|m| m.text_content())
         .collect::<Vec<_>>()
         .join("\n");
-    let (candidates, policy_decision) = runtime
-        .route_with_policy(&chat_req.model, rid, &prompt_text)
+    let (candidates, policy_decision, canary_version_index) = runtime
+        .route_with_policy_and_canary_index(&chat_req.model, rid, &prompt_text)
         .await;
     // DW-085: record the routing-policy decision as a metric. The
     // `ai` domain cannot import `observability` (the dependency
@@ -681,6 +681,19 @@ where
             let status_u16 = status.as_u16();
             for name in &applicable_policies {
                 adaptive.record_outcome(name, status_u16, latency, retry_after);
+            }
+        }
+        // DW-091: feed the provider outcome to the auto-canary
+        // controller when this request was served by a canary-tracked
+        // AI model alias. The canary side is index 1; the baseline is
+        // index 0. The latency is measured from the attempt start to
+        // header resolution (the same point the adaptive controller
+        // observes). The controller is a no-op when the alias has no
+        // canary_analysis (canary_version_index is None).
+        if let Some(idx) = canary_version_index {
+            if let Some(canary) = gen.canary() {
+                let latency_ms = attempt_started.elapsed().as_secs_f64() * 1000.0;
+                canary.record_outcome(&chat_req.model, idx == 1, status.as_u16(), latency_ms);
             }
         }
         if !status.is_success() {

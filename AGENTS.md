@@ -132,8 +132,10 @@ crates/dwara-core/src/
   dataplane/          proxy, upstream, balance, hardening, cors,
                       compression, ai_proxy (the DW-075 AI route
                       action), anomaly (DW-090 statistical anomaly
-                      scoring), and active.rs (probe loops drive
-                      the registry — dataplane lifecycle)
+                      scoring), canary (DW-091 auto-canary analysis
+                      controller + background runner), and active.rs
+                      (probe loops drive the registry — dataplane
+                      lifecycle)
   ai/                 the DW-075 provider-adapter pack: canonical
                       chat types, the pure-translation
                       ProviderAdapter trait + OpenAI/Anthropic/Gemini

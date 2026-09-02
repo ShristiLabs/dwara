@@ -638,6 +638,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // its pending queue is abandoned (the gateway is not a durable
     // queue).
     let webhook_task = dp.spawn_webhook_deliverer(shutdown_rx.clone());
+    // DW-091: the auto-canary analysis background evaluator. Runs
+    // even when no canary_analysis is configured (the loop's per-tick
+    // check skips empty controllers); aborted on shutdown (the
+    // transient weight changes revert on the next config reload).
+    // The evaluation interval is a fixed 5 seconds (the operator
+    // tunes reaction speed via the canary_analysis cooldown, not the
+    // poll interval — a shorter interval does more work without
+    // adjusting faster when cooldown is the gate).
+    let _canary_runner = dwara_core::dataplane::canary::CanaryRunner::spawn(
+        Arc::clone(&dp),
+        std::time::Duration::from_secs(5),
+    );
     // DW-121: the access-record stream — constructed ALWAYS (an
     // unconfigured stream is disabled by its enabled flag, so a live
     // reload can arm the pipeline without a restart; only the channel

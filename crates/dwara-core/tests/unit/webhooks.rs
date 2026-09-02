@@ -124,7 +124,7 @@ const NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
 #[test]
 fn the_kind_set_is_closed_and_snake_cased() {
-    assert_eq!(EventKind::ALL.len(), 8, "one kind per emission site");
+    assert_eq!(EventKind::ALL.len(), 10, "one kind per emission site");
     for kind in EventKind::ALL {
         assert_eq!(
             EventKind::from_config(kind.as_str()),

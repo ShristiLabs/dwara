@@ -1536,6 +1536,40 @@ impl UpstreamRegistry {
     pub fn names(&self) -> Vec<&str> {
         self.handles.keys().map(String::as_str).collect()
     }
+
+    /// DW-091: rebuild the split for `service` from explicit
+    /// `(upstream_name, weight)` pairs. Returns a new registry with
+    /// the replacement split; the handles are shared (Arc bump). The
+    /// total weight MUST stay constant (the caller enforces this);
+    /// changing the total would reshuffle every session's branch
+    /// (the DW-040 invariant).
+    pub fn with_rebuilt_split_from_pairs(
+        &self,
+        service: &str,
+        pairs: &[(String, u64)],
+    ) -> Option<UpstreamRegistry> {
+        let mut new_splits = self.splits.clone();
+        let mut targets = Vec::with_capacity(pairs.len());
+        let mut ok = true;
+        for (name, weight) in pairs {
+            let Some(handle) = self.handles.get(name) else {
+                ok = false;
+                break;
+            };
+            targets.push((Arc::clone(handle), *weight));
+        }
+        if !ok {
+            return None;
+        }
+        new_splits.insert(
+            service.to_string(),
+            Arc::new(crate::dataplane::split::ServiceSplit::new(&targets)),
+        );
+        Some(UpstreamRegistry {
+            handles: self.handles.clone(),
+            splits: new_splits,
+        })
+    }
 }
 
 /// Refresh the state-derived observation gauges (breaker state, endpoint

@@ -476,6 +476,17 @@ pub(super) struct Generation {
     /// generation (a reload is a fresh controller, like the rate-limit
     /// engine).
     adaptive: Arc<crate::resilience::adaptive::AdaptiveController>,
+    /// Auto-canary analysis controller (DW-091): compiled from the
+    /// `canary_analysis` blocks on service splits and AI model
+    /// aliases. Empty when no group configures canary analysis (the
+    /// fast path: `record_outcome` and `evaluate` are no-ops).
+    /// Rebuilt every generation so a config change takes effect on
+    /// the next request; the sliding windows reset with the
+    /// generation (a reload is a fresh controller, like the adaptive
+    /// controller). Weight changes are TRANSIENT (applied by the
+    /// runner via `apply_*_weights`, which swap a cloned Generation);
+    /// a config reload reverts them.
+    canary: Option<Arc<crate::dataplane::canary::CanaryController>>,
 }
 
 impl Generation {
@@ -512,6 +523,13 @@ impl Generation {
     pub(super) fn adaptive(&self) -> &Arc<crate::resilience::adaptive::AdaptiveController> {
         &self.adaptive
     }
+
+    /// The compiled auto-canary analysis controller (DW-091). None
+    /// when no service split or AI model alias configures
+    /// `canary_analysis` (the fast path: `record_outcome` is a no-op).
+    pub fn canary(&self) -> Option<&Arc<crate::dataplane::canary::CanaryController>> {
+        self.canary.as_ref()
+    }
 }
 
 /// Compile the anomaly scorer (DW-090) from the gateway's policies.
@@ -544,6 +562,24 @@ fn compile_adaptive_controller(
         gateway,
         Some(Arc::clone(obs)),
     ))
+}
+
+/// Compile the auto-canary analysis controller (DW-091) from the
+/// gateway's service splits and AI model aliases. Returns `None`
+/// when no group configures `canary_analysis` (the fast path:
+/// `record_outcome` and `evaluate` are no-ops). The observability
+/// handle wires the canary metric families.
+fn compile_canary_controller(
+    gateway: &crate::config::Gateway,
+    obs: &Arc<Observability>,
+) -> Option<Arc<crate::dataplane::canary::CanaryController>> {
+    let controller =
+        crate::dataplane::canary::CanaryController::compile(gateway, Some(Arc::clone(obs)));
+    if controller.is_empty() {
+        None
+    } else {
+        Some(Arc::new(controller))
+    }
 }
 
 /// Build the per-upstream OAuth2 client map (DW-035) from the gateway
@@ -945,6 +981,7 @@ impl DataPlane {
             .map(Arc::new);
         let anomaly = compile_anomaly_scorer(snapshot.gateway());
         let adaptive = compile_adaptive_controller(snapshot.gateway(), &obs);
+        let canary = compile_canary_controller(snapshot.gateway(), &obs);
         let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
             snapshot.gateway(),
         ));
@@ -977,6 +1014,7 @@ impl DataPlane {
                 ai,
                 anomaly,
                 adaptive,
+                canary,
             }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
@@ -1383,6 +1421,7 @@ impl DataPlane {
             .map(Arc::new);
         let anomaly = compile_anomaly_scorer(snapshot.gateway());
         let adaptive = compile_adaptive_controller(snapshot.gateway(), &self.obs);
+        let canary = compile_canary_controller(snapshot.gateway(), &self.obs);
         // DW-078: budget RULES swap with the generation; the LEDGER
         // (spent windows) carries over — a reload never resets a
         // live budget window.
@@ -1455,6 +1494,7 @@ impl DataPlane {
             ai,
             anomaly,
             adaptive,
+            canary,
         }));
         self.obs.set_config_generation(generation);
         // DW-052: the new generation's SLO set (plain targets, converted
@@ -1503,6 +1543,96 @@ impl DataPlane {
     /// routes through the same generation the dataplane serves.
     pub(super) fn current(&self) -> Arc<Generation> {
         self.current.load_full()
+    }
+
+    /// DW-091: apply new service split weights atomically (transient,
+    /// reverts on config reload). Loads the current generation, clones
+    /// the registry, rebuilds the split for `service` with the new
+    /// canary weight (baseline = total - canary, keeping the total
+    /// constant), and stores a new Generation. Returns true on
+    /// success; false when the service has no split or the rebuild
+    /// failed. The canary is the SECOND target (index 1); the
+    /// baseline is the first (index 0).
+    pub fn apply_service_split_weights(&self, service: &str, new_canary_weight: u64) -> bool {
+        let gen = self.current();
+        let gateway = gen.snapshot.gateway();
+        let Some(svc) = gateway.services.iter().find(|s| s.name == service) else {
+            return false;
+        };
+        let Some(split) = &svc.split else {
+            return false;
+        };
+        if split.targets.len() != 2 {
+            return false;
+        }
+        let total: u64 = split.targets.iter().map(|t| t.weight as u64).sum();
+        if total == 0 {
+            return false;
+        }
+        let new_canary_weight = new_canary_weight.min(total);
+        let new_baseline_weight = total - new_canary_weight;
+        let pairs = vec![
+            (split.targets[0].upstream.clone(), new_baseline_weight),
+            (split.targets[1].upstream.clone(), new_canary_weight),
+        ];
+        let Some(new_registry) = gen.registry.with_rebuilt_split_from_pairs(service, &pairs) else {
+            return false;
+        };
+        self.current.store(Arc::new(Generation {
+            snapshot: Arc::clone(&gen.snapshot),
+            registry: Arc::new(new_registry),
+            oauth2_clients: gen.oauth2_clients.clone(),
+            ai: gen.ai.clone(),
+            anomaly: gen.anomaly.clone(),
+            adaptive: Arc::clone(&gen.adaptive),
+            canary: gen.canary.clone(),
+        }));
+        true
+    }
+
+    /// DW-091: apply new AI canary weights atomically (transient,
+    /// reverts on config reload). Loads the current generation, clones
+    /// the AI runtime, rebuilds the canary split for `alias` with the
+    /// new canary weight (baseline = total - canary, keeping the total
+    /// constant), and stores a new Generation. Returns true on
+    /// success; false when the alias has no canary or the rebuild
+    /// failed. The canary is the SECOND version (index 1); the
+    /// baseline is the first (index 0).
+    pub fn apply_ai_canary_weights(&self, alias: &str, new_canary_weight: u64) -> bool {
+        let gen = self.current();
+        let Some(ai) = &gen.ai else {
+            return false;
+        };
+        let gateway = gen.snapshot.gateway();
+        let Some(ai_cfg) = &gateway.ai else {
+            return false;
+        };
+        let Some(model) = ai_cfg.models.get(alias) else {
+            return false;
+        };
+        if model.canary.len() != 2 {
+            return false;
+        }
+        let total: u64 = model.canary.iter().map(|v| v.weight as u64).sum();
+        if total == 0 {
+            return false;
+        }
+        let new_canary_weight = new_canary_weight.min(total) as u32;
+        let new_baseline_weight = (total - new_canary_weight as u64) as u32;
+        let new_weights = [new_baseline_weight, new_canary_weight];
+        let Some(new_ai) = ai.with_rebuilt_canary(alias, &new_weights) else {
+            return false;
+        };
+        self.current.store(Arc::new(Generation {
+            snapshot: Arc::clone(&gen.snapshot),
+            registry: Arc::clone(&gen.registry),
+            oauth2_clients: gen.oauth2_clients.clone(),
+            ai: Some(Arc::new(new_ai)),
+            anomaly: gen.anomaly.clone(),
+            adaptive: Arc::clone(&gen.adaptive),
+            canary: gen.canary.clone(),
+        }));
+        true
     }
 
     /// The OAuth2 token cache (DW-035): per-dataplane, carried across
@@ -1742,6 +1872,13 @@ impl DataPlane {
     /// balancers) and by tests.
     pub fn registry(&self) -> Arc<UpstreamRegistry> {
         Arc::clone(&self.current().registry)
+    }
+
+    /// DW-091: the current generation's auto-canary controller (None
+    /// when no canary_analysis is configured). Used by the background
+    /// runner and by tests.
+    pub fn canary_controller(&self) -> Option<Arc<crate::dataplane::canary::CanaryController>> {
+        self.current().canary.clone()
     }
 
     /// Whether the gateway is READY to serve: at least one config
@@ -4576,11 +4713,21 @@ where
         }
     });
     let dispatch_key: String = sticky_key.clone().unwrap_or_else(|| rid.to_string());
+    // DW-091: track whether this request hit the canary side of a
+    // service split (index 1 = canary, 0 = baseline), so the response
+    // path can feed the outcome to the auto-canary controller.
+    let mut canary_split_index: Option<usize> = None;
     let handle: Arc<crate::dataplane::upstream::UpstreamHandle> =
         if let Some(split) = gen.registry.split_for(&service.name) {
-            let picked = Arc::clone(split.pick(&dispatch_key));
+            let (picked, idx) = split.pick_with_index(&dispatch_key);
             obs.record_split_pick(&service.name, picked.name());
-            picked
+            // Only track the index when canary analysis is compiled
+            // for this service (the fast path: no controller = no
+            // record_outcome call below).
+            if gen.canary().is_some_and(|c| !c.is_empty()) {
+                canary_split_index = Some(idx);
+            }
+            Arc::clone(picked)
         } else {
             let Some(name) = &service.upstream else {
                 // Validation requires exactly one of upstream/split, and a
@@ -5171,6 +5318,26 @@ where
                     let status = resp.status().as_u16();
                     for name in applicable_policies {
                         adaptive.record_outcome(name, status, latency, retry_after);
+                    }
+                }
+                // DW-091: feed the final upstream outcome to the
+                // auto-canary controller when this request was served
+                // by a canary-tracked service split. The canary side
+                // is index 1; the baseline is index 0. The latency is
+                // measured to header resolution (the same point the
+                // adaptive controller and breaker observe). The
+                // controller is a no-op when the group has no
+                // canary_analysis (the fast path above left
+                // canary_split_index None).
+                if let Some(idx) = canary_split_index {
+                    if let Some(canary) = gen.canary() {
+                        let latency_ms = attempt_started.elapsed().as_secs_f64() * 1000.0;
+                        canary.record_outcome(
+                            &service.name,
+                            idx == 1,
+                            resp.status().as_u16(),
+                            latency_ms,
+                        );
                     }
                 }
                 let mut resp = finish_proxy_response(

@@ -3050,6 +3050,14 @@ pub struct ServiceSplit {
     /// total of 0 would route nowhere; individual zeros are the
     /// parked side of a blue-green pair).
     pub targets: Vec<SplitTarget>,
+    /// Auto-canary analysis (DW-091): when set, a background
+    /// controller compares the canary (second target) vs the baseline
+    /// (first target) on error rate or latency and adjusts the split
+    /// weights automatically. Only valid when the split has exactly 2
+    /// targets (baseline + canary). Weight changes are transient
+    /// (Generation swap) and revert on config reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_analysis: Option<CanaryAnalysis>,
 }
 
 /// One weighted target of a service split (DW-040).
@@ -3073,6 +3081,77 @@ fn default_split_weight() -> u32 {
 }
 fn is_default_split_weight(w: &u32) -> bool {
     *w == 1
+}
+
+/// Auto-canary analysis (DW-091): metrics-driven promotion/rollback of
+/// canary split weights. A background controller compares the canary
+/// side against the baseline on error rate or latency; on regression it
+/// rolls the canary weight back (toward 0), on success it promotes
+/// (toward the total weight). Severe regression (>2x the rollback
+/// threshold) triggers an immediate rollback to 0. The total weight
+/// stays constant: when the canary weight changes, the baseline
+/// absorbs the difference, preserving the hash distribution for
+/// existing sessions (the DW-040 invariant). Weight changes are
+/// TRANSIENT (a Generation swap) and revert on config reload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CanaryAnalysis {
+    /// Master switch. Default true: an analysis block is active unless
+    /// explicitly disabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Look-back window for metrics, in seconds. The controller
+    /// evaluates canary health over the recent window of observations.
+    pub window_seconds: u64,
+    /// Weight delta per adjustment (in weight units). Promote:
+    /// increase canary weight by `step`. Rollback: decrease by `step`.
+    /// Severe regression (>2x the rollback threshold) rolls back to 0
+    /// immediately, ignoring the step.
+    pub step: u32,
+    /// Minimum total requests (baseline + canary) before the
+    /// controller acts. Prevents acting on insufficient data.
+    pub min_requests: u64,
+    /// Cooldown between adjustments, in seconds. Prevents rapid
+    /// oscillation: after one adjustment, the next is suppressed until
+    /// the cooldown elapses.
+    pub cooldown_seconds: u64,
+    /// The promotion rule: when the canary metric is BELOW this
+    /// threshold (good), the controller promotes (increases canary
+    /// weight by `step`).
+    pub promote: CanaryRule,
+    /// The rollback rule: when the canary metric is ABOVE this
+    /// threshold (bad), the controller rolls back (decreases canary
+    /// weight by `step`). When the canary metric exceeds 2x this
+    /// threshold (severe regression), the controller rolls back to 0
+    /// immediately.
+    pub rollback: CanaryRule,
+}
+
+/// One canary analysis rule (DW-091): a metric to compare and the
+/// threshold that triggers the rule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CanaryRule {
+    /// The metric to compare canary vs baseline.
+    pub metric: CanaryMetric,
+    /// The threshold. For `promote`: the canary metric must be BELOW
+    /// this (good) to promote. For `rollback`: the canary metric must
+    /// be ABOVE this (bad) to roll back.
+    pub threshold: f64,
+}
+
+/// The metric a canary rule compares (DW-091).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CanaryMetric {
+    /// HTTP error rate (status >= 500 / total requests).
+    ErrorRate,
+    /// P99 latency in milliseconds.
+    LatencyP99,
+    /// P95 latency in milliseconds.
+    LatencyP95,
+    /// P50 (median) latency in milliseconds.
+    LatencyP50,
 }
 
 /// Cookie affinity for a service (DW-040, `services[].sticky`).

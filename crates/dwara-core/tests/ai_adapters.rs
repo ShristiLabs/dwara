@@ -583,6 +583,7 @@ fn ai_runtime_compiles_and_resolves() {
                 canary: vec![],
                 routing_policy: None,
                 ab_test: None,
+                canary_analysis: None,
             },
         )]
         .into_iter()

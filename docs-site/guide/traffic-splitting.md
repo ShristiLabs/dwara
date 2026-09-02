@@ -123,3 +123,45 @@ is one hour.
   response (a plain counter).
 
 Both are visible at [`/metrics`](./observability).
+
+## Auto-canary analysis
+
+A `canary_analysis` block on a service split (exactly 2 targets:
+baseline + canary) or an AI model alias arms a background controller
+that automatically adjusts the canary weight based on error rate or
+latency. When the canary is healthy, the controller promotes it
+(increases its weight by `step`); when it regresses, the controller
+rolls it back (decreases by `step`, or to 0 on severe regression).
+The total weight stays constant — the baseline absorbs the delta — so
+existing sessions are not reshuffled beyond the changed share. Weight
+changes are transient and revert on config reload.
+
+```yaml
+services:
+  - name: api
+    split:
+      targets:
+        - { upstream: api-stable, weight: 90 }
+        - { upstream: api-canary, weight: 10 }
+      canary_analysis:
+        enabled: true
+        window_seconds: 60
+        step: 5
+        min_requests: 10
+        cooldown_seconds: 30
+        promote:
+          metric: error_rate       # or latency_p99
+          threshold: 0.01          # canary error < 1% -> promote
+        rollback:
+          metric: error_rate
+          threshold: 0.05          # canary error > 5% -> rollback
+```
+
+The controller uses per-version sliding windows (1000-sample cap) and
+waits for `min_requests` before acting. `cooldown_seconds` prevents
+rapid oscillation. Severe regression (canary metric > 2x the rollback
+threshold) triggers an immediate rollback to 0.
+
+New metrics: `dwara_canary_promotions_total`,
+`dwara_canary_rollbacks_total`, `dwara_canary_weight{group}`. New
+events: `canary_promoted`, `canary_rolled_back`.

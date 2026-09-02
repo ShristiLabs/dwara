@@ -132,6 +132,15 @@ pub enum EventKind {
     /// one window is not re-emitted, and the counter resets with the
     /// window itself.
     QuotaNearLimit,
+    /// A canary group was promoted (DW-091): the auto-canary
+    /// controller increased the canary weight. Payload: canary_group,
+    /// canary_action, canary_weight, canary_metric_value.
+    CanaryPromoted,
+    /// A canary group was rolled back (DW-091): the auto-canary
+    /// controller decreased the canary weight (or rolled it to 0 on
+    /// severe regression). Payload: canary_group, canary_action,
+    /// canary_weight, canary_metric_value.
+    CanaryRolledBack,
 }
 
 impl EventKind {
@@ -146,6 +155,8 @@ impl EventKind {
         EventKind::ConfigPublished,
         EventKind::ConfigRejected,
         EventKind::QuotaNearLimit,
+        EventKind::CanaryPromoted,
+        EventKind::CanaryRolledBack,
     ];
 
     /// Stable wire/config spelling (serde's snake_case form, spelled out
@@ -161,6 +172,8 @@ impl EventKind {
             EventKind::ConfigPublished => "config_published",
             EventKind::ConfigRejected => "config_rejected",
             EventKind::QuotaNearLimit => "quota_near_limit",
+            EventKind::CanaryPromoted => "canary_promoted",
+            EventKind::CanaryRolledBack => "canary_rolled_back",
         }
     }
 
@@ -216,6 +229,22 @@ pub struct EventPayload {
     /// The budget's configured cap (quota_near_limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    /// Config-declared canary group name (canary_promoted /
+    /// canary_rolled_back, DW-091): the service name or AI alias the
+    /// auto-canary controller adjusted. A config label, never
+    /// request-derived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary_group: Option<String>,
+    /// The canary action that triggered the event (DW-091): "promote",
+    /// "rollback", or "severe_regression". A static string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary_action: Option<String>,
+    /// The new canary weight after the adjustment (DW-091).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary_weight: Option<u64>,
+    /// The metric value that triggered the adjustment (DW-091).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary_metric_value: Option<f64>,
 }
 
 impl EventPayload {

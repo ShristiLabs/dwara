@@ -28,6 +28,7 @@ pub mod active;
 pub mod ai_proxy;
 pub mod anomaly;
 pub mod balance;
+pub mod canary;
 pub mod compression;
 pub mod cors;
 // DW-054: config convergence coordinator (ent feature only). The

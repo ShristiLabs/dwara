@@ -399,6 +399,7 @@ fn runtime_route_plans_chains_and_canaries() {
                     canary: vec![],
                     routing_policy: None,
                     ab_test: None,
+                    canary_analysis: None,
                 },
             ),
             (
@@ -423,6 +424,7 @@ fn runtime_route_plans_chains_and_canaries() {
                     ],
                     routing_policy: None,
                     ab_test: None,
+                    canary_analysis: None,
                 },
             ),
         ]

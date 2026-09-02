@@ -2223,6 +2223,76 @@ fn is_cookie_name(name: &str) -> bool {
         })
 }
 
+/// DW-091: validate one canary analysis rule. Error-rate thresholds
+/// must be in [0.0, 1.0] (a fraction); latency thresholds must be > 0
+/// (a 0-ms threshold would trigger on every request).
+fn validate_canary_rule(
+    service: &str,
+    field: &str,
+    rule: &crate::config::CanaryRule,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    match rule.metric {
+        crate::config::CanaryMetric::ErrorRate => {
+            if rule.threshold < 0.0 || rule.threshold > 1.0 {
+                issues.push(issue(
+                    "service",
+                    service,
+                    &format!("{field}.threshold"),
+                    "error_rate threshold must be in [0.0, 1.0] (a fraction)",
+                ));
+            }
+        }
+        crate::config::CanaryMetric::LatencyP99
+        | crate::config::CanaryMetric::LatencyP95
+        | crate::config::CanaryMetric::LatencyP50 => {
+            if rule.threshold <= 0.0 {
+                issues.push(issue(
+                    "service",
+                    service,
+                    &format!("{field}.threshold"),
+                    "latency threshold must be > 0 (milliseconds)",
+                ));
+            }
+        }
+    }
+}
+
+/// DW-091: validate one canary analysis rule for an AI model alias.
+/// Same bounds as [`validate_canary_rule`] but uses the `gateway`
+/// scope and the alias in the field path.
+fn validate_ai_canary_rule(
+    alias: &str,
+    field: &str,
+    rule: &crate::config::CanaryRule,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    match rule.metric {
+        crate::config::CanaryMetric::ErrorRate => {
+            if rule.threshold < 0.0 || rule.threshold > 1.0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].{field}.threshold"),
+                    "error_rate threshold must be in [0.0, 1.0] (a fraction)",
+                ));
+            }
+        }
+        crate::config::CanaryMetric::LatencyP99
+        | crate::config::CanaryMetric::LatencyP95
+        | crate::config::CanaryMetric::LatencyP50 => {
+            if rule.threshold <= 0.0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].{field}.threshold"),
+                    "latency threshold must be > 0 (milliseconds)",
+                ));
+            }
+        }
+    }
+}
+
 /// Check semantic integrity of a parsed [`Gateway`]. An empty Vec means valid.
 /// Validate the `ai:` block (DW-075): provider names unique and
 /// non-empty, provider `upstream` references resolve, auth headers are
@@ -2544,6 +2614,60 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                     "provider_model must be non-empty",
                 ));
             }
+        }
+        // DW-091: canary_analysis validation on AI model aliases.
+        // Only valid on a 2-version canary (baseline + canary);
+        // the controller compares exactly two sides. Same bounds as
+        // service-level canary_analysis.
+        if let Some(analysis) = &m.canary_analysis {
+            if m.canary.len() != 2 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary_analysis"),
+                    "canary_analysis requires exactly 2 canary versions (baseline + canary): \
+                     the controller compares two sides",
+                ));
+            }
+            if analysis.window_seconds == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary_analysis.window_seconds"),
+                    "window_seconds must be >= 1",
+                ));
+            }
+            if analysis.step == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary_analysis.step"),
+                    "step must be >= 1 (a 0-step never adjusts)",
+                ));
+            }
+            if analysis.min_requests == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary_analysis.min_requests"),
+                    "min_requests must be >= 1",
+                ));
+            }
+            if analysis.cooldown_seconds == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("ai.models[{alias}].canary_analysis.cooldown_seconds"),
+                    "cooldown_seconds must be >= 1",
+                ));
+            }
+            validate_ai_canary_rule(alias, "canary_analysis.promote", &analysis.promote, issues);
+            validate_ai_canary_rule(
+                alias,
+                "canary_analysis.rollback",
+                &analysis.rollback,
+                issues,
+            );
         }
     }
     // DW-084: governance team_allowlists must reference model aliases
@@ -4101,6 +4225,67 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "split.targets",
                     format!("weights sum to {total}; keep the total at or under 100000"),
                 ));
+            }
+            // DW-091: canary_analysis validation. Only valid on a
+            // 2-target split (baseline + canary); the controller
+            // compares exactly two sides. Bounds: window >= 1s,
+            // step >= 1, min_requests >= 1, cooldown >= 1s, and
+            // thresholds in [0.0, 1.0] for error_rate or > 0 for
+            // latency.
+            if let Some(analysis) = &split.canary_analysis {
+                if split.targets.len() != 2 {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        "split.canary_analysis",
+                        "canary_analysis requires exactly 2 targets (baseline + canary): \
+                         the controller compares two sides",
+                    ));
+                }
+                if analysis.window_seconds == 0 {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        "split.canary_analysis.window_seconds",
+                        "window_seconds must be >= 1",
+                    ));
+                }
+                if analysis.step == 0 {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        "split.canary_analysis.step",
+                        "step must be >= 1 (a 0-step never adjusts)",
+                    ));
+                }
+                if analysis.min_requests == 0 {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        "split.canary_analysis.min_requests",
+                        "min_requests must be >= 1",
+                    ));
+                }
+                if analysis.cooldown_seconds == 0 {
+                    issues.push(issue(
+                        "service",
+                        &s.name,
+                        "split.canary_analysis.cooldown_seconds",
+                        "cooldown_seconds must be >= 1",
+                    ));
+                }
+                validate_canary_rule(
+                    &s.name,
+                    "split.canary_analysis.promote",
+                    &analysis.promote,
+                    &mut issues,
+                );
+                validate_canary_rule(
+                    &s.name,
+                    "split.canary_analysis.rollback",
+                    &analysis.rollback,
+                    &mut issues,
+                );
             }
         }
         // DW-040 sticky validation: a usable cookie-name token and a

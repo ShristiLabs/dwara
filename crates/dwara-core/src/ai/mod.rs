@@ -278,6 +278,29 @@ impl AiRuntime {
         }
     }
 
+    /// DW-091: like [`route`](Self::route) but for canary aliases the
+    /// single picked candidate carries its INDEX (0 = baseline, 1 =
+    /// canary for a 2-version canary split). The auto-canary
+    /// controller needs the index to record the outcome on the
+    /// correct side. Returns `(candidates, canary_index)` where
+    /// `canary_index` is `Some(idx)` only for canary aliases.
+    pub fn route_with_canary_index<'a>(
+        &'a self,
+        alias: &str,
+        pick_key: &str,
+    ) -> (Vec<&'a RouteTarget>, Option<usize>) {
+        match self.models.get(alias) {
+            Some(CompiledModel::Chain(chain)) => (chain.iter().collect(), None),
+            Some(CompiledModel::Canary(versions)) => {
+                let (target, idx) = routing::weighted_pick_with_index(versions, pick_key);
+                (vec![target], Some(idx))
+            }
+            Some(CompiledModel::Policy(_)) => (Vec::new(), None),
+            Some(CompiledModel::Experiment(_)) => (Vec::new(), None),
+            None => (Vec::new(), None),
+        }
+    }
+
     /// Route one request with policy/experiment evaluation (DW-085 /
     /// DW-086). Like [`route`](Self::route) but handles Policy
     /// variants by calling the async
@@ -311,6 +334,40 @@ impl AiRuntime {
                 (vec![variant.target.clone()], None)
             }
             None => (Vec::new(), None),
+        }
+    }
+
+    /// DW-091: like [`route_with_policy`](Self::route_with_policy) but
+    /// also returns the canary index (0 = baseline, 1 = canary for a
+    /// 2-version canary split) when the alias is a canary alias. The
+    /// auto-canary controller needs the index to record the outcome
+    /// on the correct side. Returns `(candidates, policy_decision,
+    /// canary_index)`.
+    pub async fn route_with_policy_and_canary_index(
+        &self,
+        alias: &str,
+        pick_key: &str,
+        prompt_text: &str,
+    ) -> (
+        Vec<RouteTarget>,
+        Option<policy::PolicyDecision>,
+        Option<usize>,
+    ) {
+        match self.models.get(alias) {
+            Some(CompiledModel::Chain(chain)) => (chain.to_vec(), None, None),
+            Some(CompiledModel::Canary(versions)) => {
+                let (target, idx) = routing::weighted_pick_with_index(versions, pick_key);
+                (vec![target.clone()], None, Some(idx))
+            }
+            Some(CompiledModel::Policy(policy)) => {
+                let (targets, decision) = policy.evaluate(prompt_text).await;
+                (targets, Some(decision), None)
+            }
+            Some(CompiledModel::Experiment(test)) => {
+                let variant = test.pick(pick_key);
+                (vec![variant.target.clone()], None, None)
+            }
+            None => (Vec::new(), None, None),
         }
     }
 
@@ -377,6 +434,36 @@ impl AiRuntime {
     /// Number of model aliases (config introspection/tests).
     pub fn model_count(&self) -> usize {
         self.models.len()
+    }
+
+    /// DW-091: rebuild the canary split for `alias` with new weights
+    /// and return a new runtime with the replacement. The providers
+    /// and other models are shared (Arc bump / clone). `new_weights`
+    /// is the new weight per canary version in config order (baseline
+    /// first, canary second for a 2-version canary). The total weight
+    /// MUST stay constant (the caller enforces this). Returns `None`
+    /// when the alias is not a canary alias or the weight count does
+    /// not match the version count.
+    pub fn with_rebuilt_canary(&self, alias: &str, new_weights: &[u32]) -> Option<AiRuntime> {
+        let model = self.models.get(alias)?;
+        let CompiledModel::Canary(versions) = model else {
+            return None;
+        };
+        if new_weights.len() != versions.len() {
+            return None;
+        }
+        let new_versions: Vec<(u32, RouteTarget)> = versions
+            .iter()
+            .zip(new_weights.iter())
+            .map(|((_, target), w)| (*w, target.clone()))
+            .collect();
+        let mut new_models = self.models.clone();
+        new_models.insert(alias.to_string(), CompiledModel::Canary(new_versions));
+        Some(AiRuntime {
+            providers: self.providers.clone(),
+            models: new_models,
+            mcp: self.mcp.clone(),
+        })
     }
 }
 

@@ -281,6 +281,15 @@ pub struct AiModel {
     /// no primary provider/model pair of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ab_test: Option<String>,
+    /// Auto-canary analysis (DW-091): when set, a background
+    /// controller compares the canary (second version) vs the
+    /// baseline (first version) on error rate or latency and adjusts
+    /// the canary split weights automatically. Only valid when the
+    /// canary has exactly 2 versions (baseline + canary). Weight
+    /// changes are transient (Generation swap) and revert on config
+    /// reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_analysis: Option<crate::config::CanaryAnalysis>,
 }
 
 /// One provider/model pair an alias can route to (DW-076): the primary

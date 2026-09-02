@@ -125,6 +125,20 @@ impl ServiceSplit {
         &self.entries[0].handle
     }
 
+    /// DW-091: pick the target upstream AND its index (0 = baseline,
+    /// 1 = canary for a 2-target canary split). The auto-canary
+    /// controller needs the index to record the outcome on the
+    /// correct side. Same hash as [`Self::pick`].
+    pub fn pick_with_index(&self, key: &str) -> (&Arc<UpstreamHandle>, usize) {
+        let slot = key_hash(key) % self.total;
+        for (i, e) in self.entries.iter().enumerate() {
+            if slot < e.bound {
+                return (&e.handle, i);
+            }
+        }
+        (&self.entries[0].handle, 0)
+    }
+
     /// The entry weights in config order (diagnostics and tests).
     pub fn weights(&self) -> Vec<u64> {
         self.entries.iter().map(|e| e.weight).collect()

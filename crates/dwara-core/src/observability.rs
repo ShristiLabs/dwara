@@ -69,6 +69,12 @@
 //!   (DW-089) — adaptive factor decreases, by policy
 //! - `dwara_rate_limiter_adaptive_relaxed_total{policy}` counter
 //!   (DW-089) — adaptive factor increases, by policy
+//! - `dwara_canary_promotions_total{group}` counter (DW-091) — canary
+//!   promotions, by group (service name or AI alias)
+//! - `dwara_canary_rollbacks_total{group}` counter (DW-091) — canary
+//!   rollbacks (including severe-regression immediate rollbacks to 0)
+//! - `dwara_canary_weight{group}` gauge (DW-091) — current canary
+//!   weight, by group (the total weight stays constant)
 //! - `shed_total{priority}` counter
 //! - `dwara_policy_dry_run_total{phase,route}` counter (DW-041) —
 //!   requests a dry-run (monitor) policy would have rejected, by phase
@@ -643,6 +649,17 @@ pub struct Observability {
     /// (config-bounded label). Counted once per healthy update that
     /// moved the factor up.
     rate_limiter_adaptive_relaxed_total: IntCounterVec,
+    /// DW-091: canary promotions, by group (config-bounded label:
+    /// service name or AI alias). Counted once per promote action the
+    /// auto-canary controller applied.
+    canary_promotions_total: IntCounterVec,
+    /// DW-091: canary rollbacks, by group (config-bounded label).
+    /// Counted once per rollback action (including severe-regression
+    /// immediate rollbacks to 0).
+    canary_rollbacks_total: IntCounterVec,
+    /// DW-091: current canary weight, by group (config-bounded
+    /// label). Set on every applied adjustment.
+    canary_weight: GaugeVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -1318,6 +1335,37 @@ impl Observability {
             &["policy"],
         )
         .expect("valid metric definition");
+        let canary_promotions_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_canary_promotions_total",
+                "Canary promotions (DW-091), by group (config-bounded: service \
+                 name or AI alias). Counted once per promote action the \
+                 auto-canary controller applied.",
+            ),
+            &["group"],
+        )
+        .expect("valid metric definition");
+        let canary_rollbacks_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_canary_rollbacks_total",
+                "Canary rollbacks (DW-091), by group (config-bounded: service \
+                 name or AI alias). Counted once per rollback action (including \
+                 severe-regression immediate rollbacks to 0).",
+            ),
+            &["group"],
+        )
+        .expect("valid metric definition");
+        let canary_weight = GaugeVec::new(
+            Opts::new(
+                "dwara_canary_weight",
+                "Current canary weight (DW-091), by group (config-bounded: \
+                 service name or AI alias). Set on every applied adjustment. \
+                 The total weight stays constant; the baseline absorbs the \
+                 difference.",
+            ),
+            &["group"],
+        )
+        .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
@@ -1416,6 +1464,9 @@ impl Observability {
             Box::new(rate_limiter_origin_signal_total.clone()),
             Box::new(rate_limiter_adaptive_tightened_total.clone()),
             Box::new(rate_limiter_adaptive_relaxed_total.clone()),
+            Box::new(canary_promotions_total.clone()),
+            Box::new(canary_rollbacks_total.clone()),
+            Box::new(canary_weight.clone()),
         ] {
             registry
                 .register(m)
@@ -1497,6 +1548,9 @@ impl Observability {
             rate_limiter_origin_signal_total,
             rate_limiter_adaptive_tightened_total,
             rate_limiter_adaptive_relaxed_total,
+            canary_promotions_total,
+            canary_rollbacks_total,
+            canary_weight,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1593,6 +1647,29 @@ impl Observability {
         self.rate_limiter_adaptive_relaxed_total
             .with_label_values(&[policy])
             .inc();
+    }
+
+    /// Count one canary promotion (DW-091), by group (config-bounded:
+    /// service name or AI alias).
+    pub fn record_canary_promotion(&self, group: &str) {
+        self.canary_promotions_total
+            .with_label_values(&[group])
+            .inc();
+    }
+
+    /// Count one canary rollback (DW-091), by group (config-bounded:
+    /// service name or AI alias). Includes severe-regression
+    /// immediate rollbacks to 0.
+    pub fn record_canary_rollback(&self, group: &str) {
+        self.canary_rollbacks_total
+            .with_label_values(&[group])
+            .inc();
+    }
+
+    /// Set the current canary weight for a group (DW-091). Set on
+    /// every applied adjustment; the total weight stays constant.
+    pub fn set_canary_weight(&self, group: &str, weight: f64) {
+        self.canary_weight.with_label_values(&[group]).set(weight);
     }
 
     /// Count one quota denial (429, DW-033) by consumer and binding

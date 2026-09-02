@@ -1082,6 +1082,17 @@
             "$ref": "#/$defs/AiCanaryVersion"
           }
         },
+        "canary_analysis": {
+          "description": "Auto-canary analysis (DW-091): when set, a background\ncontroller compares the canary (second version) vs the\nbaseline (first version) on error rate or latency and adjusts\nthe canary split weights automatically. Only valid when the\ncanary has exactly 2 versions (baseline + canary). Weight\nchanges are transient (Generation swap) and revert on config\nreload.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanaryAnalysis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "failover": {
           "description": "Ordered failover chain (DW-076): when the primary target\nanswers 429 or a 5xx, or its transport errors, the gateway\nretries the next entry — a DIFFERENT provider/model pair, never\na re-send to the provider that just failed (its upstream's\nbreaker owns same-provider retries). The client sees one\nresponse. Absent (the default): no failover, the primary's\nanswer is final. Cannot be combined with `canary` on the same\nalias (validation rejects the pairing): failover is an\navailability chain for a single logical model; a canary split\nis deliberately serving multiple versions at once — mixing the\ntwo would retry a canary request onto the stable version and\nsilently undo the experiment.",
           "type": "array",
@@ -1914,6 +1925,103 @@
         }
       },
       "additionalProperties": false
+    },
+    "CanaryAnalysis": {
+      "description": "Auto-canary analysis (DW-091): metrics-driven promotion/rollback of\ncanary split weights. A background controller compares the canary\nside against the baseline on error rate or latency; on regression it\nrolls the canary weight back (toward 0), on success it promotes\n(toward the total weight). Severe regression (>2x the rollback\nthreshold) triggers an immediate rollback to 0. The total weight\nstays constant: when the canary weight changes, the baseline\nabsorbs the difference, preserving the hash distribution for\nexisting sessions (the DW-040 invariant). Weight changes are\nTRANSIENT (a Generation swap) and revert on config reload.",
+      "type": "object",
+      "properties": {
+        "cooldown_seconds": {
+          "description": "Cooldown between adjustments, in seconds. Prevents rapid\noscillation: after one adjustment, the next is suppressed until\nthe cooldown elapses.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Master switch. Default true: an analysis block is active unless\nexplicitly disabled.",
+          "type": "boolean",
+          "default": true
+        },
+        "min_requests": {
+          "description": "Minimum total requests (baseline + canary) before the\ncontroller acts. Prevents acting on insufficient data.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "promote": {
+          "description": "The promotion rule: when the canary metric is BELOW this\nthreshold (good), the controller promotes (increases canary\nweight by `step`).",
+          "$ref": "#/$defs/CanaryRule"
+        },
+        "rollback": {
+          "description": "The rollback rule: when the canary metric is ABOVE this\nthreshold (bad), the controller rolls back (decreases canary\nweight by `step`). When the canary metric exceeds 2x this\nthreshold (severe regression), the controller rolls back to 0\nimmediately.",
+          "$ref": "#/$defs/CanaryRule"
+        },
+        "step": {
+          "description": "Weight delta per adjustment (in weight units). Promote:\nincrease canary weight by `step`. Rollback: decrease by `step`.\nSevere regression (>2x the rollback threshold) rolls back to 0\nimmediately, ignoring the step.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "window_seconds": {
+          "description": "Look-back window for metrics, in seconds. The controller\nevaluates canary health over the recent window of observations.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "window_seconds",
+        "step",
+        "min_requests",
+        "cooldown_seconds",
+        "promote",
+        "rollback"
+      ]
+    },
+    "CanaryMetric": {
+      "description": "The metric a canary rule compares (DW-091).",
+      "oneOf": [
+        {
+          "description": "HTTP error rate (status >= 500 / total requests).",
+          "type": "string",
+          "const": "error_rate"
+        },
+        {
+          "description": "P99 latency in milliseconds.",
+          "type": "string",
+          "const": "latency_p99"
+        },
+        {
+          "description": "P95 latency in milliseconds.",
+          "type": "string",
+          "const": "latency_p95"
+        },
+        {
+          "description": "P50 (median) latency in milliseconds.",
+          "type": "string",
+          "const": "latency_p50"
+        }
+      ]
+    },
+    "CanaryRule": {
+      "description": "One canary analysis rule (DW-091): a metric to compare and the\nthreshold that triggers the rule.",
+      "type": "object",
+      "properties": {
+        "metric": {
+          "description": "The metric to compare canary vs baseline.",
+          "$ref": "#/$defs/CanaryMetric"
+        },
+        "threshold": {
+          "description": "The threshold. For `promote`: the canary metric must be BELOW\nthis (good) to promote. For `rollback`: the canary metric must\nbe ABOVE this (bad) to roll back.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "threshold"
+      ]
     },
     "Compression": {
       "description": "Route-scoped response compression policy (DW-027, feature analysis\n4.13).\n\nSemantics (frozen; negotiation and encoding live in\n`dataplane::compression`):\n\n- `algorithms` is the PREFERENCE order: the first entry the request's\n  `Accept-Encoding` accepts wins. `q=0` entries in `Accept-Encoding`\n  are treated as refusal.\n- `level` is clamped per algorithm at encode time (gzip 0-9, brotli\n  0-11, zstd 0-22; validation bounds the field to 0-22). Absent: the\n  algorithm's library default.\n- `min_size` skips compression of responses whose size is known and\n  below it — a declared `Content-Length` or the exact size of the\n  gateway's own respond/redirect bodies. Responses of UNKNOWN length\n  (streaming) are always candidates.\n- `content_types` (when non-empty) restricts compression to responses\n  whose `Content-Type` starts with one of the entries; entries are\n  lowercase prefix matches (e.g. `text/`). `excluded_content_types`\n  is checked after the include list and wins (the way to express\n  \"compress everything text/ except `text/event-stream`\").\n- Responses carrying an existing `Content-Encoding`, 1xx/204/304\n  statuses, zero-length bodies, and 101 upgrade responses are never\n  compressed. `Vary: Accept-Encoding` is merged into every response\n  on a compression-configured route that is not already encoded —\n  compressed or not — so caches key correctly.\n- The compressed body streams chunk-by-chunk with a flush per chunk\n  (streaming/SSE-friendly, at a small compression-ratio cost); the\n  gateway never buffers the whole body to compress it. The frame\n  codec's internal buffer is bounded by the chunk size.",
@@ -4886,6 +4994,17 @@
       "description": "Weighted traffic split across upstreams (DW-040,\n`services[].split`): canary releases and blue-green switches at the\nSERVICE level — each target is a full upstream (its own endpoints,\nprotocol, health, and balancer), so a canary pool is isolated from\nthe stable one by construction. The pick is a deterministic\nweighted hash (see [`Service::split`]): ratios hold statistically\nper request and exactly per session when sticky affinity is on.",
       "type": "object",
       "properties": {
+        "canary_analysis": {
+          "description": "Auto-canary analysis (DW-091): when set, a background\ncontroller compares the canary (second target) vs the baseline\n(first target) on error rate or latency and adjusts the split\nweights automatically. Only valid when the split has exactly 2\ntargets (baseline + canary). Weight changes are transient\n(Generation swap) and revert on config reload.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanaryAnalysis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "targets": {
           "description": "The weighted targets. Validation enforces 2..=8 entries (one\ntarget is what `services[].upstream` expresses), existing\nupstream names, no duplicates, and a positive total weight (a\ntotal of 0 would route nowhere; individual zeros are the\nparked side of a blue-green pair).",
           "type": "array",

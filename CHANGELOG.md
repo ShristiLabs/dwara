@@ -9,6 +9,28 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Auto-canary analysis (DW-091): metrics-driven promotion and rollback
+  of canary split weights. A `canary_analysis` block on a service
+  split (exactly 2 targets: baseline + canary) or an AI model alias
+  arms a background controller that compares the canary side against
+  the baseline on `error_rate` or `latency_p99`. On regression (canary
+  metric above the rollback threshold), the controller decreases the
+  canary weight by `step`; on success (canary metric below the promote
+  threshold), it increases by `step`. Severe regression (>2x the
+  rollback threshold) triggers an immediate rollback to 0. The total
+  weight stays constant (the baseline absorbs the difference,
+  preserving the DW-040 hash-distribution invariant). Weight changes
+  are transient (a Generation swap via ArcSwap) and revert on config
+  reload. The controller uses per-version sliding windows (1000-sample
+  cap) with `min_requests` and `cooldown_seconds` gates. New events:
+  `canary_promoted`, `canary_rolled_back`. New metrics:
+  `dwara_canary_promotions_total`, `dwara_canary_rollbacks_total`,
+  `dwara_canary_weight`. Configured via
+  `services[].split.canary_analysis` and
+  `ai.models[].canary_analysis` (`enabled`, `window_seconds`, `step`,
+  `min_requests`, `cooldown_seconds`, `promote`, `rollback`). No new
+  dependencies.
+
 - Adaptive + origin-driven rate-limit tuning (DW-089): an EWMA of
   upstream error rate and latency dynamically scales a policy's
   rate-limit quotas at check time. The adaptive factor (bounded

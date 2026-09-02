@@ -68,6 +68,24 @@ pub fn weighted_pick<'a, T>(entries: &'a [(u32, T)], key: &str) -> &'a T {
     &entries[0].1
 }
 
+/// DW-091: like [`weighted_pick`] but also returns the picked entry's
+/// INDEX (0 = baseline, 1 = canary for a 2-version canary split).
+/// The auto-canary controller needs the index to record the outcome
+/// on the correct side. Same hash and slot arithmetic.
+pub fn weighted_pick_with_index<'a, T>(entries: &'a [(u32, T)], key: &str) -> (&'a T, usize) {
+    let total: u64 = entries.iter().map(|(w, _)| u64::from(*w)).sum();
+    debug_assert!(total > 0, "validation guarantees positive total weight");
+    let slot = pick_hash(key) % total;
+    let mut bound = 0u64;
+    for (i, (w, item)) in entries.iter().enumerate() {
+        bound += u64::from(*w);
+        if slot < bound {
+            return (item, i);
+        }
+    }
+    (&entries[0].1, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

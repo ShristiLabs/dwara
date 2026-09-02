@@ -167,3 +167,105 @@ The [load balancing](./load-balancing.md) page covers the per-upstream
 algorithms this feature layers over (the `ip_hash` ring the sticky
 value reuses); the [dataplane and proxy](./dataplane-proxy.md) page
 covers the dispatch path the split plugs into.
+
+## Auto-canary analysis (DW-091)
+
+DW-040 gave the operator manual weight-ramp control. DW-091 adds the
+automated layer: a `canary_analysis` block on a service split (exactly
+2 targets: baseline + canary) or an AI model alias arms a background
+controller that compares the canary side against the baseline on
+`error_rate` or `latency_p99` and adjusts the canary weight
+automatically.
+
+### How it works
+
+1. **Recording**: every response through a canary-shaped split calls
+   `CanaryController::record_outcome(group, is_canary, status,
+   latency_ms)`. The controller maintains per-version sliding windows
+   (1000-sample cap) with error counts and latency samples.
+
+2. **Evaluation**: a background `CanaryRunner` polls every 5 seconds.
+   For each canary group, it checks whether both sides have at least
+   `min_requests` observations and the `cooldown_seconds` window has
+   elapsed since the last adjustment. If so, it computes the canary
+   metric (error rate or p99 latency) and compares it against the
+   promote and rollback thresholds.
+
+3. **Actions**:
+   - **Promote**: canary metric BELOW the promote threshold (good) ->
+     canary weight increases by `step` (baseline decreases by `step`,
+     total stays constant).
+   - **Rollback**: canary metric ABOVE the rollback threshold (bad) ->
+     canary weight decreases by `step`.
+   - **Severe regression**: canary metric ABOVE 2x the rollback
+     threshold -> canary weight goes to 0 immediately (no step
+     decrement).
+   - **Neutral**: canary metric between the two thresholds -> no
+     action.
+
+4. **Application**: the runner calls `apply_service_split_weights` or
+   `apply_ai_canary_weights` on the DataPlane, which builds a new
+   `Generation` with the adjusted weights and swaps it in via ArcSwap.
+   The weight change is TRANSIENT — it reverts on the next config
+   reload.
+
+### Configuration
+
+```yaml
+services:
+  - name: api
+    split:
+      targets:
+        - { upstream: api-stable, weight: 90 }
+        - { upstream: api-canary, weight: 10 }
+      canary_analysis:
+        enabled: true              # default true; set false to pause
+        window_seconds: 60         # intended look-back period (>= 1)
+        step: 5                    # weight delta per adjustment (>= 1)
+        min_requests: 10           # minimum samples before acting (>= 1)
+        cooldown_seconds: 30       # gap between adjustments (>= 1)
+        promote:
+          metric: error_rate       # or latency_p99
+          threshold: 0.01          # canary error < 1% -> promote
+        rollback:
+          metric: error_rate
+          threshold: 0.05          # canary error > 5% -> rollback
+```
+
+The same block is available on AI model aliases:
+
+```yaml
+ai:
+  models:
+    gpt-4:
+      canary_analysis:
+        enabled: true
+        # ... same fields as above
+```
+
+### Validation
+
+- `canary_analysis` requires exactly 2 split targets (baseline +
+  canary). A 3-target split with `canary_analysis` is rejected.
+- `window_seconds >= 1`, `step >= 1`, `min_requests >= 1`,
+  `cooldown_seconds >= 1`.
+- `error_rate` thresholds must be in `[0.0, 1.0]`.
+- `latency_p99` thresholds must be `> 0`.
+
+### Events and metrics
+
+- `canary_promoted` / `canary_rolled_back` events on the event bus
+  (carrying the group name, action, new weight, and metric value).
+- `dwara_canary_promotions_total` — counter of promote actions.
+- `dwara_canary_rollbacks_total` — counter of rollback actions.
+- `dwara_canary_weight{group}` — the current canary weight per group.
+
+### Invariants preserved
+
+- **Total weight constant**: the baseline absorbs the canary's delta,
+  preserving the DW-040 hash-distribution invariant (no session
+  reshuffle beyond the changed share).
+- **Transient**: weight changes are Generation swaps, not config
+  edits. A config reload reverts to the configured weights.
+- **No new dependencies**: the controller uses `Mutex<HashMap>` for
+  the sliding windows and `AtomicU64` for counters.
