@@ -433,6 +433,7 @@ fn hcl_escapes_special_characters() {
         timeouts: None,
         oauth2_client_credentials: None,
         dns_discovery: None,
+        peak_ewma: None,
     });
     gw.allow_empty_routes = false;
     let hcl = gateway_to_hcl(&gw);

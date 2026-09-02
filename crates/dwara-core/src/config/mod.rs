@@ -3280,6 +3280,32 @@ pub struct Upstream {
     /// remain static (the current behavior — no change).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_discovery: Option<DnsDiscovery>,
+    /// Peak-EWMA tuning (DW-090): only meaningful when
+    /// `load_balancer: peak_ewma`. Absent (the default) uses the built-in
+    /// defaults (10 s decay tau, 250 ms initial cost). Ignored for the
+    /// other algorithms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_ewma: Option<PeakEwmaConfig>,
+}
+
+/// Peak-EWMA load-balancing tuning (DW-090, `upstreams[].peak_ewma`).
+/// Only consulted when `load_balancer: peak_ewma`; ignored otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PeakEwmaConfig {
+    /// Decay tau in milliseconds (default 10 000 = 10 s). The EWMA weight
+    /// is `exp(-td / tau)` where `td` is the time since the last update.
+    /// A larger tau makes the cost track slow endpoints more sluggishly
+    /// (more stable, less reactive); a smaller tau reacts faster to
+    /// latency changes. Must be > 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_ms: Option<u64>,
+    /// Initial cost in milliseconds (default 250). A fresh endpoint's
+    /// EWMA cost starts here (converted to nanoseconds) so the first
+    /// picks have a reasonable baseline before any real RTT is observed.
+    /// Must be > 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_rtt_ms: Option<u64>,
 }
 
 /// OAuth2 client-credentials configuration for an upstream (DW-035,
@@ -3749,6 +3775,19 @@ pub enum LoadBalancer {
     LeastRequests,
     Random,
     IpHash,
+    /// Peak-EWMA latency-aware load balancing (DW-090, Finagle-style):
+    /// favors low-latency endpoints and degrades outliers. Each endpoint
+    /// carries an atomic EWMA cost tracker (nanosecond resolution) updated
+    /// with the Finagle peak-EWMA formula: a new RTT that EXCEEDS the
+    /// current cost replaces it outright (the "peak"), otherwise the cost
+    /// decays toward the new RTT at rate `exp(-td / tau)`. Selection picks
+    /// the endpoint with the lowest `cost_ns * (inflight + 1)` score, so a
+    /// slow endpoint with few in-flight requests can still win a pick
+    /// while a fast one is saturated. Tunable via `upstreams[].peak_ewma`
+    /// (decay tau and the initial cost); defaults are 10 s decay and a
+    /// 250 ms initial cost. Carried across rebuilds by `address:port`,
+    /// exactly like in-flight counters and health trackers.
+    PeakEwma,
 }
 
 fn default_upstream_protocol() -> UpstreamProtocol {
@@ -4089,6 +4128,17 @@ pub struct Policy {
     /// binding budget are unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<TokenBudget>,
+    /// Anomaly scoring (DW-090): lightweight statistical detection of
+    /// abusive request patterns (header entropy, request-shape outliers).
+    /// When enabled, every matched request is scored against the
+    /// configured signals; a score at or above `threshold` is blocked
+    /// (403 `anomaly_blocked`) unless `dry_run` is set (scored and
+    /// logged, request proceeds). Resolution follows the frozen
+    /// precedence chain (consumer > route > service > listener > global);
+    /// every level with an attachment applies and the applicable rules
+    /// AND together. Absent (the default): no anomaly scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anomaly: Option<AnomalyPolicy>,
 }
 
 /// An AI token budget (DW-078, `policies[].token_budget`): limits of
@@ -4314,4 +4364,72 @@ pub struct PluginLimitsConfig {
     /// Maximum execution time in milliseconds. Default: 100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+}
+
+/// Anomaly scoring policy (DW-090, `policies[].anomaly`): lightweight
+/// statistical detection of abusive request patterns. Each enabled
+/// signal produces a normalized [0, 1] score from the request shape
+/// (header entropy, header count/bytes, path length/depth, query count,
+/// body size, unusual method); the overall score is the average of the
+/// configured signals' scores. A score at or above `threshold` is
+/// blocked (403 `anomaly_blocked`) unless `dry_run` is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnomalyPolicy {
+    /// Whether anomaly scoring is enabled (default true). A `policies[].anomaly`
+    /// block with `enabled: false` is a no-op (the scorer is not compiled).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Monitor mode (DW-041 synergy): the score is computed and the
+    /// would-block is logged + counted, but the request proceeds. Default
+    /// false (enforce).
+    #[serde(default)]
+    pub dry_run: bool,
+    /// The signals to score. Must be non-empty when `enabled` is true.
+    /// Each signal contributes one normalized [0, 1] sub-score; the
+    /// overall score is their average.
+    pub signals: Vec<AnomalySignal>,
+    /// Block threshold in [0, 1] (default 0.8). A score >= threshold is
+    /// blocked (or logged in dry-run mode). Must be in (0, 1].
+    #[serde(default = "default_anomaly_threshold")]
+    pub threshold: f64,
+    /// Maximum body bytes to inspect for the `body_size` signal (default
+    /// 4096). The signal scores `min(body_len, cap) / cap`, so a body
+    /// at or beyond the cap scores 1.0. Must be > 0.
+    #[serde(default = "default_max_body_inspect")]
+    pub max_body_inspect_bytes: u64,
+}
+
+/// One anomaly signal (DW-090). Each produces a normalized [0, 1]
+/// sub-score from one request-shape dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AnomalySignal {
+    /// Shannon entropy of concatenated header values (normalized by 8,
+    /// the max entropy for byte values). High entropy can indicate
+    /// randomized/obfuscated header payloads.
+    HeaderEntropy,
+    /// Header count outlier: `count / 50`, capped at 1.0.
+    HeaderCount,
+    /// Total header bytes outlier: `bytes / 8192`, capped at 1.0.
+    HeaderBytes,
+    /// Path length outlier: `len / 1024`, capped at 1.0.
+    PathLength,
+    /// Path depth outlier: segment count / 20, capped at 1.0.
+    PathDepth,
+    /// Query parameter count outlier: `count / 50`, capped at 1.0.
+    QueryCount,
+    /// Body size outlier: `min(body_len, cap) / cap`, capped at 1.0.
+    BodySize,
+    /// Unusual HTTP method: 1.0 if the method is not one of GET, POST,
+    /// PUT, DELETE, PATCH, HEAD, OPTIONS; 0.0 otherwise.
+    MethodUnusual,
+}
+
+fn default_anomaly_threshold() -> f64 {
+    0.8
+}
+
+fn default_max_body_inspect() -> u64 {
+    4096
 }

@@ -1108,6 +1108,12 @@ impl UpstreamHandle {
         // framing, and the DW-014 read timeout) and statuses >= 500 are
         // failures; 1xx-4xx (including 429/408; documented choice) are
         // successes. Mid-BODY aborts are reported later, by `UpstreamBody`.
+        // DW-090: the issued instant is captured here so the peak-EWMA
+        // latency tracker records the FULL attempt duration (pool-queue
+        // wait + connect + request write + response headers) for every
+        // outcome — success, error, and timeout alike (a timeout is a
+        // latency signal too).
+        let issued = std::time::Instant::now();
         let request = self.client.request(req);
         // Captured before release(): the body wrapper reports mid-stream
         // failures into the same tracker (DW-014 closing the DW-012 gap).
@@ -1123,6 +1129,9 @@ impl UpstreamHandle {
                     if let Some(health) = &dispatch.health {
                         health.report(self.lb.now_ms(), true);
                     }
+                    // DW-090: record the latency (the full timeout
+                    // duration) before releasing the in-flight guard.
+                    self.lb.record_latency(dispatch.idx, issued.elapsed());
                     dispatch.release();
                     return Err(UpstreamError::ReadTimeout { after });
                 }
@@ -1141,6 +1150,11 @@ impl UpstreamHandle {
         if let (Some(health), Some(is_failure)) = (&dispatch.health, report) {
             health.report(self.lb.now_ms(), is_failure);
         }
+        // DW-090: record the observed latency for the peak-EWMA tracker.
+        // Recorded for ALL outcomes (success, error, timeout) since even
+        // a timeout is a latency signal. No-op when the algorithm is not
+        // peak_ewma (the tracker is absent).
+        self.lb.record_latency(dispatch.idx, issued.elapsed());
         dispatch.release();
         outcome.map_err(Into::into).map(|resp| {
             (
@@ -1285,6 +1299,7 @@ fn build_handle(
                 effective_slow_start(u),
                 u.health.as_ref(),
                 upstream_events.as_ref(),
+                u.peak_ewma.as_ref(),
             );
             Arc::clone(prev)
         }
@@ -1294,6 +1309,7 @@ fn build_handle(
             effective_slow_start(u),
             u.health.as_ref(),
             upstream_events.as_ref(),
+            u.peak_ewma.as_ref(),
         ),
     };
     let retry_budget = previous
@@ -1590,6 +1606,7 @@ mod tests {
             trusted_ca_file: None,
             oauth2_client_credentials: None,
             dns_discovery: None,
+            peak_ewma: None,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

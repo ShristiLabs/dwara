@@ -9,6 +9,32 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Peak-EWMA latency-aware load balancing (DW-090): a new
+  `LoadBalancer::PeakEwma` variant implementing Finagle-style
+  peak-EWMA latency-aware endpoint selection. Each endpoint tracks an
+  atomic EWMA cost (`cost_ns`) updated on every observed latency
+  (success, error, and timeout alike). The formula: a new RTT that
+  exceeds the current cost replaces it outright (the "peak" -- a slow
+  response is remembered in full so the balancer degrades an outlier
+  immediately); otherwise the cost decays toward the new RTT at rate
+  `w = exp(-td / tau)`. Selection scores endpoints by
+  `cost_ns * (inflight + 1)` (lowest wins). Per-upstream tuning via
+  `upstream.peak_ewma` (`decay_ms`, `default_rtt_ms`); the tracker is
+  carried across config reloads for unchanged addresses (the live cost
+  history survives the swap). No new dependencies (uses `AtomicU64`).
+
+- Anomaly scoring (DW-090): a lightweight statistical anomaly detection
+  system that scores requests against configurable request-shape
+  signals (header entropy, header count/bytes, path length/depth,
+  query count, body size, unusual method). Each signal produces a
+  normalized [0, 1] sub-score; the overall score is the average. A
+  score at or above the policy's `threshold` is blocked (403
+  `anomaly_blocked`) unless `dry_run` is set (scored and logged, request
+  proceeds). Configured via `policies[].anomaly` with
+  `AnomalySignal` enum variants. Runs after the WAF-lite filter and
+  before route limits in the request path. The `dwara_anomaly_total`
+  metric tracks outcomes (`blocked`, `logged`, `passed`) by route.
+
 - Agent principals & governance (DW-113): typed consumer principals
   with per-agent tool allowlists, per-agent token budgets, and typed
   analytics attribution. (1) `consumer_type`: a new `Consumer` field

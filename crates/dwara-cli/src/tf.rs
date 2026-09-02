@@ -472,6 +472,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
             LoadBalancer::LeastRequests => "least_requests",
             LoadBalancer::Random => "random",
             LoadBalancer::IpHash => "ip_hash",
+            LoadBalancer::PeakEwma => "peak_ewma",
         }),
     );
     m.insert(
@@ -542,6 +543,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         timeouts: None,
         oauth2_client_credentials: None,
         dns_discovery: None,
+        peak_ewma: None,
     })
 }
 
@@ -647,6 +649,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
                 LoadBalancer::LeastRequests => "least_requests",
                 LoadBalancer::Random => "random",
                 LoadBalancer::IpHash => "ip_hash",
+                LoadBalancer::PeakEwma => "peak_ewma",
             }
         ));
         out.push_str(&format!(
@@ -1126,6 +1129,7 @@ mod tests {
                 timeouts: None,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
+                peak_ewma: None,
             }],
             consumers: Vec::new(),
             policies: Vec::new(),

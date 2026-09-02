@@ -463,6 +463,11 @@ pub(super) struct Generation {
     /// has no `ai:` block. Rebuilt every generation (a reload picks up
     /// rotated secrets and model-table changes).
     ai: Option<Arc<crate::ai::AiRuntime>>,
+    /// Anomaly scorer (DW-090): compiled from the first enabled
+    /// `policies[].anomaly` block. None when no policy configures
+    /// anomaly scoring (or all are disabled). Rebuilt every generation
+    /// so a config change takes effect on the next request.
+    anomaly: Option<Arc<crate::dataplane::anomaly::AnomalyScorer>>,
 }
 
 impl Generation {
@@ -486,6 +491,29 @@ impl Generation {
     pub(super) fn ai(&self) -> Option<&Arc<crate::ai::AiRuntime>> {
         self.ai.as_ref()
     }
+
+    /// The compiled anomaly scorer (DW-090); None when no policy
+    /// configures anomaly scoring.
+    pub(super) fn anomaly(&self) -> Option<&Arc<crate::dataplane::anomaly::AnomalyScorer>> {
+        self.anomaly.as_ref()
+    }
+}
+
+/// Compile the anomaly scorer (DW-090) from the gateway's policies.
+/// Takes the first enabled `policies[].anomaly` block (the policies list
+/// is ordered; the first enabled one governs). Returns `None` when no
+/// policy configures anomaly scoring or all are disabled.
+fn compile_anomaly_scorer(
+    gateway: &crate::config::Gateway,
+) -> Option<Arc<crate::dataplane::anomaly::AnomalyScorer>> {
+    for policy in &gateway.policies {
+        if let Some(anomaly_cfg) = &policy.anomaly {
+            if let Some(scorer) = crate::dataplane::anomaly::AnomalyScorer::compile(anomaly_cfg) {
+                return Some(Arc::new(scorer));
+            }
+        }
+    }
+    None
 }
 
 /// Build the per-upstream OAuth2 client map (DW-035) from the gateway
@@ -885,6 +913,7 @@ impl DataPlane {
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
             .map(Arc::new);
+        let anomaly = compile_anomaly_scorer(snapshot.gateway());
         let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
             snapshot.gateway(),
         ));
@@ -915,6 +944,7 @@ impl DataPlane {
                 registry,
                 oauth2_clients,
                 ai,
+                anomaly,
             }),
             global_cap: ArcSwap::from_pointee(global_cap),
             priority_counters: PriorityCounters::default(),
@@ -1319,6 +1349,7 @@ impl DataPlane {
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
         let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
             .map(Arc::new);
+        let anomaly = compile_anomaly_scorer(snapshot.gateway());
         // DW-078: budget RULES swap with the generation; the LEDGER
         // (spent windows) carries over — a reload never resets a
         // live budget window.
@@ -1389,6 +1420,7 @@ impl DataPlane {
             registry,
             oauth2_clients,
             ai,
+            anomaly,
         }));
         self.obs.set_config_generation(generation);
         // DW-052: the new generation's SLO set (plain targets, converted
@@ -2862,6 +2894,56 @@ where
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
     let mut req = req;
+    // Anomaly scoring (DW-090): lightweight statistical detection of
+    // abusive request patterns. Runs AFTER the WAF-lite filter (which
+    // is in the caller, `handle`) and BEFORE the route limits — it is
+    // an inspection phase like the WAF, rejecting abusive request
+    // shapes before any resource is spent on auth or rate limiting.
+    // Inspects the ORIGINAL request (before path rewrite / transforms).
+    // Dry-run mode (DW-041 synergy) evaluates and logs but does not
+    // block. The scorer is compiled from the first enabled
+    // `policies[].anomaly` block (see `compile_anomaly_scorer`).
+    if let Some(scorer) = gen.anomaly() {
+        let result = scorer.score(
+            req.method().as_str(),
+            req.uri().path(),
+            req.uri().query(),
+            req.headers(),
+            None, // body prefix — not inspected here (no buffering yet)
+        );
+        if result.triggered {
+            if scorer.dry_run() {
+                dp.obs.record_anomaly(&route.name, "logged");
+                tracing::warn!(
+                    code = "anomaly_logged",
+                    request_id = %rid,
+                    route = %route.name,
+                    score = %result.score,
+                    signals = ?result.signals.iter().map(|(n, v)| (n.as_str(), *v)).collect::<Vec<_>>(),
+                    "anomaly dry-run match (request allowed)"
+                );
+            } else {
+                dp.obs.record_anomaly(&route.name, "blocked");
+                tracing::warn!(
+                    code = "anomaly_blocked",
+                    request_id = %rid,
+                    route = %route.name,
+                    score = %result.score,
+                    "request blocked by anomaly scoring"
+                );
+                let mut resp = simple(
+                    StatusCode::FORBIDDEN,
+                    "anomaly_blocked",
+                    "request blocked by anomaly scoring",
+                    rid,
+                );
+                stamp_security_headers(&mut resp, route);
+                return resp;
+            }
+        } else {
+            dp.obs.record_anomaly(&route.name, "passed");
+        }
+    }
     // Route-scoped request limits (DW-027): header caps and a declared
     // (`Content-Length`) body cap are enforced immediately after route
     // resolution — before CORS preflight handling, authentication, and

@@ -130,7 +130,8 @@ crates/dwara-core/src/
   resilience/         health, retries, breaker (passive observation)
   dataplane/          proxy, upstream, balance, hardening, cors,
                       compression, ai_proxy (the DW-075 AI route
-                      action), and active.rs (probe loops drive
+                      action), anomaly (DW-090 statistical anomaly
+                      scoring), and active.rs (probe loops drive
                       the registry — dataplane lifecycle)
   ai/                 the DW-075 provider-adapter pack: canonical
                       chat types, the pure-translation
@@ -269,7 +270,11 @@ Rules for new code:
   (405 + Allow, preflight-exempt like maintenance, DW-030) → WAF-lite
   heuristic filtering (DW-051: pattern matching for SQLi/XSS/path-traversal
   on the path, query, selected headers, and body; 403 `waf_blocked` or
-  dry-run logged, per-route opt-in) → route limits (413/431) → CORS
+  dry-run logged, per-route opt-in) → anomaly scoring (DW-090:
+  lightweight statistical detection of abusive request shapes — header
+  entropy, header count/bytes, path length/depth, query count, body
+  size, unusual method; 403 `anomaly_blocked` or dry-run logged,
+  per-policy opt-in) → route limits (413/431) → CORS
   preflight short-circuit (204, pre-authn) →
   WebSocket origin gate (DW-039: a websocket upgrade on a route with a
   non-empty `websocket.origins` list is denied 403 at the proxy action,

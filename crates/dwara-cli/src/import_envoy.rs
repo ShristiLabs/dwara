@@ -290,6 +290,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                 timeouts: None,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
+                peak_ewma: None,
             },
         );
         // Each cluster gets a service with the same name.

@@ -97,6 +97,7 @@ fn test_upstream(
         trusted_ca_file: None,
         oauth2_client_credentials: None,
         dns_discovery: None,
+        peak_ewma: None,
     }
 }
 
@@ -423,6 +424,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             trusted_ca_file: None,
             oauth2_client_credentials: None,
             dns_discovery: None,
+            peak_ewma: None,
         }],
         consumers: vec![],
         policies: vec![],

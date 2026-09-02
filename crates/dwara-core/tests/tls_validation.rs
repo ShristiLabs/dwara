@@ -142,6 +142,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             trusted_ca_file: None,
             oauth2_client_credentials: None,
             dns_discovery: None,
+            peak_ewma: None,
         }],
         consumers: vec![],
         policies: vec![],

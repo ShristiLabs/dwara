@@ -169,6 +169,7 @@ fn good_gateway() -> Gateway {
             trusted_ca_file: None,
             oauth2_client_credentials: None,
             dns_discovery: None,
+            peak_ewma: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -330,6 +331,7 @@ fn validate_rejects_malformed_rate_limit_rules() {
             timeouts: None,
             dry_run: false,
             token_budget: None,
+            anomaly: None,
         }];
         gw
     }

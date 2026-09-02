@@ -242,6 +242,7 @@ async fn refresh_cycle(
     let slow_start = lb.slow_start();
     let health = lb.health_config();
     let events = lb.events();
+    let peak_ewma = lb.peak_ewma_config();
     match result {
         Ok((endpoints, ttl)) => {
             // min_endpoints floor: if the resolution yielded fewer than
@@ -268,6 +269,7 @@ async fn refresh_cycle(
                 slow_start,
                 health,
                 events.as_ref(),
+                peak_ewma.as_deref(),
             );
             obs.set_dns_discovery_endpoints(upstream_name, endpoints.len() as i64);
             tracing::info!(
@@ -303,6 +305,7 @@ async fn refresh_cycle(
                     slow_start,
                     health,
                     events.as_ref(),
+                    peak_ewma.as_deref(),
                 );
                 obs.set_dns_discovery_endpoints(upstream_name, 0);
             }

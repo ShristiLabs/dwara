@@ -116,6 +116,7 @@ fn bench_gateway() -> Gateway {
             timeouts: None,
             oauth2_client_credentials: None,
             dns_discovery: None,
+            peak_ewma: None,
         })
         .collect();
     Gateway {

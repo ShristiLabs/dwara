@@ -81,8 +81,59 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 
 use crate::config::limits::KETAMA_VNODES;
-use crate::config::{Endpoint, LoadBalancer, PassiveHealth};
+use crate::config::{Endpoint, LoadBalancer, PassiveHealth, PeakEwmaConfig};
 use crate::resilience::health::{EndpointHealth, HealthDispatch, HealthParams};
+
+/// Peak-EWMA latency tracker (DW-090): one per endpoint when the
+/// upstream's algorithm is `peak_ewma`. Holds the current EWMA cost
+/// (`cost_ns`, in nanoseconds) and the timestamp of the last update
+/// (`stamp`, in nanoseconds since the Unix epoch) as atomics so
+/// [`UpstreamLb::record_latency`] is lock-free on the hot path. Carried
+/// across rebuilds by `address:port` (exactly like `inflight` and
+/// `health`): the live tracker survives a config reload so a latency
+/// history accumulated under one generation is not thrown away by the
+/// next.
+///
+/// The Finagle peak-EWMA formula (see [`UpstreamLb::record_latency`]):
+/// a new RTT that EXCEEDS the current cost replaces it outright (the
+/// "peak" — a slow response is remembered in full so the balancer
+/// degrades an outlier immediately), otherwise the cost decays toward
+/// the new RTT at rate `w = exp(-td / tau)` where `td` is the time
+/// since the last update and `tau` is the decay window. Selection
+/// scores endpoints by `cost_ns * (inflight + 1)` (lowest wins).
+pub struct PeakEwmaTracker {
+    cost_ns: AtomicU64,
+    stamp: AtomicU64,
+}
+
+impl PeakEwmaTracker {
+    /// Build a fresh tracker with the given initial cost (nanoseconds)
+    /// and a stamp of "now" so the first update's time delta is small.
+    fn new(initial_cost_ns: u64) -> Self {
+        let now = system_now_ns();
+        PeakEwmaTracker {
+            cost_ns: AtomicU64::new(initial_cost_ns),
+            stamp: AtomicU64::new(now),
+        }
+    }
+
+    /// Current EWMA cost in nanoseconds.
+    pub fn cost_ns(&self) -> u64 {
+        self.cost_ns.load(Ordering::Relaxed)
+    }
+}
+
+/// Unix-epoch nanosecond clock for the peak-EWMA stamp. System clock in
+/// production; the stamp only needs to be monotonic-ish for the decay
+/// delta (a reload that moves the clock backward produces a small or
+/// zero `td`, which makes the first post-reload update near-peak —
+/// harmless and self-correcting on the next observation).
+fn system_now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
 
 /// One endpoint's runtime row inside an [`LbState`].
 struct LbEndpoint {
@@ -111,6 +162,12 @@ struct LbEndpoint {
     /// swap, so consecutive-failure streaks and the observation window
     /// survive config reloads.
     health: Option<Arc<EndpointHealth>>,
+    /// Peak-EWMA latency tracker (DW-090); present only when the
+    /// upstream's algorithm is `peak_ewma`. Carried across rebuilds for
+    /// unchanged addresses, exactly like `inflight`: the live cost
+    /// history survives the swap, so a latency trend accumulated under
+    /// one generation is not reset by the next.
+    peak_ewma: Option<Arc<PeakEwmaTracker>>,
 }
 
 impl LbEndpoint {
@@ -123,6 +180,7 @@ impl LbEndpoint {
             inflight: Arc::new(AtomicU64::new(0)),
             current_weight: Arc::new(AtomicI64::new(0)),
             health: None,
+            peak_ewma: None,
         }
     }
 
@@ -140,6 +198,7 @@ impl LbEndpoint {
             inflight: Arc::clone(&old.inflight),
             current_weight: Arc::clone(&old.current_weight),
             health: old.health.clone(),
+            peak_ewma: old.peak_ewma.clone(),
         }
     }
 
@@ -159,6 +218,16 @@ struct LbState {
     /// Resolved passive-health parameters for this generation (DW-012);
     /// `None` = passive health disabled (no ejection, no filtering).
     health: Option<Arc<HealthParams>>,
+    /// Peak-EWMA decay tau in nanoseconds (DW-090); only meaningful when
+    /// `algorithm == PeakEwma`. Stored on the state so
+    /// [`UpstreamLb::record_latency`] reads the generation's tau without
+    /// a config lookup on the hot path.
+    peak_ewma_tau_ns: u64,
+    /// Peak-EWMA resolved config (DW-090); the discovery task reads this
+    /// so a live endpoint-set swap uses the same tuning as the initial
+    /// build (a custom `decay_ms` / `default_rtt_ms` survives a DNS
+    /// refresh). `None` when the algorithm is not `peak_ewma`.
+    peak_ewma_cfg: Option<Arc<PeakEwmaConfig>>,
 }
 
 impl LbState {
@@ -222,6 +291,7 @@ fn build_state(
     previous: Option<&LbState>,
     health: Option<Arc<HealthParams>>,
     events: Option<&crate::events::UpstreamEmitter>,
+    peak_ewma_cfg: Option<&PeakEwmaConfig>,
 ) -> LbState {
     let mut eps: Vec<LbEndpoint> = Vec::with_capacity(endpoints.len());
     for e in endpoints {
@@ -252,6 +322,25 @@ fn build_state(
             }
         }
     }
+    // Peak-EWMA invariant (DW-090): when the algorithm is peak_ewma,
+    // EVERY endpoint carries a latency tracker (fresh ones for new
+    // addresses, the carried live tracker for unchanged addresses).
+    // The initial cost is `default_rtt_ms` in nanoseconds; the decay
+    // tau is resolved once here and stored on the state.
+    let peak_ewma_tau_ns = if algorithm == LoadBalancer::PeakEwma {
+        let decay_ms = peak_ewma_cfg.and_then(|c| c.decay_ms).unwrap_or(10_000);
+        let default_rtt_ms = peak_ewma_cfg.and_then(|c| c.default_rtt_ms).unwrap_or(250);
+        let initial_cost_ns = default_rtt_ms.saturating_mul(1_000_000);
+        for e in &mut eps {
+            if e.peak_ewma.is_none() {
+                e.peak_ewma = Some(Arc::new(PeakEwmaTracker::new(initial_cost_ns)));
+            }
+        }
+        decay_ms.saturating_mul(1_000_000)
+    } else {
+        0
+    };
+    let peak_ewma_cfg = peak_ewma_cfg.map(|c| Arc::new(c.clone()));
     let ring = if algorithm == LoadBalancer::IpHash {
         build_ring(&eps)
     } else {
@@ -263,6 +352,8 @@ fn build_state(
         slow_start,
         ring,
         health,
+        peak_ewma_tau_ns,
+        peak_ewma_cfg,
     }
 }
 
@@ -402,7 +493,7 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) -> Arc<Self> {
-        Self::new_with_health_and_events(endpoints, algorithm, slow_start, health, None)
+        Self::new_with_health_and_events(endpoints, algorithm, slow_start, health, None, None)
     }
 
     /// `new_with_health` with ejection/recovery events (DW-044): fresh
@@ -410,12 +501,15 @@ impl UpstreamLb {
     /// emitter), so their ejection/recovery transitions emit onto the
     /// event bus. Carried trackers keep the binding they were built
     /// with. `None` behaves exactly like [`UpstreamLb::new_with_health`].
+    /// `peak_ewma` (DW-090) is the per-upstream tuning consulted only
+    /// when `algorithm == PeakEwma`; `None` uses the built-in defaults.
     pub fn new_with_health_and_events(
         endpoints: &[Endpoint],
         algorithm: LoadBalancer,
         slow_start: Duration,
         health: Option<&PassiveHealth>,
         events: Option<&crate::events::UpstreamEmitter>,
+        peak_ewma: Option<&PeakEwmaConfig>,
     ) -> Arc<Self> {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -426,7 +520,7 @@ impl UpstreamLb {
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         Arc::new(UpstreamLb {
             state: ArcSwap::from_pointee(build_state(
-                endpoints, algorithm, slow_start, None, health, events,
+                endpoints, algorithm, slow_start, None, health, events, peak_ewma,
             )),
             rng: AtomicU64::new(seed | 1),
             health_clock: RwLock::new(system_now_ms),
@@ -459,14 +553,16 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) {
-        self.rebuild_with_health_and_events(endpoints, algorithm, slow_start, health, None);
+        self.rebuild_with_health_and_events(endpoints, algorithm, slow_start, health, None, None);
     }
 
     /// `rebuild_with_health` with ejection/recovery events (DW-044):
     /// trackers created by THIS rebuild bind `events`; carried trackers
     /// keep their original binding (the emitter is per-dataplane and
     /// stable, so in practice the two agree). `None` behaves exactly
-    /// like [`UpstreamLb::rebuild_with_health`].
+    /// like [`UpstreamLb::rebuild_with_health`]. `peak_ewma` (DW-090) is
+    /// the per-upstream tuning consulted only when
+    /// `algorithm == PeakEwma`; `None` uses the built-in defaults.
     pub fn rebuild_with_health_and_events(
         &self,
         endpoints: &[Endpoint],
@@ -474,6 +570,7 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
         events: Option<&crate::events::UpstreamEmitter>,
+        peak_ewma: Option<&PeakEwmaConfig>,
     ) {
         let prev = self.state.load_full();
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
@@ -484,6 +581,7 @@ impl UpstreamLb {
             Some(&prev),
             health,
             events,
+            peak_ewma,
         )));
     }
 
@@ -492,7 +590,9 @@ impl UpstreamLb {
     /// DNS discovery task reads the resolved parameters from the current
     /// LbState (via [`UpstreamLb::health_config`]) so a live endpoint-set
     /// swap uses the same health parameters as the initial build without
-    /// re-resolving the config form.
+    /// re-resolving the config form. `peak_ewma` (DW-090) is the
+    /// per-upstream tuning consulted only when
+    /// `algorithm == PeakEwma`; `None` uses the built-in defaults.
     pub fn rebuild_with_resolved_health_and_events(
         &self,
         endpoints: &[Endpoint],
@@ -500,6 +600,7 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<Arc<HealthParams>>,
         events: Option<&crate::events::UpstreamEmitter>,
+        peak_ewma: Option<&PeakEwmaConfig>,
     ) {
         let prev = self.state.load_full();
         self.state.store(Arc::new(build_state(
@@ -509,6 +610,7 @@ impl UpstreamLb {
             Some(&prev),
             health,
             events,
+            peak_ewma,
         )));
     }
 
@@ -563,6 +665,14 @@ impl UpstreamLb {
         self.state.load().health.clone()
     }
 
+    /// DW-090: the resolved peak-EWMA config of the current state, if
+    /// the algorithm is `peak_ewma`. The discovery task reads this so a
+    /// live endpoint-set swap uses the same tuning (decay tau, initial
+    /// cost) as the initial build.
+    pub fn peak_ewma_config(&self) -> Option<Arc<PeakEwmaConfig>> {
+        self.state.load().peak_ewma_cfg.clone()
+    }
+
     /// DW-042: the upstream-scoped event emitter, if the balancer was
     /// built with one. The discovery task passes this to
     /// `rebuild_with_health_and_events` so new endpoints get
@@ -610,6 +720,61 @@ impl UpstreamLb {
             .inflight
             .fetch_add(1, Ordering::Relaxed);
         Some(InflightGuard { state, idx })
+    }
+
+    /// Record an observed latency for endpoint `idx` (DW-090). Updates
+    /// the endpoint's peak-EWMA cost tracker using the Finagle formula:
+    ///
+    /// - `w = exp(-td / tau)` where `td` is the time since the last
+    ///   update and `tau` is the decay window (`peak_ewma.decay_ms`).
+    /// - If `rtt > cost` (the new RTT exceeds the current cost), the
+    ///   cost is replaced outright (the "peak" — a slow response is
+    ///   remembered in full so the balancer degrades an outlier
+    ///   immediately).
+    /// - Otherwise `cost = cost * w + rtt * (1 - w)` (the cost decays
+    ///   toward the new RTT).
+    ///
+    /// No-op when the endpoint has no peak-EWMA tracker (the algorithm
+    /// is not `peak_ewma`, or the index is out of range). Lock-free:
+    /// the tracker's `cost_ns` and `stamp` are atomics. The latency is
+    /// recorded for ALL outcomes (success, error, timeout) since even a
+    /// timeout is a latency signal.
+    pub fn record_latency(&self, idx: usize, duration: Duration) {
+        let state = self.state.load();
+        let Some(e) = state.endpoints.get(idx) else {
+            return;
+        };
+        let Some(tracker) = &e.peak_ewma else {
+            return;
+        };
+        let tau_ns = state.peak_ewma_tau_ns.max(1) as f64;
+        let now = system_now_ns();
+        let prev_stamp = tracker.stamp.load(Ordering::Relaxed);
+        let td = now.saturating_sub(prev_stamp) as f64;
+        let w = (-td / tau_ns).exp();
+        let prev_cost = tracker.cost_ns.load(Ordering::Relaxed);
+        let rtt_ns = duration.as_nanos() as u64;
+        let new_cost = if rtt_ns > prev_cost {
+            // Peak: a slow response replaces the cost outright.
+            rtt_ns
+        } else {
+            // Decay toward the new RTT.
+            ((prev_cost as f64) * w + (rtt_ns as f64) * (1.0 - w)) as u64
+        };
+        tracker.cost_ns.store(new_cost, Ordering::Relaxed);
+        tracker.stamp.store(now, Ordering::Relaxed);
+    }
+
+    /// The current peak-EWMA cost (nanoseconds) for endpoint `idx`, or
+    /// `None` when the endpoint has no tracker (the algorithm is not
+    /// `peak_ewma` or the index is out of range). Test/diagnostic helper.
+    pub fn peak_ewma_cost(&self, idx: usize) -> Option<u64> {
+        let state = self.state.load();
+        state.endpoints.get(idx).and_then(|e| {
+            e.peak_ewma
+                .as_ref()
+                .map(|t| t.cost_ns.load(Ordering::Relaxed))
+        })
     }
 
     /// Pick the endpoint index for one dispatch. `key` is the hash key
@@ -781,6 +946,29 @@ impl UpstreamLb {
                 }
                 None => smooth_weighted_rr(state, cand.as_deref()),
             },
+            // Peak-EWMA (DW-090, Finagle-style): score each candidate by
+            // `cost_ns * (inflight + 1)` and pick the lowest. The cost
+            // is the endpoint's atomic EWMA latency tracker; `inflight`
+            // is the live in-flight count. A slow endpoint with few
+            // in-flight requests can still win a pick while a fast one
+            // is saturated. Ties break to the lower index
+            // (deterministic). When no tracker is present (should not
+            // happen for a peak_ewma generation — `build_state` creates
+            // one for every endpoint — but defensive), fall back to
+            // least-requests over the candidate set.
+            LoadBalancer::PeakEwma => (0..n)
+                .map(resolve)
+                .min_by_key(|&i| {
+                    let cost = state.endpoints[i]
+                        .peak_ewma
+                        .as_ref()
+                        .map(|t| t.cost_ns.load(Ordering::Relaxed))
+                        .unwrap_or(0);
+                    let inflight = state.endpoints[i].inflight.load(Ordering::Relaxed);
+                    // u128 so the product of two u64s cannot overflow.
+                    (cost as u128 * (inflight as u128 + 1), i as u64)
+                })
+                .unwrap_or_else(|| resolve(0)),
         };
         // The SELECTED endpoint spends a half-open probe slot (no-op for
         // healthy endpoints; best-effort under races — see
@@ -890,12 +1078,14 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(fresh.effective_weight(&fresh.endpoints[1]), 1);
         let mut aged = build_state(
             &spec,
             LoadBalancer::RoundRobin,
             Duration::from_secs(10),
+            None,
             None,
             None,
             None,
@@ -912,6 +1102,7 @@ mod tests {
             &spec,
             LoadBalancer::RoundRobin,
             Duration::ZERO,
+            None,
             None,
             None,
             None,

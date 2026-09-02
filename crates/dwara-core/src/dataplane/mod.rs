@@ -26,6 +26,7 @@
 
 pub mod active;
 pub mod ai_proxy;
+pub mod anomaly;
 pub mod balance;
 pub mod compression;
 pub mod cors;

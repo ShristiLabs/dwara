@@ -421,6 +421,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 timeouts: None,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
+                peak_ewma: None,
             },
         );
 
@@ -489,6 +490,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                         timeouts: None,
                         oauth2_client_credentials: None,
                         dns_discovery: None,
+                        peak_ewma: None,
                     },
                 );
                 services.insert(

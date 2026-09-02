@@ -108,6 +108,7 @@ fn upstream(name: &str) -> Upstream {
         trusted_ca_file: None,
         oauth2_client_credentials: None,
         dns_discovery: None,
+        peak_ewma: None,
     }
 }
 
@@ -236,6 +237,7 @@ fn validation_rejects_duplicate_policy_name() {
         rate_limits: vec![],
         dry_run: false,
         token_budget: None,
+        anomaly: None,
     });
     gw.policies.push(dwara_core::config::Policy {
         name: "p".into(),
@@ -244,6 +246,7 @@ fn validation_rejects_duplicate_policy_name() {
         rate_limits: vec![],
         dry_run: false,
         token_budget: None,
+        anomaly: None,
     });
     assert_single_issue(&gw, "policy", "p", "name");
 }
@@ -1097,6 +1100,7 @@ fn policy_gateway(rl: RateLimit) -> Gateway {
         rate_limits: vec![],
         dry_run: false,
         token_budget: None,
+        anomaly: None,
     });
     gw
 }
@@ -1424,6 +1428,7 @@ fn validation_accepts_resolved_global_and_listener_policy_references() {
         dry_run: false,
         timeouts: None,
         token_budget: None,
+        anomaly: None,
     }];
     gw.global_policies = vec!["p".into()];
     gw.listeners[0].policies = vec!["p".into()];

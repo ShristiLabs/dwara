@@ -493,6 +493,13 @@ pub struct Observability {
     /// (the request was allowed); `passed` = no match (counted once per
     /// inspected request, filter label `all`).
     waf_total: IntCounterVec,
+    /// DW-090: anomaly-scoring inspection outcomes — a CLOSED label set
+    /// (`blocked`, `logged`, `passed`) over the route label space
+    /// (config-bounded). `blocked` = the score was at or above the
+    /// threshold and the request was rejected with 403; `logged` = a
+    /// dry-run match (the request was allowed); `passed` = the score was
+    /// below the threshold (counted once per inspected request).
+    anomaly_total: IntCounterVec,
     /// DW-032: license status gauge — 0 = no license (OSS), 1 = valid,
     /// 2 = expired within grace, 3 = expired past grace (degraded to
     /// OSS). Set once at startup and on every reload; no labels (closed
@@ -996,6 +1003,18 @@ impl Observability {
             &["route", "filter", "outcome"],
         )
         .expect("valid metric definition");
+        let anomaly_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_anomaly_total",
+                "Anomaly-scoring inspection outcomes (DW-090), by route. \
+                 outcome: blocked (the score was at or above the threshold \
+                 and the request was rejected with 403), logged (a dry-run \
+                 match; the request was allowed), passed (the score was \
+                 below the threshold; counted once per inspected request).",
+            ),
+            &["route", "outcome"],
+        )
+        .expect("valid metric definition");
         let license_status = IntGauge::new(
             "dwara_license_status",
             "License status (DW-032): 0 = no license (OSS mode), 1 = valid, \
@@ -1299,6 +1318,7 @@ impl Observability {
             Box::new(admission_queued_total.clone()),
             Box::new(admission_queue_depth.clone()),
             Box::new(waf_total.clone()),
+            Box::new(anomaly_total.clone()),
             Box::new(license_status.clone()),
             Box::new(dns_discovery_endpoints.clone()),
             Box::new(dns_discovery_refresh_total.clone()),
@@ -1375,6 +1395,7 @@ impl Observability {
             admission_queued_total,
             admission_queue_depth,
             waf_total,
+            anomaly_total,
             license_status,
             dns_discovery_endpoints,
             dns_discovery_refresh_total,
@@ -1530,6 +1551,17 @@ impl Observability {
     pub fn record_waf(&self, route: &str, filter: &str, outcome: &str) {
         self.waf_total
             .with_label_values(&[route, filter, outcome])
+            .inc();
+    }
+
+    /// Count one anomaly-scoring inspection outcome (DW-090). `route` is
+    /// the matched route name; `outcome` is `blocked` (403 returned),
+    /// `logged` (dry-run match, request allowed), or `passed` (score
+    /// below the threshold). Both labels are config-bounded (route names
+    /// and the closed outcome set).
+    pub fn record_anomaly(&self, route: &str, outcome: &str) {
+        self.anomaly_total
+            .with_label_values(&[route, outcome])
             .inc();
     }
 

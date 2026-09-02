@@ -348,6 +348,7 @@ fn clusters_body(ctx: &AdminContext) -> serde_json::Value {
             dwara_core::config::LoadBalancer::LeastRequests => "least_requests",
             dwara_core::config::LoadBalancer::Random => "random",
             dwara_core::config::LoadBalancer::IpHash => "ip_hash",
+            dwara_core::config::LoadBalancer::PeakEwma => "peak_ewma",
         };
         let breaker_state = if handle.breaker_params().is_none() {
             serde_json::json!("disabled")

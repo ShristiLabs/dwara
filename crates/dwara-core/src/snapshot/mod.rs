@@ -5155,6 +5155,29 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 );
             }
         }
+        // DW-090: Peak-EWMA load-balancer tuning validation.
+        if let Some(pe) = &u.peak_ewma {
+            if let Some(decay) = pe.decay_ms {
+                if decay == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "peak_ewma.decay_ms",
+                        "peak_ewma.decay_ms must be > 0 (the EWMA decay window)",
+                    ));
+                }
+            }
+            if let Some(rtt) = pe.default_rtt_ms {
+                if rtt == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "peak_ewma.default_rtt_ms",
+                        "peak_ewma.default_rtt_ms must be > 0 (the initial cost estimate)",
+                    ));
+                }
+            }
+        }
     }
 
     // DW-035: mTLS consumer mapping validation.
@@ -5524,6 +5547,35 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     &p.name,
                     &format!("{field}.burst"),
                     "rate limit burst must be >= 1 when present (omit for the default)",
+                ));
+            }
+        }
+        // DW-090: anomaly scoring policy validation.
+        if let Some(an) = &p.anomaly {
+            if an.enabled && an.signals.is_empty() {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "anomaly.signals",
+                    "anomaly scoring is enabled but no signals are configured (at least \
+                     one signal is required)",
+                ));
+            }
+            if !an.threshold.is_finite() || an.threshold <= 0.0 || an.threshold > 1.0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "anomaly.threshold",
+                    format!("anomaly.threshold must be in (0, 1]; got {}", an.threshold),
+                ));
+            }
+            if an.max_body_inspect_bytes == 0 {
+                issues.push(issue(
+                    "policy",
+                    &p.name,
+                    "anomaly.max_body_inspect_bytes",
+                    "anomaly.max_body_inspect_bytes must be > 0 (the body_size signal \
+                     cap; use a large value to effectively disable the cap)",
                 ));
             }
         }

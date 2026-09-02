@@ -112,6 +112,7 @@ fn render_contains_families() {
                 trusted_ca_file: None,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
+                peak_ewma: None,
             }],
             consumers: vec![],
             policies: vec![],

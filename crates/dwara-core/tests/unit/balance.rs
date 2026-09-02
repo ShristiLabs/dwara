@@ -393,6 +393,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         trusted_ca_file: None,
         oauth2_client_credentials: None,
         dns_discovery: None,
+        peak_ewma: None,
     }
 }
 
