@@ -9,6 +9,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- federated analytics (DW-095, Ent): a `PublishAnalytics` gRPC RPC on
+  the `DwaraControlPlane` service that lets edges (`dwara-edge`) stream
+  analytics batches to the controller (`dwara-controller`) for fleet-
+  wide aggregation. The edge-side `FederatedAnalyticsSink` implements
+  `AnalyticsSink`, batches events in a bounded channel (fire-and-forget,
+  never blocks the dataplane), and pushes them to the controller via
+  the new client-streaming RPC. The controller-side `AnalyticsCollector`
+  trait receives batches and forwards them to an `EmbeddedAnalytics`
+  store (or any other sink). `ControllerServer::with_analytics_collector`
+  attaches the collector to the gRPC server. Wire messages
+  (`PbAnalyticsRecord`, `PbAnalyticsBatch`, `PbAnalyticsAck`) are
+  hand-written prost structs (no protoc dependency). Ent-only: the
+  module is compiled behind `#[cfg(feature = "ent")]`.
 - provider credential pools (DW-080, Ent): an `ai.providers[].credential_pool`
   block that declares multiple API keys per provider and rotates across them
   to aggregate rate-limit headroom (the LiteLLM pattern). Each entry is an

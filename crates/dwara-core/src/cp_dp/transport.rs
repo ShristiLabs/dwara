@@ -47,6 +47,7 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status, Streaming};
 use tower_service::Service as TowerService;
 
+use super::analytics::{PbAnalyticsAck, PbAnalyticsBatch};
 use super::{ConfigAck, ConfigGeneration, ConfigUpdate, ControllerState, EdgeRegistration};
 
 // ---------------------------------------------------------------------------
@@ -341,10 +342,15 @@ impl UpdateBroadcaster {
 /// On [`ControllerServer::publish_update`], the update is broadcast to
 /// all connected edge streams. Each edge's stream filters out updates
 /// not targeted at it (empty `target_edges` = all edges).
+///
+/// DW-095: the server also holds an optional [`AnalyticsCollector`] for
+/// federated analytics. When set, the `PublishAnalytics` RPC forwards
+/// edge batches to the collector.
 #[derive(Clone)]
 pub struct ControllerServer {
     state: Arc<ControllerState>,
     broadcaster: Arc<UpdateBroadcaster>,
+    analytics_collector: Option<Arc<dyn super::analytics::AnalyticsCollector>>,
 }
 
 impl ControllerServer {
@@ -353,7 +359,18 @@ impl ControllerServer {
         Self {
             state,
             broadcaster: Arc::new(UpdateBroadcaster::new(256)),
+            analytics_collector: None,
         }
+    }
+
+    /// Attach an analytics collector (DW-095). When set, the
+    /// `PublishAnalytics` RPC forwards edge batches to this collector.
+    pub fn with_analytics_collector(
+        mut self,
+        collector: Arc<dyn super::analytics::AnalyticsCollector>,
+    ) -> Self {
+        self.analytics_collector = Some(collector);
+        self
     }
 
     /// The controller state.
@@ -461,6 +478,7 @@ impl DwaraControlPlane for ControllerServer {
 pub const SERVICE_NAME: &str = "dwara.ControlPlane";
 pub const STREAM_CONFIG_UPDATES_PATH: &str = "/dwara.ControlPlane/StreamConfigUpdates";
 pub const ACK_PATH: &str = "/dwara.ControlPlane/Ack";
+pub const PUBLISH_ANALYTICS_PATH: &str = "/dwara.ControlPlane/PublishAnalytics";
 
 impl NamedService for ControllerServer {
     const NAME: &'static str = SERVICE_NAME;
@@ -503,6 +521,32 @@ impl TowerService<http::Request<BoxBody>> for ControllerServer {
                     };
                     let resp = grpc.unary(service, req).await;
                     Ok(resp)
+                }
+                PUBLISH_ANALYTICS_PATH => {
+                    // DW-095: client-streaming analytics RPC. The
+                    // edge streams PbAnalyticsBatch messages; the
+                    // controller forwards them to the AnalyticsCollector.
+                    if let Some(collector) = &server.analytics_collector {
+                        let mut grpc = tonic::server::Grpc::new(ProstCodec::<
+                            PbAnalyticsAck,
+                            PbAnalyticsBatch,
+                        >::new());
+                        let service = PublishAnalyticsSvc {
+                            collector: Arc::clone(collector),
+                        };
+                        let resp = grpc.client_streaming(service, req).await;
+                        Ok(resp)
+                    } else {
+                        // No collector attached: return UNIMPLEMENTED.
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::NOT_IMPLEMENTED)
+                            .body(BoxBody::new(
+                                http_body_util::Empty::<bytes::Bytes>::new()
+                                    .map_err(|e| -> tonic::Status { match e {} }),
+                            ))
+                            .expect("static response builds");
+                        Ok(resp)
+                    }
                 }
                 _ => {
                     let resp = http::Response::builder()
@@ -563,6 +607,28 @@ impl UnaryService<PbConfigAck> for AckSvc {
     fn call(&mut self, request: Request<PbConfigAck>) -> Self::Future {
         let server = self.server.clone();
         Box::pin(async move { server.ack(request).await })
+    }
+}
+
+/// A boxed future for client-streaming responses (DW-095).
+type ClientStreamingFuture =
+    Pin<Box<dyn Future<Output = Result<Response<PbAnalyticsAck>, Status>> + Send + 'static>>;
+
+/// Wrapper that adapts the analytics collector to
+/// `ClientStreamingService<PbAnalyticsBatch>` (DW-095).
+struct PublishAnalyticsSvc {
+    collector: Arc<dyn super::analytics::AnalyticsCollector>,
+}
+
+impl tonic::server::ClientStreamingService<PbAnalyticsBatch> for PublishAnalyticsSvc {
+    type Response = PbAnalyticsAck;
+    type Future = ClientStreamingFuture;
+
+    fn call(&mut self, request: Request<Streaming<PbAnalyticsBatch>>) -> Self::Future {
+        let collector = Arc::clone(&self.collector);
+        Box::pin(
+            async move { super::analytics::handle_publish_analytics(collector, request).await },
+        )
     }
 }
 
@@ -673,6 +739,30 @@ impl EdgeClient {
             .map_err(EdgeClientError::from)?;
 
         Ok(())
+    }
+
+    /// DW-095: publish a batch of analytics records to the controller.
+    /// Returns the number of records accepted by the controller.
+    pub async fn publish_analytics(
+        &self,
+        batch: super::analytics::PbAnalyticsBatch,
+    ) -> Result<u64, EdgeClientError> {
+        let codec = ProstCodec::<PbAnalyticsBatch, PbAnalyticsAck>::new();
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+
+        grpc.ready()
+            .await
+            .map_err(|e| EdgeClientError::Transport(e.to_string()))?;
+
+        let request = Request::new(batch);
+        let path = http::uri::PathAndQuery::from_static(PUBLISH_ANALYTICS_PATH);
+
+        let response = grpc
+            .unary(request, path, codec)
+            .await
+            .map_err(EdgeClientError::from)?;
+
+        Ok(response.into_inner().accepted)
     }
 }
 

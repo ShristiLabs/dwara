@@ -184,7 +184,11 @@ crates/dwara-core/src/
                       (credentials.rs: multi-key rotation with 429
                       quarantine, round-robin/weighted pick, pool-
                       exhaustion graceful degradation; Ent-gated at
-                      validation)
+                      validation), and the DW-095 federated analytics
+                      (analytics.rs: edge-to-controller gRPC streaming
+                      via PublishAnalytics RPC, FederatedAnalyticsSink
+                      implements AnalyticsSink, AnalyticsCollector
+                      trait for controller-side aggregation; Ent-only)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind

@@ -51,6 +51,7 @@ pub mod cluster_sync;
 // Hand-written prost messages + a custom Codec (no protoc/build-script
 // dependency). Feature-gated behind `ent` (the tonic/prost deps are
 // optional and only compiled in with the `ent` feature).
+pub mod analytics;
 pub mod controller;
 pub mod edge;
 pub mod transport;
