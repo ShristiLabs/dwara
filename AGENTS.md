@@ -36,6 +36,7 @@ cargo build --workspace
 cargo test --workspace            # ~1188 tests; suites spawn real servers/binaries
 cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
 cargo build -p dwara-bin --features h3   # HTTP/3 (QUIC) ingress (default OFF)
+cargo build -p dwara-bin --features console  # tokio-console diagnostics (default OFF)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
@@ -356,6 +357,7 @@ if invalid). Main environment variables:
 | `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin (dev only) |
 | `DWARA_LOG` / `DWARA_ACCESS_LOG_SAMPLE` | `dwara=info` / `1.0` | log filter / access-line sampling |
 | `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export; live only in an `otlp`-feature build (`http://` endpoint), reserved-but-inert otherwise |
+| `DWARA_CONSOLE` | unset | `1` = spawn tokio-console gRPC server on 127.0.0.1:6669; live only in a `console`-feature build, inert otherwise |
 | `DWARA_HTTP1_*`, `DWARA_H2_*`, `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | protocol hardening knobs |
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful drain bound |
 

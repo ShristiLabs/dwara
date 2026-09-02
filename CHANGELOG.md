@@ -9,6 +9,16 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- tokio-console subscriber (DW-097): a `console` cargo feature on
+  `dwara-bin` (default OFF) that enables the `tokio-console` gRPC
+  server for live async task diagnostics. When the feature is compiled
+  in, set `DWARA_CONSOLE=1` at runtime to spawn the console server on
+  `127.0.0.1:6669`; connect with the `tokio-console` CLI to inspect
+  task polls, wakers, and async resource usage in real time. Unset =
+  inert (no server spawned, no overhead). The console layer joins the
+  existing tracing subscriber chain alongside the JSON fmt layer and
+  the optional OTLP layer. New dependency (feature-gated, MIT-licensed,
+  allow-listed in deny.toml): `console-subscriber`.
 - HTTP/3 (QUIC) ingress (DW-088): a new `protocol: h3` listener type
   serves HTTP/3 over QUIC using `quinn` (QUIC transport) + `h3`
   (HTTP/3 framing) + `h3-quinn` (the bridge). The QUIC handshake reuses

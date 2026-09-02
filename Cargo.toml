@@ -296,6 +296,13 @@ quinn = { version = "0.11", default-features = false, features = [
 ] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
+# DW-097: tokio-console subscriber for async task diagnostics. The
+# console-subscriber layer spawns a gRPC server (default
+# 127.0.0.1:6669) that the `tokio-console` CLI connects to. MIT-licensed.
+# Feature-gated behind the `console` feature on dwara-bin so the default
+# build never pulls it in (it adds significant binary size + ties into
+# the tokio runtime's tracing instrumentation).
+console-subscriber = "0.4"
 
 [profile.release]
 lto = true

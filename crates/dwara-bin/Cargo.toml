@@ -62,6 +62,13 @@ h3-quinn = { workspace = true, optional = true }
 # bytes is shared by the `otlp` and `h3` features (OTLP export + H3
 # body adaptation). Already in the tree transitively; this makes it a
 # direct one. The `dep:bytes` key is listed in both feature sets.
+# DW-097 (feature `console`, default OFF): tokio-console subscriber for
+# async task diagnostics. The console-subscriber layer spawns a gRPC
+# server (default 127.0.0.1:6669) that the `tokio-console` CLI connects
+# to. Optional so the default build never pulls it in; the wiring is
+# inline in main.rs (the layer is added to the tracing registry).
+# MIT-licensed (allow-listed in deny.toml).
+console-subscriber = { workspace = true, optional = true }
 
 [features]
 # #126: OTLP trace export (http/protobuf) of the existing root/phase
@@ -95,6 +102,14 @@ ent = ["dwara-core/ent", "dep:redis"]
 # feature is off, `protocol: h3` in config is rejected at validation
 # (the H3 module does not exist and the QUIC stack is not linked).
 h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:bytes", "dwara-core/h3"]
+# DW-097: tokio-console subscriber for async task diagnostics. Default
+# OFF: console-subscriber adds binary size and ties into the tokio
+# runtime's tracing instrumentation. Build with
+# `cargo build --features console` (or `--features dwara-bin/console`)
+# to enable the console layer. When the feature is on, set
+# DWARA_CONSOLE=1 at runtime to activate the gRPC server (default
+# 127.0.0.1:6669); unset = the layer is inert (no server spawned).
+console = ["dep:console-subscriber"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

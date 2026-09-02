@@ -163,8 +163,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // registry + EnvFilter + JSON fmt (identical to the fmt()-builder
     // form) so the OTLP layer can join the chain when compiled in;
     // feature OFF compiles the exact same subscriber as before.
+    //
+    // DW-097: with the `console` feature, DWARA_CONSOLE=1 additionally
+    // spawns the tokio-console gRPC server (default 127.0.0.1:6669) —
+    // the `tokio-console` CLI connects to it for live async task
+    // diagnostics. The console layer joins the subscriber chain the
+    // same way as OTLP; feature OFF compiles the exact same subscriber.
     #[cfg(feature = "otlp")]
     let otlp = otlp::Otlp::from_env();
+    // DW-097: build the console layer when the feature is compiled in
+    // AND DWARA_CONSOLE is set (unset = inert, no server spawned).
+    #[cfg(feature = "console")]
+    let console_enabled = std::env::var("DWARA_CONSOLE").is_ok();
+    #[cfg(feature = "console")]
+    let console_layer: Option<_> = if console_enabled {
+        Some(
+            console_subscriber::ConsoleLayer::builder()
+                .server_addr(([127, 0, 0, 1], 6669))
+                .spawn(),
+        )
+    } else {
+        None
+    };
     let filter =
         EnvFilter::new(std::env::var("DWARA_LOG").unwrap_or_else(|_| "dwara=info".to_string()));
     let subscriber = tracing_subscriber::registry()
@@ -172,9 +192,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(tracing_subscriber::fmt::layer().json().with_target(true));
     #[cfg(feature = "otlp")]
     let subscriber = subscriber.with(otlp.layer());
+    #[cfg(feature = "console")]
+    let subscriber = subscriber.with(console_layer);
     subscriber.init();
     #[cfg(feature = "otlp")]
     otlp.log_status();
+    #[cfg(feature = "console")]
+    if console_enabled {
+        tracing::info!(
+            code = "console_enabled",
+            "tokio-console listening on 127.0.0.1:6669 (connect with `tokio-console`)"
+        );
+    }
     tls::install_aws_lc_rs_provider();
     let config_path = PathBuf::from(
         std::env::var("DWARA_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
