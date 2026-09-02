@@ -47,6 +47,7 @@ pub mod experiments;
 pub mod governance;
 pub mod guardrails;
 pub mod logging;
+pub mod mcp;
 pub mod openai_compat;
 pub mod policy;
 pub mod redaction;
@@ -57,6 +58,7 @@ pub mod stream;
 pub mod types;
 
 use crate::config::ai::{AiConfig, AiProviderKind};
+use crate::config::Gateway;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -128,6 +130,9 @@ pub enum CompiledModel {
 pub struct AiRuntime {
     providers: BTreeMap<String, CompiledProvider>,
     models: BTreeMap<String, CompiledModel>,
+    /// The compiled MCP gateway (DW-087), built from the `ai.mcp`
+    /// config block. None when the config has no `ai.mcp` block.
+    mcp: Option<Arc<mcp::CompiledMcp>>,
 }
 
 impl AiRuntime {
@@ -138,7 +143,7 @@ impl AiRuntime {
     /// compiles without its auth header and every call to it will
     /// surface the provider's own 401 — the loud, attributable
     /// failure — while an error log records why.
-    pub fn compile(cfg: Option<&AiConfig>) -> Option<AiRuntime> {
+    pub fn compile(cfg: Option<&AiConfig>, gateway: &Gateway) -> Option<AiRuntime> {
         let cfg = cfg?;
         let mut providers = BTreeMap::new();
         for p in &cfg.providers {
@@ -217,7 +222,22 @@ impl AiRuntime {
                 }
             }
         }
-        Some(AiRuntime { providers, models })
+        // DW-087: compile the MCP gateway (tools, sessions, path).
+        let mcp = cfg
+            .mcp
+            .as_ref()
+            .and_then(|mcp_cfg| mcp::CompiledMcp::compile(mcp_cfg, gateway))
+            .map(Arc::new);
+        Some(AiRuntime {
+            providers,
+            models,
+            mcp,
+        })
+    }
+
+    /// The compiled MCP gateway (DW-087); None when no `ai.mcp` block.
+    pub fn mcp(&self) -> Option<&Arc<mcp::CompiledMcp>> {
+        self.mcp.as_ref()
     }
 
     /// Resolve a model alias to its provider and provider model id

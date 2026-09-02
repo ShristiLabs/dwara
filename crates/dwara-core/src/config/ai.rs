@@ -122,6 +122,15 @@ pub struct AiConfig {
     /// feedback ingestion. Absent (the default): no experiments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiments: Option<AiExperiments>,
+    /// MCP gateway (DW-087 `ai.mcp`): turns dwara into an MCP
+    /// (Model Context Protocol) server/router. Configured tools are
+    /// exposed over JSON-RPC 2.0 on a reserved HTTP path (default
+    /// `/mcp`); the gateway proxies tool calls to upstream HTTP
+    /// endpoints with authN/authZ, manages agent sessions in the
+    /// state store, and correlates tool calls in analytics. Absent
+    /// (the default): no MCP surface (the `/mcp` path returns 404).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<AiMcpConfig>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -883,4 +892,82 @@ pub struct AiFeedbackConfig {
     /// 403.
     #[serde(default = "default_feedback_enabled", skip_serializing_if = "is_false")]
     pub enabled: bool,
+}
+
+/// MCP gateway config (DW-087 `ai.mcp`): the tool table, session
+/// policy, and reserved path. Tools are configured with upstream
+/// references; the gateway proxies tool calls to upstream HTTP
+/// endpoints (POST JSON body, get JSON response). The gateway is a
+/// router, not a tool executor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpConfig {
+    /// The tool table, keyed by tool name. Each tool names an
+    /// upstream that carries the transport and a path on that
+    /// upstream. Tool names must be non-empty and unique (validation
+    /// rejects duplicates and empty names).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, AiMcpTool>,
+    /// Session policy. Absent (the default): the built-in defaults
+    /// (TTL 3600s, max 1000 concurrent sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<AiMcpSessions>,
+    /// The reserved HTTP path for the MCP JSON-RPC endpoint. Default
+    /// `/mcp`. Must start with `/` if specified. The path is reserved
+    /// like `/healthz`, `/readyz`, `/metrics` — it shadows any
+    /// configured route and is handled before route resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// One MCP tool (DW-087 `ai.mcp.tools.<name>`). The gateway proxies
+/// tool calls to the named upstream's HTTP endpoint: the tool's
+/// arguments are sent as the JSON request body, and the upstream's
+/// response body becomes the tool's output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpTool {
+    /// Human-readable description of the tool (returned to the client
+    /// in `tools/list`).
+    pub description: String,
+    /// Name of the `upstreams[]` entry that carries this tool's
+    /// transport. The gateway resolves the upstream's first endpoint
+    /// to build the tool's URL. Validation rejects a reference to an
+    /// unknown upstream.
+    pub upstream: String,
+    /// The path on the upstream (appended to the endpoint's
+    /// `address:port`). Default `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The HTTP method for the upstream call. Default `POST`. Must be
+    /// a valid HTTP method (GET, POST, PUT, PATCH, DELETE) if
+    /// specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// The JSON Schema for the tool's arguments (returned to the
+    /// client in `tools/list` as `inputSchema`). Must be a valid JSON
+    /// object.
+    pub input_schema: serde_json::Value,
+    /// Optional per-tool authorization. When present, the tool is
+    /// only callable by consumers satisfying the authz rules. When
+    /// absent, any authenticated consumer may call the tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authz: Option<crate::config::Authz>,
+    /// Upstream call timeout in milliseconds. Default 30000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// MCP session policy (DW-087 `ai.mcp.sessions`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpSessions {
+    /// Session TTL in seconds. Default 3600. Expired sessions are
+    /// cleaned up periodically and rejected on use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+    /// Maximum number of concurrent active sessions. Default 1000.
+    /// New `initialize` requests beyond this limit are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
 }

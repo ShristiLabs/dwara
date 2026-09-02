@@ -519,6 +519,17 @@
             }
           ]
         },
+        "mcp": {
+          "description": "MCP gateway (DW-087 `ai.mcp`): turns dwara into an MCP\n(Model Context Protocol) server/router. Configured tools are\nexposed over JSON-RPC 2.0 on a reserved HTTP path (default\n`/mcp`); the gateway proxies tool calls to upstream HTTP\nendpoints with authN/authZ, manages agent sessions in the\nstate store, and correlates tool calls in analytics. Absent\n(the default): no MCP surface (the `/mcp` path returns 404).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiMcpConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "models": {
           "description": "Model alias table: the `model` value a client puts in its request\nbody maps to the provider that serves it and the provider's own\nmodel identifier. The alias is echoed back to the client; the\n`provider_model` never leaves the gateway.",
           "type": "object",
@@ -887,6 +898,120 @@
         }
       },
       "additionalProperties": false
+    },
+    "AiMcpConfig": {
+      "description": "MCP gateway config (DW-087 `ai.mcp`): the tool table, session\npolicy, and reserved path. Tools are configured with upstream\nreferences; the gateway proxies tool calls to upstream HTTP\nendpoints (POST JSON body, get JSON response). The gateway is a\nrouter, not a tool executor.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The reserved HTTP path for the MCP JSON-RPC endpoint. Default\n`/mcp`. Must start with `/` if specified. The path is reserved\nlike `/healthz`, `/readyz`, `/metrics` — it shadows any\nconfigured route and is handled before route resolution.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessions": {
+          "description": "Session policy. Absent (the default): the built-in defaults\n(TTL 3600s, max 1000 concurrent sessions).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiMcpSessions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools": {
+          "description": "The tool table, keyed by tool name. Each tool names an\nupstream that carries the transport and a path on that\nupstream. Tool names must be non-empty and unique (validation\nrejects duplicates and empty names).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiMcpTool"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiMcpSessions": {
+      "description": "MCP session policy (DW-087 `ai.mcp.sessions`).",
+      "type": "object",
+      "properties": {
+        "max_concurrent": {
+          "description": "Maximum number of concurrent active sessions. Default 1000.\nNew `initialize` requests beyond this limit are rejected.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "ttl_secs": {
+          "description": "Session TTL in seconds. Default 3600. Expired sessions are\ncleaned up periodically and rejected on use.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "AiMcpTool": {
+      "description": "One MCP tool (DW-087 `ai.mcp.tools.<name>`). The gateway proxies\ntool calls to the named upstream's HTTP endpoint: the tool's\narguments are sent as the JSON request body, and the upstream's\nresponse body becomes the tool's output.",
+      "type": "object",
+      "properties": {
+        "authz": {
+          "description": "Optional per-tool authorization. When present, the tool is\nonly callable by consumers satisfying the authz rules. When\nabsent, any authenticated consumer may call the tool.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Human-readable description of the tool (returned to the client\nin `tools/list`).",
+          "type": "string"
+        },
+        "input_schema": {
+          "description": "The JSON Schema for the tool's arguments (returned to the\nclient in `tools/list` as `inputSchema`). Must be a valid JSON\nobject."
+        },
+        "method": {
+          "description": "The HTTP method for the upstream call. Default `POST`. Must be\na valid HTTP method (GET, POST, PUT, PATCH, DELETE) if\nspecified.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path on the upstream (appended to the endpoint's\n`address:port`). Default `/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_ms": {
+          "description": "Upstream call timeout in milliseconds. Default 30000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "upstream": {
+          "description": "Name of the `upstreams[]` entry that carries this tool's\ntransport. The gateway resolves the upstream's first endpoint\nto build the tool's URL. Validation rejects a reference to an\nunknown upstream.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "upstream",
+        "input_schema"
+      ]
     },
     "AiModel": {
       "description": "One model alias mapping (DW-075 `ai.models{alias}`).",

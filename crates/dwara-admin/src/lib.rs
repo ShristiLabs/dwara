@@ -39,6 +39,10 @@
 //!   `{"route": "<name>"}` or `{"all": true}`; the response names what
 //!   was invalidated. Purge is an O(1) cache-epoch advance, never a
 //!   store enumeration — sub-100 ms at any store size by construction.
+//! - `GET /mcp/sessions` — list active MCP sessions (DW-087).
+//! - `DELETE /mcp/sessions/:id` — teardown an MCP session (DW-087).
+//! - `GET /mcp/tools` — list configured MCP tools (DW-087).
+//! - `GET /mcp/calls` — query MCP tool call analytics (DW-087).
 //!
 //! AUTHENTICATION IS THE TLS LAYER (decision 6): the admin listener
 //! REQUIRES a client certificate chaining to the configured CA; there is
@@ -1963,6 +1967,21 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             experiments_verdict(ctx, body, &request_id).await
         }
+        // DW-087: MCP gateway admin endpoints.
+        // GET /mcp/sessions -- list active MCP sessions from the state
+        // store.
+        ("GET", "/mcp/sessions") => mcp_sessions_list(ctx, &request_id).await,
+        // DELETE /mcp/sessions/:id -- teardown an MCP session.
+        (m, p) if m == "DELETE" && p.starts_with("/mcp/sessions/") => {
+            let id = percent_decode(p.trim_start_matches("/mcp/sessions/"));
+            mcp_session_delete(ctx, &id, &request_id).await
+        }
+        // GET /mcp/tools -- list configured MCP tools from the current
+        // snapshot's AiRuntime.
+        ("GET", "/mcp/tools") => mcp_tools_list(ctx, &request_id).await,
+        // GET /mcp/calls -- query MCP tool call analytics. Query params:
+        // from_ms, to_ms, session_id, consumer, tool_name, limit.
+        ("GET", "/mcp/calls") => mcp_calls_query(ctx, &req, &request_id).await,
         // A known resource path with the wrong method.
         (
             _,
@@ -1983,6 +2002,9 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/experiments/prompt-overrides"
             | "/experiments/feedback"
             | "/experiments/verdict"
+            | "/mcp/sessions"
+            | "/mcp/tools"
+            | "/mcp/calls"
             | "/quotas/usage",
         ) => envelope(
             405,
@@ -2351,6 +2373,142 @@ async fn credentials_retire(
             request_id,
         ),
         Err(e) => envelope(500, "credential_retire_failed", &e.to_string(), request_id),
+    }
+}
+
+// --- DW-087: MCP gateway admin endpoints ---
+
+/// GET /mcp/sessions (DW-087): list active (non-expired) MCP sessions
+/// from the state store, ordered by creation time descending.
+async fn mcp_sessions_list(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            503,
+            "state_store_not_configured",
+            "a state store is required for MCP session management",
+            request_id,
+        );
+    };
+    match store.list_active_mcp_sessions() {
+        Ok(sessions) => json_response(
+            200,
+            serde_json::json!({
+                "sessions": sessions.iter().map(|(id, consumer, created, last_used, expires, client_info)| {
+                    serde_json::json!({
+                        "session_id": id,
+                        "consumer": consumer,
+                        "created_at": created,
+                        "last_used_at": last_used,
+                        "expires_at": expires,
+                        "client_info": client_info,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => envelope(500, "mcp_sessions_list_failed", &e.to_string(), request_id),
+    }
+}
+
+/// DELETE /mcp/sessions/:id (DW-087): teardown an MCP session by id.
+/// Returns 200 regardless of whether a row was deleted (idempotent).
+async fn mcp_session_delete(
+    ctx: Arc<AdminContext>,
+    id: &str,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.state_store() else {
+        return envelope(
+            503,
+            "state_store_not_configured",
+            "a state store is required for MCP session management",
+            request_id,
+        );
+    };
+    match store.delete_mcp_session(id) {
+        Ok(()) => json_response(200, serde_json::json!({"deleted": id})),
+        Err(e) => envelope(500, "mcp_session_delete_failed", &e.to_string(), request_id),
+    }
+}
+
+/// GET /mcp/tools (DW-087): list configured MCP tools from the current
+/// snapshot's `ai.mcp` config block. Returns the tool name, description,
+/// input schema, upstream reference, path, method, timeout, and whether
+/// the tool has an authz attachment.
+async fn mcp_tools_list(ctx: Arc<AdminContext>, _request_id: &str) -> Response<AdminBody> {
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    let Some(ai) = &gateway.ai else {
+        return json_response(200, serde_json::json!({"tools": []}));
+    };
+    let Some(mcp) = &ai.mcp else {
+        return json_response(200, serde_json::json!({"tools": []}));
+    };
+    let tools: Vec<_> = mcp
+        .tools
+        .iter()
+        .map(|(name, t)| {
+            serde_json::json!({
+                "name": name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+                "upstream": t.upstream,
+                "path": t.path,
+                "method": t.method,
+                "timeout_ms": t.timeout_ms,
+                "authz": t.authz.is_some(),
+            })
+        })
+        .collect();
+    json_response(200, serde_json::json!({"tools": tools}))
+}
+
+/// GET /mcp/calls (DW-087): query MCP tool call analytics. Query
+/// params: from_ms, to_ms (required), session_id, consumer,
+/// tool_name (optional filters), limit (optional, default 10000, max
+/// 10000).
+async fn mcp_calls_query(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let params = query_params(req.uri());
+    let (Some(from_ms), Some(to_ms)) = (
+        param(&params, "from_ms").and_then(|v| v.parse::<i64>().ok()),
+        param(&params, "to_ms").and_then(|v| v.parse::<i64>().ok()),
+    ) else {
+        return envelope(
+            400,
+            "mcp_calls_bad_window",
+            "from_ms and to_ms are required query parameters",
+            request_id,
+        );
+    };
+    let q = dwara_core::analytics::query::McpToolCallQuery {
+        from_ms,
+        to_ms,
+        session_id: param(&params, "session_id").map(|s| s.to_string()),
+        consumer: param(&params, "consumer").map(|s| s.to_string()),
+        tool_name: param(&params, "tool_name").map(|s| s.to_string()),
+        limit: param(&params, "limit").and_then(|v| v.parse::<i64>().ok()),
+    };
+    match store.query(|c| dwara_core::analytics::query::mcp_tool_calls(c, &q)) {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "query": {
+                    "from_ms": q.from_ms,
+                    "to_ms": q.to_ms,
+                    "session_id": q.session_id,
+                    "consumer": q.consumer,
+                    "tool_name": q.tool_name,
+                },
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(500, "mcp_calls_query_failed", &e.to_string(), request_id),
     }
 }
 

@@ -281,6 +281,37 @@ pub struct AiFeedbackRecord {
     pub model: String,
 }
 
+/// One MCP tool call record (DW-087): the per-call record written to
+/// the `mcp_tool_calls` table when a tool call is proxied through the
+/// MCP gateway. A PLAIN DTO — deliberately not importing `ai::mcp`
+/// (the analytics domain may not import the `ai` domain; see
+/// `scripts/check_deps.py`). The dataplane constructs it at the call
+/// site.
+#[derive(Debug, Clone)]
+pub struct McpToolCallRecord {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id (correlation handle).
+    pub request_id: String,
+    /// The MCP session id (correlates calls within one agent session).
+    pub session_id: String,
+    /// The authenticated consumer name (or "anonymous").
+    pub consumer: String,
+    /// The tool name that was called.
+    pub tool_name: String,
+    /// Whether the call was authorized (passed the per-tool authz
+    /// check). `false` for denied calls.
+    pub allowed: bool,
+    /// The call duration in milliseconds (from the authz check
+    /// through the upstream response).
+    pub duration_ms: f64,
+    /// An optional error code (e.g. `"unauthorized"`,
+    /// `"upstream_error"`, `"timeout"`). `None` for successful calls.
+    pub error_code: Option<String>,
+    /// The call status: `success`, `error`, or `denied`.
+    pub status: String,
+}
+
 impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
@@ -396,6 +427,14 @@ pub struct EmbeddedAnalytics {
     feedback_rx: Mutex<Option<mpsc::Receiver<AiFeedbackRecord>>>,
     /// Records dropped on a full FEEDBACK channel.
     feedback_dropped: AtomicU64,
+    /// DW-087: the MCP tool call channel (same fire-and-forget
+    /// posture — drop and count on full, never block the request
+    /// path).
+    mcp_tx: mpsc::Sender<McpToolCallRecord>,
+    mcp_rx: Mutex<Option<mpsc::Receiver<McpToolCallRecord>>>,
+    /// Records dropped on a full MCP channel (the never-block
+    /// counter for the DW-087 path).
+    mcp_dropped: AtomicU64,
     /// Retention config: [raw, 1m, 5m, 1h, 1d] in ms.
     retention_ms: [i64; 5],
     /// Flush tick (ms) — the writer's maximum batch latency.
@@ -429,6 +468,7 @@ impl EmbeddedAnalytics {
         let (exp_assign_tx, exp_assign_rx) = mpsc::channel(CHANNEL_CAP);
         let (eval_result_tx, eval_result_rx) = mpsc::channel(CHANNEL_CAP);
         let (feedback_tx, feedback_rx) = mpsc::channel(CHANNEL_CAP);
+        let (mcp_tx, mcp_rx) = mpsc::channel(CHANNEL_CAP);
         Ok(Arc::new(EmbeddedAnalytics {
             conn: Mutex::new(conn),
             rx: Mutex::new(Some(rx)),
@@ -452,6 +492,9 @@ impl EmbeddedAnalytics {
             feedback_tx,
             feedback_rx: Mutex::new(Some(feedback_rx)),
             feedback_dropped: AtomicU64::new(0),
+            mcp_tx,
+            mcp_rx: Mutex::new(Some(mcp_rx)),
+            mcp_dropped: AtomicU64::new(0),
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
@@ -486,6 +529,8 @@ impl EmbeddedAnalytics {
         let exp_assign_rx_opt = self.exp_assign_rx.lock().unwrap().take();
         let eval_result_rx_opt = self.eval_result_rx.lock().unwrap().take();
         let feedback_rx_opt = self.feedback_rx.lock().unwrap().take();
+        // DW-087: take the MCP tool call receiver alongside the others.
+        let mcp_rx_opt = self.mcp_rx.lock().unwrap().take();
         let mut writer_shutdown = shutdown.clone();
         let writer = {
             let store = Arc::clone(self);
@@ -772,6 +817,47 @@ impl EmbeddedAnalytics {
         } else {
             None
         };
+        // DW-087: the MCP tool call writer — same fire-and-forget
+        // batched transaction shape, draining the MCP channel into
+        // the `mcp_tool_calls` table.
+        let mcp_writer = if let Some(mut mcp_rx) = mcp_rx_opt {
+            let store = Arc::clone(self);
+            let mut mcp_shutdown = shutdown.clone();
+            Some(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(store.flush_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut batch: Vec<McpToolCallRecord> = Vec::with_capacity(BATCH_MAX);
+                loop {
+                    let drained = tokio::select! {
+                        m = mcp_rx.recv() => match m {
+                            Some(r) => {
+                                batch.push(r);
+                                batch.len() >= BATCH_MAX
+                            }
+                            None => {
+                                store.flush_mcp_tool_call(&batch);
+                                return;
+                            }
+                        },
+                        _ = tick.tick() => true,
+                        _ = mcp_shutdown.changed() => {
+                            while let Ok(r) = mcp_rx.try_recv() {
+                                batch.push(r);
+                            }
+                            store.flush_mcp_tool_call(&batch);
+                            return;
+                        }
+                    };
+                    if drained {
+                        store.flush_mcp_tool_call(&batch);
+                        batch.clear();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let maintainer = {
             let store = Arc::clone(self);
             let mut shutdown2 = shutdown.clone();
@@ -804,6 +890,9 @@ impl EmbeddedAnalytics {
             handles.push(h);
         }
         if let Some(h) = feedback_writer {
+            handles.push(h);
+        }
+        if let Some(h) = mcp_writer {
             handles.push(h);
         }
         handles
@@ -1260,6 +1349,70 @@ impl EmbeddedAnalytics {
         }
     }
 
+    /// One batched transaction of `mcp_tool_calls` INSERTs (DW-087).
+    /// Same swallow-and-log posture as the other flush methods.
+    fn flush_mcp_tool_call(&self, batch: &[McpToolCallRecord]) {
+        if batch.is_empty() {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_mcp_batch_begin_failed",
+                    "mcp_tool_calls batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut stmt = match tx.prepare(
+            "INSERT INTO mcp_tool_calls \
+             (ts_ms, request_id, session_id, consumer, tool_name, allowed, \
+              duration_ms, error_code, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    code = "analytics_mcp_batch_prepare_failed",
+                    "mcp_tool_calls batch lost: {e}"
+                );
+                return;
+            }
+        };
+        let mut ok = true;
+        for r in batch {
+            let res = stmt.execute(rusqlite::params![
+                r.ts_ms,
+                r.request_id,
+                r.session_id,
+                r.consumer,
+                r.tool_name,
+                r.allowed as i64,
+                r.duration_ms,
+                r.error_code,
+                r.status,
+            ]);
+            if let Err(e) = res {
+                tracing::warn!(
+                    code = "analytics_mcp_insert_failed",
+                    "mcp_tool_calls record lost: {e}"
+                );
+                ok = false;
+            }
+        }
+        drop(stmt);
+        if ok || !batch.is_empty() {
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    code = "analytics_mcp_commit_failed",
+                    "mcp_tool_calls batch lost: {e}"
+                );
+            }
+        }
+    }
+
     /// One rollup + retention pass (cursor-guarded; safe to run at any
     /// time, from the ticker or shutdown).
     fn maintain(&self) {
@@ -1500,6 +1653,28 @@ impl EmbeddedAnalytics {
     /// Feedback records accepted but dropped (channel full).
     pub fn dropped_feedback_records(&self) -> u64 {
         self.feedback_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The MCP tool call hot path (DW-087): fire-and-forget record of
+    /// one proxied tool call. NEVER blocks — a bounded-channel
+    /// `try_send` that drops and counts on full.
+    pub fn offer_mcp_tool_call(&self, rec: McpToolCallRecord) {
+        if self.mcp_tx.try_send(rec).is_err() {
+            let n = self.mcp_dropped.fetch_add(1, Ordering::Relaxed);
+            if n.is_multiple_of(4096) {
+                tracing::warn!(
+                    code = "analytics_mcp_channel_full",
+                    total_dropped = n + 1,
+                    "mcp_tool_calls channel full; dropping records (never blocking the dataplane)"
+                );
+            }
+        }
+    }
+
+    /// MCP tool call records accepted but dropped (channel full).
+    /// The honest loss counter for the DW-087 path.
+    pub fn dropped_mcp_tool_call_records(&self) -> u64 {
+        self.mcp_dropped.load(Ordering::Relaxed)
     }
 }
 

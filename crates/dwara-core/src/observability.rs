@@ -132,6 +132,16 @@
 //!   discovery refresh attempts, by upstream (config-bounded label).
 //! - `dwara_dns_discovery_refresh_failures_total{upstream}` counter
 //!   (DW-042) — DNS discovery refresh failures, by upstream.
+//! - `dwara_mcp_sessions_total{state}` counter (DW-087) — MCP session
+//!   lifecycle transitions, by state (`initialized`, `closed`,
+//!   `expired`). A closed three-value label set, so cardinality is
+//!   three series total.
+//! - `dwara_mcp_tool_calls_total{tool,status}` counter (DW-087) — MCP
+//!   tool calls, by tool (config-bounded) and status (`success`,
+//!   `error`, `denied`). No consumer label (cardinality rule).
+//! - `dwara_mcp_tool_duration_seconds{tool}` histogram (DW-087) — MCP
+//!   tool call duration (authz check through upstream response), by
+//!   tool (config-bounded label).
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -588,6 +598,18 @@ pub struct Observability {
     /// DW-077: total streaming duration (first request byte to stream
     /// end), by provider, in seconds.
     ai_stream_duration_seconds: HistogramVec,
+    /// DW-087: MCP session lifecycle transitions, by state
+    /// (`initialized`, `closed`, `expired`). A CLOSED three-value label
+    /// set, so the family's cardinality is three series total.
+    mcp_sessions_total: IntCounterVec,
+    /// DW-087: MCP tool calls, by tool and status. `tool` is the tool
+    /// name (config-bounded); `status` is the CLOSED set `success`,
+    /// `error`, `denied`. No consumer label (cardinality rule); the
+    /// consumer is in the access log and the analytics table.
+    mcp_tool_calls_total: IntCounterVec,
+    /// DW-087: MCP tool call duration (authz check through upstream
+    /// response), by tool (config-bounded label), in seconds.
+    mcp_tool_duration_seconds: HistogramVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -1178,6 +1200,39 @@ impl Observability {
             &["provider"],
         )
         .expect("valid metric definition");
+        let mcp_sessions_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_mcp_sessions_total",
+                "MCP session lifecycle transitions (DW-087), by state. \
+                 state: initialized (a new session created by initialize), \
+                 closed (a session deleted by shutdown), expired (a session \
+                 reaped by the TTL cleanup).",
+            ),
+            &["state"],
+        )
+        .expect("valid metric definition");
+        let mcp_tool_calls_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_mcp_tool_calls_total",
+                "MCP tool calls (DW-087), by tool and status. tool is the \
+                 config-declared tool name (config-bounded); status is the \
+                 closed set success, error, denied. No consumer label \
+                 (cardinality rule); the consumer is in the access log and \
+                 the analytics mcp_tool_calls table.",
+            ),
+            &["tool", "status"],
+        )
+        .expect("valid metric definition");
+        let mcp_tool_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_mcp_tool_duration_seconds",
+                "MCP tool call duration (DW-087) -- authz check through \
+                 upstream response -- by tool (config-bounded label).",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
+            &["tool"],
+        )
+        .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
@@ -1268,6 +1323,9 @@ impl Observability {
             Box::new(ai_experiment_variant_selections_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
+            Box::new(mcp_sessions_total.clone()),
+            Box::new(mcp_tool_calls_total.clone()),
+            Box::new(mcp_tool_duration_seconds.clone()),
         ] {
             registry
                 .register(m)
@@ -1341,6 +1399,9 @@ impl Observability {
             ai_experiment_variant_selections_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
+            mcp_sessions_total,
+            mcp_tool_calls_total,
+            mcp_tool_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1765,6 +1826,37 @@ impl Observability {
     pub fn record_ai_stream_end(&self, provider: &str, seconds: f64) {
         self.ai_stream_duration_seconds
             .with_label_values(&[provider])
+            .observe(seconds);
+    }
+
+    /// Count one MCP session lifecycle transition (DW-087) in
+    /// `dwara_mcp_sessions_total{state}`. `state` is one of the closed
+    /// set `initialized` (a new session created by `initialize`),
+    /// `closed` (a session deleted by `shutdown`), or `expired` (a
+    /// session reaped by the TTL cleanup).
+    pub fn record_mcp_session(&self, state: &str) {
+        self.mcp_sessions_total.with_label_values(&[state]).inc();
+    }
+
+    /// Count one MCP tool call (DW-087) in
+    /// `dwara_mcp_tool_calls_total{tool,status}`. `tool` is the
+    /// config-declared tool name (config-bounded); `status` is one of
+    /// the closed set `success`, `error`, `denied`. No consumer label
+    /// (cardinality rule); the consumer is in the access log and the
+    /// analytics `mcp_tool_calls` table.
+    pub fn record_mcp_tool_call(&self, tool: &str, status: &str) {
+        self.mcp_tool_calls_total
+            .with_label_values(&[tool, status])
+            .inc();
+    }
+
+    /// Record an MCP tool call duration (DW-087) in
+    /// `dwara_mcp_tool_duration_seconds{tool}`. `tool` is the
+    /// config-declared tool name (config-bounded label). Call once per
+    /// tool call (success, error, and denied alike).
+    pub fn record_mcp_tool_duration(&self, tool: &str, seconds: f64) {
+        self.mcp_tool_duration_seconds
+            .with_label_values(&[tool])
             .observe(seconds);
     }
 

@@ -106,7 +106,8 @@ crates/dwara-core/src/
                       the resilience state machines both emit onto it
   state/              SQLite store + migrations (including the
                       DW-086 prompt_overrides table for runtime
-                      prompt-version overrides)
+                      prompt-version overrides and the DW-087
+                      mcp_sessions table for MCP session management)
   analytics/          the embedded analytics store (DW-043): its own
                       SQLite file (raw access records + 1m/5m/1h/1d
                       additive rollups, cursor-guarded cascade,
@@ -118,7 +119,8 @@ crates/dwara-core/src/
                       (redacted prompt/response capture, schema v5),
                       and the DW-086 ai_experiment_assignments,
                       ai_eval_results, and ai_feedback tables (schema
-                      v6), each with its own fire-and-forget writer;
+                      v6), and the DW-087 mcp_tool_calls table (schema
+                      v7), each with its own fire-and-forget writer;
                       implements extensions::analytics::AnalyticsSink;
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
@@ -156,7 +158,9 @@ crates/dwara-core/src/
                       experimentation (experiments.rs: prompt versioning,
                       A/B model comparison, regression evals, feedback
                       ingestion, verdict computation, composed over
-                      DW-076 routing)
+                      DW-076 routing), and the DW-087 MCP gateway
+                      (mcp.rs: MCP server/router, tool routing to
+                      upstreams, session management, authN/authZ)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind
@@ -380,7 +384,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | SLO & error-budget export (DW-052) | dwara-core | `observability` (SLO e2e: config→refresh→traffic→/metrics series), `tests/unit/observability.rs` SLO cases (window math, expiry, ring wrap+reset, unconfigured/removal, empty-family safety), `config_schema_extended` slo validation matrix |
 | Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
 | Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
-| AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) + cost attribution (DW-079) + model governance (DW-084) + prompt/response logging (DW-081) + guardrails (DW-082) + semantic caching (DW-083) + routing policies (DW-085) + prompt experimentation (DW-086) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation), `ai_cost` (pricing table, spend recording, export columns), `ai_governance` (per-team allowlist, shadow audit, deny-wins), `ai_prompt_logging` (sampling, retention, PII redaction, per-consumer toggle), `ai_guardrails` (injection block, PII redact, banned block, schema enforcement, policy scoping, log dry-run, benign-traffic corpus, validation), `ai_semantic_cache` (feature-gated: paraphrase hit, dissimilar miss, cost savings, TTL expiry, streaming bypass, disabled default, cache reset, model isolation), `ai_routing_policy` (fallback chain escalate/cheap, classifier fail-open, latency-cost cost/latency/balanced, validation matrix, cost savings), `ai_experiments` (A/B test determinism + analytics, prompt version prepend, prompt override via state, eval scorers exact/contains/regex, feedback ingestion, verdict computation, validation matrix) |
+| AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) + cost attribution (DW-079) + model governance (DW-084) + prompt/response logging (DW-081) + guardrails (DW-082) + semantic caching (DW-083) + routing policies (DW-085) + prompt experimentation (DW-086) + MCP gateway (DW-087) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation), `ai_cost` (pricing table, spend recording, export columns), `ai_governance` (per-team allowlist, shadow audit, deny-wins), `ai_prompt_logging` (sampling, retention, PII redaction, per-consumer toggle), `ai_guardrails` (injection block, PII redact, banned block, schema enforcement, policy scoping, log dry-run, benign-traffic corpus, validation), `ai_semantic_cache` (feature-gated: paraphrase hit, dissimilar miss, cost savings, TTL expiry, streaming bypass, disabled default, cache reset, model isolation), `ai_routing_policy` (fallback chain escalate/cheap, classifier fail-open, latency-cost cost/latency/balanced, validation matrix, cost savings), `ai_experiments` (A/B test determinism + analytics, prompt version prepend, prompt override via state, eval scorers exact/contains/regex, feedback ingestion, verdict computation, validation matrix), `ai_mcp` (JSON-RPC parsing, initialize/tools-list/tools-call/shutdown lifecycle, session id generation, upstream proxy, authz filtering, error envelopes) |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
 | Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |

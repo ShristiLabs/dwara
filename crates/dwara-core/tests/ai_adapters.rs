@@ -594,8 +594,10 @@ fn ai_runtime_compiles_and_resolves() {
         semantic_cache: None,
         routing_policies: std::collections::BTreeMap::new(),
         experiments: None,
+        mcp: None,
     };
-    let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg)).unwrap();
+    let gw: dwara_core::config::Gateway = serde_yaml_ng::from_str("ai: ~\n").unwrap();
+    let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg), &gw).unwrap();
     assert_eq!(rt.provider_count(), 1);
     assert_eq!(rt.model_count(), 1);
     let (provider, model) = rt.resolve("alias-a").unwrap();
@@ -609,7 +611,7 @@ fn ai_runtime_compiles_and_resolves() {
     );
     assert!(rt.resolve("alias-missing").is_none());
     // Absent block: no runtime.
-    assert!(dwara_core::ai::AiRuntime::compile(None).is_none());
+    assert!(dwara_core::ai::AiRuntime::compile(None, &gw).is_none());
 }
 
 #[test]

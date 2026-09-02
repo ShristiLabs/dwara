@@ -9,6 +9,43 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- MCP gateway (DW-087): dwara as an MCP (Model Context Protocol)
+  server/router over JSON-RPC 2.0. Configured tools are exposed on a
+  reserved HTTP path (default `/mcp`); the gateway proxies tool calls
+  to upstream HTTP endpoints (POST JSON body, get JSON response) with
+  authN/authZ enforcement. Config under `ai.mcp` (keyed by `tools`,
+  `sessions`, and `path`). (1) Tool routing: each tool names an
+  upstream that carries the transport; the gateway resolves the
+  upstream's first endpoint to build the tool's URL; `tools/call`
+  proxies the call. (2) Session management: `initialize` creates a
+  state-store-backed session (the new `mcp_sessions` table) with a
+  128-bit hex session id returned in the `Mcp-Session-Id` header;
+  sessions have a TTL (default 3600s) and a max-concurrent limit
+  (default 1000); `shutdown` deletes the session; non-initialize
+  requests validate the session on use (expired sessions are rejected
+  and cleaned up). (3) AuthN/authZ: every MCP request runs through the
+  existing `security/authn` module; per-tool authz uses the existing
+  `security/authz` module (a tool with an `authz` attachment is only
+  callable by authorized consumers; `tools/list` is filtered by the
+  caller's authz). (4) Tool-call analytics: every `tools/call` is
+  recorded in the new `mcp_tool_calls` analytics table with session
+  id, consumer, tool name, authorization result, duration, error code,
+  and status (`success`, `error`, `denied`); the session id correlates
+  calls within one agent session. New `ai::mcp` module with
+  `CompiledMcp`, `CompiledMcpTool`, `JsonRpcRequest`, `McpHandleResult`,
+  `McpToolCallOutcome`, and async `handle_request`. New config section
+  `ai.mcp` (`AiMcpConfig`, `AiMcpTool`, `AiMcpSessions`). New analytics
+  table `mcp_tool_calls` (schema v7). New state table `mcp_sessions`
+  (migration 007). New admin API endpoints: `GET /mcp/sessions`,
+  `DELETE /mcp/sessions/:id`, `GET /mcp/tools`, `GET /mcp/calls`. New
+  metrics: `dwara_mcp_sessions_total{state}` (closed set: initialized,
+  closed, expired), `dwara_mcp_tool_calls_total{tool,status}` (closed
+  status set: success, error, denied; config-bounded tool label, no
+  consumer label), `dwara_mcp_tool_duration_seconds{tool}`
+  (config-bounded tool label). Validation: tool name non-empty and
+  unique, upstream reference existence, path starts with `/`. No new
+  dependencies (reuses hyper_util for the upstream tool call).
+
 - AI prompt experimentation (DW-086): prompt versioning, A/B model
   comparison, regression evals, and feedback ingestion. Config under
   `ai.experiments` (keyed by `prompts`, `ab_tests`, `evals`, and

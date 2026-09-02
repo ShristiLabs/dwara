@@ -988,6 +988,143 @@ impl StateStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    // --- MCP sessions (DW-087) ---------------------------------------
+
+    /// Create a new MCP agent session (DW-087). Inserts a row with
+    /// the given session id, consumer, TTL, and optional client info
+    /// JSON. `created_at`, `last_used_at`, and `expires_at` are
+    /// Unix-epoch SECONDS.
+    pub fn create_mcp_session(
+        &self,
+        session_id: &str,
+        consumer: &str,
+        ttl_secs: u64,
+        client_info: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let expires = now + ttl_secs as i64;
+        conn.execute(
+            "INSERT INTO mcp_sessions \
+             (session_id, consumer, created_at, last_used_at, expires_at, client_info) \
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+            params![session_id, consumer, now, expires, client_info],
+        )?;
+        Ok(())
+    }
+
+    /// Touch an MCP session: update `last_used_at` to now. Returns
+    /// `true` if the session exists and is not expired, `false`
+    /// otherwise. An expired session is deleted on touch.
+    pub fn touch_mcp_session(&self, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let expires_at: Option<i64> = conn
+            .query_row(
+                "SELECT expires_at FROM mcp_sessions WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match expires_at {
+            Some(exp) if exp > now => {
+                conn.execute(
+                    "UPDATE mcp_sessions SET last_used_at = ?1 WHERE session_id = ?2",
+                    params![now, session_id],
+                )?;
+                Ok(true)
+            }
+            Some(_) => {
+                // Expired: delete it.
+                let _ = conn.execute(
+                    "DELETE FROM mcp_sessions WHERE session_id = ?1",
+                    params![session_id],
+                );
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Delete an MCP session (DW-087 `shutdown`). Returns Ok
+    /// regardless of whether a row was deleted.
+    pub fn delete_mcp_session(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "DELETE FROM mcp_sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Count active (non-expired) MCP sessions (DW-087).
+    pub fn count_active_mcp_sessions(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mcp_sessions WHERE expires_at > ?1",
+            params![now],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Delete expired MCP sessions (DW-087). Returns the number of
+    /// rows deleted.
+    pub fn cleanup_expired_mcp_sessions(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let n = conn.execute(
+            "DELETE FROM mcp_sessions WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(n)
+    }
+
+    /// List active MCP sessions (DW-087): the admin surface's
+    /// `GET /mcp/sessions` view. Returns (session_id, consumer,
+    /// created_at, last_used_at, expires_at, client_info) for
+    /// non-expired sessions, ordered by created_at descending.
+    #[allow(clippy::type_complexity)]
+    pub fn list_active_mcp_sessions(
+        &self,
+    ) -> Result<Vec<(String, String, i64, i64, i64, Option<String>)>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut stmt = conn.prepare(
+            "SELECT session_id, consumer, created_at, last_used_at, expires_at, client_info \
+             FROM mcp_sessions WHERE expires_at > ?1 \
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38

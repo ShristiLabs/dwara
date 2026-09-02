@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -146,6 +146,26 @@ const MIGRATION_006_PROMPT_OVERRIDES: &str = "
     );
 ";
 
+/// Migration 007 (DW-087): `mcp_sessions` — one row per active MCP
+/// agent session. The `session_id` is a server-generated 128-bit
+/// random hex string (the PRIMARY KEY); `consumer` is the
+/// authenticated consumer name; `created_at`, `last_used_at`, and
+/// `expires_at` are Unix-epoch SECONDS; `client_info` is the optional
+/// client-provided info JSON. A session is deleted on `shutdown` or
+/// when it expires (the cleanup pass deletes rows whose `expires_at`
+/// is in the past). Additive (a new table; existing databases have no
+/// rows = no active sessions, exactly the pre-007 behavior).
+const MIGRATION_007_MCP_SESSIONS: &str = "
+    CREATE TABLE IF NOT EXISTS mcp_sessions (
+        session_id   TEXT PRIMARY KEY,
+        consumer     TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        expires_at   INTEGER NOT NULL,
+        client_info  TEXT
+    );
+";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -156,6 +176,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_004_CREDENTIAL_SOURCE_REF),
         M::up(MIGRATION_005_CREDENTIAL_RETIRE_AT),
         M::up(MIGRATION_006_PROMPT_OVERRIDES),
+        M::up(MIGRATION_007_MCP_SESSIONS),
     ])
 }
 

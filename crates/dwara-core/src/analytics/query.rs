@@ -837,3 +837,79 @@ pub fn prompt_logs(conn: &Connection, q: &PromptLogQuery) -> rusqlite::Result<Ve
     }
     Ok(out)
 }
+
+// --- MCP tool calls (DW-087) ---------------------------------------------
+
+/// Query parameters for MCP tool call records (DW-087).
+#[derive(Debug, Clone, Default)]
+pub struct McpToolCallQuery {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub session_id: Option<String>,
+    pub consumer: Option<String>,
+    pub tool_name: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// One MCP tool call row (DW-087).
+#[derive(Debug, Serialize)]
+pub struct McpToolCallRow {
+    pub ts_ms: i64,
+    pub request_id: String,
+    pub session_id: String,
+    pub consumer: String,
+    pub tool_name: String,
+    pub allowed: bool,
+    pub duration_ms: f64,
+    pub error_code: Option<String>,
+    pub status: String,
+}
+
+/// Execute an MCP tool call query (DW-087): return the raw
+/// `mcp_tool_calls` rows in a time window, newest first, optionally
+/// filtered by session id, consumer, or tool name.
+pub fn mcp_tool_calls(
+    conn: &Connection,
+    q: &McpToolCallQuery,
+) -> rusqlite::Result<Vec<McpToolCallRow>> {
+    let limit = q.limit.unwrap_or(10_000).min(10_000);
+    let mut sql = String::from(
+        "SELECT ts_ms, request_id, session_id, consumer, tool_name, allowed, \
+         duration_ms, error_code, status \
+         FROM mcp_tool_calls \
+         WHERE ts_ms >= ? AND ts_ms < ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(q.from_ms), Box::new(q.to_ms)];
+    if let Some(v) = &q.session_id {
+        sql.push_str(" AND session_id = ?");
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &q.consumer {
+        sql.push_str(" AND consumer = ?");
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &q.tool_name {
+        sql.push_str(" AND tool_name = ?");
+        params.push(Box::new(v.clone()));
+    }
+    sql.push_str(" ORDER BY ts_ms DESC LIMIT ?");
+    params.push(Box::new(limit));
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(McpToolCallRow {
+            ts_ms: row.get(0)?,
+            request_id: row.get(1)?,
+            session_id: row.get(2)?,
+            consumer: row.get(3)?,
+            tool_name: row.get(4)?,
+            allowed: row.get::<_, i64>(5)? != 0,
+            duration_ms: row.get(6)?,
+            error_code: row.get(7)?,
+            status: row.get(8)?,
+        });
+    }
+    Ok(out)
+}

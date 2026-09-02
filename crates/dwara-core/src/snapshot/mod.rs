@@ -3185,6 +3185,121 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+
+    // DW-087: MCP gateway validation. Tool names are non-empty (the
+    // BTreeMap key enforces uniqueness; empty keys are impossible via
+    // serde but trim-empty descriptions are caught here). Each tool's
+    // `upstream` must reference a known upstream. The `path` (if
+    // present) must start with `/`. Session TTL and max_concurrent
+    // must be positive.
+    if let Some(mcp) = &ai.mcp {
+        let upstream_names: std::collections::BTreeSet<&str> =
+            gateway.upstreams.iter().map(|u| u.name.as_str()).collect();
+        for (name, tool) in &mcp.tools {
+            if name.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.mcp.tools",
+                    "tool name must be non-empty",
+                ));
+            }
+            if tool.description.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    name,
+                    "ai.mcp.tools.description",
+                    "tool description must be non-empty",
+                ));
+            }
+            if !upstream_names.contains(tool.upstream.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    name,
+                    "ai.mcp.tools.upstream",
+                    format!(
+                        "references unknown upstream '{}' (not in \
+                         upstreams[] — a typo, or the upstream was renamed)",
+                        tool.upstream
+                    ),
+                ));
+            }
+            if let Some(path) = &tool.path {
+                if !path.starts_with('/') {
+                    issues.push(issue(
+                        "gateway",
+                        name,
+                        "ai.mcp.tools.path",
+                        "the path must start with '/' (it is appended to the upstream endpoint)",
+                    ));
+                }
+            }
+            if let Some(method) = &tool.method {
+                let m = method.to_ascii_uppercase();
+                if !matches!(m.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                    issues.push(issue(
+                        "gateway",
+                        name,
+                        "ai.mcp.tools.method",
+                        format!(
+                            "unknown HTTP method '{}' (must be GET, POST, PUT, PATCH, or DELETE)",
+                            method
+                        ),
+                    ));
+                }
+            }
+            if !tool.input_schema.is_object() {
+                issues.push(issue(
+                    "gateway",
+                    name,
+                    "ai.mcp.tools.input_schema",
+                    "input_schema must be a JSON object (a JSON Schema for the tool's arguments)",
+                ));
+            }
+            if let Some(timeout) = tool.timeout_ms {
+                if timeout == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        name,
+                        "ai.mcp.tools.timeout_ms",
+                        "timeout_ms must be > 0 (omit for the default 30s)",
+                    ));
+                }
+            }
+        }
+        if let Some(sessions) = &mcp.sessions {
+            if let Some(ttl) = sessions.ttl_secs {
+                if ttl == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "ai.mcp.sessions.ttl_secs",
+                        "ttl_secs must be > 0 (omit for the default 3600s)",
+                    ));
+                }
+            }
+            if let Some(max) = sessions.max_concurrent {
+                if max == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "ai.mcp.sessions.max_concurrent",
+                        "max_concurrent must be > 0 (omit for the default 1000)",
+                    ));
+                }
+            }
+        }
+        if let Some(path) = &mcp.path {
+            if !path.starts_with('/') {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.mcp.path",
+                    "the path must start with '/' (it is a reserved HTTP path)",
+                ));
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {

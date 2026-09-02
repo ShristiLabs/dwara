@@ -694,6 +694,7 @@ mod tests {
             semantic_cache: None,
             routing_policies: Default::default(),
             experiments: None,
+            mcp: None,
         };
         GuardrailEngine::compile(Some(&cfg))
     }

@@ -254,7 +254,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use http_body_util::Full;
+use http_body_util::{Full, LengthLimitError, Limited};
 use hyper::body::Body as _;
 use hyper::body::Bytes;
 use hyper::header::{
@@ -883,7 +883,8 @@ impl DataPlane {
         let oidc_introspection_cache =
             Arc::new(crate::security::oidc::OidcIntrospectionCache::new());
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
-        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
+        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
+            .map(Arc::new);
         let ai_budgets = ArcSwap::from_pointee(crate::ai::budget::AiBudgetEngine::compile(
             snapshot.gateway(),
         ));
@@ -1316,7 +1317,8 @@ impl DataPlane {
         self.response_cache
             .note_generation(Some(previous.snapshot.as_ref()), &snapshot);
         let oauth2_clients = build_oauth2_clients(snapshot.gateway());
-        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref()).map(Arc::new);
+        let ai = crate::ai::AiRuntime::compile(snapshot.gateway().ai.as_ref(), snapshot.gateway())
+            .map(Arc::new);
         // DW-078: budget RULES swap with the generation; the LEDGER
         // (spent windows) carries over — a reload never resets a
         // live budget window.
@@ -1747,6 +1749,418 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
     }
 }
 
+/// The MCP session-id header name (DW-087).
+const MCP_SESSION_ID_HDR: hyper::header::HeaderName =
+    hyper::header::HeaderName::from_static("mcp-session-id");
+
+/// Maximum MCP request body size (1 MiB — JSON-RPC requests are small;
+/// anything larger is a misbehaving or hostile client).
+const MCP_BODY_CAP: u64 = 1024 * 1024;
+
+/// Handle one MCP JSON-RPC request (DW-087): authenticate, collect
+/// the body, parse JSON-RPC, dispatch to the compiled MCP gateway,
+/// manage the session (state store), record analytics, and return the
+/// JSON-RPC response. The MCP path shadows any configured route (it
+/// is checked before route resolution in [`handle_inner`]).
+async fn mcp_handle<B>(
+    dp: &Arc<DataPlane>,
+    peer: IpAddr,
+    req: Request<B>,
+    mcp: &Arc<crate::ai::mcp::CompiledMcp>,
+    rid: &str,
+    rec: &mut AccessRecord,
+) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use http_body_util::BodyExt as _;
+
+    // --- AuthN (same as the proxy path) ---
+    let authn = dp.authn.load_full();
+    let client_cert = req
+        .extensions()
+        .get::<Arc<crate::security::authn::ClientCertificate>>()
+        .cloned();
+    let authn_req = crate::security::authn::AuthnRequest {
+        method: req.method(),
+        uri: req.uri(),
+        headers: req.headers(),
+        client_cert: client_cert.as_deref(),
+    };
+    let identity = match authn
+        .authenticate(&authn_req)
+        .instrument(tracing::info_span!("mcp_authn"))
+        .await
+    {
+        Ok(id) => id,
+        Err(AuthError::Invalid(_)) => {
+            return unauthorized(&authn.challenge(), rid);
+        }
+        Err(AuthError::Unavailable(msg)) => {
+            tracing::error!(
+                code = "mcp_authn_unavailable",
+                request_id = %rid,
+                error = %msg,
+                "authn unavailable for MCP request"
+            );
+            return simple(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "authn_unavailable",
+                "authentication unavailable",
+                rid,
+            );
+        }
+    };
+    let consumer = identity
+        .as_ref()
+        .map(|i| i.consumer_name.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+    rec.consumer = consumer.clone();
+
+    // --- Collect the request body ---
+    // Split the request first so we can still read headers after
+    // consuming the body.
+    let (parts, body) = req.into_parts();
+    let limited = Limited::new(body, MCP_BODY_CAP as usize);
+    let body_bytes = match limited.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(err) => {
+            if err.downcast_ref::<LengthLimitError>().is_some() {
+                return simple(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "mcp_body_too_large",
+                    &format!("mcp request body exceeds {} bytes", MCP_BODY_CAP),
+                    rid,
+                );
+            }
+            return simple(
+                StatusCode::BAD_REQUEST,
+                "mcp_body_read_failed",
+                &err.to_string(),
+                rid,
+            );
+        }
+    };
+
+    // --- Parse JSON-RPC ---
+    let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            let resp = crate::ai::mcp::parse_error_response();
+            return mcp_json_response(StatusCode::BAD_REQUEST, &resp, None);
+        }
+    };
+    let rpc_req = match crate::ai::mcp::JsonRpcRequest::parse(&body_json) {
+        Ok(r) => r,
+        Err(err_resp) => {
+            return mcp_json_response(StatusCode::BAD_REQUEST, &err_resp, None);
+        }
+    };
+
+    // --- Session management ---
+    let session_id_hdr = parts
+        .headers
+        .get(&MCP_SESSION_ID_HDR)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let state_store = dp.state_store();
+
+    // For non-initialize requests, validate the session if a state
+    // store is attached. Without a state store, sessions are
+    // stateless (the session id is still returned but not persisted).
+    if let Some(sid) = &session_id_hdr {
+        if rpc_req.method != "initialize" {
+            if let Some(store) = &state_store {
+                if let Ok(false) = store.touch_mcp_session(sid) {
+                    return mcp_json_response(
+                        StatusCode::NOT_FOUND,
+                        &crate::ai::mcp::json_rpc_error_pub(
+                            None,
+                            -32000,
+                            "session not found or expired",
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    // --- AuthZ for tools/call (DW-087) ---
+    // The `ai` domain may not import `security` (dependency direction),
+    // so authz is evaluated here in the dataplane. A tool with an
+    // authz attachment is only callable by consumers satisfying the
+    // rules; a tool without one is open to any authenticated consumer.
+    let mcp_tool_started = if rpc_req.method == "tools/call" {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    if rpc_req.method == "tools/call" {
+        let tool_name = rpc_req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some(authz) = mcp.tool_authz(tool_name) {
+            let authz_chain = crate::security::authz::AuthzChain {
+                consumer: None,
+                route: None,
+                service: None,
+                listener: None,
+                global: Some(authz),
+            };
+            let authz_ctx = crate::security::authz::AuthzContext {
+                identity: identity.as_ref(),
+                consumer_groups: identity
+                    .as_ref()
+                    .map(|i| i.groups.as_slice())
+                    .unwrap_or(&[]),
+                peer_ip: peer,
+                effective_ip: peer,
+                geoip: None,
+            };
+            if crate::security::authz::authorize(&authz_chain, &authz_ctx)
+                != crate::security::authz::Decision::Allow
+            {
+                let duration_ms = mcp_tool_started
+                    .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                let outcome = crate::ai::mcp::McpToolCallOutcome {
+                    tool_name: tool_name.to_string(),
+                    allowed: false,
+                    duration_ms,
+                    error_code: Some("unauthorized".to_string()),
+                    status: "denied".to_string(),
+                };
+                // Record metrics for the denied call (DW-087).
+                dp.obs.record_mcp_tool_call(tool_name, "denied");
+                dp.obs
+                    .record_mcp_tool_duration(tool_name, duration_ms / 1000.0);
+                // Record analytics for the denied call.
+                if let Some(analytics) = dp.analytics() {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    analytics.offer_mcp_tool_call(crate::analytics::McpToolCallRecord {
+                        ts_ms: now_ms,
+                        request_id: rid.to_string(),
+                        session_id: session_id_hdr.clone().unwrap_or_default(),
+                        consumer: consumer.clone(),
+                        tool_name: outcome.tool_name.clone(),
+                        allowed: outcome.allowed,
+                        duration_ms: outcome.duration_ms,
+                        error_code: outcome.error_code.clone(),
+                        status: outcome.status.clone(),
+                    });
+                }
+                let result_json = serde_json::json!({
+                    "content": [{"type": "text", "text": "unauthorized: this tool requires authorization"}],
+                    "isError": true,
+                });
+                let resp = if rpc_req.id.is_none() {
+                    serde_json::json!({})
+                } else {
+                    crate::ai::mcp::json_rpc_result_pub(rpc_req.id.clone(), result_json)
+                };
+                let status = if rpc_req.id.is_none() {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::OK
+                };
+                return mcp_json_response(status, &resp, session_id_hdr.as_deref());
+            }
+        }
+    }
+
+    // --- Dispatch to the compiled MCP gateway ---
+    let result = mcp
+        .handle_request(&rpc_req, session_id_hdr.as_deref(), &consumer)
+        .await;
+
+    // --- AuthZ filtering for tools/list (DW-087) ---
+    // Filter the tools list to only show tools the caller is allowed
+    // to invoke. The filtering happens here (dataplane) because the
+    // `ai` domain may not import `security`.
+    if rpc_req.method == "tools/list" {
+        if let Some(resp) = &result.response {
+            if let Some(tools) = resp.get("result").and_then(|r| r.get("tools")) {
+                if let Some(tools_arr) = tools.as_array() {
+                    let mut filtered = Vec::new();
+                    for tool in tools_arr {
+                        let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let allowed = match mcp.tool_authz(name) {
+                            None => true,
+                            Some(authz) => {
+                                let chain = crate::security::authz::AuthzChain {
+                                    consumer: None,
+                                    route: None,
+                                    service: None,
+                                    listener: None,
+                                    global: Some(authz),
+                                };
+                                let ctx = crate::security::authz::AuthzContext {
+                                    identity: identity.as_ref(),
+                                    consumer_groups: identity
+                                        .as_ref()
+                                        .map(|i| i.groups.as_slice())
+                                        .unwrap_or(&[]),
+                                    peer_ip: peer,
+                                    effective_ip: peer,
+                                    geoip: None,
+                                };
+                                crate::security::authz::authorize(&chain, &ctx)
+                                    == crate::security::authz::Decision::Allow
+                            }
+                        };
+                        if allowed {
+                            filtered.push(tool.clone());
+                        }
+                    }
+                    // Rebuild the response with filtered tools.
+                    // We need to return a modified result — but since
+                    // `result` is immutable, we'll handle this by
+                    // post-processing the response below.
+                    // Store the filtered list for response building.
+                    // Actually, let's just rebuild the response here.
+                    let filtered_resp = if rpc_req.id.is_none() {
+                        serde_json::json!({})
+                    } else {
+                        crate::ai::mcp::json_rpc_result_pub(
+                            rpc_req.id.clone(),
+                            serde_json::json!({
+                                "tools": filtered,
+                                "nextCursor": null,
+                            }),
+                        )
+                    };
+                    let session_id_for_hdr = result.session_id.clone();
+                    return mcp_json_response(
+                        StatusCode::OK,
+                        &filtered_resp,
+                        session_id_for_hdr.as_deref(),
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Session lifecycle (state store) ---
+    if result.session_initialized {
+        if let Some(sid) = &result.session_id {
+            if let Some(store) = &state_store {
+                // Enforce max concurrent sessions.
+                if let Ok(count) = store.count_active_mcp_sessions() {
+                    if count >= mcp.sessions_max_concurrent {
+                        // Reject: too many sessions.
+                        let resp = crate::ai::mcp::json_rpc_error_pub(
+                            rpc_req.id.clone(),
+                            -32001,
+                            "too many concurrent sessions",
+                        );
+                        return mcp_json_response(StatusCode::SERVICE_UNAVAILABLE, &resp, None);
+                    }
+                }
+                let client_info = rpc_req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("clientInfo"))
+                    .map(|v| v.to_string());
+                let _ = store.create_mcp_session(
+                    sid,
+                    &consumer,
+                    mcp.sessions_ttl_secs,
+                    client_info.as_deref(),
+                );
+            }
+            // Record the session-initialized metric (DW-087). Counted
+            // whether or not a state store is attached (the session is
+            // created either way; without a store it is stateless).
+            dp.obs.record_mcp_session("initialized");
+        }
+    }
+    if result.session_closed {
+        if let Some(sid) = &result.session_id {
+            if let Some(store) = &state_store {
+                let _ = store.delete_mcp_session(sid);
+            }
+            // Record the session-closed metric (DW-087).
+            dp.obs.record_mcp_session("closed");
+        }
+    }
+
+    // --- Analytics and metrics (tool calls) ---
+    if let Some(outcome) = &result.tool_call {
+        // Record metrics (DW-087): tool call count by status and
+        // duration. The duration from the authz-check start through
+        // the upstream response is used; when no timer was started
+        // (e.g. a tool-not-found before the dispatch), the outcome's
+        // own duration is used.
+        let dur_secs = if let Some(started) = mcp_tool_started {
+            started.elapsed().as_secs_f64()
+        } else {
+            outcome.duration_ms / 1000.0
+        };
+        dp.obs
+            .record_mcp_tool_call(&outcome.tool_name, &outcome.status);
+        dp.obs
+            .record_mcp_tool_duration(&outcome.tool_name, dur_secs);
+        if let Some(analytics) = dp.analytics() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            analytics.offer_mcp_tool_call(crate::analytics::McpToolCallRecord {
+                ts_ms: now_ms,
+                request_id: rid.to_string(),
+                session_id: result.session_id.clone().unwrap_or_default(),
+                consumer: consumer.clone(),
+                tool_name: outcome.tool_name.clone(),
+                allowed: outcome.allowed,
+                duration_ms: outcome.duration_ms,
+                error_code: outcome.error_code.clone(),
+                status: outcome.status.clone(),
+            });
+        }
+    }
+
+    // --- Build the response ---
+    let session_id_for_hdr = result.session_id.clone();
+    match result.response {
+        Some(resp_json) => {
+            mcp_json_response(StatusCode::OK, &resp_json, session_id_for_hdr.as_deref())
+        }
+        None => {
+            // Notification: no response body, but still 202 Accepted.
+            mcp_json_response(
+                StatusCode::ACCEPTED,
+                &serde_json::json!({}),
+                session_id_for_hdr.as_deref(),
+            )
+        }
+    }
+}
+
+/// Build a JSON response for the MCP endpoint (DW-087).
+fn mcp_json_response(
+    status: StatusCode,
+    body: &serde_json::Value,
+    session_id: Option<&str>,
+) -> Response<ProxyBody> {
+    let mut builder = Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json");
+    if let Some(sid) = session_id {
+        builder = builder.header(&MCP_SESSION_ID_HDR, sid);
+    }
+    builder
+        .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+        .expect("static response parts")
+}
+
 /// Refresh the rate-limiter observation gauges from the CURRENT
 /// engine at scrape time (#132) — the same snapshot model as
 /// [`refresh_observation_gauges`]: the walk lives on the dataplane
@@ -2106,6 +2520,19 @@ where
     // Reserved gateway paths first: they shadow any configured route.
     if let Some(resp) = reserved_path(dp, &path, rid) {
         return resp;
+    }
+
+    // DW-087: the MCP JSON-RPC endpoint. Like the reserved paths, it
+    // shadows any configured route — but unlike them it needs the
+    // full request (authn, body, session management), so it is
+    // handled as a dedicated path here, before route resolution.
+    // Only active when the current generation's `ai.mcp` block
+    // compiled a `CompiledMcp`; absent = 404 (fall through to route
+    // resolution, which will 404 on the unknown path).
+    if let Some(mcp) = gen.ai.as_ref().and_then(|ai| ai.mcp()) {
+        if path == mcp.path() {
+            return mcp_handle(dp, peer, req, mcp, rid, rec).await;
+        }
     }
 
     // The listener that accepted this request (#123): its policies and

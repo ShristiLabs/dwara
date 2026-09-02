@@ -248,7 +248,7 @@ pub const SCHEMA_V5: &str = "
 ";
 
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 /// Schema v6 (DW-086): three tables for prompt experimentation.
 ///
@@ -311,6 +311,30 @@ pub const SCHEMA_V6: &str = "
     CREATE INDEX IF NOT EXISTS idx_ai_feedback_request_id ON ai_feedback(request_id);
 ";
 
+/// Schema v7 (DW-087): the `mcp_tool_calls` table. One row per MCP
+/// tool call proxied through the gateway, carrying the session
+/// correlation id, the authenticated consumer, the tool name, the
+/// authorization outcome (`allowed`), the call duration, an optional
+/// error code, and a status string (`success`, `error`, or `denied`).
+/// The admin `/mcp/calls` endpoint reads these rows; the session and
+/// consumer indexes support per-session and per-consumer drill-down.
+pub const SCHEMA_V7: &str = "
+    CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        request_id  TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        consumer    TEXT NOT NULL,
+        tool_name   TEXT NOT NULL,
+        allowed     INTEGER NOT NULL,
+        duration_ms REAL NOT NULL,
+        error_code  TEXT,
+        status      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_session ON mcp_tool_calls(session_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_consumer ON mcp_tool_calls(consumer);
+";
+
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
 /// state store's forward-only rule, same rationale).
@@ -350,6 +374,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 6 {
         conn.execute_batch(SCHEMA_V6)?;
         conn.pragma_update(None, "user_version", 6)?;
+    }
+    if version < 7 {
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.pragma_update(None, "user_version", 7)?;
     }
     Ok(())
 }
