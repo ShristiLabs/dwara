@@ -1896,6 +1896,10 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // metering — current-window used/limit per budget. Query params:
         // optional consumer (name filter).
         ("GET", "/quotas/usage") => quotas_usage(ctx, &req, &request_id).await,
+        // DW-080: credential pool status — per-provider, per-key
+        // quarantine state (never secret values). Optional `?provider=`
+        // filter narrows to one provider.
+        ("GET", "/ai/credential-pools") => ai_credential_pools(ctx, &req, &request_id).await,
         // Credential lifecycle (DW-046 key rotation): list a consumer's
         // credential rows (ids and lifecycle stamps only — never
         // selector/hash material), issue a NEW api key alongside the
@@ -2399,6 +2403,68 @@ fn store_absent(request_id: &str) -> Response<AdminBody> {
          credentials rotate by editing the config and reloading)",
         request_id,
     )
+}
+
+/// DW-080: credential pool status — per-provider, per-key quarantine
+/// state. Never includes secret values. Optional `?provider=` query
+/// param narrows to one provider. Returns 404 `ai_not_configured` when
+/// no `ai:` block is active, and 404 `provider_not_found` when the
+/// filter names an unknown provider.
+async fn ai_credential_pools(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(ai) = ctx.dp.ai_runtime() else {
+        return envelope(
+            404,
+            "ai_not_configured",
+            "no ai: block is active on this gateway",
+            request_id,
+        );
+    };
+    let params = query_params(req.uri());
+    let filter = params
+        .iter()
+        .find(|(k, _)| k == "provider")
+        .map(|(_, v)| v.as_str());
+    let names: Vec<String> = match filter {
+        Some(name) => {
+            if ai.provider(name).is_none() {
+                return envelope(
+                    404,
+                    "provider_not_found",
+                    &format!("ai provider '{}' is not in the compiled table", name),
+                    request_id,
+                );
+            }
+            vec![name.to_string()]
+        }
+        None => ai.provider_names(),
+    };
+    let mut providers = serde_json::Map::new();
+    for name in &names {
+        let Some(provider) = ai.provider(name) else {
+            continue;
+        };
+        let entry = if let Some(pool) = &provider.credential_pool {
+            serde_json::json!({
+                "has_pool": true,
+                "pool_size": pool.len(),
+                "exhausted": pool.is_exhausted(),
+                "credentials": pool.status(),
+            })
+        } else {
+            serde_json::json!({
+                "has_pool": false,
+                "pool_size": 0,
+                "exhausted": false,
+                "credentials": [],
+            })
+        };
+        providers.insert(name.clone(), entry);
+    }
+    json_response(200, serde_json::json!({ "providers": providers }))
 }
 
 /// GET /consumers/{name}/credentials: the rotation runbook's view —

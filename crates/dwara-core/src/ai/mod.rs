@@ -43,6 +43,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod budget;
 pub mod cost;
+pub mod credentials;
 pub mod experiments;
 pub mod governance;
 pub mod guardrails;
@@ -78,7 +79,13 @@ pub struct CompiledProvider {
     /// Resolved auth header pairs (name, value). SECRET: never logged,
     /// never echoed; the redaction walk in `config` covers config
     /// echoes and this value lives only here and on the wire.
+    /// Used when the provider has singular `auth` (no pool).
     pub auth_headers: Vec<(String, String)>,
+    /// DW-080 (Ent): credential pool for this provider. When set, the
+    /// pool is used INSTEAD of `auth_headers` — the proxy picks one
+    /// credential per request and rotates on 429. None when the
+    /// provider has singular `auth` or no auth.
+    pub credential_pool: Option<Arc<credentials::CredentialPool>>,
 }
 
 /// One routable provider/model pair (DW-076): a failover-chain member
@@ -148,7 +155,37 @@ impl AiRuntime {
         let mut providers = BTreeMap::new();
         for p in &cfg.providers {
             let mut auth_headers = Vec::new();
-            if let Some(auth) = &p.auth {
+            let mut credential_pool = None;
+            if let Some(pool_cfg) = &p.credential_pool {
+                // DW-080: compile the credential pool. Each entry is
+                // resolved via the same path as singular auth. Entries
+                // that fail to resolve are skipped (with an error log);
+                // the pool is still built with the remaining entries.
+                // If ALL entries fail to resolve, the pool is None and
+                // the provider compiles without auth (calls will 401).
+                let mut entries = Vec::new();
+                for (i, cred) in pool_cfg.credentials.iter().enumerate() {
+                    match crate::config::credentials::resolve_configured_secret(&cred.value) {
+                        Ok(value) => entries.push(credentials::PoolEntry {
+                            header: cred.header.clone(),
+                            value,
+                            index: i,
+                        }),
+                        Err(message) => tracing::error!(
+                            code = "ai_credential_pool_entry_unresolved",
+                            provider = %p.name,
+                            index = i,
+                            "ai credential pool entry could not be resolved \
+                             at compile time; this key will be skipped: {message}"
+                        ),
+                    }
+                }
+                if !entries.is_empty() {
+                    credential_pool = Some(Arc::new(credentials::CredentialPool::new(
+                        entries, pool_cfg,
+                    )));
+                }
+            } else if let Some(auth) = &p.auth {
                 match crate::config::credentials::resolve_configured_secret(&auth.value) {
                     Ok(value) => auth_headers.push((auth.header.clone(), value)),
                     Err(message) => tracing::error!(
@@ -167,6 +204,7 @@ impl AiRuntime {
                     kind: p.kind,
                     upstream: p.upstream.clone(),
                     auth_headers,
+                    credential_pool,
                 },
             );
         }
@@ -408,6 +446,12 @@ impl AiRuntime {
     /// The compiled provider by name.
     pub fn provider(&self, name: &str) -> Option<&CompiledProvider> {
         self.providers.get(name)
+    }
+
+    /// DW-080: the names of all compiled providers (for admin API
+    /// credential pool status enumeration).
+    pub fn provider_names(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
     }
 
     /// The primary target of an alias (first chain entry; the first

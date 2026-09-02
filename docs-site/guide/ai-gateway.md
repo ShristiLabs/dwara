@@ -92,6 +92,7 @@ services:
 | `upstream` | (required) | Name of the upstream that carries this provider's transport (endpoints, TLS, timeouts, connection pooling, circuit breaking). |
 | `auth.header` | (required with `auth`) | Header name the provider expects (`Authorization`, `x-api-key`, `x-goog-api-key`). |
 | `auth.value` | (required with `auth`) | Header value, verbatim. Use a `${...}` [secret reference](./secrets) (env var or file); inline values are redacted in every config echo. Omit `auth` entirely for providers that need none (for example a local OpenAI-compatible endpoint on an internal network). |
+| `credential_pool` | (optional, Ent) | A multi-key credential pool for this provider. See [Credential pools](#credential-pools) below. Mutually exclusive with `auth`. |
 
 Notes on providers:
 
@@ -101,6 +102,58 @@ Notes on providers:
 - The `openai` kind also speaks to OpenAI-COMPATIBLE servers (vLLM,
   Ollama's compatibility endpoint, and others): point the upstream at
   one of those and no other change is needed.
+
+#### Credential pools
+
+::: tip Enterprise feature
+Credential pools require the enterprise edition (build with
+`--features ent`). The config schema is accepted in the OSS edition
+too, but validation rejects it at publish time.
+:::
+
+A credential pool lets a single provider declare multiple API keys and
+rotate across them to aggregate rate-limit headroom (the LiteLLM
+pattern). When a key receives a 429 from the provider, it is
+quarantined for a configurable window and subsequent requests rotate
+to the next available key.
+
+```yaml
+ai:
+  providers:
+    - name: openai
+      kind: openai
+      upstream: openai-pool
+      credential_pool:
+        credentials:
+          - header: Authorization
+            value: ${OPENAI_KEY_1}
+          - header: Authorization
+            value: ${OPENAI_KEY_2}
+          - header: Authorization
+            value: ${OPENAI_KEY_3}
+        strategy: round_robin    # or weighted (per-request-id hash)
+        quarantine_secs: 60      # default; capped at 600
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `credentials` | (required) | Two or more `AiProviderAuth` entries (same shape as `auth`). At least 2 required. |
+| `strategy` | `round_robin` | `round_robin` cycles in config order; `weighted` picks by request-id hash. |
+| `quarantine_secs` | `60` | How long a 429'd key is skipped. The provider's `Retry-After` header overrides per-429 (capped at 600s). |
+
+Pool exhaustion (all keys quarantined) degrades gracefully: the request
+fails with a 429 + `Retry-After` (based on the earliest quarantine
+expiry), not a panic.
+
+Monitor pool state via the admin API:
+
+```
+GET /ai/credential-pools              # all providers
+GET /ai/credential-pools?provider=openai  # one provider
+```
+
+The response includes per-key quarantine status (index, header name,
+quarantined flag, cumulative quarantine count) -- never secret values.
 
 ### Models
 

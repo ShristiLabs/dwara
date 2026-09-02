@@ -378,12 +378,14 @@ fn runtime_route_plans_chains_and_canaries() {
                 kind: AiProviderKind::Openai,
                 upstream: "u".into(),
                 auth: None,
+                credential_pool: None,
             },
             AiProvider {
                 name: "p-b".into(),
                 kind: AiProviderKind::Anthropic,
                 upstream: "u".into(),
                 auth: None,
+                credential_pool: None,
             },
         ],
         models: [

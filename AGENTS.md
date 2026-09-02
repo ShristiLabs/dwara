@@ -179,7 +179,12 @@ crates/dwara-core/src/
                       ingestion, verdict computation, composed over
                       DW-076 routing), and the DW-087 MCP gateway
                       (mcp.rs: MCP server/router, tool routing to
-                      upstreams, session management, authN/authZ)
+                      upstreams, session management, authN/authZ),
+                      and the DW-080 provider credential pools
+                      (credentials.rs: multi-key rotation with 429
+                      quarantine, round-robin/weighted pick, pool-
+                      exhaustion graceful degradation; Ent-gated at
+                      validation)
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind

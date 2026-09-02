@@ -189,6 +189,19 @@ pub struct AiProvider {
     /// example) may need none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AiProviderAuth>,
+    /// DW-080 (Ent): a credential pool for this provider. When set,
+    /// the gateway rotates across multiple API keys to aggregate
+    /// rate-limit headroom (the LiteLLM pattern). Each entry is an
+    /// `AiProviderAuth` (same shape as `auth`); the pool is used
+    /// INSTEAD of `auth` — validation rejects a provider that sets
+    /// both. At request time the pool picks one credential per
+    /// request (round-robin by default); when a key returns 429, it
+    /// is temporarily quarantined and subsequent requests rotate to
+    /// the next. Pool exhaustion (all keys quarantined) degrades
+    /// gracefully with a 429 + Retry-After, not a panic. Ent-only:
+    /// rejected at validation when the `ent` cargo feature is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_pool: Option<AiCredentialPool>,
 }
 
 /// The wire protocol an adapter speaks (DW-075).
@@ -222,6 +235,66 @@ pub struct AiProviderAuth {
     /// prefix belongs INSIDE the referenced variable or the literal).
     /// Inline values are redacted in config echoes; never logged.
     pub value: String,
+}
+
+/// DW-080 (Ent): a credential pool for a provider — multiple API keys
+/// rotated across to aggregate rate-limit headroom. Each entry is an
+/// `AiProviderAuth` (same header+value shape as the singular `auth`
+/// field). The pool is used INSTEAD of `auth`; validation rejects a
+/// provider that sets both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCredentialPool {
+    /// One or more credential entries. Each entry has the same shape
+    /// as `ai.providers[].auth` (a header name + secret-bearing value).
+    /// At least two entries are required (a single-entry pool is
+    /// equivalent to `auth` — validation rejects it).
+    pub credentials: Vec<AiProviderAuth>,
+    /// Rotation strategy (DW-080). `round_robin` (the default) cycles
+    /// through credentials in config order; `weighted` picks
+    /// proportionally to each entry's `weight` (deterministic per
+    /// request id, same as canary splits). When a credential is
+    /// quarantined (429 from the provider), the pool skips it and
+    /// picks the next available one.
+    #[serde(default, skip_serializing_if = "is_default_pool_strategy")]
+    pub strategy: AiPoolStrategy,
+    /// Quarantine duration in seconds for a credential that received a
+    /// 429 from the provider. During quarantine, the pool skips the
+    /// credential; after the window expires, it re-enters rotation.
+    /// Default: 60 seconds. A provider's `Retry-After` header, when
+    /// present, overrides this per-429 (capped at 600 seconds to
+    /// prevent a hostile provider from pinning a key out indefinitely).
+    #[serde(
+        default = "default_quarantine_secs",
+        skip_serializing_if = "is_default_quarantine_secs"
+    )]
+    pub quarantine_secs: u64,
+}
+
+/// Credential pool rotation strategy (DW-080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPoolStrategy {
+    /// Cycle through credentials in config order (default).
+    #[default]
+    RoundRobin,
+    /// Pick proportionally to each entry's weight (deterministic per
+    /// request id, same hash as canary splits). Weights are implicit
+    /// in the entry order (equal weight); a future extension may add
+    /// an explicit `weight` field per entry.
+    Weighted,
+}
+
+fn is_default_pool_strategy(s: &AiPoolStrategy) -> bool {
+    *s == AiPoolStrategy::RoundRobin
+}
+
+fn default_quarantine_secs() -> u64 {
+    60
+}
+
+fn is_default_quarantine_secs(v: &u64) -> bool {
+    *v == 60
 }
 
 /// One model alias mapping (DW-075 `ai.models{alias}`).

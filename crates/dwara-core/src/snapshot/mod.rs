@@ -2480,6 +2480,92 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 ));
             }
         }
+        // DW-080: credential pool validation.
+        if let Some(pool) = &p.credential_pool {
+            // Ent-only: reject when the ent feature is off.
+            #[cfg(not(feature = "ent"))]
+            {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].credential_pool",
+                    "credential pools require the enterprise edition (build with \
+                 --features ent)",
+                ));
+            }
+            // auth and credential_pool are mutually exclusive.
+            if p.auth.is_some() {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].credential_pool",
+                    "credential_pool and auth are mutually exclusive; use one or \
+                     the other",
+                ));
+            }
+            // At least 2 entries required.
+            if pool.credentials.len() < 2 {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].credential_pool.credentials",
+                    "credential pool requires at least 2 entries (a single-entry \
+                     pool is equivalent to auth)",
+                ));
+            }
+            // Each entry: validate header name + resolve value.
+            for (i, cred) in pool.credentials.iter().enumerate() {
+                if hyper::header::HeaderName::from_bytes(cred.header.as_bytes()).is_err() {
+                    issues.push(issue(
+                        "gateway",
+                        &p.name,
+                        &format!("ai.providers[].credential_pool.credentials[{i}].header"),
+                        format!("'{}' is not a valid HTTP header name", cred.header),
+                    ));
+                }
+                let problem =
+                    match crate::config::credentials::resolve_configured_secret(&cred.value) {
+                        Ok(resolved) => {
+                            if hyper::header::HeaderValue::from_str(&resolved).is_err() {
+                                Some(
+                                    "the credential value (after secret-reference \
+                                 resolution) contains characters that cannot appear \
+                                 in an HTTP header value"
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            }
+                        }
+                        Err(message) => Some(message),
+                    };
+                if let Some(message) = problem {
+                    issues.push(issue(
+                        "gateway",
+                        &p.name,
+                        &format!("ai.providers[].credential_pool.credentials[{i}].value"),
+                        format!("credential pool entry {i}: {message}"),
+                    ));
+                }
+            }
+            // Quarantine window bounds.
+            if pool.quarantine_secs == 0 {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].credential_pool.quarantine_secs",
+                    "quarantine_secs must be greater than 0",
+                ));
+            }
+            if pool.quarantine_secs > 600 {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].credential_pool.quarantine_secs",
+                    "quarantine_secs must not exceed 600 (10 minutes)",
+                ));
+            }
+        }
     }
     for (alias, m) in &ai.models {
         if alias.trim().is_empty() {

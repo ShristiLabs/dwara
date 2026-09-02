@@ -9,6 +9,21 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- provider credential pools (DW-080, Ent): an `ai.providers[].credential_pool`
+  block that declares multiple API keys per provider and rotates across them
+  to aggregate rate-limit headroom (the LiteLLM pattern). Each entry is an
+  `AiProviderAuth` (same header+value shape as singular `auth`); the pool is
+  used INSTEAD of `auth` — validation rejects a provider that sets both. At
+  request time the pool picks one credential per request (round-robin by
+  default, or weighted by request-id hash); when a key receives a 429 from
+  the provider, it is quarantined for a configurable window (default 60s,
+  capped at 600s; the provider's `Retry-After` header overrides per-429) and
+  subsequent requests rotate to the next key. Pool exhaustion (all keys
+  quarantined) degrades gracefully with a 429 + Retry-After, not a panic.
+  New admin API endpoint `GET /ai/credential-pools` (optional `?provider=`
+  filter) returns per-key quarantine state (never secret values). Ent-only:
+  the config schema is accepted regardless of edition, but snapshot
+  validation rejects `credential_pool` when the `ent` cargo feature is off.
 - tokio-console subscriber (DW-097): a `console` cargo feature on
   `dwara-bin` (default OFF) that enables the `tokio-console` gRPC
   server for live async task diagnostics. When the feature is compiled

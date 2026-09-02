@@ -573,6 +573,7 @@ fn ai_runtime_compiles_and_resolves() {
                 header: "x-api-key".into(),
                 value: "inline-secret".into(),
             }),
+            credential_pool: None,
         }],
         models: [(
             "alias-a".to_string(),

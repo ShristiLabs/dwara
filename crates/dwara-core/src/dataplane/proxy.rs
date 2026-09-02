@@ -1190,6 +1190,13 @@ impl DataPlane {
         self.analytics.load_full()
     }
 
+    /// The compiled AI runtime for the current generation (DW-075;
+    /// None when no `ai:` block). Admin surface seam for DW-080
+    /// credential pool status introspection.
+    pub fn ai_runtime(&self) -> Option<Arc<crate::ai::AiRuntime>> {
+        self.current().ai.clone()
+    }
+
     /// Attach the access-record stream (DW-121): dwara-bin constructs
     /// it ALWAYS (capacity from the config when the block is present
     /// at boot, the default otherwise) and hands it here once, before

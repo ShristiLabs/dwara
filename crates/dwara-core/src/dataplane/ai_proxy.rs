@@ -619,7 +619,54 @@ where
         // Provider auth from the compiled table (resolved at compile
         // time; adapters never see credentials). Applied last so
         // nothing overrides it; unrepresentable values skip loudly.
-        for (name, value) in &provider.auth_headers {
+        // DW-080: when the provider has a credential pool, pick one
+        // credential per request and track its index for quarantine
+        // on 429. When the pool is exhausted (all keys quarantined),
+        // fail this attempt with a 429 + Retry-After.
+        let mut pool_entry_index: Option<usize> = None;
+        let auth_pairs: Vec<(String, String)> = if let Some(pool) = &provider.credential_pool {
+            match pool.pick(rid) {
+                Some(entry) => {
+                    pool_entry_index = Some(entry.index);
+                    vec![(entry.header.clone(), entry.value.clone())]
+                }
+                None => {
+                    // Pool exhaustion: all keys quarantined.
+                    let retry_after = pool
+                        .earliest_quarantine_expiry()
+                        .map(|t| {
+                            t.duration_since(std::time::Instant::now())
+                                .as_secs()
+                                .clamp(1, 600)
+                        })
+                        .unwrap_or(60);
+                    tracing::warn!(
+                        code = "ai_credential_pool_exhausted",
+                        request_id = %rid,
+                        provider = %provider.name,
+                        retry_after_secs = retry_after,
+                        "ai credential pool exhausted (all keys quarantined)"
+                    );
+                    obs.record_ai_request(&provider.name, route_name, "pool_exhausted", version);
+                    let body = openai_compat::error_body(
+                        "all provider API keys are rate-limited; retry later",
+                        "pool_exhausted",
+                        Some("429"),
+                        rid,
+                    );
+                    let mut headers = HeaderMap::new();
+                    if let Ok(v) = hyper::header::HeaderValue::from_str(&format!("{retry_after}")) {
+                        headers.insert("retry-after", v);
+                    }
+                    fallback_response =
+                        response_with_json(hyper::StatusCode::TOO_MANY_REQUESTS, &body, &headers);
+                    continue;
+                }
+            }
+        } else {
+            provider.auth_headers.clone()
+        };
+        for (name, value) in &auth_pairs {
             match (
                 hyper::header::HeaderName::from_bytes(name.as_bytes()),
                 hyper::header::HeaderValue::from_str(value),
@@ -713,6 +760,24 @@ where
             );
             let resp = response_with_json(status, &body, &up_parts.headers);
             if retryable {
+                // DW-080: quarantine the credential pool entry on 429.
+                // The pool skips this key for the quarantine window;
+                // subsequent requests rotate to the next key. The
+                // provider's Retry-After header (if present) overrides
+                // the configured quarantine window, capped at 600s.
+                if status.as_u16() == 429 {
+                    if let (Some(pool), Some(idx)) = (&provider.credential_pool, pool_entry_index) {
+                        let retry_after = parse_ai_retry_after(&up_parts.headers);
+                        pool.quarantine(idx, retry_after.map(|d| d.as_secs()));
+                        tracing::info!(
+                            code = "ai_credential_pool_quarantined",
+                            request_id = %rid,
+                            provider = %provider.name,
+                            key_index = idx,
+                            "credential pool key quarantined after 429"
+                        );
+                    }
+                }
                 // 429/5xx is transient — try the next candidate; if
                 // none succeed, the LAST provider's answer is the one
                 // the client sees (closest to the truth of the outage).

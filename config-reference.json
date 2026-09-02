@@ -623,6 +623,33 @@
       },
       "additionalProperties": false
     },
+    "AiCredentialPool": {
+      "description": "DW-080 (Ent): a credential pool for a provider — multiple API keys\nrotated across to aggregate rate-limit headroom. Each entry is an\n`AiProviderAuth` (same header+value shape as the singular `auth`\nfield). The pool is used INSTEAD of `auth`; validation rejects a\nprovider that sets both.",
+      "type": "object",
+      "properties": {
+        "credentials": {
+          "description": "One or more credential entries. Each entry has the same shape\nas `ai.providers[].auth` (a header name + secret-bearing value).\nAt least two entries are required (a single-entry pool is\nequivalent to `auth` — validation rejects it).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiProviderAuth"
+          }
+        },
+        "quarantine_secs": {
+          "description": "Quarantine duration in seconds for a credential that received a\n429 from the provider. During quarantine, the pool skips the\ncredential; after the window expires, it re-enters rotation.\nDefault: 60 seconds. A provider's `Retry-After` header, when\npresent, overrides this per-429 (capped at 600 seconds to\nprevent a hostile provider from pinning a key out indefinitely).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "strategy": {
+          "description": "Rotation strategy (DW-080). `round_robin` (the default) cycles\nthrough credentials in config order; `weighted` picks\nproportionally to each entry's `weight` (deterministic per\nrequest id, same as canary splits). When a credential is\nquarantined (429 from the provider), the pool skips it and\npicks the next available one.",
+          "$ref": "#/$defs/AiPoolStrategy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "credentials"
+      ]
+    },
     "AiEval": {
       "description": "One regression eval (DW-086 `ai.experiments.evals.<name>`): a\ngolden set of input/expected cases plus an optional prompt\nversion. The admin API runs it against a model alias (or an A/B\ntest's variants) and stores the results in analytics.",
       "type": "object",
@@ -1141,6 +1168,21 @@
         "provider_model"
       ]
     },
+    "AiPoolStrategy": {
+      "description": "Credential pool rotation strategy (DW-080).",
+      "oneOf": [
+        {
+          "description": "Cycle through credentials in config order (default).",
+          "type": "string",
+          "const": "round_robin"
+        },
+        {
+          "description": "Pick proportionally to each entry's weight (deterministic per\nrequest id, same hash as canary splits). Weights are implicit\nin the entry order (equal weight); a future extension may add\nan explicit `weight` field per entry.",
+          "type": "string",
+          "const": "weighted"
+        }
+      ]
+    },
     "AiPricing": {
       "description": "Per-model token pricing (DW-079 `ai.pricing.<provider_model>`).\nCosts are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =\n$1.00 — no floating-point money). The key in the parent map is the\nPROVIDER MODEL identifier (the actual model the provider charges\nfor), not the client-facing alias. Spend is computed as\n`input_tokens * input_per_1k_micros / 1000 + output_tokens *\noutput_per_1k_micros / 1000` (integer micro-USD, saturating).",
       "type": "object",
@@ -1209,6 +1251,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/AiProviderAuth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_pool": {
+          "description": "DW-080 (Ent): a credential pool for this provider. When set,\nthe gateway rotates across multiple API keys to aggregate\nrate-limit headroom (the LiteLLM pattern). Each entry is an\n`AiProviderAuth` (same shape as `auth`); the pool is used\nINSTEAD of `auth` — validation rejects a provider that sets\nboth. At request time the pool picks one credential per\nrequest (round-robin by default); when a key returns 429, it\nis temporarily quarantined and subsequent requests rotate to\nthe next. Pool exhaustion (all keys quarantined) degrades\ngracefully with a 429 + Retry-After, not a panic. Ent-only:\nrejected at validation when the `ent` cargo feature is off.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiCredentialPool"
             },
             {
               "type": "null"

@@ -1401,6 +1401,12 @@ impl Gateway {
                 if let Some(auth) = &mut provider.auth {
                     auth.value = credentials::redact_inline_secret(&auth.value);
                 }
+                // DW-080: redact credential pool entry values too.
+                if let Some(pool) = &mut provider.credential_pool {
+                    for cred in &mut pool.credentials {
+                        cred.value = credentials::redact_inline_secret(&cred.value);
+                    }
+                }
             }
         }
         redacted
