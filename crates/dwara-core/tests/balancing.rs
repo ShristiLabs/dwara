@@ -293,6 +293,8 @@ async fn ip_hash_distinct_client_ips_spread_across_backends() {
                 address: "127.0.0.1".into(),
                 port: p,
                 weight: 1,
+                region: None,
+                zone: None,
             })
             .collect();
         let probe = UpstreamLb::new(&eps, LoadBalancer::IpHash, Duration::ZERO);
@@ -512,6 +514,8 @@ fn every_algorithm_degenerates_to_index_zero_with_one_endpoint() {
                 address: "10.0.0.1".into(),
                 port: 80,
                 weight: 7, // weight is irrelevant with one endpoint
+                region: None,
+                zone: None,
             }],
             algo,
             Duration::from_secs(10),
@@ -537,11 +541,15 @@ fn random_two_ties_break_to_the_lowest_index_of_the_pair() {
                 address: "a".into(),
                 port: 1,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "b".into(),
                 port: 2,
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
         LoadBalancer::Random,
@@ -565,6 +573,8 @@ fn endpoints(specs: &[(&str, u32)]) -> Vec<Endpoint> {
             address: a.into(),
             port: 80,
             weight: w,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -603,6 +613,8 @@ fn ketama_heavy_endpoint_addition_takes_its_share_and_remaps_minimally() {
         address: "10.0.0.3".into(),
         port: 80,
         weight: 8,
+        region: None,
+        zone: None,
     });
     lb.rebuild(&grown, LoadBalancer::IpHash, Duration::ZERO);
     let after: Vec<usize> = keys
@@ -745,6 +757,8 @@ fn shrink_rebuild_while_dispatch_held_drains_inflight_without_panic() {
                 address: format!("10.4.0.{n}"),
                 port: 80,
                 weight: 1,
+                region: None,
+                zone: None,
             })
             .collect();
         let lb = UpstreamLb::new(&four, LoadBalancer::RoundRobin, Duration::ZERO);
@@ -809,6 +823,8 @@ fn ketama_heavy_addition_leaves_old_endpoint_keys_in_place() {
         address: "10.5.0.3".into(),
         port: 80,
         weight: 8,
+        region: None,
+        zone: None,
     });
     lb.rebuild(&grown, LoadBalancer::IpHash, Duration::ZERO);
     let after: Vec<usize> = keys

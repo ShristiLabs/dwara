@@ -3585,6 +3585,124 @@ pub struct Upstream {
     /// other algorithms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_ewma: Option<PeakEwmaConfig>,
+    /// DW-094 (Ent): locality-aware routing and data residency. When
+    /// present, the balancer filters or prefers endpoints by region/zone
+    /// before applying the configured `load_balancer` algorithm. Ent-only:
+    /// rejected at validation when the `ent` cargo feature is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locality: Option<UpstreamLocality>,
+}
+
+/// DW-094 (Ent): locality-aware routing and data residency configuration
+/// for an upstream. Controls how the balancer uses endpoint `region`/
+/// `zone` fields to filter or prefer endpoints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamLocality {
+    /// The routing mode (DW-094):
+    /// - `prefer`: prefer endpoints in the edge's region; fall back to
+    ///   other regions if none are available (healthy).
+    /// - `strict`: only route to endpoints in the edge's region; fail
+    ///   with 503 if none are available (no cross-region fallback).
+    /// - `failover`: prefer the edge's region, fall back to other
+    ///   regions only when all local endpoints are ejected (like
+    ///   `prefer` but with a stricter local-first policy — local
+    ///   endpoints are always tried first even if unhealthy).
+    #[serde(default)]
+    pub mode: LocalityMode,
+    /// Data residency enforcement: when true, the balancer drops
+    /// endpoints whose `region` is not in `allowed_regions` BEFORE
+    /// applying the locality mode. This is a hard constraint —
+    /// endpoints outside the allowed set are never used, even as a
+    /// fallback. Use this to comply with data sovereignty requirements
+    /// (e.g. EU traffic must stay in EU regions).
+    #[serde(default)]
+    pub enforce_data_residency: bool,
+    /// The allowed regions when `enforce_data_residency` is true. An
+    /// endpoint with no `region` field is always allowed (locality-
+    /// agnostic). An endpoint with a `region` not in this list is
+    /// dropped. Must be non-empty when `enforce_data_residency` is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_regions: Vec<String>,
+    /// The denied regions (optional). An endpoint with a `region` in
+    /// this list is always dropped, regardless of other settings. Use
+    /// this to exclude specific regions without enumerating all
+    /// allowed ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_regions: Vec<String>,
+}
+
+/// DW-094 (Ent): locality routing mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalityMode {
+    /// Prefer endpoints in the edge's region; fall back to other
+    /// regions if none are available (healthy). The default.
+    #[default]
+    Prefer,
+    /// Only route to endpoints in the edge's region; fail with 503 if
+    /// none are available (no cross-region fallback).
+    Strict,
+    /// Prefer the edge's region, fall back to other regions only when
+    /// all local endpoints are ejected (local-first with failover).
+    Failover,
+}
+
+/// DW-094 (Ent): the edge's locality context — its region and zone.
+/// Threaded into the balancer at request time to enable locality-aware
+/// endpoint selection. When both `region` and `zone` are `None`, the
+/// balancer skips locality filtering (the OSS behavior).
+///
+/// The context is set from `EdgeState.labels` (the `region` and `zone`
+/// keys) when running as an edge, or from the `DWARA_REGION`/
+/// `DWARA_ZONE` environment variables in embedded mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalityContext {
+    /// The edge's region (e.g. `us-east-1`).
+    pub region: Option<String>,
+    /// The edge's zone (e.g. `us-east-1a`).
+    pub zone: Option<String>,
+}
+
+impl LocalityContext {
+    /// Create a new locality context.
+    pub fn new(region: Option<String>, zone: Option<String>) -> Self {
+        Self { region, zone }
+    }
+
+    /// Whether locality-aware routing should be applied (at least one
+    /// of region/zone is set).
+    pub fn is_set(&self) -> bool {
+        self.region.is_some() || self.zone.is_some()
+    }
+
+    /// Whether an endpoint region matches this context's region.
+    /// An endpoint with no region is always a match (locality-agnostic).
+    pub fn region_matches(&self, endpoint_region: Option<&str>) -> bool {
+        match (&self.region, endpoint_region) {
+            (Some(ctx_region), Some(ep_region)) => ctx_region == ep_region,
+            _ => true,
+        }
+    }
+
+    /// Whether an endpoint zone matches this context's zone.
+    /// An endpoint with no zone is always a match (zone-agnostic).
+    pub fn zone_matches(&self, endpoint_zone: Option<&str>) -> bool {
+        match (&self.zone, endpoint_zone) {
+            (Some(ctx_zone), Some(ep_zone)) => ctx_zone == ep_zone,
+            _ => true,
+        }
+    }
+
+    /// Load the locality context from environment variables
+    /// (`DWARA_REGION`, `DWARA_ZONE`). Returns a context with `None`
+    /// values when the variables are not set.
+    pub fn from_env() -> Self {
+        Self {
+            region: std::env::var("DWARA_REGION").ok(),
+            zone: std::env::var("DWARA_ZONE").ok(),
+        }
+    }
 }
 
 /// Peak-EWMA load-balancing tuning (DW-090, `upstreams[].peak_ewma`).
@@ -4113,6 +4231,16 @@ pub struct Endpoint {
         skip_serializing_if = "is_default_weight"
     )]
     pub weight: u32,
+    /// DW-094 (Ent): the region this endpoint belongs to (e.g.
+    /// `us-east-1`, `eu-west-1`). Used by locality-aware load balancing
+    /// and data residency enforcement. Optional — endpoints without a
+    /// region are treated as locality-agnostic (always eligible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// DW-094 (Ent): the zone within a region (e.g. `us-east-1a`).
+    /// Used for zone-aware routing within a region. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
 }
 
 fn default_endpoint_weight() -> u32 {

@@ -23,6 +23,8 @@ fn eps(specs: &[(&str, u16, u32)]) -> Vec<Endpoint> {
             address: a.to_string(),
             port: p,
             weight: w,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -36,6 +38,8 @@ fn eps_from_weights(prefix: &str, weights: &[u32]) -> Vec<Endpoint> {
             address: format!("{prefix}{i}"),
             port: 80,
             weight: w,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -176,6 +180,8 @@ proptest! {
             address: format!("10.2.0.{n}"),
             port: 80,
             weight: 1,
+            region: None,
+            zone: None,
         });
         lb.rebuild(&grown, LoadBalancer::IpHash, Duration::ZERO);
         let after = owned_keys(&lb, &keys);
@@ -370,11 +376,15 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
                 address: "10.9.0.1".into(),
                 port: 80,
                 weight: w.0,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "10.9.0.2".into(),
                 port: 80,
                 weight: w.1,
+                region: None,
+                zone: None,
             },
         ],
         connection_cap: None,
@@ -394,6 +404,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     }
 }
 

@@ -499,6 +499,7 @@ pub fn translate(
                             timeouts: None,
                             oauth2_client_credentials: None,
                             dns_discovery: None,
+                            locality: None,
                         };
                         upstreams.push(upstream);
 

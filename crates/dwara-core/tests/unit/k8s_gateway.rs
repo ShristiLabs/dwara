@@ -101,6 +101,8 @@ fn make_endpoint(ip: &str, port: u16) -> DwaraEndpoint {
         address: ip.to_string(),
         port,
         weight: 1,
+        region: None,
+        zone: None,
     }
 }
 

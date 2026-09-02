@@ -51,6 +51,8 @@ fn eps(specs: &[(&str, u16)]) -> Vec<Endpoint> {
             address: a.to_string(),
             port: p,
             weight: 1,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -581,11 +583,15 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
                     address: "127.0.0.1".into(),
                     port: a_port,
                     weight: 1,
+                    region: None,
+                    zone: None,
                 },
                 Endpoint {
                     address: "127.0.0.1".into(),
                     port: b_port,
                     weight: 1,
+                    region: None,
+                    zone: None,
                 },
             ],
             connection_cap: None,
@@ -600,6 +606,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -802,6 +809,7 @@ fn upstream_cfg(
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     }
 }
 
@@ -896,6 +904,8 @@ async fn single_pool_with_health(
             address: "127.0.0.1".into(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
         LoadBalancer::RoundRobin,
         health,
@@ -929,11 +939,15 @@ async fn status_pool_with_health(
                 address: "127.0.0.1".into(),
                 port: a_port,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "127.0.0.1".into(),
                 port: b_port,
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
         LoadBalancer::RoundRobin,
@@ -1065,6 +1079,8 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
                 address: "127.0.0.1".into(),
                 port: 9_000,
                 weight: 1,
+                region: None,
+                zone: None,
             }],
             connection_cap: None,
             slow_start_ms: None,
@@ -1078,6 +1094,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         }],
         consumers: vec![],
         policies: vec![],

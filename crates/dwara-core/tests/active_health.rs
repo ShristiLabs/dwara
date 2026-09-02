@@ -95,6 +95,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -276,11 +277,15 @@ async fn failing_endpoint_leaves_rotation_within_two_intervals() {
                 address: "127.0.0.1".into(),
                 port: good,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "127.0.0.1".into(),
                 port: bad,
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
     );
@@ -325,6 +330,8 @@ async fn recovery_by_probe_returns_endpoint_to_rotation() {
             address: "127.0.0.1".into(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let (dp, _probes) = launch(&gw);
@@ -352,11 +359,15 @@ async fn tcp_probes_eject_dead_endpoint() {
                 address: "127.0.0.1".into(),
                 port,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "127.0.0.1".into(),
                 port: dead_port(),
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
     );
@@ -382,11 +393,15 @@ async fn respawn_cancels_and_respawns_probe_tasks_without_leaks() {
                 address: "127.0.0.1".into(),
                 port,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "127.0.0.1".into(),
                 port: dead_port(),
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
     );
@@ -600,6 +615,8 @@ async fn reserved_paths_shadow_configured_routes() {
                     address: "127.0.0.1".into(),
                     port: 9,
                     weight: 1,
+                    region: None,
+                    zone: None,
                 }],
                 connection_cap: None,
                 slow_start_ms: None,
@@ -613,6 +630,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
+                locality: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -719,6 +737,8 @@ fn validation_bounds_active_health_knobs() {
         address: "127.0.0.1".into(),
         port: 9,
         weight: 1,
+        region: None,
+        zone: None,
     }];
 
     let default = ActiveHealth::default();
@@ -776,6 +796,8 @@ fn validation_rejects_zero_active_thresholds() {
             address: "127.0.0.1".into(),
             port: 9,
             weight: 1,
+            region: None,
+            zone: None,
         }];
         g
     };
@@ -897,6 +919,8 @@ async fn probe_interarrival_respects_full_jitter_bounds() {
             address: "127.0.0.1".into(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let _dp_probes = launch(&gw);
@@ -1061,6 +1085,8 @@ async fn failing_endpoint_ejected_within_250ms_and_picks_avoid_it() {
             address: "127.0.0.1".into(),
             port: bad,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let (dp, _probes) = launch(&gw);
@@ -1110,11 +1136,15 @@ async fn probes_alone_readmit_ejected_endpoint_with_zero_traffic() {
                 address: "127.0.0.1".into(),
                 port: good,
                 weight: 1,
+                region: None,
+                zone: None,
             },
             Endpoint {
                 address: "127.0.0.1".into(),
                 port: flaky_port,
                 weight: 1,
+                region: None,
+                zone: None,
             },
         ],
     );
@@ -1167,6 +1197,8 @@ async fn probe_success_resets_the_passive_failure_streak() {
             address: "127.0.0.1".into(),
             port: good,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     gw.upstreams[0].health = Some(PassiveHealth {
@@ -1237,6 +1269,8 @@ async fn probe_failures_do_not_feed_the_ratio_window() {
             address: "127.0.0.1".into(),
             port: bad,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     gw.upstreams[0].health = Some(PassiveHealth {
@@ -1276,6 +1310,8 @@ async fn reload_toggles_probe_tasks_with_the_active_health_block() {
             address: "127.0.0.1".into(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let state = Arc::new(ConfigState::new());
@@ -1323,6 +1359,8 @@ async fn reserved_paths_survive_query_strings_and_total_ejection() {
             address: "127.0.0.1".into(),
             port: bad,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let (dp, _probes) = launch(&gw);

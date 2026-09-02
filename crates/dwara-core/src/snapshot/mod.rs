@@ -5671,6 +5671,78 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        // DW-094 (Ent): locality-aware routing and data residency
+        // validation.
+        if let Some(loc) = &u.locality {
+            // Data residency: allowed_regions must be non-empty when
+            // enforce_data_residency is true.
+            if loc.enforce_data_residency && loc.allowed_regions.is_empty() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "locality.allowed_regions",
+                    "locality.allowed_regions must be non-empty when \
+                     enforce_data_residency is true",
+                ));
+            }
+            // Region/zone fields on endpoints must be non-empty strings.
+            for (i, ep) in u.endpoints.iter().enumerate() {
+                if let Some(r) = &ep.region {
+                    if r.is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            &format!("endpoints[{i}].region"),
+                            "endpoint region must be a non-empty string",
+                        ));
+                    }
+                }
+                if let Some(z) = &ep.zone {
+                    if z.is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            &format!("endpoints[{i}].zone"),
+                            "endpoint zone must be a non-empty string",
+                        ));
+                    }
+                }
+            }
+            // When data residency is enforced, at least one endpoint
+            // must satisfy the allowed_regions constraint (or have no
+            // region — locality-agnostic endpoints are always allowed).
+            if loc.enforce_data_residency {
+                let has_satisfiable = u.endpoints.iter().any(|ep| {
+                    ep.region
+                        .as_ref()
+                        .is_none_or(|r| loc.allowed_regions.contains(r))
+                });
+                if !has_satisfiable {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "locality.allowed_regions",
+                        "no endpoint satisfies the allowed_regions constraint \
+                         (every endpoint has a region not in the allowed list)",
+                    ));
+                }
+            }
+            // denied_regions must not overlap with allowed_regions.
+            for d in &loc.denied_regions {
+                if loc.allowed_regions.contains(d) {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "locality.denied_regions",
+                        format!(
+                            "region '{}' appears in both allowed_regions and \
+                             denied_regions (contradictory)",
+                            d
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     // DW-035: mTLS consumer mapping validation.

@@ -422,6 +422,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
+                locality: None,
             },
         );
 
@@ -491,6 +492,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                         oauth2_client_credentials: None,
                         dns_discovery: None,
                         peak_ewma: None,
+                        locality: None,
                     },
                 );
                 services.insert(
@@ -626,6 +628,8 @@ fn parse_endpoint(s: &str) -> Option<Endpoint> {
         address: host.to_string(),
         port,
         weight: 1,
+        region: None,
+        zone: None,
     })
 }
 

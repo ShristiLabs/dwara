@@ -103,6 +103,8 @@ fn bench_gateway() -> Gateway {
                     address: format!("10.0.{u}.{e}"),
                     port: 8080,
                     weight: 1,
+                    region: None,
+                    zone: None,
                 })
                 .collect(),
             connection_cap: None,
@@ -117,6 +119,7 @@ fn bench_gateway() -> Gateway {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         })
         .collect();
     Gateway {
@@ -217,6 +220,8 @@ fn bench_micro(c: &mut Criterion) {
             address: format!("10.1.0.{e}"),
             port: 8080,
             weight: if e == 0 { 3 } else { 1 },
+            region: None,
+            zone: None,
         })
         .collect();
     let wrr = UpstreamLb::new(&endpoints, LoadBalancer::RoundRobin, Duration::from_secs(0));

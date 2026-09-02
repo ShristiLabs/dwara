@@ -816,6 +816,14 @@ pub struct DataPlane {
     /// of a generation — reloads never re-notify a window already
     /// reported.
     quota_near_limit_seen: std::sync::Mutex<std::collections::HashSet<(String, &'static str, i64)>>,
+    /// DW-094 (Ent): the edge's locality context (region/zone). Set
+    /// once at startup via [`DataPlane::set_locality_context`] from env
+    /// vars (`DWARA_REGION`/`DWARA_ZONE`) or edge labels. Applied to
+    /// every upstream's load balancer on `new` and `refresh` so
+    /// locality-aware routing filters endpoints by region/zone before
+    /// the LB algorithm runs. Default (empty) = no locality filtering
+    /// (the OSS behavior).
+    locality_ctx: std::sync::RwLock<crate::config::LocalityContext>,
 }
 
 /// The gateway-level concurrency admission for one generation (DW-015 +
@@ -1041,6 +1049,7 @@ impl DataPlane {
             #[cfg(feature = "ent")]
             convergence: std::sync::RwLock::new(None),
             quota_near_limit_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
+            locality_ctx: std::sync::RwLock::new(crate::config::LocalityContext::from_env()),
             state,
         };
         dp.obs.set_config_generation(generation);
@@ -1049,6 +1058,10 @@ impl DataPlane {
         // one inline, so both paths must seed the collector).
         dp.obs.set_route_slos(slos);
         dp.rebuild_authn();
+        // DW-094 (Ent): apply the edge's locality context (from env vars
+        // or edge labels) to every upstream's load balancer. On `refresh`,
+        // the context is re-applied to the new registry.
+        dp.apply_locality_to_registry();
         Arc::new(dp)
     }
 
@@ -1066,6 +1079,32 @@ impl DataPlane {
     /// Set once at startup and on every reload.
     pub fn set_license_status(&self, status: i64) {
         self.obs.set_license_status(status);
+    }
+
+    /// DW-094 (Ent): set the edge's locality context (region/zone).
+    /// Overrides the env-var-derived context set at construction. Applied
+    /// immediately to the current registry's balancers and to every
+    /// future registry built by `refresh`. Used by the CP/DP edge
+    /// runtime to propagate the edge's labels (set by the controller)
+    /// to the dataplane's load balancers.
+    pub fn set_locality_context(&self, ctx: crate::config::LocalityContext) {
+        *self
+            .locality_ctx
+            .write()
+            .expect("locality ctx lock poisoned") = ctx;
+        self.apply_locality_to_registry();
+    }
+
+    /// DW-094 (Ent): apply the stored locality context to every upstream
+    /// balancer in the current registry. Called on `new`, `refresh`, and
+    /// `set_locality_context`.
+    fn apply_locality_to_registry(&self) {
+        let ctx = self
+            .locality_ctx
+            .read()
+            .expect("locality ctx lock poisoned")
+            .clone();
+        self.current().registry.set_locality_context(ctx);
     }
 
     /// Attach the Redis connection for the distributed rate limiter
@@ -1543,6 +1582,10 @@ impl DataPlane {
             stream.set_enabled(armed);
         }
         self.rebuild_authn();
+        // DW-094 (Ent): re-apply the edge's locality context to the new
+        // registry's balancers (the registry was just rebuilt with fresh
+        // upstream handles whose balancers start with an empty context).
+        self.apply_locality_to_registry();
     }
 
     /// The current (snapshot, registry) generation pair. pub(super):

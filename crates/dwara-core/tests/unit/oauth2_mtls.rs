@@ -302,6 +302,8 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
             address: "127.0.0.1".into(),
             port: 9001,
             weight: 1,
+            region: None,
+            zone: None,
         }],
         connection_cap: None,
         slow_start_ms: None,
@@ -315,6 +317,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
         oauth2_client_credentials: Some(cfg),
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     }
 }
 

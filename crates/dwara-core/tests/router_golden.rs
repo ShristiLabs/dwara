@@ -104,6 +104,8 @@ fn inject_default_services(gateway: &mut Gateway) {
             address: "127.0.0.1".into(),
             port: 9,
             weight: 1,
+            region: None,
+            zone: None,
         }],
         connection_cap: None,
         slow_start_ms: None,
@@ -117,6 +119,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

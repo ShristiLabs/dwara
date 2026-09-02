@@ -339,6 +339,7 @@ pub fn translate_ingress(
                         timeouts: None,
                         oauth2_client_credentials: None,
                         dns_discovery: None,
+                        locality: None,
                     };
                     upstreams.push(upstream);
 

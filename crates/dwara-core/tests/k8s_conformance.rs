@@ -91,6 +91,8 @@ fn endpoints_with(svc: &str, port: u16) -> HashMap<String, Vec<DwaraEndpoint>> {
             address: "10.0.0.1".to_string(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     m
@@ -416,6 +418,8 @@ fn multiple_rules_produce_multiple_routes() {
             address: "10.0.0.2".to_string(),
             port: 80,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let result = translate(&gw, &[route], &eps);
@@ -515,6 +519,8 @@ fn ingress_path_prefix() {
             address: "10.0.0.1".to_string(),
             port: 8080,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let result = ingress::translate_ingress(&[ingress], "dwara", &eps).expect("translation ok");
@@ -572,6 +578,8 @@ fn ingress_tls_produces_https_listener() {
             address: "10.0.0.1".to_string(),
             port: 80,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let result = ingress::translate_ingress(&[ingress], "dwara", &eps).expect("translation ok");
@@ -631,6 +639,8 @@ fn ingress_unsupported_annotation_emits_warning() {
             address: "10.0.0.1".to_string(),
             port: 80,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let result = ingress::translate_ingress(&[ingress], "dwara", &eps).expect("translation ok");

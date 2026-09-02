@@ -95,6 +95,8 @@ fn make_endpoints(svc: &str, port: u16) -> HashMap<String, Vec<DwaraEndpoint>> {
             address: "10.0.0.1".to_string(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     m
@@ -296,6 +298,8 @@ fn reconciler_merges_gateway_api_and_ingress() {
             address: "10.0.0.2".to_string(),
             port: 80,
             weight: 1,
+            region: None,
+            zone: None,
         }],
     );
     let ing = make_ingress("my-ingress", "ingress-svc", 80);

@@ -555,6 +555,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 address: "10.0.0.1".into(),
                 port: 0,
                 weight: 0,
+                region: None,
+                zone: None,
             }],
             connection_cap: None,
             slow_start_ms: None,
@@ -568,6 +570,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         }],
         consumers: vec![Consumer {
             name: "c".into(),

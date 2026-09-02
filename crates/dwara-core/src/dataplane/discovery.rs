@@ -190,6 +190,8 @@ fn endpoints_from_a(addrs: &[(IpAddr, u32)], port: u16) -> Vec<Endpoint> {
             address: ip.to_string(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -203,6 +205,8 @@ fn endpoints_from_srv(addrs: &[(IpAddr, u16, u32)]) -> Vec<Endpoint> {
             address: ip.to_string(),
             port: *port,
             weight: 1,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -243,6 +247,7 @@ async fn refresh_cycle(
     let health = lb.health_config();
     let events = lb.events();
     let peak_ewma = lb.peak_ewma_config();
+    let locality = lb.locality_config();
     match result {
         Ok((endpoints, ttl)) => {
             // min_endpoints floor: if the resolution yielded fewer than
@@ -270,6 +275,7 @@ async fn refresh_cycle(
                 health,
                 events.as_ref(),
                 peak_ewma.as_deref(),
+                locality.as_deref(),
             );
             obs.set_dns_discovery_endpoints(upstream_name, endpoints.len() as i64);
             tracing::info!(
@@ -306,6 +312,7 @@ async fn refresh_cycle(
                     health,
                     events.as_ref(),
                     peak_ewma.as_deref(),
+                    locality.as_deref(),
                 );
                 obs.set_dns_discovery_endpoints(upstream_name, 0);
             }

@@ -972,6 +972,14 @@ impl UpstreamHandle {
         &self.lb
     }
 
+    /// DW-094 (Ent): set the edge's locality context on this upstream's
+    /// load balancer. Called by the dataplane at startup to propagate
+    /// the edge's region/zone (from env vars or edge labels) to every
+    /// upstream's balancer.
+    pub fn set_locality_context(&self, ctx: crate::config::LocalityContext) {
+        self.lb.set_locality_context(ctx);
+    }
+
     /// The trust roots this upstream's TLS connections verify against
     /// (#121): None for plaintext `http1` upstreams, the configured
     /// `trusted_ca_file` bundle when set, else the webpki public set.
@@ -1300,6 +1308,7 @@ fn build_handle(
                 u.health.as_ref(),
                 upstream_events.as_ref(),
                 u.peak_ewma.as_ref(),
+                u.locality.as_ref(),
             );
             Arc::clone(prev)
         }
@@ -1310,6 +1319,7 @@ fn build_handle(
             u.health.as_ref(),
             upstream_events.as_ref(),
             u.peak_ewma.as_ref(),
+            u.locality.as_ref(),
         ),
     };
     let retry_budget = previous
@@ -1537,6 +1547,15 @@ impl UpstreamRegistry {
         self.handles.keys().map(String::as_str).collect()
     }
 
+    /// DW-094 (Ent): set the edge's locality context on every upstream's
+    /// load balancer in this registry. Called by the dataplane at startup
+    /// and on refresh to propagate the edge's region/zone.
+    pub fn set_locality_context(&self, ctx: crate::config::LocalityContext) {
+        for handle in self.handles.values() {
+            handle.set_locality_context(ctx.clone());
+        }
+    }
+
     /// DW-091: rebuild the split for `service` from explicit
     /// `(upstream_name, weight)` pairs. Returns a new registry with
     /// the replacement split; the handles are shared (Arc bump). The
@@ -1641,6 +1660,7 @@ mod tests {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

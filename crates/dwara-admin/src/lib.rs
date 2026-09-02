@@ -2195,6 +2195,10 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // GET /mcp/calls -- query MCP tool call analytics. Query params:
         // from_ms, to_ms, session_id, consumer, tool_name, limit.
         ("GET", "/mcp/calls") => mcp_calls_query(ctx, &req, &request_id).await,
+        // DW-094 (Ent): locality-aware routing status — the edge's
+        // region/zone and per-upstream locality config + endpoint
+        // regions. Optional `?upstream=` filter narrows to one upstream.
+        ("GET", "/locality/status") => locality_status(ctx, &req, &request_id).await,
         // A known resource path with the wrong method.
         (
             _,
@@ -2223,6 +2227,7 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/mcp/sessions"
             | "/mcp/tools"
             | "/mcp/calls"
+            | "/locality/status"
             | "/quotas/usage",
         ) => envelope(
             405,
@@ -2465,6 +2470,80 @@ async fn ai_credential_pools(
         providers.insert(name.clone(), entry);
     }
     json_response(200, serde_json::json!({ "providers": providers }))
+}
+
+/// DW-094 (Ent): locality-aware routing status — the edge's region/zone
+/// and per-upstream locality config + endpoint regions. Optional
+/// `?upstream=` query param narrows to one upstream.
+async fn locality_status(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    let params = query_params(req.uri());
+    let filter = params
+        .iter()
+        .find(|(k, _)| k == "upstream")
+        .map(|(_, v)| v.as_str());
+    let mut upstreams = serde_json::Map::new();
+    for u in &gateway.upstreams {
+        if let Some(name) = filter {
+            if u.name != name {
+                continue;
+            }
+        }
+        let endpoints: Vec<serde_json::Value> = u
+            .endpoints
+            .iter()
+            .map(|ep| {
+                serde_json::json!({
+                    "address": ep.address,
+                    "port": ep.port,
+                    "region": ep.region,
+                    "zone": ep.zone,
+                    "weight": ep.weight,
+                })
+            })
+            .collect();
+        let locality = u.locality.as_ref().map(|loc| {
+            serde_json::json!({
+                "mode": match loc.mode {
+                    dwara_core::config::LocalityMode::Prefer => "prefer",
+                    dwara_core::config::LocalityMode::Strict => "strict",
+                    dwara_core::config::LocalityMode::Failover => "failover",
+                },
+                "enforce_data_residency": loc.enforce_data_residency,
+                "allowed_regions": loc.allowed_regions,
+                "denied_regions": loc.denied_regions,
+            })
+        });
+        upstreams.insert(
+            u.name.clone(),
+            serde_json::json!({
+                "load_balancer": format!("{:?}", u.load_balancer).to_lowercase(),
+                "locality": locality,
+                "endpoints": endpoints,
+            }),
+        );
+    }
+    if let Some(name) = filter {
+        if !upstreams.contains_key(name) {
+            return envelope(
+                404,
+                "upstream_not_found",
+                &format!("upstream '{}' is not in the current config", name),
+                request_id,
+            );
+        }
+    }
+    json_response(
+        200,
+        serde_json::json!({
+            "upstreams": upstreams,
+        }),
+    )
 }
 
 /// GET /consumers/{name}/credentials: the rotation runbook's view —

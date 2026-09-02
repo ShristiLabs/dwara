@@ -210,6 +210,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
+                locality: None,
             },
         );
     }
@@ -243,6 +244,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         oauth2_client_credentials: None,
                         dns_discovery: None,
                         peak_ewma: None,
+                        locality: None,
                     },
                 );
             } else {
@@ -302,6 +304,8 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                             address: "127.0.0.1".to_string(),
                             port: 9000,
                             weight: 1,
+                            region: None,
+                            zone: None,
                         }],
                         connection_cap: None,
                         slow_start_ms: None,
@@ -314,6 +318,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         oauth2_client_credentials: None,
                         dns_discovery: None,
                         peak_ewma: None,
+                        locality: None,
                     },
                 );
             }
@@ -491,6 +496,8 @@ fn derive_service_endpoint(svc: &KongService, warnings: &mut Vec<String>) -> Opt
             address: host.clone(),
             port,
             weight: 1,
+            region: None,
+            zone: None,
         });
     }
     let _ = warnings;
@@ -511,6 +518,8 @@ fn parse_url(url: &str) -> Option<Endpoint> {
         address: host.to_string(),
         port,
         weight: 1,
+        region: None,
+        zone: None,
     })
 }
 
@@ -522,6 +531,8 @@ fn parse_target(target: &str, weight: u32) -> Option<Endpoint> {
         address: host.to_string(),
         port,
         weight,
+        region: None,
+        zone: None,
     })
 }
 

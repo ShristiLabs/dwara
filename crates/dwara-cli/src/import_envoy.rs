@@ -291,6 +291,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
+                locality: None,
             },
         );
         // Each cluster gets a service with the same name.
@@ -468,6 +469,8 @@ fn extract_cluster_endpoints(cluster: &EnvoyCluster, warnings: &mut Vec<String>)
                             address: sa.address.clone(),
                             port: sa.port_value,
                             weight: 1,
+                            region: None,
+                            zone: None,
                         });
                     }
                 }

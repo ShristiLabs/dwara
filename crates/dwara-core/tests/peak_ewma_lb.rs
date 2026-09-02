@@ -18,6 +18,8 @@ fn eps(specs: &[(&str, u16, u32)]) -> Vec<Endpoint> {
             address: a.to_string(),
             port: p,
             weight: w,
+            region: None,
+            zone: None,
         })
         .collect()
 }
@@ -60,6 +62,7 @@ fn peak_ewma_custom_initial_cost() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     let cost = lb2.peak_ewma_cost(0).expect("tracker exists");
     // 100 ms = 100_000_000 ns
@@ -84,6 +87,7 @@ fn peak_ewma_peak_replacement() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     // Initial cost: 100 ms = 100_000_000 ns.
     assert_eq!(lb.peak_ewma_cost(0).unwrap(), 100_000_000);
@@ -111,6 +115,7 @@ fn peak_ewma_decay_toward_lower_rtt() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     // Initial cost: 500 ms.
     assert_eq!(lb.peak_ewma_cost(0).unwrap(), 500_000_000);
@@ -162,6 +167,7 @@ fn peak_ewma_picks_faster_endpoint_after_latency() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     // Record a slow latency on endpoint 0 (peak replacement to 500 ms).
     lb.record_latency(0, Duration::from_millis(500));
@@ -186,6 +192,7 @@ fn peak_ewma_tracker_carries_across_rebuild() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     // Record a high latency on endpoint 0.
     lb.record_latency(0, Duration::from_millis(500));
@@ -198,6 +205,7 @@ fn peak_ewma_tracker_carries_across_rebuild() {
         None,
         None,
         Some(&cfg),
+        None,
     );
     // The cost should be unchanged (the tracker was carried, not reset).
     assert_eq!(

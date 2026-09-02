@@ -524,6 +524,8 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
                         address,
                         port,
                         weight,
+                        region: None,
+                        zone: None,
                     })
                 })
                 .collect()
@@ -546,6 +548,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     })
 }
 
@@ -1116,11 +1119,15 @@ mod tests {
                         address: "127.0.0.1".to_string(),
                         port: 9000,
                         weight: 1,
+                        region: None,
+                        zone: None,
                     },
                     Endpoint {
                         address: "127.0.0.1".to_string(),
                         port: 9001,
                         weight: 2,
+                        region: None,
+                        zone: None,
                     },
                 ],
                 connection_cap: None,
@@ -1134,6 +1141,7 @@ mod tests {
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
+                locality: None,
             }],
             consumers: Vec::new(),
             policies: Vec::new(),

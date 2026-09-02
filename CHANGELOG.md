@@ -9,6 +9,23 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- global load balancing + data residency (DW-094, Ent): locality-aware
+  endpoint selection and data sovereignty enforcement for upstreams.
+  Endpoints now carry optional `region` and `zone` fields, and an
+  upstream may declare a `locality` block with a routing `mode`
+  (`prefer`, `strict`, `failover`), `enforce_data_residency` with
+  `allowed_regions`/`denied_regions` lists. The balancer applies
+  locality filtering AFTER health filtering and BEFORE the LB
+  algorithm runs: `prefer` routes to same-region endpoints with
+  fallback; `strict` denies (503) when no local endpoints are
+  available; `failover` tries local first and falls back only when
+  all local endpoints are ejected. Zone-level refinement further
+  prefers same-zone endpoints within the local region. The edge's
+  locality context (region/zone) is loaded from `DWARA_REGION`/
+  `DWARA_ZONE` env vars at startup, or set via
+  `DataPlane::set_locality_context` from edge labels (CP/DP). An admin
+  API endpoint `GET /locality/status` reports the per-upstream locality
+  config and endpoint regions.
 - federated analytics (DW-095, Ent): a `PublishAnalytics` gRPC RPC on
   the `DwaraControlPlane` service that lets edges (`dwara-edge`) stream
   analytics batches to the controller (`dwara-controller`) for fleet-

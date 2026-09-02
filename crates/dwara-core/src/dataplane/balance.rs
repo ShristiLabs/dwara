@@ -141,6 +141,12 @@ struct LbEndpoint {
     port: u16,
     /// Configured weight (>= 1; validation enforces).
     weight: u32,
+    /// DW-094 (Ent): the endpoint's region (e.g. `us-east-1`), used
+    /// for locality-aware routing and data residency enforcement.
+    /// `None` = locality-agnostic (always eligible).
+    region: Option<String>,
+    /// DW-094 (Ent): the endpoint's zone within a region.
+    zone: Option<String>,
     /// When this endpoint entered the set (slow-start clock). Carried
     /// across rebuilds for unchanged addresses.
     entered: Instant,
@@ -176,6 +182,8 @@ impl LbEndpoint {
             address: e.address.clone(),
             port: e.port,
             weight: e.weight.max(1),
+            region: e.region.clone(),
+            zone: e.zone.clone(),
             entered: Instant::now(),
             inflight: Arc::new(AtomicU64::new(0)),
             current_weight: Arc::new(AtomicI64::new(0)),
@@ -194,6 +202,8 @@ impl LbEndpoint {
             address: old.address.clone(),
             port: old.port,
             weight: e.weight.max(1),
+            region: e.region.clone(),
+            zone: e.zone.clone(),
             entered: old.entered,
             inflight: Arc::clone(&old.inflight),
             current_weight: Arc::clone(&old.current_weight),
@@ -228,6 +238,10 @@ struct LbState {
     /// build (a custom `decay_ms` / `default_rtt_ms` survives a DNS
     /// refresh). `None` when the algorithm is not `peak_ewma`.
     peak_ewma_cfg: Option<Arc<PeakEwmaConfig>>,
+    /// DW-094 (Ent): resolved locality-aware routing config for this
+    /// upstream. `None` = locality-aware routing disabled (the OSS
+    /// behavior — all endpoints are eligible regardless of region/zone).
+    locality: Option<Arc<crate::config::UpstreamLocality>>,
 }
 
 impl LbState {
@@ -248,6 +262,24 @@ impl LbState {
     }
 }
 
+/// DW-094 (Ent): the result of locality-aware filtering in
+/// [`UpstreamLb::choose`].
+enum LocalityResult {
+    /// The candidate set was restricted to a subset (local endpoints
+    /// or residency-filtered endpoints).
+    Restricted(Vec<usize>),
+    /// The candidate set was not changed (locality filtering was a
+    /// no-op — either all endpoints are local, or the mode allows
+    /// fallback and no restriction was needed). Carries the original
+    /// health-filtered candidate set.
+    Unchanged(Option<Vec<usize>>),
+    /// The request was denied — no endpoints satisfy the locality
+    /// constraints (strict mode with no local endpoints, or data
+    /// residency with no allowed endpoints). The balancer returns
+    /// `None` → 503.
+    Denied,
+}
+
 /// A load balancer for one upstream: lock-free picks over an atomically
 /// swappable endpoint set. Share via `Arc`; cheap to read from any task.
 pub struct UpstreamLb {
@@ -266,6 +298,11 @@ pub struct UpstreamLb {
     /// event-bound health trackers, matching the reload path). None
     /// when the balancer was built without events.
     events: Option<crate::events::UpstreamEmitter>,
+    /// DW-094 (Ent): the edge's locality context (region/zone). Set
+    /// once at dataplane startup from env vars or edge labels; read on
+    /// every pick when the upstream has `locality` configured. Default
+    /// (empty) = no locality filtering (the OSS behavior).
+    locality_ctx: RwLock<crate::config::LocalityContext>,
 }
 
 fn xorshift(x: u64) -> u64 {
@@ -284,6 +321,7 @@ fn system_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_state(
     endpoints: &[Endpoint],
     algorithm: LoadBalancer,
@@ -292,6 +330,7 @@ fn build_state(
     health: Option<Arc<HealthParams>>,
     events: Option<&crate::events::UpstreamEmitter>,
     peak_ewma_cfg: Option<&PeakEwmaConfig>,
+    locality: Option<&crate::config::UpstreamLocality>,
 ) -> LbState {
     let mut eps: Vec<LbEndpoint> = Vec::with_capacity(endpoints.len());
     for e in endpoints {
@@ -354,6 +393,7 @@ fn build_state(
         health,
         peak_ewma_tau_ns,
         peak_ewma_cfg,
+        locality: locality.map(|l| Arc::new(l.clone())),
     }
 }
 
@@ -493,7 +533,7 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) -> Arc<Self> {
-        Self::new_with_health_and_events(endpoints, algorithm, slow_start, health, None, None)
+        Self::new_with_health_and_events(endpoints, algorithm, slow_start, health, None, None, None)
     }
 
     /// `new_with_health` with ejection/recovery events (DW-044): fresh
@@ -503,6 +543,9 @@ impl UpstreamLb {
     /// with. `None` behaves exactly like [`UpstreamLb::new_with_health`].
     /// `peak_ewma` (DW-090) is the per-upstream tuning consulted only
     /// when `algorithm == PeakEwma`; `None` uses the built-in defaults.
+    /// `locality` (DW-094, Ent) is the per-upstream locality-aware
+    /// routing config; `None` disables locality filtering.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_health_and_events(
         endpoints: &[Endpoint],
         algorithm: LoadBalancer,
@@ -510,6 +553,7 @@ impl UpstreamLb {
         health: Option<&PassiveHealth>,
         events: Option<&crate::events::UpstreamEmitter>,
         peak_ewma: Option<&PeakEwmaConfig>,
+        locality: Option<&crate::config::UpstreamLocality>,
     ) -> Arc<Self> {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -520,12 +564,13 @@ impl UpstreamLb {
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
         Arc::new(UpstreamLb {
             state: ArcSwap::from_pointee(build_state(
-                endpoints, algorithm, slow_start, None, health, events, peak_ewma,
+                endpoints, algorithm, slow_start, None, health, events, peak_ewma, locality,
             )),
             rng: AtomicU64::new(seed | 1),
             health_clock: RwLock::new(system_now_ms),
             fail_open_picks: AtomicU64::new(0),
             events: events.cloned(),
+            locality_ctx: RwLock::new(crate::config::LocalityContext::default()),
         })
     }
 
@@ -553,7 +598,9 @@ impl UpstreamLb {
         slow_start: Duration,
         health: Option<&PassiveHealth>,
     ) {
-        self.rebuild_with_health_and_events(endpoints, algorithm, slow_start, health, None, None);
+        self.rebuild_with_health_and_events(
+            endpoints, algorithm, slow_start, health, None, None, None,
+        );
     }
 
     /// `rebuild_with_health` with ejection/recovery events (DW-044):
@@ -563,6 +610,10 @@ impl UpstreamLb {
     /// like [`UpstreamLb::rebuild_with_health`]. `peak_ewma` (DW-090) is
     /// the per-upstream tuning consulted only when
     /// `algorithm == PeakEwma`; `None` uses the built-in defaults.
+    /// `locality` (DW-094, Ent) is the per-upstream locality-aware
+    /// routing config; `None` disables locality filtering for this
+    /// generation.
+    #[allow(clippy::too_many_arguments)]
     pub fn rebuild_with_health_and_events(
         &self,
         endpoints: &[Endpoint],
@@ -571,6 +622,7 @@ impl UpstreamLb {
         health: Option<&PassiveHealth>,
         events: Option<&crate::events::UpstreamEmitter>,
         peak_ewma: Option<&PeakEwmaConfig>,
+        locality: Option<&crate::config::UpstreamLocality>,
     ) {
         let prev = self.state.load_full();
         let health = health.map(|h| Arc::new(HealthParams::from_config(h)));
@@ -582,6 +634,7 @@ impl UpstreamLb {
             health,
             events,
             peak_ewma,
+            locality,
         )));
     }
 
@@ -593,6 +646,10 @@ impl UpstreamLb {
     /// re-resolving the config form. `peak_ewma` (DW-090) is the
     /// per-upstream tuning consulted only when
     /// `algorithm == PeakEwma`; `None` uses the built-in defaults.
+    /// `locality` (DW-094, Ent) is the per-upstream locality-aware
+    /// routing config; `None` disables locality filtering for this
+    /// generation.
+    #[allow(clippy::too_many_arguments)]
     pub fn rebuild_with_resolved_health_and_events(
         &self,
         endpoints: &[Endpoint],
@@ -601,6 +658,7 @@ impl UpstreamLb {
         health: Option<Arc<HealthParams>>,
         events: Option<&crate::events::UpstreamEmitter>,
         peak_ewma: Option<&PeakEwmaConfig>,
+        locality: Option<&crate::config::UpstreamLocality>,
     ) {
         let prev = self.state.load_full();
         self.state.store(Arc::new(build_state(
@@ -611,6 +669,7 @@ impl UpstreamLb {
             health,
             events,
             peak_ewma,
+            locality,
         )));
     }
 
@@ -679,6 +738,21 @@ impl UpstreamLb {
     /// event-bound health trackers.
     pub fn events(&self) -> Option<crate::events::UpstreamEmitter> {
         self.events.clone()
+    }
+
+    /// DW-094 (Ent): set the edge's locality context (region/zone).
+    /// Applied to every upstream's balancer by the dataplane at startup
+    /// (from env vars or edge labels). Read on every pick when the
+    /// upstream has `locality` configured; ignored otherwise.
+    pub fn set_locality_context(&self, ctx: crate::config::LocalityContext) {
+        *self.locality_ctx.write().expect("locality ctx poisoned") = ctx;
+    }
+
+    /// DW-094 (Ent): the resolved locality-aware routing config for the
+    /// current generation, if any. The discovery task reads this so a
+    /// live endpoint-set swap preserves the locality config.
+    pub fn locality_config(&self) -> Option<Arc<crate::config::UpstreamLocality>> {
+        self.state.load().locality.clone()
     }
 
     /// `address:port` of endpoint `idx` in the current set.
@@ -824,6 +898,111 @@ impl UpstreamLb {
         })
     }
 
+    /// DW-094 (Ent): the result of locality-aware filtering on the
+    /// candidate set.
+    fn apply_locality(
+        &self,
+        state: &LbState,
+        loc: &crate::config::UpstreamLocality,
+        ctx: &crate::config::LocalityContext,
+        health_cand: &Option<Vec<usize>>,
+    ) -> LocalityResult {
+        // Materialize the current candidate set (health-filtered or full).
+        let base: Vec<usize> = health_cand
+            .clone()
+            .unwrap_or_else(|| (0..state.endpoints.len()).collect());
+        // Step 1: data residency hard constraint. Drop endpoints whose
+        // region is not in `allowed_regions` (when `enforce_data_residency`
+        // is true) or is in `denied_regions`. Endpoints with no region
+        // are always allowed (locality-agnostic).
+        let residency_filtered: Vec<usize> = base
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let ep = &state.endpoints[i];
+                if let Some(ep_region) = ep.region.as_deref() {
+                    if loc.denied_regions.iter().any(|d| d == ep_region) {
+                        return false;
+                    }
+                }
+                if loc.enforce_data_residency {
+                    if let Some(ep_region) = ep.region.as_deref() {
+                        if !loc.allowed_regions.iter().any(|a| a == ep_region) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+        // If residency filtering empties the set, the constraint is
+        // unsatisfiable — deny (residency is a hard constraint).
+        if residency_filtered.is_empty() && loc.enforce_data_residency {
+            return LocalityResult::Denied;
+        }
+        let after_residency: &[usize] = if residency_filtered.len() < base.len() {
+            &residency_filtered
+        } else {
+            &base
+        };
+        // Step 2: locality mode filtering. Partition into local (region
+        // matches the edge's context) and non-local. Within the local
+        // set, further prefer endpoints in the same zone when the edge
+        // has a zone set (zone-level locality).
+        let local: Vec<usize> = after_residency
+            .iter()
+            .copied()
+            .filter(|&i| ctx.region_matches(state.endpoints[i].region.as_deref()))
+            .collect();
+        // Zone refinement: if the edge has a zone and there are
+        // same-zone endpoints in the local set, restrict to them.
+        let zone_refined: Vec<usize> = if ctx.zone.is_some() {
+            let zoned: Vec<usize> = local
+                .iter()
+                .copied()
+                .filter(|&i| ctx.zone_matches(state.endpoints[i].zone.as_deref()))
+                .collect();
+            if !zoned.is_empty() && zoned.len() < local.len() {
+                zoned
+            } else {
+                local
+            }
+        } else {
+            local
+        };
+        match loc.mode {
+            crate::config::LocalityMode::Strict => {
+                if zone_refined.is_empty() {
+                    LocalityResult::Denied
+                } else if zone_refined.len() < after_residency.len() {
+                    LocalityResult::Restricted(zone_refined)
+                } else {
+                    LocalityResult::Unchanged(health_cand.clone())
+                }
+            }
+            crate::config::LocalityMode::Prefer => {
+                if !zone_refined.is_empty() && zone_refined.len() < after_residency.len() {
+                    LocalityResult::Restricted(zone_refined)
+                } else {
+                    LocalityResult::Unchanged(health_cand.clone())
+                }
+            }
+            crate::config::LocalityMode::Failover => {
+                if !zone_refined.is_empty() {
+                    if zone_refined.len() < after_residency.len() {
+                        LocalityResult::Restricted(zone_refined)
+                    } else {
+                        LocalityResult::Unchanged(health_cand.clone())
+                    }
+                } else if residency_filtered.len() < base.len() {
+                    LocalityResult::Restricted(residency_filtered.clone())
+                } else {
+                    LocalityResult::Unchanged(health_cand.clone())
+                }
+            }
+        }
+    }
+
     /// Algorithm choice over one pinned snapshot; returns an endpoint
     /// index valid in `state`.
     ///
@@ -850,7 +1029,7 @@ impl UpstreamLb {
         if state.endpoints.is_empty() {
             return None;
         }
-        let (cand, filtered) = match &state.health {
+        let (cand, _health_filtered) = match &state.health {
             Some(params) => {
                 let now = self.now_ms();
                 let avail: Vec<usize> = state
@@ -874,6 +1053,33 @@ impl UpstreamLb {
             }
             None => (None, false),
         };
+        // DW-094 (Ent): locality-aware filtering. Applied AFTER health
+        // filtering and BEFORE the algorithm. When the upstream has no
+        // `locality` config or the edge has no locality context, this is
+        // a no-op (the OSS behavior). See [`UpstreamLb::apply_locality`]
+        // for the mode/residency semantics.
+        let cand = match &state.locality {
+            Some(loc) => {
+                let ctx = self.locality_ctx.read().expect("locality ctx poisoned");
+                if ctx.is_set() {
+                    match self.apply_locality(state, loc, &ctx, &cand) {
+                        LocalityResult::Restricted(set) => Some(set),
+                        LocalityResult::Unchanged(orig) => orig,
+                        LocalityResult::Denied => return None,
+                    }
+                } else {
+                    cand
+                }
+            }
+            None => cand,
+        };
+        // Recompute `filtered`: true when the candidate set is a strict
+        // subset of the full endpoint set (health-filtered and/or
+        // locality-filtered). Used by the IpHash ring walk to skip
+        // ineligible owners.
+        let filtered = cand
+            .as_ref()
+            .is_some_and(|c| c.len() < state.endpoints.len());
         // Single candidate: no algorithm to run (random-2 needs two), but
         // a half-open selection still spends its probe slot.
         let n = cand.as_ref().map_or(state.endpoints.len(), Vec::len);
@@ -1055,6 +1261,8 @@ mod tests {
                 address: a.to_string(),
                 port: p,
                 weight: w,
+                region: None,
+                zone: None,
             })
             .collect()
     }
@@ -1079,12 +1287,14 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(fresh.effective_weight(&fresh.endpoints[1]), 1);
         let mut aged = build_state(
             &spec,
             LoadBalancer::RoundRobin,
             Duration::from_secs(10),
+            None,
             None,
             None,
             None,
@@ -1102,6 +1312,7 @@ mod tests {
             &spec,
             LoadBalancer::RoundRobin,
             Duration::ZERO,
+            None,
             None,
             None,
             None,

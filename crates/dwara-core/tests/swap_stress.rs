@@ -167,6 +167,8 @@ fn lb_state_swap_stress() {
                 address: "127.0.0.1".into(),
                 port: p,
                 weight: 1,
+                region: None,
+                zone: None,
             })
             .collect()
     }

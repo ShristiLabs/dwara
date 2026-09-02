@@ -2662,11 +2662,25 @@
           "maximum": 65535,
           "minimum": 0
         },
+        "region": {
+          "description": "DW-094 (Ent): the region this endpoint belongs to (e.g.\n`us-east-1`, `eu-west-1`). Used by locality-aware load balancing\nand data residency enforcement. Optional — endpoints without a\nregion are treated as locality-agnostic (always eligible).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "weight": {
           "description": "Relative traffic weight (default 1 for all endpoints).",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "zone": {
+          "description": "DW-094 (Ent): the zone within a region (e.g. `us-east-1a`).\nUsed for zone-aware routing within a region. Optional.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -3251,6 +3265,26 @@
           "description": "Peak-EWMA latency-aware load balancing (DW-090, Finagle-style):\nfavors low-latency endpoints and degrades outliers. Each endpoint\ncarries an atomic EWMA cost tracker (nanosecond resolution) updated\nwith the Finagle peak-EWMA formula: a new RTT that EXCEEDS the\ncurrent cost replaces it outright (the \"peak\"), otherwise the cost\ndecays toward the new RTT at rate `exp(-td / tau)`. Selection picks\nthe endpoint with the lowest `cost_ns * (inflight + 1)` score, so a\nslow endpoint with few in-flight requests can still win a pick\nwhile a fast one is saturated. Tunable via `upstreams[].peak_ewma`\n(decay tau and the initial cost); defaults are 10 s decay and a\n250 ms initial cost. Carried across rebuilds by `address:port`,\nexactly like in-flight counters and health trackers.",
           "type": "string",
           "const": "peak_ewma"
+        }
+      ]
+    },
+    "LocalityMode": {
+      "description": "DW-094 (Ent): locality routing mode.",
+      "oneOf": [
+        {
+          "description": "Prefer endpoints in the edge's region; fall back to other\nregions if none are available (healthy). The default.",
+          "type": "string",
+          "const": "prefer"
+        },
+        {
+          "description": "Only route to endpoints in the edge's region; fail with 503 if\nnone are available (no cross-region fallback).",
+          "type": "string",
+          "const": "strict"
+        },
+        {
+          "description": "Prefer the edge's region, fall back to other regions only when\nall local endpoints are ejected (local-first with failover).",
+          "type": "string",
+          "const": "failover"
         }
       ]
     },
@@ -5480,6 +5514,17 @@
           "$ref": "#/$defs/LoadBalancer",
           "default": "round_robin"
         },
+        "locality": {
+          "description": "DW-094 (Ent): locality-aware routing and data residency. When\npresent, the balancer filters or prefers endpoints by region/zone\nbefore applying the configured `load_balancer` algorithm. Ent-only:\nrejected at validation when the `ent` cargo feature is off.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamLocality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "max_pending": {
           "description": "Maximum number of requests WAITING for an outbound connection slot\nto this upstream (DW-015). 0/absent (the default) means unbounded\nqueueing — the DW-008 `connection_cap` behavior. A positive value\nrejects excess requests IMMEDIATELY with 503 \"upstream saturated\"\ninstead of letting them wait.",
           "type": [
@@ -5561,6 +5606,37 @@
       "required": [
         "name"
       ]
+    },
+    "UpstreamLocality": {
+      "description": "DW-094 (Ent): locality-aware routing and data residency configuration\nfor an upstream. Controls how the balancer uses endpoint `region`/\n`zone` fields to filter or prefer endpoints.",
+      "type": "object",
+      "properties": {
+        "allowed_regions": {
+          "description": "The allowed regions when `enforce_data_residency` is true. An\nendpoint with no `region` field is always allowed (locality-\nagnostic). An endpoint with a `region` not in this list is\ndropped. Must be non-empty when `enforce_data_residency` is true.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_regions": {
+          "description": "The denied regions (optional). An endpoint with a `region` in\nthis list is always dropped, regardless of other settings. Use\nthis to exclude specific regions without enumerating all\nallowed ones.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enforce_data_residency": {
+          "description": "Data residency enforcement: when true, the balancer drops\nendpoints whose `region` is not in `allowed_regions` BEFORE\napplying the locality mode. This is a hard constraint —\nendpoints outside the allowed set are never used, even as a\nfallback. Use this to comply with data sovereignty requirements\n(e.g. EU traffic must stay in EU regions).",
+          "type": "boolean",
+          "default": false
+        },
+        "mode": {
+          "description": "The routing mode (DW-094):\n- `prefer`: prefer endpoints in the edge's region; fall back to\n  other regions if none are available (healthy).\n- `strict`: only route to endpoints in the edge's region; fail\n  with 503 if none are available (no cross-region fallback).\n- `failover`: prefer the edge's region, fall back to other\n  regions only when all local endpoints are ejected (like\n  `prefer` but with a stricter local-first policy — local\n  endpoints are always tried first even if unhealthy).",
+          "$ref": "#/$defs/LocalityMode",
+          "default": "prefer"
+        }
+      },
+      "additionalProperties": false
     },
     "UpstreamProtocol": {
       "type": "string",

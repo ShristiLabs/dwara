@@ -80,6 +80,8 @@ fn test_upstream(
             address,
             port,
             weight: 1,
+            region: None,
+            zone: None,
         }],
         connection_cap: cap,
         slow_start_ms: None,
@@ -98,6 +100,7 @@ fn test_upstream(
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     }
 }
 
@@ -407,6 +410,8 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
                 address: "127.0.0.1".into(),
                 port: 9001,
                 weight: 1,
+                region: None,
+                zone: None,
             }],
             connection_cap: Some(0),
             slow_start_ms: None,
@@ -425,6 +430,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
+            locality: None,
         }],
         consumers: vec![],
         policies: vec![],

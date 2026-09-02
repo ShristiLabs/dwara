@@ -97,6 +97,8 @@ fn upstream(name: &str) -> Upstream {
             address: "127.0.0.1".into(),
             port: 9001,
             weight: 1,
+            region: None,
+            zone: None,
         }],
         connection_cap: None,
         slow_start_ms: None,
@@ -110,6 +112,7 @@ fn upstream(name: &str) -> Upstream {
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
+        locality: None,
     }
 }
 
@@ -375,6 +378,8 @@ fn validation_rejects_duplicate_endpoints_with_padded_addresses() {
         address: "  127.0.0.1  ".into(),
         port: 9001,
         weight: 1,
+        region: None,
+        zone: None,
     });
     assert_single_issue(&gw, "upstream", "pool", "endpoints[1].address");
 
@@ -384,6 +389,8 @@ fn validation_rejects_duplicate_endpoints_with_padded_addresses() {
         address: "  127.0.0.1  ".into(),
         port: 9002,
         weight: 1,
+        region: None,
+        zone: None,
     });
     assert!(validate(&gw).is_empty(), "{:?}", validate(&gw));
 }
