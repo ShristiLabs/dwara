@@ -253,6 +253,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     })
 }
 
@@ -1167,6 +1168,7 @@ mod tests {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         }
     }
 
@@ -1343,6 +1345,7 @@ mod tests {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         };
         let state = gateway_to_state(&gw);
         assert!(state.resources.is_empty());

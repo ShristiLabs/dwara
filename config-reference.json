@@ -92,6 +92,17 @@
         "$ref": "#/$defs/Consumer"
       }
     },
+    "fleet": {
+      "description": "Fleet operations (DW-098, enterprise feature). Absent (the\ndefault): no fleet skew policy is enforced — the controller\naccepts edges regardless of version. When present, the `ent`\ncargo feature is compiled in, AND a valid license with the\n`fleet_operations` feature claim is loaded, the controller\nchecks each connecting edge's version against the skew policy\nand the admin API exposes `GET /fleet/skew` (per-edge skew\nstatus) and `GET /fleet/status` (fleet-wide convergence +\nversion distribution). When the `ent` feature is NOT compiled\nin, or the license lacks the claim, the block is accepted but\ninert (the controller accepts all edges).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FleetConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "geoip": {
       "description": "The GeoIP database (DW-050): MaxMind-format .mmdb file backing\n`authorization.geoip` country/ASN predicates. Absent: geo rules\nare rejected by validation (an unevaluable gate is an authoring\nerror, not a silent pass).",
       "anyOf": [
@@ -2766,6 +2777,90 @@
         }
       },
       "additionalProperties": false
+    },
+    "FleetConfig": {
+      "description": "Fleet operations config (DW-098, `gateway.fleet`).\n\nConfigures the version-skew policy and rolling-upgrade order for a\nfleet of edge instances managed by a controller (CP/DP split,\nDW-066). When present and the `ent` cargo feature is compiled in\nAND a valid license with the `fleet_operations` feature claim is\nloaded, the controller checks each connecting edge's version\nagainst the skew policy and the admin API exposes fleet status\nendpoints. When the `ent` feature is NOT compiled in, or the\nlicense lacks the claim, the block is accepted but inert.",
+      "type": "object",
+      "properties": {
+        "controller_version": {
+          "description": "The controller's own version (the reference version edges are\nchecked against). When absent, the gateway binary's\n`CARGO_PKG_VERSION` is used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Master switch. Default false: fleet operations are inert and\nthe controller accepts edges regardless of version. When true\n(and licensed), the skew policy is enforced.",
+          "type": "boolean"
+        },
+        "stale_timeout_secs": {
+          "description": "How long an edge can go without being seen (no ack, no\nre-registration) before it is flagged stale, in seconds\n(default 60; validated to 5..=3600). Stale edges are reported\nby `GET /fleet/status` but are NOT automatically removed — the\noperator decides whether to drain or wait.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "upgrade": {
+          "description": "The rolling-upgrade and version-skew policy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FleetUpgradeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FleetUpgradeConfig": {
+      "description": "Rolling-upgrade and version-skew policy (DW-098,\n`gateway.fleet.upgrade`).",
+      "type": "object",
+      "properties": {
+        "halt_on_failure": {
+          "description": "Whether to fail the rollout if any edge reports a failed ack\n(applied: false). Default true: the controller stops pushing\nto further edges when one fails. false: the controller\ncontinues pushing to all matching edges regardless of\nindividual failures (the operator monitors and rolls back\nmanually).",
+          "type": "boolean"
+        },
+        "max_concurrent": {
+          "description": "The maximum number of edges that may be upgraded\nsimultaneously (a rolling-upgrade concurrency cap). 0 (the\ndefault) means no cap — all matching edges are upgraded at\nonce. A typical canary rollout sets this to 1.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "order": {
+          "description": "The upgrade order: which edges to upgrade first, identified by\nlabel selector. Edges matching earlier entries are upgraded\nbefore edges matching later entries. An edge matches an entry\nwhen it has ALL the labels in the entry's `labels` map. Empty\n(the default) means no ordering — all edges are upgraded\nsimultaneously (canary/zone-based rollouts are configured by\nadding entries here).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FleetUpgradeOrderEntry"
+          }
+        },
+        "skew": {
+          "description": "The version-skew policy: how tolerant the controller is of\nedges running a different version.\n\n- `\"allow\"` — accept any version (no skew check).\n- `\"allow_minor_skew\"` (default) — edges must match the\n  controller's major version and be within 1 minor version\n  (N-1 or N+1).\n- `\"require_exact\"` — edges must match the controller's version\n  exactly.",
+          "$ref": "#/$defs/VersionSkewPolicyConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "FleetUpgradeOrderEntry": {
+      "description": "A label-selector entry in the upgrade order list.",
+      "type": "object",
+      "properties": {
+        "labels": {
+          "description": "The label selector: an edge matches this entry when it has\nALL of these labels (key=value). Must be non-empty.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "A name for this upgrade wave (for logging and the status\nendpoint). Must be non-empty.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
     },
     "FrameOptions": {
       "description": "The `X-Frame-Options` value (DW-028).",
@@ -5644,6 +5739,26 @@
         "http1",
         "http2",
         "https"
+      ]
+    },
+    "VersionSkewPolicyConfig": {
+      "description": "The version-skew policy, mirroring the CP/DP\n`cluster_sync::VersionSkewPolicy` but living in the config schema\n(so the gateway config carries it, not just the controller\nruntime).",
+      "oneOf": [
+        {
+          "description": "Allow any version skew. The edge accepts the config regardless\nof version.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Allow skew within a minor version (e.g. 1.2.x can talk to\n1.3.x, but not 2.0.x). This is the default.",
+          "type": "string",
+          "const": "allow_minor_skew"
+        },
+        {
+          "description": "Require exact version match. The edge rejects the config if\nits version differs from the controller's.",
+          "type": "string",
+          "const": "require_exact"
+        }
       ]
     },
     "Webhook": {

@@ -2199,6 +2199,13 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // region/zone and per-upstream locality config + endpoint
         // regions. Optional `?upstream=` filter narrows to one upstream.
         ("GET", "/locality/status") => locality_status(ctx, &req, &request_id).await,
+        // DW-098 (Ent): fleet operations — skew-check and fleet
+        // status. The skew-check reports the configured version-skew
+        // policy and this instance's compatibility; the status
+        // endpoint reports the full fleet config (upgrade order,
+        // concurrency cap, halt-on-failure).
+        ("GET", "/fleet/skew") => fleet_skew(ctx, &request_id).await,
+        ("GET", "/fleet/status") => fleet_status(ctx, &request_id).await,
         // A known resource path with the wrong method.
         (
             _,
@@ -2228,6 +2235,8 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/mcp/tools"
             | "/mcp/calls"
             | "/locality/status"
+            | "/fleet/skew"
+            | "/fleet/status"
             | "/quotas/usage",
         ) => envelope(
             405,
@@ -2544,6 +2553,140 @@ async fn locality_status(
             "upstreams": upstreams,
         }),
     )
+}
+
+/// DW-098 (Ent): fleet skew-check — reports the configured version-skew
+/// policy, the controller's reference version, and this instance's
+/// version compatibility. Returns 404 `fleet_not_configured` when no
+/// `fleet` block is active.
+async fn fleet_skew(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    let Some(fleet) = &gateway.fleet else {
+        return envelope(
+            404,
+            "fleet_not_configured",
+            "no fleet: block is active on this gateway",
+            request_id,
+        );
+    };
+    let this_version = env!("CARGO_PKG_VERSION");
+    let controller_version = fleet.controller_version.as_deref().unwrap_or(this_version);
+    let skew_policy = fleet
+        .upgrade
+        .as_ref()
+        .map(|u| match u.skew {
+            dwara_core::config::VersionSkewPolicyConfig::Allow => "allow",
+            dwara_core::config::VersionSkewPolicyConfig::AllowMinorSkew => "allow_minor_skew",
+            dwara_core::config::VersionSkewPolicyConfig::RequireExact => "require_exact",
+        })
+        .unwrap_or("allow_minor_skew");
+    // Check this instance's version against the policy.
+    let compatible = if !fleet.enabled {
+        true
+    } else {
+        check_version_compatibility(skew_policy, controller_version, this_version)
+    };
+    json_response(
+        200,
+        serde_json::json!({
+            "enabled": fleet.enabled,
+            "skew_policy": skew_policy,
+            "controller_version": controller_version,
+            "this_version": this_version,
+            "compatible": compatible,
+        }),
+    )
+}
+
+/// DW-098 (Ent): fleet status — reports the full fleet config
+/// (upgrade order, concurrency cap, halt-on-failure, stale timeout)
+/// and the version distribution. Returns 404 `fleet_not_configured`
+/// when no `fleet` block is active.
+async fn fleet_status(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let snapshot = ctx.state.snapshot();
+    let gateway = snapshot.gateway();
+    let Some(fleet) = &gateway.fleet else {
+        return envelope(
+            404,
+            "fleet_not_configured",
+            "no fleet: block is active on this gateway",
+            request_id,
+        );
+    };
+    let this_version = env!("CARGO_PKG_VERSION");
+    let controller_version = fleet.controller_version.as_deref().unwrap_or(this_version);
+    let upgrade = fleet.upgrade.as_ref().map(|u| {
+        let order: Vec<serde_json::Value> = u
+            .order
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "labels": entry.labels,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "skew": match u.skew {
+                dwara_core::config::VersionSkewPolicyConfig::Allow => "allow",
+                dwara_core::config::VersionSkewPolicyConfig::AllowMinorSkew => "allow_minor_skew",
+                dwara_core::config::VersionSkewPolicyConfig::RequireExact => "require_exact",
+            },
+            "max_concurrent": u.max_concurrent,
+            "halt_on_failure": u.halt_on_failure,
+            "order": order,
+        })
+    });
+    json_response(
+        200,
+        serde_json::json!({
+            "enabled": fleet.enabled,
+            "controller_version": controller_version,
+            "this_version": this_version,
+            "stale_timeout_secs": fleet.stale_timeout_secs,
+            "upgrade": upgrade,
+        }),
+    )
+}
+
+/// Check whether `this_version` is compatible with
+/// `controller_version` under the given skew policy.
+fn check_version_compatibility(policy: &str, controller_version: &str, this_version: &str) -> bool {
+    match policy {
+        "allow" => true,
+        "require_exact" => controller_version == this_version,
+        "allow_minor_skew" => {
+            let (Ok(c), Ok(e)) = (parse_semver(controller_version), parse_semver(this_version))
+            else {
+                return false;
+            };
+            c.0 == e.0 && c.1.abs_diff(e.1) <= 1
+        }
+        _ => false,
+    }
+}
+
+/// Parse a semver string (major.minor.patch, ignoring pre-release
+/// suffixes).
+fn parse_semver(s: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 3 {
+        return Err(format!("invalid version '{s}'"));
+    }
+    let major = parts[0]
+        .parse()
+        .map_err(|_| format!("invalid major in '{s}'"))?;
+    let minor = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid minor in '{s}'"))?;
+    let patch = parts[2]
+        .split('-')
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| format!("invalid patch in '{s}'"))?;
+    Ok((major, minor, patch))
 }
 
 /// GET /consumers/{name}/credentials: the rotation runbook's view —

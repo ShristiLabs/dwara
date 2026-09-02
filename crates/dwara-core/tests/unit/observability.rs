@@ -142,6 +142,7 @@ fn render_contains_families() {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         })
         .expect("publish");
     let registry =

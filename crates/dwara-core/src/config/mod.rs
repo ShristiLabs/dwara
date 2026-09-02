@@ -350,6 +350,19 @@ pub struct Gateway {
     /// shape. See [`ai::AiConfig`] and the `ai` domain docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<ai::AiConfig>,
+    /// Fleet operations (DW-098, enterprise feature). Absent (the
+    /// default): no fleet skew policy is enforced — the controller
+    /// accepts edges regardless of version. When present, the `ent`
+    /// cargo feature is compiled in, AND a valid license with the
+    /// `fleet_operations` feature claim is loaded, the controller
+    /// checks each connecting edge's version against the skew policy
+    /// and the admin API exposes `GET /fleet/skew` (per-edge skew
+    /// status) and `GET /fleet/status` (fleet-wide convergence +
+    /// version distribution). When the `ent` feature is NOT compiled
+    /// in, or the license lacks the claim, the block is accepted but
+    /// inert (the controller accepts all edges).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet: Option<FleetConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -702,6 +715,133 @@ fn default_config_convergence_drift_check_interval_ms() -> u64 {
 
 fn is_default_config_convergence_drift_check_interval_ms(v: &u64) -> bool {
     *v == 5000
+}
+
+/// Fleet operations config (DW-098, `gateway.fleet`).
+///
+/// Configures the version-skew policy and rolling-upgrade order for a
+/// fleet of edge instances managed by a controller (CP/DP split,
+/// DW-066). When present and the `ent` cargo feature is compiled in
+/// AND a valid license with the `fleet_operations` feature claim is
+/// loaded, the controller checks each connecting edge's version
+/// against the skew policy and the admin API exposes fleet status
+/// endpoints. When the `ent` feature is NOT compiled in, or the
+/// license lacks the claim, the block is accepted but inert.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetConfig {
+    /// Master switch. Default false: fleet operations are inert and
+    /// the controller accepts edges regardless of version. When true
+    /// (and licensed), the skew policy is enforced.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The rolling-upgrade and version-skew policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<FleetUpgradeConfig>,
+    /// The controller's own version (the reference version edges are
+    /// checked against). When absent, the gateway binary's
+    /// `CARGO_PKG_VERSION` is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_version: Option<String>,
+    /// How long an edge can go without being seen (no ack, no
+    /// re-registration) before it is flagged stale, in seconds
+    /// (default 60; validated to 5..=3600). Stale edges are reported
+    /// by `GET /fleet/status` but are NOT automatically removed — the
+    /// operator decides whether to drain or wait.
+    #[serde(
+        default = "default_fleet_stale_timeout_secs",
+        skip_serializing_if = "is_default_fleet_stale_timeout_secs"
+    )]
+    pub stale_timeout_secs: u64,
+}
+
+/// Rolling-upgrade and version-skew policy (DW-098,
+/// `gateway.fleet.upgrade`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetUpgradeConfig {
+    /// The version-skew policy: how tolerant the controller is of
+    /// edges running a different version.
+    ///
+    /// - `"allow"` — accept any version (no skew check).
+    /// - `"allow_minor_skew"` (default) — edges must match the
+    ///   controller's major version and be within 1 minor version
+    ///   (N-1 or N+1).
+    /// - `"require_exact"` — edges must match the controller's version
+    ///   exactly.
+    #[serde(default, skip_serializing_if = "is_default_version_skew_policy")]
+    pub skew: VersionSkewPolicyConfig,
+    /// The upgrade order: which edges to upgrade first, identified by
+    /// label selector. Edges matching earlier entries are upgraded
+    /// before edges matching later entries. An edge matches an entry
+    /// when it has ALL the labels in the entry's `labels` map. Empty
+    /// (the default) means no ordering — all edges are upgraded
+    /// simultaneously (canary/zone-based rollouts are configured by
+    /// adding entries here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<FleetUpgradeOrderEntry>,
+    /// The maximum number of edges that may be upgraded
+    /// simultaneously (a rolling-upgrade concurrency cap). 0 (the
+    /// default) means no cap — all matching edges are upgraded at
+    /// once. A typical canary rollout sets this to 1.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_concurrent: u32,
+    /// Whether to fail the rollout if any edge reports a failed ack
+    /// (applied: false). Default true: the controller stops pushing
+    /// to further edges when one fails. false: the controller
+    /// continues pushing to all matching edges regardless of
+    /// individual failures (the operator monitors and rolls back
+    /// manually).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub halt_on_failure: bool,
+}
+
+/// A label-selector entry in the upgrade order list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetUpgradeOrderEntry {
+    /// A name for this upgrade wave (for logging and the status
+    /// endpoint). Must be non-empty.
+    pub name: String,
+    /// The label selector: an edge matches this entry when it has
+    /// ALL of these labels (key=value). Must be non-empty.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+/// The version-skew policy, mirroring the CP/DP
+/// `cluster_sync::VersionSkewPolicy` but living in the config schema
+/// (so the gateway config carries it, not just the controller
+/// runtime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum VersionSkewPolicyConfig {
+    /// Allow any version skew. The edge accepts the config regardless
+    /// of version.
+    Allow,
+    /// Allow skew within a minor version (e.g. 1.2.x can talk to
+    /// 1.3.x, but not 2.0.x). This is the default.
+    #[default]
+    AllowMinorSkew,
+    /// Require exact version match. The edge rejects the config if
+    /// its version differs from the controller's.
+    RequireExact,
+}
+
+fn default_fleet_stale_timeout_secs() -> u64 {
+    60
+}
+
+fn is_default_fleet_stale_timeout_secs(v: &u64) -> bool {
+    *v == 60
+}
+
+fn is_default_version_skew_policy(p: &VersionSkewPolicyConfig) -> bool {
+    *p == VersionSkewPolicyConfig::AllowMinorSkew
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 /// The embedded analytics store config (DW-043, `gateway.analytics`).

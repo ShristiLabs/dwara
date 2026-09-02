@@ -148,6 +148,7 @@ fn base_gateway() -> Gateway {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     }
 }
 

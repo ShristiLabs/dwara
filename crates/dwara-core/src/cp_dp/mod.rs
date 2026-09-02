@@ -247,6 +247,88 @@ impl ControllerState {
     pub fn edge_count(&self) -> usize {
         self.edges.read().unwrap().len()
     }
+
+    /// DW-098 (Ent): check an edge's version against the controller's
+    /// version under the given skew policy. Returns `Ok(())` when
+    /// compatible, `Err(VersionSkewError)` otherwise. The controller
+    /// calls this on edge registration to reject incompatible edges
+    /// (or log a warning, depending on the policy's enforcement mode).
+    pub fn check_edge_version_skew(
+        &self,
+        policy: super::cluster_sync::VersionSkewPolicy,
+        controller_version: &str,
+        edge_version: &str,
+    ) -> Result<(), super::cluster_sync::VersionSkewError> {
+        super::cluster_sync::check_version_skew(policy, controller_version, edge_version)
+    }
+
+    /// DW-098 (Ent): the per-edge version skew status. Returns one
+    /// entry per registered edge with its version, the controller's
+    /// version, and whether it passes the skew check.
+    pub fn edge_skew_status(
+        &self,
+        policy: super::cluster_sync::VersionSkewPolicy,
+        controller_version: &str,
+    ) -> Vec<EdgeSkewStatus> {
+        let edges = self.edges.read().unwrap();
+        edges
+            .values()
+            .map(|info| {
+                let compatible = super::cluster_sync::check_version_skew(
+                    policy,
+                    controller_version,
+                    &info.registration.version,
+                )
+                .is_ok();
+                EdgeSkewStatus {
+                    edge_id: info.registration.edge_id.clone(),
+                    edge_version: info.registration.version.clone(),
+                    controller_version: controller_version.to_string(),
+                    compatible,
+                }
+            })
+            .collect()
+    }
+
+    /// DW-098 (Ent): the version distribution across the fleet.
+    /// Returns one entry per distinct version with the count of edges
+    /// running it.
+    pub fn version_distribution(&self) -> Vec<VersionCount> {
+        let edges = self.edges.read().unwrap();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for info in edges.values() {
+            *counts.entry(info.registration.version.clone()).or_insert(0) += 1;
+        }
+        let mut dist: Vec<VersionCount> = counts
+            .into_iter()
+            .map(|(version, count)| VersionCount { version, count })
+            .collect();
+        dist.sort_by(|a, b| b.version.cmp(&a.version));
+        dist
+    }
+}
+
+/// DW-098 (Ent): per-edge version skew status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeSkewStatus {
+    /// The edge instance ID.
+    pub edge_id: String,
+    /// The edge's version string.
+    pub edge_version: String,
+    /// The controller's version string.
+    pub controller_version: String,
+    /// Whether the edge's version is compatible with the controller's
+    /// under the configured skew policy.
+    pub compatible: bool,
+}
+
+/// DW-098 (Ent): a version + the number of edges running it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionCount {
+    /// The version string.
+    pub version: String,
+    /// The number of edges running this version.
+    pub count: usize,
 }
 
 impl Default for ControllerState {

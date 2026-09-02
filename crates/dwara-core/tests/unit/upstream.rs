@@ -59,6 +59,7 @@ fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Sna
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -457,6 +458,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     });
     let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
     assert!(fields.contains(&"connection_cap"));
@@ -515,6 +517,7 @@ fn with_root_certificates_rejects_malformed_root() {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         })
         .expect("publish");
     let bad = CertificateDer::from(vec![0u8; 8]); // not a DER certificate

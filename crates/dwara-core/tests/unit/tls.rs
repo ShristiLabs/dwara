@@ -442,6 +442,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
     (gateway, tls)
 }

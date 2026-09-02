@@ -351,6 +351,10 @@ pub struct ControllerServer {
     state: Arc<ControllerState>,
     broadcaster: Arc<UpdateBroadcaster>,
     analytics_collector: Option<Arc<dyn super::analytics::AnalyticsCollector>>,
+    /// DW-098 (Ent): the fleet operations config (version-skew
+    /// policy + upgrade order). When set and enabled, the controller
+    /// checks each connecting edge's version against the skew policy.
+    fleet_config: Option<crate::config::FleetConfig>,
 }
 
 impl ControllerServer {
@@ -360,6 +364,7 @@ impl ControllerServer {
             state,
             broadcaster: Arc::new(UpdateBroadcaster::new(256)),
             analytics_collector: None,
+            fleet_config: None,
         }
     }
 
@@ -370,6 +375,14 @@ impl ControllerServer {
         collector: Arc<dyn super::analytics::AnalyticsCollector>,
     ) -> Self {
         self.analytics_collector = Some(collector);
+        self
+    }
+
+    /// DW-098 (Ent): attach the fleet operations config. When set
+    /// and enabled, the controller checks each connecting edge's
+    /// version against the skew policy on registration.
+    pub fn with_fleet_config(mut self, fleet: crate::config::FleetConfig) -> Self {
+        self.fleet_config = Some(fleet);
         self
     }
 
@@ -408,6 +421,50 @@ impl DwaraControlPlane for ControllerServer {
             current_generation = registration.current_generation,
             "edge registered for config updates"
         );
+
+        // DW-098 (Ent): check the edge's version against the
+        // controller's version under the configured skew policy. When
+        // the policy rejects the edge, the registration is logged but
+        // the edge is still accepted (fail-open — a skew violation is
+        // a warning, not a hard reject, so a mixed-version fleet
+        // during a rolling upgrade stays connected).
+        if let Some(fleet) = &self.fleet_config {
+            if fleet.enabled {
+                let controller_version = fleet
+                    .controller_version
+                    .as_deref()
+                    .unwrap_or(env!("CARGO_PKG_VERSION"));
+                let policy = fleet
+                    .upgrade
+                    .as_ref()
+                    .map(|u| match u.skew {
+                        crate::config::VersionSkewPolicyConfig::Allow => {
+                            crate::cp_dp::cluster_sync::VersionSkewPolicy::Allow
+                        }
+                        crate::config::VersionSkewPolicyConfig::AllowMinorSkew => {
+                            crate::cp_dp::cluster_sync::VersionSkewPolicy::AllowMinorSkew
+                        }
+                        crate::config::VersionSkewPolicyConfig::RequireExact => {
+                            crate::cp_dp::cluster_sync::VersionSkewPolicy::RequireExact
+                        }
+                    })
+                    .unwrap_or_default();
+                if let Err(err) = self.state.check_edge_version_skew(
+                    policy,
+                    controller_version,
+                    &registration.version,
+                ) {
+                    tracing::warn!(
+                        code = "cp_edge_version_skew",
+                        edge_id = %edge_id,
+                        edge_version = %registration.version,
+                        controller_version = %controller_version,
+                        error = %err,
+                        "edge version skew violation (edge accepted but flagged)"
+                    );
+                }
+            }
+        }
 
         self.state.register_edge(registration);
 

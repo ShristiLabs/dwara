@@ -272,6 +272,7 @@ impl Reconciler {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         };
 
         for gw in &self.gateways {

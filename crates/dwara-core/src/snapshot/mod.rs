@@ -1905,6 +1905,102 @@ fn validate_config_convergence(gateway: &Gateway, issues: &mut Vec<ValidationIss
     }
 }
 
+/// Validate the `gateway.fleet` block (DW-098): the stale timeout
+/// must be in range, upgrade order entries must have non-empty names
+/// and non-empty label selectors, and label selectors must not
+/// overlap (an edge would match two waves, making the order
+/// ambiguous).
+fn validate_fleet(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(fleet) = &gateway.fleet else {
+        return;
+    };
+    if !fleet.enabled {
+        return;
+    }
+    let stale = fleet.stale_timeout_secs;
+    if !(5..=3600).contains(&stale) {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "fleet.stale_timeout_secs",
+            format!("fleet.stale_timeout_secs {stale} is out of range: must be 5..=3600"),
+        ));
+    }
+    if let Some(cv) = &fleet.controller_version {
+        if cv.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "fleet.controller_version",
+                "fleet.controller_version must be a non-empty semver string when present",
+            ));
+        }
+    }
+    if let Some(upgrade) = &fleet.upgrade {
+        let mut seen_names = std::collections::HashSet::new();
+        for (i, entry) in upgrade.order.iter().enumerate() {
+            if entry.name.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("fleet.upgrade.order[{i}].name"),
+                    "upgrade order entry name must be a non-empty string",
+                ));
+            }
+            if !seen_names.insert(entry.name.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("fleet.upgrade.order[{i}].name"),
+                    format!(
+                        "upgrade order entry name '{}' is duplicated (each wave must have a \
+                         unique name)",
+                        entry.name
+                    ),
+                ));
+            }
+            if entry.labels.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("fleet.upgrade.order[{i}].labels"),
+                    "upgrade order entry labels must be a non-empty label selector",
+                ));
+            }
+        }
+        // Check for overlapping label selectors (an edge matching two
+        // waves makes the order ambiguous).
+        for (i, a) in upgrade.order.iter().enumerate() {
+            for (j, b) in upgrade.order.iter().enumerate().skip(i + 1) {
+                if labels_overlap(&a.labels, &b.labels) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("fleet.upgrade.order[{i}].labels"),
+                        format!(
+                            "upgrade order entries '{}' (index {i}) and '{}' (index {j}) have \
+                             overlapping label selectors (an edge would match both, making the \
+                             order ambiguous)",
+                            a.name, b.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Whether two label selectors overlap (one is a subset of the other).
+/// Two selectors overlap when every label in the smaller set is
+/// present in the larger set with the same value.
+fn labels_overlap(
+    a: &std::collections::HashMap<String, String>,
+    b: &std::collections::HashMap<String, String>,
+) -> bool {
+    let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    smaller.iter().all(|(k, v)| larger.get(k) == Some(v))
+}
+
 /// Validate the `gateway.oidc_providers` list (DW-034): each issuer must
 /// be an absolute `http(s)://` URL, the introspection cache TTL must be
 /// in `1..=3600`, the `consumer` reference (when set) must name a known
@@ -3753,6 +3849,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // runs at startup in dwara-bin, where a missing claim logs a
     // warning and falls back to local-only mode).
     validate_config_convergence(gateway, &mut issues);
+    validate_fleet(gateway, &mut issues);
 
     // DW-034: OIDC providers (issuer URL shape, introspection cache TTL
     // bounds, consumer references, trusted_ca_file readability).
@@ -6725,6 +6822,7 @@ impl Snapshot {
                 config_convergence: None,
                 plugins: Vec::new(),
                 ai: None,
+                fleet: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

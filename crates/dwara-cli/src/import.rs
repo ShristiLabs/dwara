@@ -252,6 +252,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     }
 }
 

@@ -480,6 +480,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
 
     (gateway, warnings)

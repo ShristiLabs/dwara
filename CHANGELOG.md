@@ -9,6 +9,20 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- fleet operations (DW-098, Ent): version-skew policy and rolling-
+  upgrade orchestration for a fleet of edge instances. A
+  `gateway.fleet` block configures the skew policy (`allow`,
+  `allow_minor_skew` (default, N-1/N+1), `require_exact`), the
+  upgrade order (label-selector waves), the concurrency cap
+  (`max_concurrent`), and `halt_on_failure`. The controller checks
+  each connecting edge's version against the policy on registration
+  (fail-open: a skew violation is logged as a warning, not a hard
+  reject, so a mixed-version fleet stays connected during a rolling
+  upgrade). Admin API endpoints `GET /fleet/skew` (per-instance
+  compatibility check) and `GET /fleet/status` (full fleet config +
+  upgrade order) report the fleet state. `ControllerState` exposes
+  `edge_skew_status` and `version_distribution` for fleet-wide
+  observability.
 - global load balancing + data residency (DW-094, Ent): locality-aware
   endpoint selection and data sovereignty enforcement for upstreams.
   Endpoints now carry optional `region` and `zone` fields, and an

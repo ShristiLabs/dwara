@@ -591,6 +591,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
 
     (gateway, warnings)

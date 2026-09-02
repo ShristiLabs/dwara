@@ -484,6 +484,7 @@ pub fn translate_ingress(
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
 
     Ok(TranslationResult {

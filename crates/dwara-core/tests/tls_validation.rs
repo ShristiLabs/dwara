@@ -173,6 +173,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     }
 }
 

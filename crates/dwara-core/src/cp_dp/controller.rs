@@ -98,6 +98,14 @@ impl ControllerRuntime {
         &self.server
     }
 
+    /// DW-098 (Ent): attach the fleet operations config. When set
+    /// and enabled, the controller checks each connecting edge's
+    /// version against the skew policy on registration.
+    pub fn with_fleet_config(mut self, fleet: crate::config::FleetConfig) -> Self {
+        self.server = self.server.with_fleet_config(fleet);
+        self
+    }
+
     /// Run the controller: gRPC server + config watch loop.
     ///
     /// Returns when the gRPC server shuts down (or on fatal error).

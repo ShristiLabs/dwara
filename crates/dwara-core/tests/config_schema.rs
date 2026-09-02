@@ -223,6 +223,7 @@ fn empty_document_is_valid() {
             config_convergence: None,
             plugins: Vec::new(),
             ai: None,
+            fleet: None,
         }
     );
 }

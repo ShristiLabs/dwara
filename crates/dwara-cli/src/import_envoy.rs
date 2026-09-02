@@ -449,6 +449,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
+        fleet: None,
     };
 
     (gateway, warnings)
