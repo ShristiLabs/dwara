@@ -96,6 +96,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         }],
         consumers: vec![],
         policies: vec![],
@@ -123,6 +124,8 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 
@@ -497,6 +500,8 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -554,6 +559,9 @@ async fn reserved_paths_shadow_configured_routes() {
                     security_headers: None,
                     masking: None,
                     plugins: Vec::new(),
+                    graphql: None,
+                    grpc_web: None,
+                    translation: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -597,6 +605,9 @@ async fn reserved_paths_shadow_configured_routes() {
                     security_headers: None,
                     masking: None,
                     plugins: Vec::new(),
+                    graphql: None,
+                    grpc_web: None,
+                    translation: None,
                 },
             ],
             services: vec![Service {
@@ -633,6 +644,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 dns_discovery: None,
                 peak_ewma: None,
                 locality: None,
+                pq: false,
             }],
             consumers: vec![],
             policies: vec![],
@@ -658,6 +670,8 @@ async fn reserved_paths_shadow_configured_routes() {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

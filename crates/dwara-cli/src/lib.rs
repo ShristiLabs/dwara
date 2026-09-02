@@ -32,6 +32,8 @@ pub mod import_envoy;
 pub mod loadgen;
 // DW-057: Plugin scaffolding (`dwara plugin new`).
 pub mod plugin_scaffold;
+// DW-102: Replay time-travel debugging (`dwara replay`).
+pub mod replay;
 // DW-065: Terraform-compatible state tool (`dwara tf`).
 pub mod tf;
 // DW-064: Kubernetes Gateway API conformance report generator

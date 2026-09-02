@@ -496,11 +496,13 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
                 certificates: vec![],
                 sni_routes: vec![],
                 zero_rtt: ZeroRttPolicy::Reject,
+                pq: false,
             }),
             proxy_protocol: false,
             policies: vec![],
             authorization: None,
             alt_svc: None,
+            l4: None,
         }],
         routes: vec![Route {
             name: "r".into(),
@@ -545,6 +547,9 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             security_headers: None,
             masking: None,
             plugins: Vec::new(),
+            graphql: None,
+            grpc_web: None,
+            translation: None,
         }],
         services: vec![],
         upstreams: vec![Upstream {
@@ -571,6 +576,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         }],
         consumers: vec![Consumer {
             name: "c".into(),
@@ -623,6 +629,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
     let once = gateway_to_yaml(&gw).expect("serialize");
     let reparsed = parse_gateway(&once).expect("normalized text reparses");

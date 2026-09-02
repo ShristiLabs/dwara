@@ -224,6 +224,8 @@ fn empty_document_is_valid() {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         }
     );
 }

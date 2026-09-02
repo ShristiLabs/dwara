@@ -102,6 +102,34 @@ enum Command {
         #[command(subcommand)]
         kind: PluginKind,
     },
+    /// Replay time-travel debugging (DW-102): re-run the gateway's
+    /// decision path for recorded requests against a candidate config
+    /// and emit a per-request diff. Exit 0 if no diffs, 1 if diffs
+    /// found (useful as a CI gate).
+    Replay {
+        /// Path to a recording JSON file (exported from analytics or
+        /// authored by hand): `{baseline_config, requests[]}`.
+        #[arg(long)]
+        recording: Option<String>,
+        /// Read requests from the analytics store directly (requires
+        /// `--analytics-db` and `--baseline`). The lower bound
+        /// timestamp (Unix ms).
+        #[arg(long)]
+        from: Option<i64>,
+        /// The upper bound timestamp (Unix ms) for `--from`.
+        #[arg(long, requires = "from")]
+        to: Option<i64>,
+        /// Path to the analytics SQLite database (for `--from/--to`).
+        #[arg(long)]
+        analytics_db: Option<String>,
+        /// Path to the baseline config YAML (for `--from/--to`; the
+        /// config the requests were captured under).
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Path to the candidate config YAML (the new config to test).
+        #[arg(long)]
+        config: String,
+    },
     /// Kubernetes Gateway API tools (DW-064). Feature-gated behind `k8s`.
     #[cfg(feature = "k8s")]
     K8s {
@@ -503,6 +531,14 @@ fn main() {
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
+        Command::Replay {
+            recording,
+            from,
+            to,
+            analytics_db,
+            baseline,
+            config,
+        } => run_replay_cmd(recording, from, to, analytics_db, baseline, config),
     };
     std::process::exit(code);
 }
@@ -699,4 +735,132 @@ fn run_conformance_report(output: Option<String>) -> i32 {
             0
         }
     }
+}
+
+/// DW-102: `dwara replay` — re-run the gateway's decision path for
+/// recorded requests against a candidate config and emit a per-request
+/// diff. Exit 0 if no diffs, 1 if diffs found, 2 on load error.
+fn run_replay_cmd(
+    recording: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+    analytics_db: Option<String>,
+    baseline: Option<String>,
+    config: String,
+) -> i32 {
+    let candidate_text = match read(&config) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    // Two modes: --recording (a JSON file with baseline + requests) or
+    // --from/--to (read from the analytics store directly). The
+    // --recording mode is the primary path; --from/--to reads raw rows
+    // from the analytics SQLite database and builds a recording
+    // in-memory.
+    let recording_text = if let Some(path) = recording {
+        match read(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
+    } else if let (Some(from_ms), Some(to_ms), Some(db_path), Some(baseline_path)) =
+        (from, to, analytics_db, baseline)
+    {
+        let baseline_text = match read(&baseline_path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        };
+        match build_recording_from_store(&db_path, from_ms, to_ms, &baseline_text) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("cannot read analytics store: {e}");
+                return 2;
+            }
+        }
+    } else {
+        eprintln!(
+            "replay: provide --recording <path>, or --from/--to with --analytics-db and --baseline"
+        );
+        return 2;
+    };
+    match dwara_cli::replay::run_replay(&recording_text, &candidate_text) {
+        Ok(report) => {
+            print!("{}", report.render());
+            if report.diff_count == 0 {
+                0
+            } else {
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("replay: {e}");
+            2
+        }
+    }
+}
+
+/// Build a recording JSON from the analytics store: read raw rows in
+/// the `[from_ms, to_ms]` window and serialize them with the baseline
+/// config. Returns the recording JSON text.
+fn build_recording_from_store(
+    db_path: &str,
+    from_ms: i64,
+    to_ms: i64,
+    baseline_config: &str,
+) -> Result<String, String> {
+    use dwara_cli::replay::{RecordedRequest, Recording};
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("cannot open analytics database {db_path}: {e}"))?;
+    // Ensure the schema is migrated (the store may have been written by
+    // an older build; the v10 columns are nullable so a pre-v10 DB
+    // still reads — the ALTER TABLE in migrate() adds them).
+    dwara_core::analytics::schema::migrate(&conn)
+        .map_err(|e| format!("cannot migrate analytics database: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT method, route, consumer, ts_ms, request_headers_redacted, auth_identity
+             FROM raw
+             WHERE ts_ms >= ?1 AND ts_ms <= ?2
+             ORDER BY ts_ms",
+        )
+        .map_err(|e| format!("cannot query raw table: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![from_ms, to_ms], |r| {
+            let method: String = r.get(0)?;
+            let path: String = r.get(1)?;
+            let _consumer: String = r.get(2)?;
+            let ts_ms: i64 = r.get(3)?;
+            let headers_json: Option<String> = r.get(4)?;
+            let auth_identity: Option<String> = r.get(5)?;
+            let headers: Vec<(String, String)> = headers_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            Ok(RecordedRequest {
+                method,
+                path,
+                headers,
+                auth_identity,
+                timestamp_ms: ts_ms,
+            })
+        })
+        .map_err(|e| format!("cannot query raw rows: {e}"))?;
+    let mut requests = Vec::new();
+    for row in rows {
+        let req = row.map_err(|e| format!("cannot read raw row: {e}"))?;
+        requests.push(req);
+    }
+    let recording = Recording {
+        baseline_config: baseline_config.to_string(),
+        requests,
+    };
+    serde_json::to_string(&recording).map_err(|e| format!("cannot serialize recording: {e}"))
 }

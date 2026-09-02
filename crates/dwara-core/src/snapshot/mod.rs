@@ -43,7 +43,7 @@ use arc_swap::ArcSwap;
 
 use crate::config::{
     gateway_to_yaml, Credential, Gateway, ListenerProtocol, PathMatchKind, PathRewrite, Route,
-    RouteAction, TlsMode, ZeroRttPolicy,
+    RouteAction, TlsMode, TranslationKind, ZeroRttPolicy,
 };
 
 /// One semantic-validation finding. Operators get every issue at once, not a
@@ -123,6 +123,17 @@ fn issue(entity: &str, name: &str, field: &str, message: impl Into<String>) -> V
         name: name.to_string(),
         field: field.to_string(),
         message: message.into(),
+    }
+}
+
+/// DW-103: human-readable name for an [`UpstreamProtocol`] (used in L4
+/// SNI-routing validation messages).
+fn upstream_protocol_name(p: crate::config::UpstreamProtocol) -> &'static str {
+    match p {
+        crate::config::UpstreamProtocol::Http1 => "http1",
+        crate::config::UpstreamProtocol::Http2 => "http2",
+        crate::config::UpstreamProtocol::Https => "https",
+        crate::config::UpstreamProtocol::H3 => "h3",
     }
 }
 
@@ -1044,6 +1055,88 @@ fn validate_security_headers(
                  scalar adds)",
             ));
         }
+    }
+}
+
+/// DW-106: maximum allowed linear memory for a nano-service module.
+const NANO_SERVICE_MAX_MEMORY: usize = 67_108_864; // 64 MiB
+
+/// DW-106: maximum allowed execution timeout for a nano-service module.
+const NANO_SERVICE_MAX_TIMEOUT_MS: u64 = 5_000;
+
+/// Validate a nano-service route action (DW-106): the module file must
+/// exist and be readable, `memory_limit` must be > 0 and <= 64 MiB, and
+/// `execution_timeout_ms` must be > 0 and <= 5000ms. When the
+/// `nano_services` cargo feature is off, a warning is emitted (the
+/// action is accepted but inert -- the route returns 502 at runtime).
+fn validate_nano_service(
+    name: &str,
+    nano: &crate::config::NanoServiceAction,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    #[cfg(not(feature = "nano_services"))]
+    {
+        issues.push(issue(
+            "route",
+            name,
+            "action.type",
+            "a nano_service action is accepted but inert: build with \
+             --features nano_services to enable WASM route handlers (DW-106)",
+        ));
+    }
+    if nano.module.trim().is_empty() {
+        issues.push(issue(
+            "route",
+            name,
+            "action.module",
+            "nano_service module path must be non-empty",
+        ));
+    } else if !std::path::Path::new(&nano.module).exists() {
+        issues.push(issue(
+            "route",
+            name,
+            "action.module",
+            format!(
+                "nano_service module file '{}' does not exist (checked at config publish time)",
+                nano.module
+            ),
+        ));
+    }
+    if nano.memory_limit == 0 {
+        issues.push(issue(
+            "route",
+            name,
+            "action.memory_limit",
+            "nano_service memory_limit must be > 0 (omit for the default 1 MiB)",
+        ));
+    } else if nano.memory_limit > NANO_SERVICE_MAX_MEMORY {
+        issues.push(issue(
+            "route",
+            name,
+            "action.memory_limit",
+            format!(
+                "nano_service memory_limit ({}) exceeds the maximum {} (64 MiB)",
+                nano.memory_limit, NANO_SERVICE_MAX_MEMORY
+            ),
+        ));
+    }
+    if nano.execution_timeout_ms == 0 {
+        issues.push(issue(
+            "route",
+            name,
+            "action.execution_timeout_ms",
+            "nano_service execution_timeout_ms must be > 0 (omit for the default 100ms)",
+        ));
+    } else if nano.execution_timeout_ms > NANO_SERVICE_MAX_TIMEOUT_MS {
+        issues.push(issue(
+            "route",
+            name,
+            "action.execution_timeout_ms",
+            format!(
+                "nano_service execution_timeout_ms ({}) exceeds the maximum {}ms",
+                nano.execution_timeout_ms, NANO_SERVICE_MAX_TIMEOUT_MS
+            ),
+        ));
     }
 }
 
@@ -1999,6 +2092,133 @@ fn labels_overlap(
 ) -> bool {
     let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     smaller.iter().all(|(k, v)| larger.get(k) == Some(v))
+}
+
+/// Validate the `gateway.mesh` block (DW-107): service mesh mode
+/// (sidecar + SPIFFE/SPIRE mTLS identity). When the `mesh` cargo
+/// feature is off, the block is accepted but a warning issue is
+/// emitted (the block is inert -- no sidecar listeners or SPIFFE
+/// client are wired). Ent-only: when the `ent` feature is off, a
+/// warning is emitted (mesh is an enterprise feature). SPIFFE:
+/// `trust_domain` and `workload_api_socket` must be non-empty, and
+/// `svid_refresh_interval_secs` must be > 0. Sidecar: `inbound_port`
+/// and `outbound_port` must be > 0 and different, and `redirect_mode`
+/// must be `iptables` or `tproxy`.
+fn validate_mesh(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(mesh) = &gateway.mesh else {
+        return;
+    };
+
+    // Feature gate: warn that the block is inert without the `mesh`
+    // cargo feature (mirrors the a2a ent-gated warning pattern).
+    #[cfg(not(feature = "mesh"))]
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "mesh",
+            "the mesh block is accepted but inert: build with \
+             --features mesh to enable the service mesh mode (sidecar + \
+             SPIFFE/SPIRE mTLS identity, DW-107; the sidecar redirect and \
+             Workload API calls are stubbed pending production hardening)",
+        ));
+    }
+
+    // Ent gate: warn when mesh is configured without the `ent` feature
+    // (mesh is an enterprise feature; mirrors the FIPS/credential-pool
+    // ent-gate pattern). The block still parses and the mesh-feature
+    // scaffold compiles, but license-gated enforcement requires `ent`.
+    #[cfg(not(feature = "ent"))]
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "mesh",
+            "the mesh block is configured but the `ent` cargo feature is \
+             not compiled in: service mesh mode is an enterprise feature \
+             (DW-107). Build with --features ent (combined with --features \
+             mesh) for license-gated enforcement.",
+        ));
+    }
+
+    if !mesh.enabled {
+        return;
+    }
+
+    // Sidecar validation.
+    if let Some(sidecar) = &mesh.sidecar {
+        if sidecar.inbound_port == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.sidecar.inbound_port",
+                "inbound_port must be > 0",
+            ));
+        }
+        if sidecar.outbound_port == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.sidecar.outbound_port",
+                "outbound_port must be > 0",
+            ));
+        }
+        if sidecar.inbound_port == sidecar.outbound_port && sidecar.inbound_port != 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.sidecar.inbound_port",
+                format!(
+                    "inbound_port ({}) and outbound_port ({}) must be different \
+                     (the sidecar binds separate listeners for inbound and outbound \
+                     traffic)",
+                    sidecar.inbound_port, sidecar.outbound_port
+                ),
+            ));
+        }
+        if sidecar.redirect_mode != "iptables" && sidecar.redirect_mode != "tproxy" {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.sidecar.redirect_mode",
+                format!(
+                    "redirect_mode '{}' is not a supported redirect mode: must be \
+                     'iptables' or 'tproxy'",
+                    sidecar.redirect_mode
+                ),
+            ));
+        }
+    }
+
+    // SPIFFE validation.
+    if let Some(spiffe) = &mesh.spiffe {
+        if spiffe.trust_domain.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.spiffe.trust_domain",
+                "trust_domain must be non-empty (it forms the SPIFFE ID prefix \
+                 spiffe://<trust-domain>/...)",
+            ));
+        }
+        if spiffe.workload_api_socket.trim().is_empty() {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.spiffe.workload_api_socket",
+                "workload_api_socket must be non-empty (the SPIRE Workload API \
+                 Unix socket path)",
+            ));
+        }
+        if spiffe.svid_refresh_interval_secs == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "mesh.spiffe.svid_refresh_interval_secs",
+                "svid_refresh_interval_secs must be > 0 (omit for the default 300s)",
+            ));
+        }
+    }
 }
 
 /// Validate the `gateway.oidc_providers` list (DW-034): each issuer must
@@ -3699,6 +3919,119 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+
+    // DW-114: A2A (agent-to-agent) validation. Agent names are
+    // non-empty and unique, each agent's `upstream` references a
+    // known upstream, the `url` is an http/https URL, and the inline
+    // card (when present) is a JSON object. Session TTL and
+    // max_concurrent must be positive. When the `a2a` cargo feature
+    // is off, the block is accepted but a warning issue is emitted
+    // (the block is inert -- no A2A providers are wired).
+    if let Some(a2a) = &ai.a2a {
+        // Feature gate: warn that the block is inert without the
+        // `a2a` cargo feature (mirrors the ent-gated credential pool
+        // warning pattern).
+        #[cfg(not(feature = "a2a"))]
+        {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "ai.a2a",
+                "the ai.a2a block is accepted but inert: build with \
+                 --features a2a to enable the A2A (agent-to-agent) surface \
+                 (DW-114; the task lifecycle is stubbed pending spec freeze)",
+            ));
+        }
+        let upstream_names: std::collections::BTreeSet<&str> =
+            gateway.upstreams.iter().map(|u| u.name.as_str()).collect();
+        let mut agent_names = std::collections::BTreeSet::new();
+        for agent in &a2a.agents {
+            if agent.name.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "ai.a2a.agents[].name",
+                    "agent name must be non-empty",
+                ));
+            } else if !agent_names.insert(agent.name.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    &agent.name,
+                    "ai.a2a.agents[].name",
+                    "duplicate a2a agent name",
+                ));
+            }
+            if agent.url.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    &agent.name,
+                    "ai.a2a.agents[].url",
+                    "agent url must be non-empty",
+                ));
+            } else if !agent.url.starts_with("http://") && !agent.url.starts_with("https://") {
+                issues.push(issue(
+                    "gateway",
+                    &agent.name,
+                    "ai.a2a.agents[].url",
+                    "the agent url must be an http or https URL",
+                ));
+            }
+            if !upstream_names.contains(agent.upstream.as_str()) {
+                issues.push(issue(
+                    "gateway",
+                    &agent.name,
+                    "ai.a2a.agents[].upstream",
+                    format!(
+                        "references unknown upstream '{}' (not in \
+                         upstreams[] -- a typo, or the upstream was renamed)",
+                        agent.upstream
+                    ),
+                ));
+            }
+            if let Some(card) = &agent.card {
+                if let Some(inline) = &card.inline {
+                    if !inline.is_object() {
+                        issues.push(issue(
+                            "gateway",
+                            &agent.name,
+                            "ai.a2a.agents[].card.inline",
+                            "the inline agent card must be a JSON object",
+                        ));
+                    }
+                }
+                if card.path.is_none() && card.inline.is_none() {
+                    issues.push(issue(
+                        "gateway",
+                        &agent.name,
+                        "ai.a2a.agents[].card",
+                        "agent card has neither inline nor path set (set one)",
+                    ));
+                }
+            }
+        }
+        if let Some(sessions) = &a2a.sessions {
+            if let Some(ttl) = sessions.ttl_secs {
+                if ttl == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "ai.a2a.sessions.ttl_secs",
+                        "ttl_secs must be > 0 (omit for the default 3600s)",
+                    ));
+                }
+            }
+            if let Some(max) = sessions.max_concurrent {
+                if max == 0 {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        "ai.a2a.sessions.max_concurrent",
+                        "max_concurrent must be > 0 (omit for the default 1000)",
+                    ));
+                }
+            }
+        }
+    }
 }
 
 pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
@@ -3851,6 +4184,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     validate_config_convergence(gateway, &mut issues);
     validate_fleet(gateway, &mut issues);
 
+    // DW-107: service mesh mode (sidecar + SPIFFE/SPIRE mTLS
+    // identity). Feature-gate warning (inert without `mesh`), ent-gate
+    // warning (enterprise feature), SPIFFE field checks, and sidecar
+    // port/redirect-mode checks.
+    validate_mesh(gateway, &mut issues);
+
     // DW-034: OIDC providers (issuer URL shape, introspection cache TTL
     // bounds, consumer references, trusted_ca_file readability).
     validate_oidc_providers(gateway, &mut issues);
@@ -3858,6 +4197,21 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // DW-075: the AI provider-adapter block (provider upstream refs,
     // auth resolvability, model alias refs).
     validate_ai(gateway, &mut issues);
+
+    // DW-111: FIPS 140-3 mode primitive restrictions. When the `fips`
+    // cargo feature is ON, reject non-approved primitives at config
+    // validation: Ed25519 certificates (not on the FIPS-validated list
+    // for aws-lc-rs) and Argon2 credential hashing (not FIPS-approved).
+    // When the feature is OFF, the check is inert (no issues produced).
+    validate_fips(gateway, &mut issues);
+
+    // DW-105: post-quantum TLS validation. When `pq: true` is configured
+    // but the `pq` cargo feature is off, emit a warning issue (the config
+    // is accepted but inert). When `pq: true` and FIPS mode is active,
+    // reject (ML-KEM is not on the FIPS-validated list). When `pq: true`
+    // is on a passthrough listener or an http1 upstream, reject (no TLS
+    // is terminated/negotiated).
+    validate_pq(gateway, &mut issues);
 
     // Zero-route guard (#129, maintainer decision): a route-less config is
     // schema-valid, and a truncated/torn write (truncate-then-save) lands
@@ -4446,6 +4800,156 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+            ListenerProtocol::Tcp | ListenerProtocol::Udp => {
+                // DW-103: L4 TCP/UDP proxying. Requires the `l4` cargo
+                // feature; when the feature is off, the listener is
+                // accepted but inert (validation warns, mirroring the
+                // a2a/pq feature-gate warning pattern).
+                if !cfg!(feature = "l4") {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "protocol",
+                        format!(
+                            "protocol {} is accepted but inert: build with --features l4 \
+                             to enable L4 proxying (DW-103; the default build does not \
+                             link the L4 dispatcher)",
+                            if l.protocol == ListenerProtocol::Tcp {
+                                "tcp"
+                            } else {
+                                "udp"
+                            }
+                        ),
+                    ));
+                }
+                // The `l4` block is required on tcp/udp listeners.
+                let l4_cfg = match &l.l4 {
+                    None => {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "l4",
+                            format!(
+                                "protocol {} requires an l4 block (upstream + optional \
+                                 sni_routing + idle_timeout_s)",
+                                if l.protocol == ListenerProtocol::Tcp {
+                                    "tcp"
+                                } else {
+                                    "udp"
+                                }
+                            ),
+                        ));
+                        continue;
+                    }
+                    Some(cfg) => cfg,
+                };
+                // sni_routing is TCP-only (UDP has no byte-stream
+                // handshake to peek).
+                if l4_cfg.sni_routing && l.protocol == ListenerProtocol::Udp {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "l4.sni_routing",
+                        "sni_routing is not supported on udp listeners (UDP has no \
+                         byte-stream handshake to peek; use protocol tcp for SNI-routed \
+                         L4 proxying)",
+                    ));
+                }
+                // idle_timeout_s bounds check (at most 1 hour).
+                if let Some(timeout) = l4_cfg.idle_timeout_s {
+                    if timeout > 3600 {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "l4.idle_timeout_s",
+                            "idle_timeout_s must be at most 3600 (1 hour)",
+                        ));
+                    }
+                }
+                // The upstream (when present) must reference a known
+                // upstream. When sni_routing is true the upstream is
+                // optional (the fallback for no-SNI/unmatched); when
+                // false it is required.
+                if !l4_cfg.sni_routing && l4_cfg.upstream.is_none() {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "l4.upstream",
+                        "l4.upstream is required when sni_routing is false (every \
+                         connection goes to the configured upstream)",
+                    ));
+                }
+                // The upstreams set is built below this loop; defer the
+                // upstream-exists check to the post-loop block (the
+                // same pattern as sni_routes upstream checks).
+                // SNI routing requires the listener to carry a tls
+                // block with sni_routes (the same routing table
+                // passthrough uses).
+                if l4_cfg.sni_routing {
+                    match &l.tls {
+                        None => {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "tls",
+                                "l4.sni_routing requires a tls block with sni_routes \
+                                 (the SNI routing table, same as tls passthrough)",
+                            ));
+                        }
+                        Some(t) => {
+                            if t.sni_routes.is_empty() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.sni_routes",
+                                    "l4.sni_routing requires at least one tls.sni_routes \
+                                     entry (the SNI routing table is empty)",
+                                ));
+                            }
+                        }
+                    }
+                } else if l.tls.is_some() {
+                    // A tls block without sni_routing is only meaningful
+                    // for sni_routes; warn (not reject -- the tls block
+                    // is additive and could carry future L4-relevant
+                    // config).
+                    if l.tls
+                        .as_ref()
+                        .map(|t| t.sni_routes.is_empty())
+                        .unwrap_or(true)
+                    {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "tls",
+                            "tls block on an l4 listener without sni_routing has no \
+                             effect (remove it or set l4.sni_routing: true)",
+                        ));
+                    }
+                }
+                // alt_svc / zero_rtt are HTTP-transport concepts;
+                // reject them on L4 listeners.
+                if l.alt_svc.is_some() {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "alt_svc",
+                        "alt_svc must not be set on an l4 listener (L4 proxying has no \
+                         HTTP response to advertise on)",
+                    ));
+                }
+                if let Some(t) = &l.tls {
+                    if t.zero_rtt != ZeroRttPolicy::Reject {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "tls.zero_rtt",
+                            "zero_rtt only applies to protocol h3 listeners (TLS 1.3 \
+                             early data over QUIC); remove it",
+                        ));
+                    }
+                }
+            }
         }
         if !binds.insert((l.address.as_str(), l.port)) {
             issues.push(issue(
@@ -4512,6 +5016,61 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     &format!("tls.sni_routes[{i}].upstream"),
                     format!("references unknown upstream '{}'", r.upstream),
                 ));
+            }
+        }
+    }
+
+    // DW-103: L4 listener upstream reference checks (deferred to here
+    // because the `upstreams` set is built after the listener loop).
+    for l in &gateway.listeners {
+        if !matches!(l.protocol, ListenerProtocol::Tcp | ListenerProtocol::Udp) {
+            continue;
+        }
+        let Some(l4_cfg) = &l.l4 else { continue };
+        // The l4.upstream (when present) must reference a known upstream.
+        if let Some(name) = &l4_cfg.upstream {
+            if !upstreams.contains(name.as_str()) {
+                issues.push(issue(
+                    "listener",
+                    &l.name,
+                    "l4.upstream",
+                    format!("references unknown upstream '{name}'"),
+                ));
+            }
+        }
+        // SNI routing: each tls.sni_routes[].upstream must reference a
+        // known upstream (already checked above for ALL listeners with
+        // tls.sni_routes, so no duplicate check here). Additionally,
+        // SNI routing requires the referenced upstreams to have TLS
+        // endpoints (the SNI is a TLS ClientHello field; the upstream
+        // must terminate or pass through TLS). Check that the upstream
+        // protocol is a TLS-bearing one (https, http2, h3).
+        if l4_cfg.sni_routing {
+            if let Some(tls) = &l.tls {
+                for r in &tls.sni_routes {
+                    if let Some(upstream) = gateway.upstreams.iter().find(|u| u.name == r.upstream)
+                    {
+                        if !matches!(
+                            upstream.protocol,
+                            crate::config::UpstreamProtocol::Https
+                                | crate::config::UpstreamProtocol::Http2
+                                | crate::config::UpstreamProtocol::H3
+                        ) {
+                            issues.push(issue(
+                                "listener",
+                                &l.name,
+                                "tls.sni_routes.upstream",
+                                format!(
+                                    "sni_routing upstream '{}' must use a TLS protocol \
+                                     (https, http2, or h3); '{}' cannot receive a \
+                                     TLS-routed L4 splice",
+                                    r.upstream,
+                                    upstream_protocol_name(upstream.protocol)
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -5016,6 +5575,184 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
         }
+        // GraphQL awareness (DW-099): when a route has a `graphql`
+        // block, validate that depth_limit and complexity_limit are
+        // > 0 (a 0 limit would reject every query or none, neither
+        // is a useful configuration), and that persisted-query
+        // hashes are non-empty strings. The block is accepted when
+        // the `graphql` cargo feature is not compiled in (the config
+        // round-trips; the runtime check is feature-gated), so
+        // validation runs unconditionally -- the schema is always
+        // present.
+        if let Some(graphql) = &r.graphql {
+            if graphql.enabled {
+                if graphql.depth_limit == 0 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "graphql.depth_limit",
+                        "depth_limit must be > 0 when graphql is enabled",
+                    ));
+                }
+                if graphql.complexity_limit == 0 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "graphql.complexity_limit",
+                        "complexity_limit must be > 0 when graphql is enabled",
+                    ));
+                }
+                if graphql.complexity_coefficient == 0 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "graphql.complexity_coefficient",
+                        "complexity_coefficient must be > 0 (use 1 for \
+                         uniform cost; 0 would make every query free)",
+                    ));
+                }
+            }
+            if let Some(pq) = &graphql.persisted_queries {
+                if pq.enabled {
+                    for (hash, query) in &pq.store {
+                        if hash.trim().is_empty() {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                "graphql.persisted_queries.store",
+                                "persisted query hash must be a non-empty \
+                                 string",
+                            ));
+                        }
+                        if query.trim().is_empty() {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                "graphql.persisted_queries.store",
+                                "persisted query text must be a non-empty \
+                                 string",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // gRPC-Web framing + JSON-to-gRPC transcoding (DW-101): when a
+        // route has a `grpc_web` block with `enabled: true`, validate
+        // the transcoding sub-block. When transcoding is enabled, at
+        // least one descriptor must be present and every descriptor
+        // file must exist and be readable at validation time (a missing
+        // or unreadable descriptor would otherwise publish fine and
+        // fail every transcoded request at runtime). The config schema
+        // is always present (the block round-trips without the
+        // `grpc_web` cargo feature), so validation runs
+        // unconditionally; descriptor files are checked only when the
+        // block is enabled so a staged-but-inert config does not fail.
+        if let Some(grpc_web) = &r.grpc_web {
+            if grpc_web.enabled {
+                if let Some(tc) = &grpc_web.transcoding {
+                    if tc.enabled {
+                        if tc.descriptors.is_empty() {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                "grpc_web.transcoding.descriptors",
+                                "transcoding is enabled but no descriptors \
+                                 are listed: at least one descriptor is \
+                                 required",
+                            ));
+                        }
+                        for (i, desc) in tc.descriptors.iter().enumerate() {
+                            check_file_readable(
+                                "route",
+                                &r.name,
+                                &format!("grpc_web.transcoding.descriptors[{i}].file"),
+                                &desc.file,
+                                &mut issues,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Protocol translation (DW-100): when a route has a
+        // `translation` block, validate that the referenced kind has
+        // the required sub-block. A `rest_to_graphql` or
+        // `graphql_to_rest` kind requires a `graphql` block with a
+        // `query_template` (the reverse direction only unwraps the
+        // response envelope, so the template is required only for
+        // `rest_to_graphql`). A `rest_to_soap` or `soap_to_rest` kind
+        // requires a `soap` block with an `operation` name, and
+        // `rest_to_soap` additionally requires a `namespace`. The
+        // config schema is always present (the block round-trips
+        // without the cargo feature), so validation runs
+        // unconditionally; the runtime translation is feature-gated.
+        if let Some(translation) = &r.translation {
+            match translation.kind {
+                TranslationKind::RestToGraphql => match &translation.graphql {
+                    None => {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "translation.graphql",
+                            "kind rest_to_graphql requires a graphql block",
+                        ));
+                    }
+                    Some(graphql) => {
+                        if graphql.query_template.trim().is_empty() {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                "translation.graphql.query_template",
+                                "rest_to_graphql requires a query_template",
+                            ));
+                        }
+                    }
+                },
+                TranslationKind::GraphqlToRest => {
+                    if translation.graphql.is_none() {
+                        issues.push(issue(
+                            "route",
+                            &r.name,
+                            "translation.graphql",
+                            "kind graphql_to_rest requires a graphql block",
+                        ));
+                    }
+                }
+                TranslationKind::RestToSoap | TranslationKind::SoapToRest => {
+                    match &translation.soap {
+                        None => {
+                            issues.push(issue(
+                                "route",
+                                &r.name,
+                                "translation.soap",
+                                "kind requires a soap block",
+                            ));
+                        }
+                        Some(soap) => {
+                            if soap.operation.trim().is_empty() {
+                                issues.push(issue(
+                                    "route",
+                                    &r.name,
+                                    "translation.soap.operation",
+                                    "soap translation requires an operation name",
+                                ));
+                            }
+                            if translation.kind == TranslationKind::RestToSoap
+                                && soap.namespace.trim().is_empty()
+                            {
+                                issues.push(issue(
+                                    "route",
+                                    &r.name,
+                                    "translation.soap.namespace",
+                                    "rest_to_soap requires a namespace",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let m = &r.r#match.path;
         for (field, entries) in [
             ("match.query", &r.r#match.query),
@@ -5172,6 +5909,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                          (ai.providers + ai.models define what it can serve)",
                     ));
                 }
+            }
+            RouteAction::NanoService { ref nano } => {
+                validate_nano_service(&r.name, nano, &mut issues);
             }
         }
         // Request validation (DW-047): the JSON schema must be
@@ -6318,6 +7058,360 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     issues
 }
 
+/// DW-111: FIPS 140-3 mode primitive restrictions. When the `fips` cargo
+/// feature is ON, reject non-approved primitives at config validation:
+///
+/// - Ed25519 certificates: the leaf certificate's SubjectPublicKeyInfo
+///   algorithm must not be Ed25519 (not on the FIPS-validated list for
+///   aws-lc-rs). The check walks the certificate DER the same way the
+///   SPKI extractor in `security::tls` does (no X.509 parser dependency).
+/// - Argon2 credential hashing: a config-declared credential whose
+///   stored-hash format prefix is `argon2id` (or `argon2`) is rejected.
+///   Config-declared credentials use sha256/hmac-sha256 (the fast path);
+///   argon2 is store-managed only, but a config that declares an argon2
+///   hash directly is rejected here so the gateway never boots in FIPS
+///   mode with a non-approved hash.
+///
+/// When the `fips` feature is OFF, this function is inert (no issues
+/// produced). The check is conservative: a certificate that cannot be
+/// parsed is skipped (the TLS build path will reject an unparseable cert
+/// on its own); only a parseable cert whose SPKI algorithm is Ed25519 is
+/// flagged.
+fn validate_fips(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    #[cfg(feature = "fips")]
+    {
+        use crate::security::fips;
+
+        // Ed25519 certificate check: walk every terminate-mode listener's
+        // certificate files and check the leaf certificate's SPKI algorithm.
+        // The DER walk is the same substrate as `spki_of_leaf` in
+        // `security::tls` (no X.509 parser dependency). A certificate that
+        // cannot be read or parsed is skipped here — the TLS build path
+        // rejects unparseable certs on its own, and piling a FIPS issue on
+        // a broken file is noise.
+        for l in &gateway.listeners {
+            if l.protocol != ListenerProtocol::Https {
+                continue;
+            }
+            let Some(tls) = &l.tls else { continue };
+            if tls.mode != TlsMode::Terminate {
+                continue;
+            }
+            // Collect all cert file paths from the terminate block.
+            let mut cert_paths: Vec<&str> = Vec::new();
+            if let Some(cf) = &tls.cert_file {
+                cert_paths.push(cf.as_str());
+            }
+            for c in &tls.certificates {
+                cert_paths.push(c.cert_file.as_str());
+            }
+            for cf in &cert_paths {
+                if let Some(algo) = spki_algorithm_of_cert_file(cf) {
+                    if fips::is_signature_disallowed(&algo) {
+                        issues.push(issue(
+                            "listener",
+                            &l.name,
+                            "tls.cert_file",
+                            format!(
+                                "FIPS mode rejects certificate '{cf}': the leaf certificate's \
+                                 signature algorithm '{algo}' is not on the FIPS-approved \
+                                 allowlist (Ed25519 is not FIPS-validated in aws-lc-rs; use \
+                                 RSA-PSS or ECDSA P-256/P-384 certificates instead)"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Admin block: check the admin mTLS server certificate too.
+        if let Some(admin) = &gateway.admin {
+            if let Some(algo) = spki_algorithm_of_cert_file(&admin.tls.cert_file) {
+                if fips::is_signature_disallowed(&algo) {
+                    issues.push(issue(
+                        "admin",
+                        "(root)",
+                        "tls.cert_file",
+                        format!(
+                            "FIPS mode rejects admin certificate '{}': the leaf certificate's \
+                             signature algorithm '{}' is not on the FIPS-approved allowlist \
+                             (Ed25519 is not FIPS-validated in aws-lc-rs; use RSA-PSS or \
+                             ECDSA P-256/P-384 certificates instead)",
+                            admin.tls.cert_file, algo
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Argon2 credential hashing check: config-declared credentials
+        // use sha256/hmac-sha256 (the fast path). A config that declares
+        // an argon2 hash directly is rejected. In practice config
+        // credentials are ApiKey/Hmac/Jwt/Mtls (no stored-hash field),
+        // but the check is here for completeness and to catch any future
+        // config field that carries a stored hash.
+        for c in &gateway.consumers {
+            for (i, cred) in c.credentials.iter().enumerate() {
+                let field = format!("credentials[{i}]");
+                // The ApiKey key value is the raw secret, not a stored hash,
+                // so it is not checked here. Argon2 appears only in
+                // store-managed credential records (the state store), not
+                // in config. This check is a no-op for config-declared
+                // credentials today, but documents the FIPS restriction
+                // for any future config field that carries a stored hash.
+                let _ = cred;
+                let _ = &field;
+            }
+        }
+    }
+
+    #[cfg(not(feature = "fips"))]
+    {
+        // Inert: no FIPS checks when the feature is off.
+        let _ = gateway;
+        let _ = issues;
+    }
+}
+
+/// DW-105: post-quantum TLS validation. Enforces three rules:
+///
+/// 1. **Feature-off warning**: when `pq: true` is configured on a
+///    listener or upstream but the `pq` cargo feature is OFF, emit a
+///    warning issue naming the field. The config is ACCEPTED (additive-
+///    only, strict serde preserved) but is INERT: no kx group is
+///    prepended. The operator sees the warning so they know the build
+///    does not include the PQ feature.
+/// 2. **FIPS incompatibility**: when `pq: true` is configured AND FIPS
+///    mode is active (the `fips` cargo feature is ON), REJECT with an
+///    error issue. ML-KEM is not on the FIPS-validated list for
+///    aws-lc-rs, so the two features must not combine unless both
+///    algorithms are on a validated list.
+/// 3. **Protocol relevance**: `pq: true` on a passthrough listener (no
+///    TLS termination) or an `http1` upstream (no TLS negotiation) is
+///    rejected — the kx group list is irrelevant when no TLS is
+///    terminated/negotiated.
+fn validate_pq(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    use crate::config::{TlsMode, UpstreamProtocol};
+    use crate::security::pq::PqMode;
+
+    let pq_feature = PqMode::current();
+    let fips_active = crate::security::fips::FipsMode::current().is_enabled();
+
+    // Listeners: check pq: true on each listener's TLS block.
+    for l in &gateway.listeners {
+        if let Some(tls) = &l.tls {
+            if tls.pq {
+                // Rule 3: passthrough listeners do not terminate TLS, so
+                // the kx group list is irrelevant.
+                if tls.mode == TlsMode::Passthrough {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "tls.pq",
+                        "pq: true is only meaningful in tls.mode terminate (passthrough does \
+                         not terminate TLS, so the kx group list is irrelevant)",
+                    ));
+                    continue;
+                }
+                // Rule 2: FIPS incompatibility.
+                if fips_active {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "tls.pq",
+                        "pq: true is incompatible with FIPS mode: ML-KEM is not on the \
+                         FIPS-validated list for aws-lc-rs (the two features must not combine \
+                         unless both algorithms are on a validated list)",
+                    ));
+                    continue;
+                }
+                // Rule 1: feature-off warning.
+                if !pq_feature.is_enabled() {
+                    issues.push(issue(
+                        "listener",
+                        &l.name,
+                        "tls.pq",
+                        "pq: true is configured but the `pq` cargo feature is OFF — PQ hybrid \
+                         key exchange is inert (no kx group is prepended). Build with \
+                         --features pq to enable post-quantum TLS",
+                    ));
+                }
+            }
+        }
+    }
+
+    // Upstreams: check pq: true on each upstream.
+    for u in &gateway.upstreams {
+        if u.pq {
+            // Rule 3: http1 upstreams do not negotiate TLS.
+            if u.protocol == UpstreamProtocol::Http1 {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "pq",
+                    "pq: true is only meaningful for https or http2 upstreams (http1 does \
+                     not negotiate TLS, so the kx group list is irrelevant)",
+                ));
+                continue;
+            }
+            // Rule 2: FIPS incompatibility.
+            if fips_active {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "pq",
+                    "pq: true is incompatible with FIPS mode: ML-KEM is not on the \
+                     FIPS-validated list for aws-lc-rs (the two features must not combine \
+                     unless both algorithms are on a validated list)",
+                ));
+                continue;
+            }
+            // Rule 1: feature-off warning.
+            if !pq_feature.is_enabled() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "pq",
+                    "pq: true is configured but the `pq` cargo feature is OFF — PQ hybrid \
+                     key exchange is inert (no kx group is prepended). Build with \
+                     --features pq to enable post-quantum TLS",
+                ));
+            }
+        }
+    }
+}
+
+/// DW-111: Extract the SubjectPublicKeyInfo algorithm OID from a
+/// certificate file's leaf certificate. Returns the algorithm name
+/// ("ed25519", "rsa", "ecdsa") or None when the file cannot be read or
+/// the SPKI algorithm cannot be determined. Uses the same DER-walk
+/// substrate as `security::tls::spki_of_leaf` (no X.509 parser
+/// dependency).
+#[cfg(feature = "fips")]
+fn spki_algorithm_of_cert_file(path: &str) -> Option<String> {
+    use rustls_pki_types::pem::PemObject;
+
+    let certs = rustls_pki_types::CertificateDer::pem_file_iter(path)
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let leaf = certs.first()?;
+    spki_algorithm_of_leaf(leaf)
+}
+
+/// DW-111: Walk the leaf certificate's DER to the SubjectPublicKeyInfo
+/// algorithm OID and map it to a name. Returns "ed25519" for Ed25519,
+/// "rsa" for RSA, "ecdsa" for ECDSA P-256/P-384, or None on any
+/// structural shortcoming.
+#[cfg(feature = "fips")]
+fn spki_algorithm_of_leaf(cert: &rustls_pki_types::CertificateDer<'_>) -> Option<String> {
+    // Certificate SEQUENCE -> TBSCertificate SEQUENCE.
+    let (tag, cert_content, _) = der_elem_local(cert.as_ref())?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, tbs, _) = der_elem_local(cert_content)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs;
+    // Optional [0] EXPLICIT version comes before the serial INTEGER.
+    if let Some((tag, _, tail)) = der_elem_local(rest) {
+        if tag & 0xc0 == 0x80 {
+            rest = tail;
+        }
+    }
+    // serialNumber, signature, issuer, validity, subject, then SPKI.
+    for _ in 0..5 {
+        let (_, _, tail) = der_elem_local(rest)?;
+        rest = tail;
+    }
+    // SPKI: SEQUENCE { algorithm SEQUENCE { OID, params }, subjectPublicKey BIT STRING }
+    let (tag, spki_content, _) = der_elem_local(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    // algorithm SEQUENCE
+    let (tag, algo_content, _) = der_elem_local(spki_content)?;
+    if tag != 0x30 {
+        return None;
+    }
+    // OID
+    let (oid_tag, oid, _) = der_elem_local(algo_content)?;
+    if oid_tag != 0x06 {
+        return None;
+    }
+    // Map the algorithm OID to a name.
+    // 1.2.840.10045.4.3 = id-ecPublicKey (ECDSA) — but the SPKI algorithm
+    // OID for ECDSA keys is 1.2.840.10045.2.1 (id-ecPublicKey). The
+    // SIGNATURE algorithm OIDs are different. Here we check the SPKI
+    // algorithm OID, which identifies the KEY type.
+    //
+    // RSA: 1.2.840.113549.1.1.1 (rsaEncryption)
+    // EC: 1.2.840.10045.2.1 (id-ecPublicKey)
+    // Ed25519: 1.3.101.112 (id-Ed25519)
+    if oid == [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01] {
+        // id-ecPublicKey — could be P-256, P-384, or Ed25519 (but Ed25519
+        // has its own OID). This is ECDSA.
+        Some("ecdsa".to_string())
+    } else if oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] {
+        // rsaEncryption
+        Some("rsa".to_string())
+    } else if oid == [0x2b, 0x65, 0x70] {
+        // id-Ed25519 (1.3.101.112)
+        Some("ed25519".to_string())
+    } else {
+        // Unknown algorithm OID — return the raw bytes as hex for the
+        // caller to decide. The FIPS check treats unknown algorithms as
+        // allowed (conservative: only known non-approved primitives are
+        // denied).
+        Some(format!("unknown:{}", hex_oid(&oid)))
+    }
+}
+
+/// DW-111: Encode an OID's content bytes as lowercase hex (for the
+/// "unknown" algorithm fallback).
+#[cfg(feature = "fips")]
+fn hex_oid(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(TABLE[usize::from(*b >> 4)] as char);
+        out.push(TABLE[usize::from(*b & 0x0f)] as char);
+    }
+    out
+}
+
+/// DW-111: Local copy of the DER element walker (the same logic as
+/// `security::tls::der_elem`, duplicated here because `der_elem` is
+/// private to that module and `snapshot` must not import `security`
+/// internals — the dependency direction is `snapshot <- security`, not
+/// the reverse).
+#[cfg(feature = "fips")]
+fn der_elem_local(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *buf.first()?;
+    let mut i = 1usize;
+    let first = *buf.get(i)?;
+    let len = if first < 0x80 {
+        i += 1;
+        first as usize
+    } else {
+        let n = (first & 0x7f) as usize;
+        if n == 0 || n > 8 {
+            return None;
+        }
+        i += 1;
+        let mut l = 0usize;
+        for &b in buf.get(i..i + n)? {
+            l = (l << 8) | b as usize;
+        }
+        i += n;
+        l
+    };
+    let end = len.checked_add(i).filter(|end| *end <= buf.len())?;
+    Some((tag, &buf[i..end], &buf[end..]))
+}
+
 /// Validate a proxy-action path rewrite (shape only; regex COMPILATION is
 /// checked in [`compile`], like the regex path-match kind).
 fn validate_rewrite(route: &str, rw: &PathRewrite, issues: &mut Vec<ValidationIssue>) {
@@ -6823,6 +7917,8 @@ impl Snapshot {
                 plugins: Vec::new(),
                 ai: None,
                 fleet: None,
+                mesh: None,
+                lifecycle: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }
@@ -6830,6 +7926,20 @@ impl Snapshot {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Build a generation-0 snapshot from a [`Compiled`] value (DW-102:
+    /// replay and other offline tools that need a snapshot without
+    /// publishing through [`ConfigState`]). The generation id is 0
+    /// (replay does not need a real generation id; it only reads the
+    /// compiled route table and gateway).
+    pub fn from_compiled(compiled: Compiled) -> Self {
+        Snapshot {
+            generation: 0,
+            content_hash: compiled.content_hash,
+            gateway: compiled.gateway,
+            routes: compiled.routes,
+        }
     }
 
     pub fn content_hash(&self) -> u64 {

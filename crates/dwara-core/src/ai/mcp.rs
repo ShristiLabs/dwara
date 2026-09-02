@@ -229,7 +229,7 @@ impl CompiledMcp {
             };
             let scheme = match upstream.protocol {
                 UpstreamProtocol::Http1 | UpstreamProtocol::Http2 => "http",
-                UpstreamProtocol::Https => "https",
+                UpstreamProtocol::Https | UpstreamProtocol::H3 => "https",
             };
             let tool_path = tool.path.clone().unwrap_or_else(|| "/".to_string());
             let upstream_url = format!(

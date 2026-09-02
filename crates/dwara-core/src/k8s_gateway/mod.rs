@@ -500,6 +500,7 @@ pub fn translate(
                             oauth2_client_credentials: None,
                             dns_discovery: None,
                             locality: None,
+                            pq: false,
                         };
                         upstreams.push(upstream);
 
@@ -561,6 +562,8 @@ pub fn translate(
                     mirror: None,
                     fault_injection: None,
                     plugins: Vec::new(),
+                    graphql: None,
+                    grpc_web: None,
                 };
                 dwara_routes.push(dwara_route);
             }
@@ -662,6 +665,7 @@ fn translate_listener_tls(
         sni_routes: Vec::new(),
         client_ca_file: None,
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     })
 }
 

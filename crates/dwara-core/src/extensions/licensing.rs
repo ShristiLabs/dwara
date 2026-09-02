@@ -88,6 +88,13 @@ pub const FEATURE_REDIS_RATE_LIMITER: &str = "redis_rate_limiter";
 /// License claim string for config convergence (DW-054).
 pub const FEATURE_CONFIG_CONVERGENCE: &str = "config_convergence";
 
+/// License claim string for FIPS 140-3 mode (DW-111). A license that
+/// carries this claim REQUIRES the gateway to be running in FIPS mode
+/// (the `fips` cargo feature compiled in and the self-test passed). When
+/// the license grants this claim but the gateway is NOT in FIPS mode,
+/// the license is invalid (config-time check).
+pub const FEATURE_FIPS: &str = "fips";
+
 /// The runtime status of the license gate, mirrored by the
 /// `dwara_license_status` metric (0..=3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +260,44 @@ impl LicenseGate {
         match self.status {
             LicenseStatus::ExpiredWithinGrace | LicenseStatus::ExpiredPastGrace => true,
             LicenseStatus::Valid | LicenseStatus::NoLicense => false,
+        }
+    }
+
+    /// DW-111: FIPS mode license assertion. A license that carries the
+    /// `fips` feature claim ([`FEATURE_FIPS`]) REQUIRES the gateway to be
+    /// running in FIPS mode. When the license grants the claim but the
+    /// gateway is NOT in FIPS mode (the `fips` cargo feature is off), the
+    /// license is invalid for this deployment.
+    ///
+    /// This is a config-time check: the caller (dwara-bin) runs it at
+    /// startup after the gate is built and before enterprise features
+    /// engage. Returns `Ok(())` when the assertion passes (the license
+    /// does not require FIPS, or FIPS mode is active) and `Err(message)`
+    /// when the license requires FIPS but the gateway is not in FIPS mode.
+    pub fn assert_fips_compliance(&self) -> Result<(), String> {
+        if !self.is_enterprise() {
+            // No license or past grace: the claim cannot be present, so
+            // the assertion passes (the gate is inert).
+            return Ok(());
+        }
+        if !self.has_feature(FEATURE_FIPS) {
+            // The license does not require FIPS mode: no assertion.
+            return Ok(());
+        }
+        // The license requires FIPS mode. Check whether the gateway is in
+        // FIPS mode (the `fips` cargo feature is compiled in).
+        #[cfg(feature = "fips")]
+        {
+            Ok(())
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            Err(
+                "license requires FIPS mode (the 'fips' feature claim is present) but the \
+                 gateway is not built with the `fips` cargo feature; rebuild with \
+                 --features fips or remove the fips claim from the license"
+                    .to_string(),
+            )
         }
     }
 

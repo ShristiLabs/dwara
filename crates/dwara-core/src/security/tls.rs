@@ -114,10 +114,46 @@ impl From<rustls::Error> for TlsError {
 /// Install the aws-lc-rs crypto provider as the process-global rustls
 /// default. Idempotent: installing twice (e.g. binary + tests in one
 /// process) returns Ok the first time and an ignorable error afterwards.
+///
+/// When the `fips` cargo feature is ON (DW-111), the binary calls
+/// [`crate::security::fips::install_fips_provider`] instead, which
+/// installs the same aws-lc-rs provider (the FIPS-validated code path)
+/// and then runs the self-test to confirm. This function remains the
+/// default install path for non-FIPS builds.
 pub fn install_aws_lc_rs_provider() {
     // install_default returns Err(previous provider) when one is already
     // installed; that is the idempotent success case for us.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// DW-111: build a FIPS-restricted `CryptoProvider` from the aws-lc-rs
+/// default provider, filtering the cipher suite list to the FIPS-approved
+/// allowlist in [`crate::security::fips::FIPS_ALLOWED_CIPHERS`]. The
+/// returned provider is identical to the aws-lc-rs default except its
+/// `cipher_suites` vector contains only the FIPS-approved suites. A suite
+/// in the allowlist that the provider does not support is silently
+/// skipped (the provider's support is the ground truth; the allowlist is
+/// the restriction).
+#[cfg(feature = "fips")]
+fn fips_provider() -> rustls::crypto::CryptoProvider {
+    use crate::security::fips::FIPS_ALLOWED_CIPHERS;
+
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let suites: Vec<rustls::SupportedCipherSuite> = provider
+        .cipher_suites
+        .iter()
+        .filter(|suite| {
+            let name = format!("{:?}", suite.suite()).to_ascii_lowercase();
+            FIPS_ALLOWED_CIPHERS
+                .iter()
+                .any(|allowed| *allowed == name.as_str())
+        })
+        .copied()
+        .collect();
+    rustls::crypto::CryptoProvider {
+        cipher_suites: suites,
+        ..provider
+    }
 }
 
 /// The Mozilla (webpki) public root set as a rustls `RootCertStore`: the
@@ -174,6 +210,41 @@ pub fn https_h1_client_config(roots: rustls::RootCertStore) -> rustls::ClientCon
         .with_root_certificates(roots)
         .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    cfg
+}
+
+/// DW-105: HTTP/1.1-ALPN rustls client config with post-quantum hybrid
+/// key exchange opt-in. When `pq` is `true` AND the `pq` cargo feature
+/// is ON, [`crate::security::pq::install_pq_kx_group`] is called to
+/// prepend the X25519+ML-KEM hybrid kx group to the provider's kx group
+/// list before building the config. The rustls PQ API is experimental;
+/// the call is a documented no-op when the API is not reachable (the
+/// config builds with the classical kx group list — no regression).
+/// When `pq` is `false` or the feature is off, this is identical to
+/// [`https_h1_client_config`].
+pub fn https_h1_client_config_pq(roots: rustls::RootCertStore, pq: bool) -> rustls::ClientConfig {
+    if pq {
+        let _ = crate::security::pq::install_pq_kx_group();
+    }
+    https_h1_client_config(roots)
+}
+
+/// HTTP/3-ALPN rustls client config over the given trust roots (DW-108):
+/// the shared shape for every outbound H3/QUIC dial — the H3 upstream
+/// connector and the QUIC active health probe. QUIC mandates TLS 1.3,
+/// so this always negotiates `h3` over the same root store the pooled
+/// https connector would use (#121: webpki by default, the upstream's
+/// `trusted_ca_file` bundle when configured). Keeping the constructor
+/// here means one trust/handshake policy across the pooled H3 client and
+/// its probes, mirroring [`https_h1_client_config`].
+pub fn https_h3_client_config(roots: rustls::RootCertStore) -> rustls::ClientConfig {
+    let mut cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h3".to_vec()];
+    // DW-108: no 0-RTT upstream dialing (replay risk footgun). rustls
+    // does not expose early-data knobs on ClientConfig directly; the
+    // default is no early data, which is the safe choice.
     cfg
 }
 
@@ -689,6 +760,18 @@ impl TlsTermination {
 
     fn server_config(tls: &ListenerTls) -> Result<ServerConfig, TlsError> {
         let resolver = SniCertResolver::build(tls)?;
+        // DW-105: when the listener opts in to post-quantum hybrid key
+        // exchange (`pq: true`) AND the `pq` cargo feature is ON, prepend
+        // the X25519+ML-KEM hybrid kx group to the provider's kx group
+        // list. The rustls PQ API is experimental; [`install_pq_kx_group`]
+        // is a documented no-op when the API is not reachable in the
+        // pinned rustls version (the config builds with the classical kx
+        // group list — no regression). When the `pq` feature is OFF, the
+        // call is inert (returns [`PqMode::Disabled`]). Validation
+        // rejects `pq: true` + FIPS mode (ML-KEM is not FIPS-validated).
+        if tls.pq {
+            let _ = crate::security::pq::install_pq_kx_group();
+        }
         // #124 client-certificate authn: with a `client_ca_file` the
         // listener REQUESTS a client certificate and verifies any
         // presented one against the bundle (the admin mTLS verifier
@@ -699,25 +782,64 @@ impl TlsTermination {
         // UNVERIFIED certificate fails the handshake here and never
         // reaches the authenticator (mTLS authn only ever sees
         // certificates rustls has already chained to the configured CA).
-        let mut config = match &tls.client_ca_file {
-            Some(client_ca) => {
-                let roots = root_store_from_pem_file(client_ca)?;
-                let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        //
+        // DW-111: when the `fips` cargo feature is ON, the server config
+        // is built with the FIPS-approved cipher suites only (the
+        // process-default provider's suite list filtered to the
+        // allowlist in `security::fips`). Non-FIPS builds use the
+        // default builder (rustls's modern cipher-suite policy).
+        #[cfg(feature = "fips")]
+        {
+            let provider = Arc::new(fips_provider());
+            let mut config = match &tls.client_ca_file {
+                Some(client_ca) => {
+                    let roots = root_store_from_pem_file(client_ca)?;
+                    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                        Arc::new(roots),
+                        Arc::clone(&provider),
+                    )
                     .allow_unauthenticated()
                     .build()
                     .map_err(|e| TlsError::ClientAuth(format!("building client verifier: {e}")))?;
-                ServerConfig::builder()
-                    .with_client_cert_verifier(verifier)
-                    .with_cert_resolver(Arc::new(resolver))
-            }
-            None => ServerConfig::builder()
-                .with_no_client_auth()
-                .with_cert_resolver(Arc::new(resolver)),
-        };
-        // ALPN advertises both; the client's choice decides HTTP/1.1 vs
-        // HTTP/2 (hyper-util's auto builder handles whichever arrives).
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Ok(config)
+                    ServerConfig::builder_with_provider(Arc::clone(&provider))
+                        .with_safe_default_protocol_versions()
+                        .map_err(|e| TlsError::Rustls(e))?
+                        .with_client_cert_verifier(verifier)
+                        .with_cert_resolver(Arc::new(resolver))
+                }
+                None => ServerConfig::builder_with_provider(Arc::clone(&provider))
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| TlsError::Rustls(e))?
+                    .with_no_client_auth()
+                    .with_cert_resolver(Arc::new(resolver)),
+            };
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            Ok(config)
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            let mut config = match &tls.client_ca_file {
+                Some(client_ca) => {
+                    let roots = root_store_from_pem_file(client_ca)?;
+                    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                        .allow_unauthenticated()
+                        .build()
+                        .map_err(|e| {
+                            TlsError::ClientAuth(format!("building client verifier: {e}"))
+                        })?;
+                    ServerConfig::builder()
+                        .with_client_cert_verifier(verifier)
+                        .with_cert_resolver(Arc::new(resolver))
+                }
+                None => ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_cert_resolver(Arc::new(resolver)),
+            };
+            // ALPN advertises both; the client's choice decides HTTP/1.1 vs
+            // HTTP/2 (hyper-util's auto builder handles whichever arrives).
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            Ok(config)
+        }
     }
 
     /// The current server config; clone the `Arc` per accepted connection.
@@ -767,14 +889,38 @@ pub fn admin_mtls_server_config(
     // one root-store-from-file helper, shared by admin mTLS and outbound
     // connectors, so bundle semantics cannot drift between them.
     let roots = root_store_from_pem_file(&tls.client_ca_file)?;
-    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+    // DW-111: when the `fips` cargo feature is ON, the admin mTLS config
+    // is also built with the FIPS-approved cipher suites only (the same
+    // restriction as dataplane termination). Non-FIPS builds use the
+    // default builder.
+    #[cfg(feature = "fips")]
+    {
+        let provider = Arc::new(fips_provider());
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::clone(&provider),
+        )
         .build()
         .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;
-    let mut config = ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(config)
+        let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TlsError::Rustls(e))?
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(config)
+    }
+    #[cfg(not(feature = "fips"))]
+    {
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;
+        let mut config = ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(config)
+    }
 }
 
 /// DW-025 fuzz fix: every u16be call site must tolerate slices shorter
@@ -1064,6 +1210,37 @@ fn examine_peeked(seen: &[u8]) -> HelloPeek {
     }
 }
 
+/// Peek the TLS ClientHello SNI off a TCP stream WITHOUT splicing.
+///
+/// This is the peek-only half of [`handle_passthrough`], extracted so
+/// the DW-103 L4 TCP dispatcher can reuse the EXACT SNI extraction
+/// (the same bounded reassembly, the same 64 KiB budget, the same 10s
+/// peek timeout) and then own its own splice (with an idle timeout and
+/// L4 metrics). Returns `Ok(None)` when the client sends no SNI, a
+/// non-TLS hello, or the peek times out. Peeking (never reading) keeps
+/// the bytes available for the upstream once splicing starts.
+pub async fn peek_client_hello_sni(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
+    let mut scratch = vec![0u8; PEEK_LIMIT];
+    let started = std::time::Instant::now();
+    loop {
+        let n = stream.peek(&mut scratch).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let seen = &scratch[..n];
+        match examine_peeked(seen) {
+            HelloPeek::Sni(name) => return Ok(Some(name)),
+            HelloPeek::Settled => return Ok(None),
+            HelloPeek::Pending => {
+                if n >= PEEK_LIMIT || started.elapsed() >= PEEK_TIMEOUT {
+                    return Ok(None);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+}
+
 /// Peek the ClientHello off a passthrough connection, decide the route,
 /// and either splice both directions to the upstream or close.
 ///
@@ -1122,4 +1299,108 @@ pub async fn handle_passthrough(
             Ok(PassthroughAction::Close)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DW-107: SPIFFE/SPIRE mTLS integration point (service mesh mode).
+//
+// The functions below are the documented seam between the mesh domain
+// (which produces SVID cert/key material and the trust bundle from the
+// SPIRE Workload API) and the TLS machinery here (which would consume
+// that material to build the mTLS server/client config). They are
+// SCAFFOLDED behind the `mesh` cargo feature: the shapes compile so
+// the integration contract is fixed, but the actual rustls config
+// construction is a documented no-op today (the `spiffe` crate would
+// be added when production-ready). The seam is kept here, in
+// `security::tls`, rather than in `mesh`, so the dependency direction
+// stays downward (`mesh` is a peer of `security`, both above `config`;
+// `mesh` does not import `security`).
+// ---------------------------------------------------------------------------
+
+/// The mTLS role the SPIFFE-aware TLS config plays for a connection.
+/// Inbound sidecar connections act as the mTLS server (terminate the
+/// peer's SVID); outbound sidecar connections act as the mTLS client
+/// (present the local workload's SVID).
+#[cfg(feature = "mesh")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpiffeMtlsRole {
+    /// The sidecar terminates the peer's mTLS (inbound): the SVID
+    /// cert/key is the server certificate, the trust bundle verifies
+    /// the peer (client) SVID.
+    Server,
+    /// The sidecar presents the local workload's SVID (outbound): the
+    /// SVID cert/key is the client certificate, the trust bundle
+    /// verifies the remote sidecar's (server) SVID.
+    Client,
+}
+
+/// Build a SPIFFE-aware mTLS rustls config from an X.509 SVID and a
+/// trust bundle. This is the integration point between the mesh domain
+/// (which fetches SVIDs from the SPIRE Workload API) and the TLS
+/// machinery here.
+///
+/// # Stubbed
+///
+/// This is a documented no-op today. The actual rustls
+/// `ServerConfig`/`ClientConfig` construction -- loading the SVID cert
+/// chain + private key as the presented certificate, the trust bundle
+/// as the peer-verification root store, and wiring a SPIFFE-ID-aware
+/// certificate verifier (one that extracts the URI SAN SPIFFE ID from
+/// the verified peer cert and hands it to the auth layer as the
+/// identity) -- would land here when the `spiffe` crate is added. Today
+/// the function logs that the integration is stubbed and returns an
+/// error so callers fail loudly and attributably.
+#[cfg(feature = "mesh")]
+pub fn build_spiffe_mtls_config(
+    role: SpiffeMtlsRole,
+    svid: &crate::mesh::SpiffeSvid,
+    trust_bundle: &crate::mesh::SpiffeTrustBundle,
+) -> Result<(), TlsError> {
+    tracing::info!(
+        code = "spiffe_mtls_config_stubbed",
+        role = ?role,
+        cert_chain_len = svid.x509_cert.len(),
+        trust_bundle_len = trust_bundle.x509_certs.len(),
+        "the SPIFFE-aware mTLS rustls config construction is stubbed (DW-107): the \
+         `spiffe` crate would be added when production-ready. The SVID cert/key and \
+         trust bundle would be loaded into a rustls ServerConfig/ClientConfig with a \
+         SPIFFE-ID-aware certificate verifier (the peer's URI SAN SPIFFE ID is the \
+         auth identity). No rustls config is built."
+    );
+    // The shapes are used so the integration contract compiles and the
+    // scaffold is exercised; the real construction lands here when the
+    // spiffe crate is wired.
+    let _ = (role, svid, trust_bundle);
+    Err(TlsError::NoCertificates)
+}
+
+/// Extract the SPIFFE ID (the URI SAN) from a verified peer
+/// certificate. This is the auth identity the mesh uses for policy
+/// decisions: the sidecar terminates mTLS, verifies the peer SVID
+/// against the trust bundle, then extracts the SPIFFE ID from the
+/// peer cert's URI SAN and hands it to the auth layer as the
+/// principal/consumer.
+///
+/// # Stubbed
+///
+/// Documented no-op today. The DER walk to the URI SAN extension
+/// (the same substrate as `spki_of_leaf`, no X.509 parser dependency)
+/// would land here when the mesh mTLS wiring is production-ready. Today
+/// the function returns None.
+#[cfg(feature = "mesh")]
+pub fn extract_spiffe_id_from_peer_cert(
+    _cert: &rustls::pki_types::CertificateDer<'_>,
+) -> Option<crate::mesh::SpiffeIdentity> {
+    // The URI SAN extraction (a DER walk to the SubjectAltName
+    // extension, then the URI entry tagged with the SPIFFE scheme)
+    // would land here when production-ready, mirroring the
+    // `spki_algorithm_of_leaf` DER walk used by FIPS validation. Today
+    // the function is a documented no-op.
+    tracing::info!(
+        code = "spiffe_id_extraction_stubbed",
+        "the SPIFFE ID (URI SAN) extraction from a peer certificate is stubbed \
+         (DW-107): the DER walk would land here when the mesh mTLS wiring is \
+         production-ready."
+    );
+    None
 }

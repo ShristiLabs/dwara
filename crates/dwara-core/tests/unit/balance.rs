@@ -405,6 +405,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     }
 }
 
@@ -442,6 +443,8 @@ async fn dataplane_reload_changes_weights_without_restart() {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
     st.compile_and_publish(&g).expect("publish A");
     let dp = DataPlane::new(Arc::clone(&st));

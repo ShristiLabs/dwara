@@ -120,6 +120,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

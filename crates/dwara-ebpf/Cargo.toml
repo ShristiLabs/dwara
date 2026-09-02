@@ -1,0 +1,28 @@
+[package]
+name = "dwara-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.94"
+publish = false
+description = """
+eBPF companion crate for dwara (DW-104, research spike).
+
+RESEARCH SCAFFOLD: this crate contains trait definitions and
+documentation for future eBPF integration, but no working eBPF
+programs. See docs/adr/0002-ebpf-hooks-research-spike.md.
+
+Linux-only: eBPF requires kernel 5.4+ (BTF/CO-RE). This crate is
+excluded from the default workspace build and CI matrix.
+"""
+
+# This crate is NOT a workspace member (see the workspace exclude list
+# in the root Cargo.toml). It is a standalone scaffold so the default
+# `cargo build --workspace` and the macOS CI lane never touch it.
+#
+# When this advances from research to implementation, add the aya
+# dependency under the Linux-only target gate below. It is intentionally
+# omitted from this scaffold -- no working eBPF programs are shipped.
+#
+# [target.'cfg(target_os = "linux")'.dependencies]
+# aya = "0.13"

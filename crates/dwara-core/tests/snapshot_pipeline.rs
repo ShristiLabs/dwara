@@ -30,6 +30,7 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
         policies: vec![],
         authorization: None,
         alt_svc: None,
+        l4: None,
     }
 }
 
@@ -72,6 +73,9 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         security_headers: None,
         masking: None,
         plugins: Vec::new(),
+        graphql: None,
+        grpc_web: None,
+        translation: None,
     }
 }
 
@@ -113,6 +117,7 @@ fn upstream(name: &str) -> Upstream {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     }
 }
 
@@ -149,6 +154,8 @@ fn base_gateway() -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 
@@ -934,6 +941,7 @@ fn validation_rejects_terminate_without_cert_file() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.cert_file");
 }
@@ -948,6 +956,7 @@ fn validation_rejects_terminate_without_key_file() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.key_file");
 }
@@ -962,6 +971,7 @@ fn validation_accepts_terminate_with_cert_and_key() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1071,6 +1081,7 @@ fn validation_accepts_passthrough_without_cert_or_key() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1085,6 +1096,7 @@ fn validation_rejects_passthrough_with_cert_and_key() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }));
     assert_single_issue(&gw, "listener", "l", "tls");
 }
@@ -1100,6 +1112,7 @@ fn validation_rejects_http_listener_with_tls_block() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     });
     assert_single_issue(&gw, "listener", "l", "tls");
 }

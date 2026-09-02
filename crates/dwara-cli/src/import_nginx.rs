@@ -423,6 +423,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 dns_discovery: None,
                 peak_ewma: None,
                 locality: None,
+                pq: false,
             },
         );
 
@@ -493,6 +494,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                         dns_discovery: None,
                         peak_ewma: None,
                         locality: None,
+                        pq: false,
                     },
                 );
                 services.insert(
@@ -548,6 +550,9 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 slo: None,
                 websocket: None,
                 waf: None,
+                graphql: None,
+                grpc_web: None,
+                translation: None,
                 request_validation: None,
                 openapi: None,
                 mirror: None,
@@ -592,6 +597,8 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
 
     (gateway, warnings)

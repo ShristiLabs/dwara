@@ -30,6 +30,9 @@
 //! - [`policy`] — the DW-085 routing-policy engine (within-request
 //!   escalation via an external classifier, and latency-vs-cost
 //!   static selection)
+//! - [`a2a`] — the DW-114 A2A (agent-to-agent) protocol scaffold
+//!   (adapter, Agent Card parser, stubbed task lifecycle; feature-
+//!   gated behind the `a2a` cargo feature)
 //!
 //! # Dependency direction
 //!
@@ -39,6 +42,7 @@
 //! wires the streaming path, DW-078/079 meter it — none of them need
 //! to touch adapter internals, which is the point of the trait.
 
+pub mod a2a;
 pub mod adapter;
 pub mod adapters;
 pub mod budget;
@@ -140,6 +144,10 @@ pub struct AiRuntime {
     /// The compiled MCP gateway (DW-087), built from the `ai.mcp`
     /// config block. None when the config has no `ai.mcp` block.
     mcp: Option<Arc<mcp::CompiledMcp>>,
+    /// The compiled A2A surface (DW-114), built from the `ai.a2a`
+    /// config block. None when the block is absent or inert (feature
+    /// off / disabled).
+    a2a: Option<Arc<a2a::CompiledA2a>>,
 }
 
 impl AiRuntime {
@@ -266,16 +274,44 @@ impl AiRuntime {
             .as_ref()
             .and_then(|mcp_cfg| mcp::CompiledMcp::compile(mcp_cfg, gateway))
             .map(Arc::new);
+        // DW-114: compile the A2A surface (agents, sessions). When the
+        // `a2a` feature is on and the block is enabled, each configured
+        // agent is also inserted into the provider pool as a provider
+        // of kind `a2a` so model aliases can route to it by name. When
+        // the feature is off or the block is inert, `compile_a2a`
+        // returns None and no A2A providers are wired.
+        let a2a = a2a::compile_a2a(gateway).map(Arc::new);
+        if let Some(compiled_a2a) = &a2a {
+            for agent in compiled_a2a.agents.values() {
+                providers.insert(
+                    agent.name.clone(),
+                    CompiledProvider {
+                        name: agent.name.clone(),
+                        kind: AiProviderKind::A2a,
+                        upstream: agent.upstream.clone(),
+                        auth_headers: Vec::new(),
+                        credential_pool: None,
+                    },
+                );
+            }
+        }
         Some(AiRuntime {
             providers,
             models,
             mcp,
+            a2a,
         })
     }
 
     /// The compiled MCP gateway (DW-087); None when no `ai.mcp` block.
     pub fn mcp(&self) -> Option<&Arc<mcp::CompiledMcp>> {
         self.mcp.as_ref()
+    }
+
+    /// The compiled A2A surface (DW-114); None when no `ai.a2a` block
+    /// or the block is inert (feature off / disabled).
+    pub fn a2a(&self) -> Option<&Arc<a2a::CompiledA2a>> {
+        self.a2a.as_ref()
     }
 
     /// Resolve a model alias to its provider and provider model id
@@ -507,6 +543,7 @@ impl AiRuntime {
             providers: self.providers.clone(),
             models: new_models,
             mcp: self.mcp.clone(),
+            a2a: self.a2a.clone(),
         })
     }
 }

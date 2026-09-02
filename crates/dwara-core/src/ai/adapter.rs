@@ -24,6 +24,8 @@ use serde_json::Value;
 use crate::ai::adapters::anthropic::AnthropicAdapter;
 use crate::ai::adapters::gemini::GeminiAdapter;
 use crate::ai::adapters::openai::OpenAiAdapter;
+// DW-114: the A2A adapter is a stateless singleton like the others.
+use crate::ai::a2a::A2AAdapter;
 
 /// The error type of the AI domain: client-side malformation, adapter
 /// translation failure, or a provider-reported error response.
@@ -156,6 +158,8 @@ pub trait ProviderAdapter: Send + Sync {
 static OPENAI_ADAPTER: OpenAiAdapter = OpenAiAdapter;
 static ANTHROPIC_ADAPTER: AnthropicAdapter = AnthropicAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
+// DW-114: the A2A adapter singleton (stateless, like the others).
+static A2A_ADAPTER: A2AAdapter = A2AAdapter;
 
 /// The adapter singleton for a provider kind. Adapters are stateless —
 /// one instance per dialect serves every request.
@@ -164,5 +168,6 @@ pub fn adapter_for(kind: AiProviderKind) -> &'static dyn ProviderAdapter {
         AiProviderKind::Openai => &OPENAI_ADAPTER,
         AiProviderKind::Anthropic => &ANTHROPIC_ADAPTER,
         AiProviderKind::Gemini => &GEMINI_ADAPTER,
+        AiProviderKind::A2a => &A2A_ADAPTER,
     }
 }

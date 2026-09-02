@@ -131,6 +131,17 @@ pub struct AiConfig {
     /// (the default): no MCP surface (the `/mcp` path returns 404).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<AiMcpConfig>,
+    /// A2A (agent-to-agent) protocol support (DW-114 `ai.a2a`):
+    /// configures remote A2A agents that the gateway can route chat
+    /// requests to. Each agent names an upstream (the transport) and
+    /// an Agent Card (discovery doc, file path or inline JSON). The
+    /// adapter translates a canonical chat request into an A2A
+    /// task-submit body; the task lifecycle is STUBBED pending spec
+    /// freeze. Feature-gated behind the `a2a` cargo feature: without
+    /// it the block is accepted but inert (validation warns). Absent
+    /// (the default): no A2A surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<A2aConfig>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -218,6 +229,14 @@ pub enum AiProviderKind {
     /// Google Gemini `generateContent` API
     /// (`POST /v1beta/models/{model}:generateContent`).
     Gemini,
+    /// DW-114: A2A (agent-to-agent) protocol. An A2A provider is a
+    /// configured `ai.a2a.agents[]` entry: the adapter translates a
+    /// canonical chat request into an A2A task-submit body and parses
+    /// the task response back. The task lifecycle is STUBBED pending
+    /// spec freeze (every task-state transition returns an A2AStub
+    /// error). Feature-gated behind the `a2a` cargo feature; without
+    /// it the `ai.a2a` block is accepted but inert.
+    A2a,
 }
 
 /// Verbatim authentication header for a provider (DW-075
@@ -1050,6 +1069,95 @@ pub struct AiMcpSessions {
     pub ttl_secs: Option<u64>,
     /// Maximum number of concurrent active sessions. Default 1000.
     /// New `initialize` requests beyond this limit are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
+}
+
+/// A2A (agent-to-agent) protocol config (DW-114 `ai.a2a`). Declares
+/// the remote A2A agents the gateway can route chat requests to and
+/// the session policy for agent-to-agent task sessions. The block is
+/// ADDITIVE: absent (the default), the gateway has no A2A surface.
+/// Feature-gated behind the `a2a` cargo feature; without it the block
+/// is accepted but inert (validation warns, the runtime wires no A2A
+/// providers).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aConfig {
+    /// Master switch. Off by default: even when the `a2a` feature is
+    /// enabled, the block is inert until `enabled: true`. This lets
+    /// operators stage the config ahead of activating the surface.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The A2A agent pool. Each entry names an upstream (the
+    /// transport) and an Agent Card (discovery doc). Agent names
+    /// must be non-empty and unique (validation rejects duplicates
+    /// and empty names). Each agent appears as a provider in the
+    /// model alias table (its `kind` is `a2a`), so a model alias
+    /// can route to it by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<A2aAgent>,
+    /// Session policy. Absent (the default): the built-in defaults
+    /// (TTL 3600s, max 1000 concurrent sessions), mirroring MCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<A2aSessions>,
+}
+
+/// One A2A agent (DW-114 `ai.a2a.agents[]`). The gateway routes a
+/// chat request to the agent by translating it into an A2A task-submit
+/// body and placing the call through the named upstream. The Agent
+/// Card (discovery doc) declares the agent's capabilities and
+/// authentication; it is parsed at compile time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aAgent {
+    /// Agent name; unique within the `ai.a2a.agents` list. Referenced
+    /// by `ai.models[].provider` (the agent appears as a provider of
+    /// kind `a2a`). Validation rejects empty and duplicate names.
+    pub name: String,
+    /// The agent's base URL (the A2A endpoint). Must be an `http` or
+    /// `https` URL. The adapter builds the task-submit path under
+    /// this URL.
+    pub url: String,
+    /// The Agent Card: a discovery doc declaring the agent's name,
+    /// description, version, capabilities, and authentication.
+    /// Either a filesystem path to a JSON document (`/path/to/card.json`)
+    /// or an inline JSON object. Validation rejects an inline card
+    /// that is not a JSON object. The card is parsed at compile time
+    /// (see `ai::a2a::AgentCardParser`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<A2aAgentCard>,
+    /// Name of the `upstreams[]` entry that carries this agent's
+    /// transport (endpoints, TLS trust, pooling, timeouts, breaker).
+    /// Validation rejects a reference to an unknown upstream.
+    pub upstream: String,
+}
+
+/// The Agent Card source (DW-114): a file path or an inline JSON
+/// object. One of the two is required when `card` is present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aAgentCard {
+    /// Filesystem path to an Agent Card JSON document. Read at
+    /// compile time; an unreadable or malformed file fails the
+    /// generation closed (the same DW-045 contract as secret refs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Inline Agent Card JSON object. When present, takes precedence
+    /// over `path`. Must be a JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<serde_json::Value>,
+}
+
+/// A2A session policy (DW-114 `ai.a2a.sessions`), mirroring MCP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aSessions {
+    /// Session TTL in seconds. Default 3600. Expired sessions are
+    /// cleaned up periodically and rejected on use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+    /// Maximum number of concurrent active sessions. Default 1000.
+    /// New task sessions beyond this limit are rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<usize>,
 }

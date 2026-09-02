@@ -653,6 +653,7 @@ fn governance_engine_deny_when_model_not_in_allowlist() {
         routing_policies: std::collections::BTreeMap::new(),
         experiments: None,
         mcp: None,
+        a2a: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     assert!(!engine.is_empty());
@@ -710,6 +711,7 @@ fn governance_engine_deny_wins_across_multiple_policies() {
         routing_policies: std::collections::BTreeMap::new(),
         experiments: None,
         mcp: None,
+        a2a: None,
     };
     let engine = GovernanceEngine::compile(Some(&cfg));
     // Consumer attaches both broad + strict. cheap is in both -> allow.

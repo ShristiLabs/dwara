@@ -78,7 +78,9 @@ fn bench_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
-            });
+                graphql: None,
+                grpc_web: None,
+                translation: None,            });
         }
     }
     let services = (0..10)
@@ -120,6 +122,7 @@ fn bench_gateway() -> Gateway {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         })
         .collect();
     Gateway {
@@ -152,7 +155,8 @@ fn bench_gateway() -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
-    }
+        lifecycle: None,
+        mesh: None,    }
 }
 
 fn bench_micro(c: &mut Criterion) {

@@ -174,6 +174,9 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             slo: None,
             websocket: None,
             waf: None,
+            graphql: None,
+            grpc_web: None,
+            translation: None,
             request_validation: None,
             openapi: Some(OpenApiMeta {
                 operation_id: op.operation_id.clone(),
@@ -227,6 +230,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         }],
         consumers: Vec::new(),
         policies: Vec::new(),
@@ -253,6 +257,8 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 

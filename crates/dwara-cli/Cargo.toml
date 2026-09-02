@@ -42,6 +42,10 @@ serde = { workspace = true }
 # already in the tree transitively; this only makes it a direct one.
 # MIT OR Apache-2.0.
 libc = { workspace = true }
+# DW-102 `replay --from/--to`: reads raw rows from the analytics
+# SQLite store. Already a workspace dependency (dwara-core/state uses
+# it); no new external crate enters the tree. MIT.
+rusqlite = { workspace = true }
 # DW-066: tracing subscriber for the ent controller/edge binaries (the
 # same registry + EnvFilter + JSON fmt stack dwara-bin installs).
 # Optional + ent-gated so the default CLI build never pulls it in.

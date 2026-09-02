@@ -171,6 +171,14 @@ pub enum UpstreamError {
     /// The hyper client failed to complete the request (broken pool
     /// connection, framing error, ...).
     Client(hyper_util::client::legacy::Error),
+    /// DW-108: the upstream is configured `protocol: h3` but the H3
+    /// transport is unavailable. When the `h3` cargo feature is off the
+    /// H3 connector is not compiled, so an `h3` upstream is inert and
+    /// every dispatch fails closed with this error rather than silently
+    /// falling back to a wrong transport. Classified 502 by the proxy;
+    /// not health-reportable (a configuration/feature gap, not an
+    /// endpoint failure).
+    H3Unavailable,
 }
 
 impl std::fmt::Display for UpstreamError {
@@ -194,6 +202,10 @@ impl std::fmt::Display for UpstreamError {
             }
             UpstreamError::Io(e) => write!(f, "upstream connect failed: {e}"),
             UpstreamError::Client(e) => write!(f, "upstream request failed: {e}"),
+            UpstreamError::H3Unavailable => write!(
+                f,
+                "upstream protocol h3 requires the `h3` cargo feature (build with --features h3)"
+            ),
         }
     }
 }
@@ -213,6 +225,7 @@ fn health_reportable(err: &UpstreamError) -> bool {
             | UpstreamError::NoEndpoints
             | UpstreamError::InvalidRootCertificate(_)
             | UpstreamError::InvalidHost(_)
+            | UpstreamError::H3Unavailable
     )
 }
 
@@ -314,7 +327,15 @@ impl std::error::Error for UpstreamBodyError {}
 /// client end abruptly (HTTP/1.1 truncation semantics); it is never
 /// retried (an attempt is final once its headers resolved).
 pub struct UpstreamBody {
-    inner: Incoming,
+    /// The wrapped upstream response body. A boxed body so the H3
+    /// transport (DW-108) can supply a buffered body alongside the
+    /// TCP/TLS path's streaming `Incoming`: the legacy path boxes an
+    /// `Incoming` (mapping `hyper::Error` to [`UpstreamBodyError`]), the
+    /// H3 path boxes a `Full<Bytes>` (the response is buffered; see
+    /// `dataplane::upstream_h3`'s module docs). Both share the
+    /// `Bytes`/`UpstreamBodyError` body shape, so the idle/deadline/
+    /// health-reporting wrapper below is transport-agnostic.
+    inner: http_body_util::combinators::BoxBody<Bytes, UpstreamBodyError>,
     idle: Option<Duration>,
     sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     health: Option<(Arc<crate::dataplane::balance::UpstreamLb>, HealthDispatch)>,
@@ -371,7 +392,7 @@ impl hyper::body::Body for UpstreamBody {
                 }
                 Poll::Ready(Some(Err(e))) => {
                     this.report_health_failure();
-                    return Poll::Ready(Some(Err(UpstreamBodyError::Upstream(e))));
+                    return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => {
@@ -407,6 +428,47 @@ impl std::fmt::Debug for UpstreamBody {
 }
 
 impl UpstreamBody {
+    /// Wrap a streaming TCP/TLS upstream body (`Incoming`) with the
+    /// DW-014 idle/deadline/health knobs. `idle` is the response-body
+    /// inactivity timeout (`timeouts.write_ms`); `health` carries the
+    /// dispatch's passive-health tracker for mid-body failure reporting.
+    /// The legacy pooled-client path uses this constructor.
+    pub fn from_incoming(
+        inner: Incoming,
+        idle: Option<Duration>,
+        health: Option<(Arc<crate::dataplane::balance::UpstreamLb>, HealthDispatch)>,
+    ) -> Self {
+        UpstreamBody {
+            inner: inner.map_err(UpstreamBodyError::Upstream).boxed(),
+            idle,
+            sleep: None,
+            health,
+            release: None,
+            deadline: None,
+        }
+    }
+
+    /// Wrap a fully-buffered H3 response body (DW-108). The H3 transport
+    /// collects the response into one `Bytes` (streaming H3 bodies are a
+    /// follow-up; see `dataplane::upstream_h3`); the wrapper still
+    /// applies the deadline knob (the body is already complete, so the
+    /// idle timer never arms). `health` is `None` for H3 today (a buffered
+    /// body cannot mid-stream abort, so there is no mid-body failure to
+    /// report).
+    #[cfg(feature = "h3")]
+    pub fn from_buffered(body: Bytes) -> Self {
+        UpstreamBody {
+            inner: http_body_util::Full::new(body)
+                .map_err(|e: std::convert::Infallible| match e {})
+                .boxed(),
+            idle: None,
+            sleep: None,
+            health: None,
+            release: None,
+            deadline: None,
+        }
+    }
+
     /// Report a mid-stream failure to the dispatch's health tracker, if any.
     fn report_health_failure(&mut self) {
         if let Some((lb, hd)) = &self.health.take() {
@@ -873,6 +935,18 @@ pub struct UpstreamHandle {
     /// Kept on the handle so the active https health probes use the
     /// SAME trust as the pooled connector.
     tls_roots: Option<rustls::RootCertStore>,
+    /// DW-108: the configured protocol. `H3` selects the QUIC transport
+    /// (`h3` field) when the `h3` cargo feature is on, and fails closed
+    /// (`UpstreamError::H3Unavailable`) when the feature is off (an `h3`
+    /// upstream is accepted at validation but inert). The other variants
+    /// use the TCP/TLS `client` below.
+    protocol: UpstreamProtocol,
+    /// DW-108: the H3/QUIC upstream transport, present iff
+    /// `protocol == H3` AND the `h3` cargo feature is enabled. When
+    /// `protocol == H3` and this is `None`, the feature is off and every
+    /// dispatch fails closed with [`UpstreamError::H3Unavailable`].
+    #[cfg(feature = "h3")]
+    h3: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>>,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
@@ -989,6 +1063,22 @@ impl UpstreamHandle {
         self.tls_roots.as_ref()
     }
 
+    /// DW-108: the H3/QUIC upstream transport, when this upstream is
+    /// `protocol: h3` AND the `h3` cargo feature is enabled. The QUIC
+    /// active health probe reuses its TLS client config (trust roots +
+    /// `h3` ALPN) so a probe and a proxied request trust the same roots.
+    /// None for non-H3 upstreams or when the feature is off.
+    #[cfg(feature = "h3")]
+    pub fn h3_handle(&self) -> Option<&Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>> {
+        self.h3.as_ref()
+    }
+
+    /// The configured upstream protocol (DW-108). `H3` selects the QUIC
+    /// transport; the other variants use the TCP/TLS pooled client.
+    pub fn protocol(&self) -> UpstreamProtocol {
+        self.protocol
+    }
+
     /// Send a request through this upstream's pool without a hash key
     /// (algorithms other than `ip_hash` ignore the key anyway).
     pub async fn send<B>(&self, req: Request<B>) -> Result<Response<UpstreamBody>, UpstreamError>
@@ -1087,6 +1177,84 @@ impl UpstreamHandle {
             *picked = Some(authority.clone());
             (dispatch, authority)
         };
+        // DW-108: H3 upstreams dispatch over QUIC, not the TCP/TLS pooled
+        // client. The LB pick, in-flight guard, health reporting, and
+        // latency recording are SHARED with the legacy path (they operate
+        // on endpoint addresses, not the transport); only the dial +
+        // request/response exchange differs. When the `h3` cargo feature
+        // is off (or the H3 handle failed to build), the upstream is
+        // inert and every dispatch fails closed with
+        // [`UpstreamError::H3Unavailable`] — never a silent fallback to a
+        // wrong transport.
+        if matches!(self.protocol, UpstreamProtocol::H3) {
+            let issued = std::time::Instant::now();
+            let outcome: Result<hyper::Response<Bytes>, UpstreamError> = {
+                #[cfg(feature = "h3")]
+                {
+                    if let Some(h3) = &self.h3 {
+                        // Buffer the request body (the H3 path sends it as
+                        // one DATA frame; see `dataplane::upstream_h3`).
+                        let body_bytes = match req.into_body().collect().await {
+                            Ok(collected) => collected.to_bytes(),
+                            Err(e) => {
+                                let err = UpstreamError::Io(std::io::Error::other(e.to_string()));
+                                if let Some(health) = &dispatch.health {
+                                    health.report(self.lb.now_ms(), true);
+                                }
+                                self.lb.record_latency(dispatch.idx, issued.elapsed());
+                                dispatch.release();
+                                return Err(err);
+                            }
+                        };
+                        let mut h3_req = hyper::Request::builder()
+                            .method(req.method().clone())
+                            .uri(format!("https://{authority}{path}"));
+                        *h3_req.headers_mut() = req.headers().clone();
+                        // H3 speaks HTTP/3; stamp the version so the
+                        // upstream sees its own dialect.
+                        *h3_req.version_mut() = hyper::Version::HTTP_3;
+                        let h3_req = h3_req.body(body_bytes).expect("static builder");
+                        h3.send(&dispatch.address, dispatch.port, &dispatch.address, h3_req)
+                            .await
+                    } else {
+                        Err(UpstreamError::H3Unavailable)
+                    }
+                }
+                #[cfg(not(feature = "h3"))]
+                {
+                    // The H3 variant exists in config but the feature is
+                    // off: inert. `dispatch` was picked, so release the
+                    // in-flight guard and record the (tiny) latency below.
+                    let _ = req;
+                    Err(UpstreamError::H3Unavailable)
+                }
+            };
+            // Same health classification as the legacy path: transport
+            // errors and statuses >= 5xx are failures; admission/config
+            // errors (H3Unavailable) are not health-reportable.
+            let report = match &outcome {
+                Ok(resp) => Some(resp.status().as_u16() >= 500),
+                Err(err) if health_reportable(err) => Some(true),
+                Err(_) => None,
+            };
+            if let (Some(health), Some(is_failure)) = (&dispatch.health, report) {
+                health.report(self.lb.now_ms(), is_failure);
+            }
+            self.lb.record_latency(dispatch.idx, issued.elapsed());
+            dispatch.release();
+            // The H3 path returns a buffered body (UpstreamBody::from_buffered);
+            // the non-H3 path returns H3Unavailable (an Err), so the map
+            // only runs when the feature is on and the request succeeded.
+            #[cfg(feature = "h3")]
+            return outcome.map(|resp| (resp.map(UpstreamBody::from_buffered), ()));
+            #[cfg(not(feature = "h3"))]
+            return outcome.map(|resp| {
+                (
+                    resp.map(|_| unreachable!("h3 response without h3 feature")),
+                    (),
+                )
+            });
+        }
         // Held (inside `dispatch`) until the response (headers) resolves;
         // see the doc comment.
         let uri: Uri = format!("{}://{}{}", self.scheme, authority, path)
@@ -1166,13 +1334,8 @@ impl UpstreamHandle {
         dispatch.release();
         outcome.map_err(Into::into).map(|resp| {
             (
-                resp.map(|inner| UpstreamBody {
-                    inner,
-                    idle: self.write_timeout,
-                    sleep: None,
-                    health: body_health,
-                    release: None,
-                    deadline: None,
+                resp.map(|inner| {
+                    UpstreamBody::from_incoming(inner, self.write_timeout, body_health)
                 }),
                 (),
             )
@@ -1257,21 +1420,67 @@ fn build_handle(
             UpstreamProtocol::Http1 => ("http", None, false, None),
             UpstreamProtocol::Https => (
                 "https",
-                Some(Arc::new(crate::security::tls::https_h1_client_config(
+                Some(Arc::new(crate::security::tls::https_h1_client_config_pq(
                     root_store.clone(),
+                    u.pq,
                 ))),
                 false,
                 Some(root_store),
             ),
             UpstreamProtocol::Http2 => {
                 // Same roots as https, but ALPN h2 and a client locked to
-                // HTTP/2 (see module docs).
+                // HTTP/2 (see module docs). DW-105: when the upstream opts
+                // in to PQ hybrid key exchange (`pq: true`), prepend the
+                // hybrid kx group before building the config (experimental
+                // no-op when the rustls PQ API is not reachable).
+                if u.pq {
+                    let _ = crate::security::pq::install_pq_kx_group();
+                }
                 let mut cfg = rustls::ClientConfig::builder()
                     .with_root_certificates(root_store.clone())
                     .with_no_client_auth();
                 cfg.alpn_protocols = vec![b"h2".to_vec()];
                 ("https", Some(Arc::new(cfg)), true, Some(root_store))
             }
+            // DW-108: H3 dials QUIC, not the TCP/TLS pooled client. The
+            // legacy `client` below is built but never used for an H3
+            // upstream (send_inner dispatches to the `h3` handle). scheme
+            // is "https" so URI/authority construction is shared; the
+            // trust roots are kept so the QUIC active health probe shares
+            // trust with the H3 connector (#121).
+            UpstreamProtocol::H3 => ("https", None, false, Some(root_store)),
+        };
+
+    // DW-108: build the H3/QUIC transport for an `h3` upstream (feature
+    // on). A build failure (the quinn client endpoint cannot bind an
+    // ephemeral port, or the rustls config is rejected by QUIC) is a
+    // torn-state the operator must see: log loudly and leave the handle
+    // inert (h3 = None) so every dispatch fails closed with
+    // `UpstreamError::H3Unavailable` rather than half-working.
+    #[cfg(feature = "h3")]
+    let h3_handle: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>> =
+        if matches!(u.protocol, UpstreamProtocol::H3) {
+            match crate::dataplane::upstream_h3::H3UpstreamHandle::new(
+                u.name.clone(),
+                tls_roots.clone().unwrap_or_default(),
+                connect_timeout,
+                cap,
+                effective_read_timeout(u),
+                Arc::clone(&stats),
+            ) {
+                Ok(h) => Some(Arc::new(h)),
+                Err(err) => {
+                    tracing::error!(
+                        code = "upstream_h3_build_failed",
+                        upstream = %u.name,
+                        "h3 upstream transport build failed; failing closed (every dispatch will \
+                         return H3Unavailable): {err}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
 
     let connector = UpstreamConnector {
@@ -1359,6 +1568,9 @@ fn build_handle(
         scheme,
         http2_only,
         tls_roots,
+        protocol: u.protocol,
+        #[cfg(feature = "h3")]
+        h3: h3_handle,
     })
 }
 
@@ -1661,6 +1873,7 @@ mod tests {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

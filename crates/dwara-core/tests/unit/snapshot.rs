@@ -20,6 +20,7 @@ fn good_gateway() -> Gateway {
             authorization: None,
             proxy_protocol: false,
             alt_svc: None,
+            l4: None,
         }],
         routes: vec![
             Route {
@@ -60,6 +61,9 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                graphql: None,
+                grpc_web: None,
+                translation: None,
             },
             Route {
                 name: "static".into(),
@@ -99,6 +103,9 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                graphql: None,
+                grpc_web: None,
+                translation: None,
             },
             Route {
                 name: "legacy".into(),
@@ -138,6 +145,9 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                graphql: None,
+                grpc_web: None,
+                translation: None,
             },
         ],
         services: vec![Service {
@@ -174,6 +184,7 @@ fn good_gateway() -> Gateway {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         }],
         consumers: vec![],
         policies: vec![],
@@ -199,6 +210,8 @@ fn good_gateway() -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 
@@ -220,6 +233,7 @@ fn validate_reports_all_semantic_issues() {
         authorization: None,
         proxy_protocol: false,
         alt_svc: None,
+        l4: None,
     });
     let issues = validate(&gw);
     assert!(issues
@@ -551,6 +565,7 @@ fn validate_rejects_proxy_protocol_with_tls_passthrough() {
         }],
         client_ca_file: None,
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     });
     gw.listeners[0].proxy_protocol = true;
     let issues = validate(&gw);

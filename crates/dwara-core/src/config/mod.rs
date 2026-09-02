@@ -32,6 +32,7 @@ pub mod ai;
 pub mod cache;
 pub mod credentials;
 pub mod limits;
+pub mod mesh;
 pub mod net;
 pub mod transforms;
 pub mod versioning;
@@ -363,6 +364,35 @@ pub struct Gateway {
     /// inert (the controller accepts all edges).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<FleetConfig>,
+    /// API lifecycle management (DW-110): the developer portal
+    /// (auto-generated from OpenAPI specs), environment profiles
+    /// (dev/staging/prod config overlays), and the API journey
+    /// recorder (request flow visualization for debugging). Absent
+    /// (the default): no lifecycle surface. When present and the
+    /// `api_lifecycle` cargo feature is compiled in, the portal is
+    /// served at its configured path, the profile overlay is applied
+    /// at config load, and journeys are recorded. When the feature is
+    /// NOT compiled in, the block is accepted but inert (validation
+    /// warns). See [`LifecycleConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleConfig>,
+    /// Service mesh mode (DW-107, enterprise feature). Absent (the
+    /// default): the gateway runs as a regular reverse proxy. When
+    /// present, the `mesh` cargo feature is compiled in, AND a valid
+    /// license with the `service_mesh` feature claim is loaded, the
+    /// gateway runs as a sidecar in each pod: an init container
+    /// configures iptables/TPROXY redirects so all traffic to and from
+    /// the local application flows through the sidecar, which
+    /// terminates mTLS (inbound) and wraps mTLS (outbound) using
+    /// SPIFFE/SPIRE X.509 SVIDs fetched from the SPIRE Workload API.
+    /// When the `mesh` feature is NOT compiled in, or the license
+    /// lacks the claim, the block is accepted but inert (validation
+    /// warns, no sidecar listeners or SPIFFE client are wired). Ent-
+    /// only: validation warns when mesh is configured without the
+    /// `ent` feature. See [`mesh::MeshConfig`] and the `mesh` domain
+    /// module docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<mesh::MeshConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -755,6 +785,150 @@ pub struct FleetConfig {
     pub stale_timeout_secs: u64,
 }
 
+/// API lifecycle management config (DW-110, `gateway.lifecycle`).
+///
+/// Three sub-concerns, each additive and independently enabled:
+///
+/// - `portal` -- the developer portal: a read-only static HTML page
+///   auto-generated from the configured OpenAPI spec sources, served
+///   at a reserved path.
+/// - `profiles` -- environment profiles: dev/staging/prod config
+///   overlays. The profile is selected via the `DWARA_PROFILE` env
+///   var; the selected profile's patch is merged onto the base config
+///   at load time.
+/// - `journey` -- the API journey recorder: records the request flow
+///   through the gateway as a JSON document for debugging, stored via
+///   the existing analytics raw table.
+///
+/// When the `api_lifecycle` cargo feature is NOT compiled in, the
+/// block is accepted but inert (validation warns, mirroring the
+/// `a2a`/`graphql` pattern).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleConfig {
+    /// The developer portal config. Absent (the default): no portal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<LifecyclePortalConfig>,
+    /// Environment profile overlays. Absent (the default): no
+    /// overlays; the base config is used as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<LifecycleProfilesConfig>,
+    /// The journey recorder config. Absent (the default): no
+    /// journeys are recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journey: Option<LifecycleJourneyConfig>,
+}
+
+/// Developer portal config (DW-110, `gateway.lifecycle.portal`).
+///
+/// The portal is a read-only static HTML page that aggregates the
+/// configured OpenAPI specs. `enabled` defaults to false: even with
+/// the `api_lifecycle` feature compiled in, the portal is inert until
+/// `enabled: true`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecyclePortalConfig {
+    /// Master switch. Default false: the portal is not served.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The URL path the portal is served at (a reserved HTTP path,
+    /// shadowing any configured route, like `/healthz`). Must start
+    /// with `/`. Default `/portal`.
+    #[serde(
+        default = "default_lifecycle_portal_path",
+        skip_serializing_if = "is_default_lifecycle_portal_path"
+    )]
+    pub path: String,
+    /// The OpenAPI spec sources to aggregate. Each source is either a
+    /// `file` path or a `url` (an upstream `/openapi.json` endpoint).
+    /// Empty (the default): the portal renders an empty listing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub specs: Vec<LifecyclePortalSpec>,
+}
+
+fn default_lifecycle_portal_path() -> String {
+    "/portal".to_string()
+}
+
+fn is_default_lifecycle_portal_path(p: &String) -> bool {
+    p == "/portal"
+}
+
+/// One OpenAPI spec source for the developer portal (DW-110,
+/// `gateway.lifecycle.portal.specs[]`).
+///
+/// Either a `file` path (read from disk) or a `url` (an upstream
+/// `/openapi.json` endpoint, fetched at render time). Exactly one of
+/// `file`/`url` must be set; validation rejects a spec with neither
+/// or both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecyclePortalSpec {
+    /// A file path to an OpenAPI 3.x JSON document on disk. The file
+    /// must exist and be readable (validation checks this at config
+    /// publish time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// An upstream `/openapi.json` endpoint URL (http or https). The
+    /// portal fetches the spec from this URL at render time. NOT
+    /// fetched at validation time (the upstream may be down at publish
+    /// time but up at render time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// An optional display name for the spec. When absent, the portal
+    /// derives the name from the spec's `info.title` (or the file name
+    /// / URL host when the spec cannot be parsed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Environment profile overlays config (DW-110,
+/// `gateway.lifecycle.profiles`).
+///
+/// Carries a base config (as a YAML string) plus per-profile config
+/// patches. The profile is selected via the `DWARA_PROFILE` env var;
+/// the selected profile's patch is merged onto the base at load time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleProfilesConfig {
+    /// The base config, as a YAML string. This is the config that
+    /// applies when no profile is selected (or the selected profile
+    /// has no patch).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_config: String,
+    /// Per-profile config patches, keyed by profile name (`dev`,
+    /// `staging`, `prod`). Each value is a YAML string merged onto the
+    /// base config when that profile is selected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub profile_overrides: std::collections::BTreeMap<String, String>,
+}
+
+/// Journey recorder config (DW-110, `gateway.lifecycle.journey`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleJourneyConfig {
+    /// Master switch. Default false: no journeys are recorded.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The retention window for in-memory journeys, in hours. Must be
+    /// greater than 0 (validation rejects 0). The durable copy's
+    /// retention is the raw table's own retention; this cap only bounds
+    /// the in-memory ring buffer. Default 24.
+    #[serde(
+        default = "default_lifecycle_journey_retention",
+        skip_serializing_if = "is_default_lifecycle_journey_retention"
+    )]
+    pub retention_hours: u64,
+}
+
+fn default_lifecycle_journey_retention() -> u64 {
+    24
+}
+
+fn is_default_lifecycle_journey_retention(h: &u64) -> bool {
+    *h == 24
+}
+
 /// Rolling-upgrade and version-skew policy (DW-098,
 /// `gateway.fleet.upgrade`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -907,6 +1081,17 @@ pub struct AnalyticsConfig {
     /// endpoints answer `analytics_not_configured`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insights: Option<AnalyticsInsights>,
+    /// Replay time-travel debugging capture (DW-102): opt-in capture of
+    /// request detail (redacted headers, auth identity) into the raw
+    /// analytics table for offline replay against candidate configs.
+    /// Absent (the default): no replay capture; the raw table's
+    /// `request_headers_redacted` and `auth_identity` columns stay
+    /// NULL. When present with `enabled: true`, the fire-and-forget
+    /// analytics writer records the redacted headers and auth identity
+    /// alongside the existing access fields, bounded by `retain_hours`.
+    /// See [`AnalyticsReplayCapture`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_capture: Option<AnalyticsReplayCapture>,
 }
 
 /// Live in-process sketches config (DW-092, `analytics.live_sketches`).
@@ -978,6 +1163,51 @@ pub struct AnalyticsInsights {
 
 fn is_default_baseline_windows(v: &u64) -> bool {
     *v == 1440
+}
+
+/// Replay time-travel debugging capture config (DW-102,
+/// `analytics.replay_capture`). Opt-in capture of request detail
+/// (redacted headers, auth identity) into the raw analytics table for
+/// offline replay against candidate configs. The capture reuses the
+/// existing fire-and-forget analytics writer path and the existing PII
+/// redaction patterns (`ai::redaction`); body capture is OFF by
+/// default (PII risk).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsReplayCapture {
+    /// Whether replay capture is active (default false — opt-in). When
+    /// false the raw table's `request_headers_redacted` and
+    /// `auth_identity` columns stay NULL even when the block is
+    /// present (a no-op shape that reads as coverage).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Time-bounded retention for replay-captured raw rows, in hours
+    /// (default 24). Rows older than the retention window are deleted
+    /// by the existing raw retention sweep. Validated to be > 0.
+    #[serde(
+        default = "default_replay_retain_hours",
+        skip_serializing_if = "is_default_replay_retain_hours"
+    )]
+    pub retain_hours: u64,
+    /// Whether to capture redacted request headers (default true when
+    /// the block is present). Headers are scrubbed via the existing PII
+    /// redaction patterns before storage.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub capture_headers: bool,
+    /// Whether to capture the request body (default false — PII risk).
+    /// Body capture is off by default; enabling it is an explicit
+    /// operator decision to accept the PII exposure of stored bodies
+    /// (even redacted bodies may carry residual sensitive content).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub capture_body: bool,
+}
+
+fn default_replay_retain_hours() -> u64 {
+    24
+}
+
+fn is_default_replay_retain_hours(v: &u64) -> bool {
+    *v == 24
 }
 
 /// Scheduled usage-report exports (DW-120, `analytics.exports`).
@@ -1848,6 +2078,17 @@ pub struct Listener {
     /// transform).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_svc: Option<String>,
+    /// L4 proxying configuration (DW-103). Only meaningful on
+    /// `protocol: tcp` and `protocol: udp` listeners; rejected by
+    /// validation on other protocols. The `upstream` field names the
+    /// upstream that receives the spliced stream (or, when
+    /// `sni_routing` is true, the upstream selected by the TLS
+    /// ClientHello SNI via the upstream's `tls.sni_routes` -- reusing
+    /// the SNI extraction from DW-008 TLS passthrough). Feature-gated
+    /// behind the `l4` cargo feature; when the feature is off the
+    /// block is accepted but inert (validation warns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4: Option<L4Config>,
 }
 
 fn default_listener_protocol() -> ListenerProtocol {
@@ -1868,6 +2109,23 @@ pub enum ListenerProtocol {
     /// sibling H1/H2 listeners advertises this listener's H3 port to
     /// clients for protocol upgrade discovery.
     H3,
+    /// L4 TCP proxying (DW-103). A raw TCP socket is bound on the
+    /// listener's address:port; accepted connections are spliced
+    /// byte-for-byte to an upstream endpoint (optionally selected by
+    /// peeking the TLS ClientHello SNI, reusing the SNI extraction
+    /// from DW-008 TLS passthrough). Requires the `l4` cargo feature
+    /// on dwara-bin; when the feature is off, the listener is accepted
+    /// but inert (validation warns). The `l4` block configures the
+    /// upstream and SNI-routing flag.
+    Tcp,
+    /// L4 UDP proxying (DW-103). A UDP socket is bound on the
+    /// listener's address:port; datagrams are forwarded to an upstream
+    /// endpoint. STUBBED: the UDP dispatcher returns Unimplemented --
+    /// UDP session semantics and NAT timeouts are a follow-up. Requires
+    /// the `l4` cargo feature; when the feature is off, the listener is
+    /// accepted but inert (validation warns). The `l4` block configures
+    /// the upstream.
+    Udp,
 }
 
 /// TLS handling for a listener: terminate at the edge or pass through.
@@ -1919,6 +2177,22 @@ pub struct ListenerTls {
     /// validation) on H1/H2 listeners.
     #[serde(default, skip_serializing_if = "is_default_zero_rtt")]
     pub zero_rtt: ZeroRttPolicy,
+    /// DW-105: opt in to post-quantum hybrid key exchange
+    /// (X25519+ML-KEM) for this listener. When `true` AND the `pq`
+    /// cargo feature is ON, the X25519+ML-KEM hybrid kx group is
+    /// prepended to the rustls provider's kx group list, PREFERRING
+    /// the hybrid group while keeping the classical X25519 fallback
+    /// for non-PQ clients. When the `pq` cargo feature is OFF, `pq:
+    /// true` is accepted by the parser (additive-only, strict serde
+    /// preserved) but is INERT: no kx group is prepended, and
+    /// validation emits a warning issue. EXPERIMENTAL: the rustls PQ
+    /// API is not yet stable. Rejected when combined with FIPS mode
+    /// (ML-KEM is not on the FIPS-validated list for aws-lc-rs).
+    /// Terminate mode only (passthrough does not terminate TLS, so
+    /// the kx group list is irrelevant); validation rejects `pq: true`
+    /// on a passthrough listener.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pq: bool,
 }
 
 fn is_default_zero_rtt(p: &ZeroRttPolicy) -> bool {
@@ -1959,6 +2233,41 @@ pub struct SniRoute {
     pub server_names: Vec<String>,
     /// Name of the upstream that receives the spliced TLS stream.
     pub upstream: String,
+}
+
+/// L4 proxying configuration for a `tcp` or `udp` listener (DW-103).
+///
+/// The listener accepts raw L4 connections and splices them byte-for-byte
+/// to an upstream endpoint. When `sni_routing` is true (TCP only), the
+/// dispatcher peeks the TLS ClientHello SNI (reusing the SNI extraction
+/// from DW-008 TLS passthrough) and selects the upstream from the
+/// listener's `tls.sni_routes` -- the same routing table passthrough
+/// uses. When `sni_routing` is false, the configured `upstream` receives
+/// every connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct L4Config {
+    /// Name of the upstream that receives the spliced stream. Required
+    /// when `sni_routing` is false; when `sni_routing` is true the
+    /// upstream is selected per-connection from `tls.sni_routes`, and
+    /// this field is the fallback for connections with no SNI or an
+    /// unmatched name (absent = close the connection on no match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    /// Peek the TLS ClientHello SNI and route the connection to the
+    /// upstream matched by the listener's `tls.sni_routes` (reusing the
+    /// SNI extraction from DW-008 TLS passthrough). TCP only; rejected
+    /// on UDP listeners by validation (UDP has no byte-stream handshake
+    /// to peek). When false, every connection is spliced to the
+    /// configured `upstream`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sni_routing: bool,
+    /// Idle timeout in seconds for an established splice. When neither
+    /// side sends data for this duration, the splice is closed. Absent
+    /// (or 0) means no idle timeout (the splice runs until either side
+    /// closes). Bounded by validation to at most 1 hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_s: Option<u64>,
 }
 
 fn default_tls_mode() -> TlsMode {
@@ -2160,6 +2469,40 @@ pub struct Route {
     /// [`RouteWaf`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waf: Option<RouteWaf>,
+    /// GraphQL awareness (DW-099): query depth/complexity limits and
+    /// optional persisted-query enforcement for routes that front a
+    /// GraphQL server. When enabled (and the `graphql` cargo feature
+    /// is compiled in), the gateway rejects abusive queries before
+    /// the route limits and authentication. Absent (the default): no
+    /// GraphQL checks. When the `graphql` feature is NOT compiled in,
+    /// the block is accepted but inert (the config round-trips, the
+    /// runtime check does not run). See [`RouteGraphql`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql: Option<RouteGraphql>,
+    /// gRPC-Web framing translation + JSON-to-gRPC transcoding (DW-101):
+    /// when enabled, the gateway translates gRPC-Web framing to native
+    /// gRPC for the upstream and wraps the response back. When
+    /// transcoding is enabled, JSON requests are translated to/from
+    /// protobuf using .proto descriptors supplied via config. Absent
+    /// (the default): no translation. When the `grpc_web` cargo feature
+    /// is NOT compiled in, the block is accepted but inert (the config
+    /// round-trips; validation warns; the runtime translation does not
+    /// run). See [`GrpcWeb`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc_web: Option<GrpcWeb>,
+    /// Protocol translation (DW-100): translates the request/response
+    /// bodies between two wire protocols on this route's forward and
+    /// response paths. When enabled (and the relevant cargo feature is
+    /// compiled in), the gateway converts the client's body to the
+    /// upstream's wire format and the upstream's response back to the
+    /// client's wire format. Absent (the default): no translation.
+    /// When the `protocol_translation` cargo feature is NOT compiled
+    /// in, the block is accepted but inert (the config round-trips;
+    /// validation warns; the runtime translation does not run). The
+    /// SOAP/XML kinds additionally require the `soap` cargo feature.
+    /// See [`Translation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<Translation>,
     /// Request validation (DW-047): an optional JSON-schema block the
     /// gateway validates the request body against before the route
     /// action runs. A mismatch answers 400 `validation_failed` with the
@@ -2431,6 +2774,293 @@ fn default_waf_max_body_inspect_bytes() -> u64 {
 
 fn is_default_waf_max_body_inspect_bytes(v: &u64) -> bool {
     *v == 131_072
+}
+
+/// Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).
+///
+/// When enabled (and the `graphql` cargo feature is compiled in), the
+/// gateway enforces query depth/complexity limits and optional
+/// persisted-query enforcement on every request the route matches,
+/// BEFORE the route limits and authentication. A query whose depth or
+/// complexity exceeds the configured limits is rejected with 400
+/// (`graphql_depth_exceeded` or `graphql_complexity_exceeded`); a
+/// query whose SHA-256 hash is not in the persisted-query store is
+/// rejected with 400 (`graphql_persisted_query_required`).
+///
+/// The check is feature-gated: when the `graphql` cargo feature is NOT
+/// compiled in, the block is accepted by the schema and validation but
+/// is inert at runtime (no check runs). This lets configs round-trip
+/// across builds with and without the feature.
+///
+/// Depth is the maximum brace-nesting level of the query (the
+/// top-level operation body is depth 1). Complexity is the sum of
+/// per-field costs: each field's cost is looked up in
+/// `cost_per_field`, falling back to `complexity_coefficient` (default
+/// 1) when the field name is not in the map.
+///
+/// Both are computed by a
+/// bounded hand-rolled scanner (no external GraphQL parser dependency).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteGraphql {
+    /// Master switch. Default false: the GraphQL block is inert even
+    /// when present (allows staged rollout). When true, the depth and
+    /// complexity checks run on every request the route matches.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Maximum query depth (max brace-nesting level). A query whose
+    /// depth exceeds this is rejected with 400
+    /// `graphql_depth_exceeded`. Must be > 0 when the block is
+    /// enabled (validation rejects 0 or absent). The top-level
+    /// operation body is depth 1, so a value of 1 permits only a
+    /// flat selection set with no nested fields.
+    pub depth_limit: usize,
+    /// Maximum query complexity (sum of per-field costs). A query
+    /// whose complexity exceeds this is rejected with 400
+    /// `graphql_complexity_exceeded`. Must be > 0 when the block is
+    /// enabled.
+    pub complexity_limit: u64,
+    /// Default cost per field when the field name is not in
+    /// `cost_per_field` (default 1). The complexity total is
+    /// `sum(cost_per_field[name].unwrap_or(complexity_coefficient))`.
+    #[serde(
+        default = "default_graphql_complexity_coefficient",
+        skip_serializing_if = "is_default_graphql_complexity_coefficient"
+    )]
+    pub complexity_coefficient: u64,
+    /// Per-field cost overrides. Maps a field name to its explicit
+    /// cost; any field not in this map uses
+    /// `complexity_coefficient`. Empty (the default): every field
+    /// costs `complexity_coefficient`.
+    #[serde(default, skip_serializing_if = "is_graphql_cost_per_field_empty")]
+    pub cost_per_field: std::collections::HashMap<String, u64>,
+    /// Persisted-query enforcement (Apollo APQ + GET-by-hash variant).
+    /// When enabled, every request's query SHA-256 hash must be in the
+    /// configured `store` (a map of hash -> query text). A hash not in
+    /// the store is rejected with 400
+    /// `graphql_persisted_query_required`. Absent (the default): no
+    /// persisted-query enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_queries: Option<GraphqlPersistedQueries>,
+}
+
+/// Persisted-query enforcement config (DW-099,
+/// `routes[].graphql.persisted_queries`).
+///
+/// When enabled, the gateway enforces that every request's query
+/// SHA-256 hash is in the config-supplied `store`. This is the Apollo
+/// APQ (Automatic Persisted Queries) + GET-by-hash variant: the
+/// client sends the query text, the gateway computes its SHA-256, and
+/// verifies the hash is known. An external store (Redis, etc.) is a
+/// future extension point; v1 uses a config-supplied map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlPersistedQueries {
+    /// Master switch. Default false: the persisted-query block is
+    /// inert even when present.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The persisted-query store: a map of SHA-256 hash (lowercase
+    /// hex) to query text. Every key must be a non-empty string
+    /// (validation rejects empty keys). The query text is stored for
+    /// future use (e.g. GET-by-hash resolution); v1 only checks hash
+    /// membership.
+    #[serde(default, skip_serializing_if = "is_graphql_persisted_store_empty")]
+    pub store: std::collections::HashMap<String, String>,
+}
+
+fn default_graphql_complexity_coefficient() -> u64 {
+    1
+}
+
+fn is_default_graphql_complexity_coefficient(v: &u64) -> bool {
+    *v == 1
+}
+
+fn is_graphql_cost_per_field_empty(v: &std::collections::HashMap<String, u64>) -> bool {
+    v.is_empty()
+}
+
+fn is_graphql_persisted_store_empty(v: &std::collections::HashMap<String, String>) -> bool {
+    v.is_empty()
+}
+
+/// Route-scoped gRPC-Web policy (DW-101, `routes[].grpc_web`).
+///
+/// When enabled, the gateway translates gRPC-Web framing (the browser-
+/// friendly variant that replaces HTTP/2 trailers with a trailing
+/// frame) to native gRPC for the upstream, and wraps the native gRPC
+/// response back into gRPC-Web framing for the browser. Streaming
+/// (server-streaming and bidi) is supported: each upstream data chunk
+/// becomes its own gRPC-Web data frame, and the trailers become a
+/// final gRPC-Web trailer frame.
+///
+/// When `transcoding` is enabled, the gateway additionally accepts
+/// plain JSON requests (Content-Type: application/json) and translates
+/// them to protobuf wire bytes for the upstream, and translates the
+/// protobuf response back to JSON. The mapping is driven by .proto
+/// descriptors supplied via config.
+///
+/// Feature-gated behind the `grpc_web` cargo feature. When the feature
+/// is NOT compiled in, the block is accepted but inert (the config
+/// round-trips; validation warns; the runtime translation does not
+/// run). See [`GrpcWebTranscoding`] and [`GrpcWebDescriptor`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcWeb {
+    /// Master switch. Default false: the gRPC-Web block is inert even
+    /// when present (allows staged rollout). When true, the gateway
+    /// translates gRPC-Web framing to native gRPC on the forward path
+    /// and back on the response path.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// JSON-to-gRPC transcoding configuration. When enabled, the
+    /// gateway accepts JSON requests and translates them to protobuf
+    /// using the supplied .proto descriptors. Absent (the default):
+    /// only gRPC-Web framing translation runs (no JSON transcoding).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcoding: Option<GrpcWebTranscoding>,
+}
+
+/// gRPC-Web JSON transcoding configuration (DW-101,
+/// `routes[].grpc_web.transcoding`).
+///
+/// Supplies the .proto descriptor files that map HTTP/JSON requests to
+/// gRPC methods. Each descriptor names a file (a FileDescriptorSet in
+/// binary protobuf format), a package, and a service. At config publish
+/// the gateway loads the descriptors, resolves the service's methods,
+/// and builds a method map keyed by the fully-qualified gRPC method
+/// path. The google.api.http annotation on each RPC maps an HTTP path +
+/// verb to the gRPC method.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcWebTranscoding {
+    /// Master switch for transcoding. Default false: even when the
+    /// `transcoding` block is present, transcoding is inert unless
+    /// this is true. (Allows the descriptor list to be staged before
+    /// activation.)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The .proto descriptor files to load. Each entry names a
+    /// FileDescriptorSet file (binary protobuf format, as produced by
+    /// `protoc --descriptor_set_out=...`), the package, and the
+    /// service within that package. At least one descriptor is
+    /// required when transcoding is enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descriptors: Vec<GrpcWebDescriptor>,
+}
+
+/// A .proto descriptor file entry (DW-101,
+/// `routes[].grpc_web.transcoding.descriptors[]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcWebDescriptor {
+    /// Path to the FileDescriptorSet file (binary protobuf format, as
+    /// produced by `protoc --descriptor_set_out=...`). The file must
+    /// exist and be readable at config publish time; a missing or
+    /// unparseable file fails validation.
+    pub file: String,
+    /// The protobuf package name (e.g. `my.api`). Used to locate the
+    /// service's methods in the descriptor set.
+    pub package: String,
+    /// The service name within the package (e.g. `MyService`).
+    pub service: String,
+}
+
+/// Route-scoped protocol translation policy (DW-100,
+/// `routes[].translation`).
+///
+/// When enabled, the gateway translates the request/response bodies
+/// between two wire protocols on this route's forward and response
+/// paths. The `kind` selects the translation direction; the `graphql`
+/// and `soap` sub-blocks carry the direction-specific config.
+///
+/// Feature-gated behind the `protocol_translation` cargo feature (and
+/// the SOAP kinds additionally behind the `soap` cargo feature). When
+/// the relevant feature is NOT compiled in, the block is accepted but
+/// inert (the config round-trips; validation warns; the runtime
+/// translation does not run).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Translation {
+    /// The translation direction. Selects which translator runs and
+    /// which sub-block (`graphql` or `soap`) carries the config.
+    pub kind: TranslationKind,
+    /// REST <-> GraphQL translation config. Required when `kind` is
+    /// `rest_to_graphql` or `graphql_to_rest`; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql: Option<GraphqlTranslation>,
+    /// SOAP/XML translation config. Required when `kind` is
+    /// `rest_to_soap` or `soap_to_rest`; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soap: Option<SoapTranslation>,
+}
+
+/// The protocol translation direction (DW-100,
+/// `routes[].translation.kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationKind {
+    /// A REST/JSON client -> GraphQL upstream. The gateway builds a
+    /// GraphQL query from a config-supplied query template and the
+    /// REST JSON body.
+    RestToGraphql,
+    /// A GraphQL client -> REST upstream. The gateway unwraps the
+    /// GraphQL `data` envelope into a REST JSON body on the response
+    /// path.
+    GraphqlToRest,
+    /// A REST/JSON client -> SOAP/XML upstream. The gateway wraps the
+    /// JSON body in a SOAP envelope with the configured operation name
+    /// and namespace.
+    RestToSoap,
+    /// A SOAP/XML client -> REST/JSON upstream. The gateway parses the
+    /// SOAP envelope and converts the Body's payload element to JSON.
+    SoapToRest,
+}
+
+/// REST <-> GraphQL translation config (DW-100,
+/// `routes[].translation.graphql`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlTranslation {
+    /// The GraphQL query template. `$variable` references are resolved
+    /// from the REST JSON body's top-level fields and substituted into
+    /// the query (the resolved values are also sent as the GraphQL
+    /// `variables` map). Required for `rest_to_graphql`; ignored for
+    /// `graphql_to_rest` (which only unwraps the response envelope).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query_template: String,
+    /// The path to send the GraphQL upstream (REST-to-GraphQL rewrites
+    /// every request to this path). Default `/graphql`.
+    #[serde(
+        default = "default_graphql_upstream_path",
+        skip_serializing_if = "is_default_graphql_upstream_path"
+    )]
+    pub upstream_path: String,
+}
+
+fn default_graphql_upstream_path() -> String {
+    "/graphql".to_string()
+}
+
+fn is_default_graphql_upstream_path(s: &str) -> bool {
+    s == "/graphql"
+}
+
+/// SOAP/XML translation config (DW-100, `routes[].translation.soap`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SoapTranslation {
+    /// The SOAP operation name: the Body's first child element name
+    /// (e.g. `GetUser`). Required for both directions.
+    pub operation: String,
+    /// The XML namespace for the operation element
+    /// (e.g. `http://example.com/api`). Required for `rest_to_soap`
+    /// (the envelope's payload element carries the namespace); used
+    /// for `soap_to_rest` only to validate the payload element's
+    /// namespace when present.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
 }
 
 /// Route-scoped WebSocket policy (DW-039, `routes[].websocket`).
@@ -3273,6 +3903,57 @@ pub enum RouteAction {
     /// rejects the pairing otherwise). `stream: true` requests are
     /// served via zero-buffer SSE pass-through (DW-077).
     Ai,
+    /// WASM route handler (nano-service, DW-106): instead of proxying
+    /// to an upstream, the route action runs a WASM module that
+    /// generates the response directly. The module implements a simple
+    /// request->response handler ABI over the existing wasmtime runtime
+    /// (the `wasm` cargo feature). The route's `service` is still
+    /// required by the schema (the frozen vocabulary) but never dialed
+    /// -- the whole point is serving without a backend. The runtime is
+    /// feature-gated behind the `nano_services` cargo feature; when the
+    /// feature is off the action is accepted but inert (validation
+    /// warns, the route returns 502). See [`NanoServiceAction`].
+    NanoService {
+        #[serde(flatten)]
+        nano: NanoServiceAction,
+    },
+}
+
+/// A WASM route handler (nano-service) action (DW-106,
+/// `routes[].action` with `type: nano_service`). The gateway loads the
+/// named WASM module, calls its `handle` export with the serialized
+/// request (method, path, headers, body), and returns the response the
+/// module produces (status, headers, body). No upstream is contacted.
+///
+/// `module` is the filesystem path to the `.wasm` module (checked for
+/// existence and readability at config publish time). `memory_limit` is
+/// the maximum linear memory in bytes the module may allocate (must be
+/// positive and at most 64 MiB). `execution_timeout_ms` is the maximum
+/// wall-clock time the `handle` call may run (must be positive and at
+/// most 5000ms); a module that exceeds it is interrupted and the route
+/// answers 504.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NanoServiceAction {
+    /// Filesystem path to the `.wasm` module. Must exist and be
+    /// readable at config publish time.
+    pub module: String,
+    /// Maximum linear memory the module may allocate, in bytes. Must be
+    /// > 0 and <= 67108864 (64 MiB). Default: 1048576 (1 MiB).
+    #[serde(default = "default_nano_memory_limit")]
+    pub memory_limit: usize,
+    /// Maximum wall-clock execution time for the `handle` call, in
+    /// milliseconds. Must be > 0 and <= 5000. Default: 100.
+    #[serde(default = "default_nano_execution_timeout_ms")]
+    pub execution_timeout_ms: u64,
+}
+
+fn default_nano_memory_limit() -> usize {
+    1_048_576
+}
+
+fn default_nano_execution_timeout_ms() -> u64 {
+    100
 }
 
 /// A canned response served without any upstream contact (DW-047,
@@ -3731,6 +4412,22 @@ pub struct Upstream {
     /// rejected at validation when the `ent` cargo feature is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<UpstreamLocality>,
+    /// DW-105: opt in to post-quantum hybrid key exchange
+    /// (X25519+ML-KEM) for this upstream's TLS connections. When
+    /// `true` AND the `pq` cargo feature is ON, the X25519+ML-KEM
+    /// hybrid kx group is prepended to the rustls client config's kx
+    /// group list, PREFERRING the hybrid group while keeping the
+    /// classical X25519 fallback for non-PQ upstreams. When the `pq`
+    /// cargo feature is OFF, `pq: true` is accepted by the parser
+    /// (additive-only, strict serde preserved) but is INERT: no kx
+    /// group is prepended, and validation emits a warning issue.
+    /// EXPERIMENTAL: the rustls PQ API is not yet stable. Only
+    /// meaningful for the TLS protocols (`https`, `http2`); validation
+    /// rejects `pq: true` on an `http1` upstream (no TLS is
+    /// negotiated). Rejected when combined with FIPS mode (ML-KEM is
+    /// not on the FIPS-validated list for aws-lc-rs).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pq: bool,
 }
 
 /// DW-094 (Ent): locality-aware routing and data residency configuration
@@ -4357,6 +5054,15 @@ pub enum UpstreamProtocol {
     Http1,
     Http2,
     Https,
+    /// HTTP/3 over QUIC (DW-108). QUIC mandates TLS 1.3, so an `h3`
+    /// upstream always negotiates TLS with ALPN `h3`; the
+    /// `trusted_ca_file` field selects the trust roots (the default
+    /// webpki public set, or a private-CA bundle). Requires the `h3`
+    /// cargo feature on dwara-bin to actually proxy: when the feature is
+    /// off the protocol is accepted at validation but the upstream is
+    /// inert (every dispatch fails closed with a clear error rather than
+    /// silently falling back to a wrong transport).
+    H3,
 }
 
 /// One `address:port` inside an upstream.

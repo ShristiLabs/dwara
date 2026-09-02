@@ -292,6 +292,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                 dns_discovery: None,
                 peak_ewma: None,
                 locality: None,
+                pq: false,
             },
         );
         // Each cluster gets a service with the same name.
@@ -329,6 +330,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
             policies: Vec::new(),
             authorization: None,
             alt_svc: None,
+            l4: None,
         });
 
         // Extract routes from the HTTP connection manager filter chain.
@@ -399,6 +401,9 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                                         slo: None,
                                         websocket: None,
                                         waf: None,
+                                        graphql: None,
+                                        grpc_web: None,
+                                        translation: None,
                                         request_validation: None,
                                         openapi: None,
                                         mirror: None,
@@ -450,6 +455,8 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
 
     (gateway, warnings)

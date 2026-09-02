@@ -46,6 +46,14 @@
 //!   vocabulary, the pure-translation [`ai::adapter::ProviderAdapter`]
 //!   seam, and the compiled alias table; the transport lives in
 //!   `dataplane`, which calls into it) |
+//! | `lifecycle` | `config`, `observability`, `analytics` (DW-110: API
+//!   lifecycle management -- developer portal, environment profiles,
+//!   API journey recorder; feature-gated behind `api_lifecycle`) |
+//! | `mesh` | `config`, `observability` (DW-107: service mesh mode --
+//!   sidecar traffic interception + SPIFFE/SPIRE mTLS identity; the
+//!   mTLS TLS integration point is a documented seam into `security`,
+//!   kept as a hand-off so the dependency direction stays downward;
+//!   feature-gated behind `mesh`, Ent-only) |
 //! | `dataplane` | all of the above |
 //! | `supervision` | (nothing — pure task plumbing, no domain imports) |
 //!
@@ -120,6 +128,21 @@ pub mod k8s_gateway;
 // binary size against the DW-026 25MB budget.
 #[cfg(feature = "wasm")]
 pub mod wasm;
+// DW-107: Service mesh mode (sidecar + SPIFFE/SPIRE mTLS identity).
+// Feature-gated behind the `mesh` cargo feature (default OFF). The
+// sidecar controller and SPIFFE Workload API client are SCAFFOLDED
+// (documented no-ops); the `spiffe` crate would be added when
+// production-ready. Ent-only.
+#[cfg(feature = "mesh")]
+pub mod mesh;
+// DW-110: API lifecycle management (developer portal, environment
+// profiles, API journey recorder). Feature-gated behind the
+// `api_lifecycle` cargo feature (default OFF, flag-only). The config
+// schema (the top-level `lifecycle` block) is always present so configs
+// round-trip without the feature; when the feature is off the block is
+// accepted but inert (validation warns).
+#[cfg(feature = "api_lifecycle")]
+pub mod lifecycle;
 
 // Path-compatibility aliases: these re-exports keep the historical
 // top-level module paths (`dwara_core::proxy`, `dwara_core::tls`, ...)
@@ -149,7 +172,11 @@ pub use security::authn;
 #[doc(hidden)]
 pub use security::authz;
 #[doc(hidden)]
+pub use security::fips;
+#[doc(hidden)]
 pub use security::oidc;
+#[doc(hidden)]
+pub use security::pq;
 #[doc(hidden)]
 pub use security::tls;
 #[doc(hidden)]

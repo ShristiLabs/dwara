@@ -597,6 +597,7 @@ fn ai_runtime_compiles_and_resolves() {
         routing_policies: std::collections::BTreeMap::new(),
         experiments: None,
         mcp: None,
+        a2a: None,
     };
     let gw: dwara_core::config::Gateway = serde_yaml_ng::from_str("ai: ~\n").unwrap();
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg), &gw).unwrap();

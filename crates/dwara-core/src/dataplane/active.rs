@@ -250,6 +250,91 @@ pub async fn probe_once(
     }
 }
 
+/// DW-108: QUIC active health probe for `protocol: h3` upstreams. Opens
+/// a one-off QUIC connection to `address:port` (verifying the upstream's
+/// server certificate against `tls`, the SAME h3-ALPN rustls config the
+/// pooled H3 connector uses), sends a HEAD request for `path`, and
+/// classifies the response status: 2xx = healthy, anything else
+/// (including connect/transport/timeout failure) = unhealthy. Mirrors
+/// [`probe_once`]'s `http` classification (the first status wins;
+/// redirects are not followed) so an H3 upstream's active-health
+/// semantics match its H1/H2 counterparts. Behind `#[cfg(feature =
+/// "h3")]` because the QUIC stack is only linked with the feature on;
+/// `respawn` never routes to this when the feature is off.
+#[cfg(feature = "h3")]
+async fn probe_once_h3(
+    tls: &Arc<rustls::ClientConfig>,
+    address: &str,
+    port: u16,
+    path: &str,
+    timeout: Duration,
+) -> bool {
+    use bytes::Buf as _;
+    let attempt = async {
+        let quic_cfg = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::clone(tls))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let client_cfg = quinn::ClientConfig::new(Arc::new(quic_cfg));
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("valid addr"))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        endpoint.set_default_client_config(client_cfg);
+        let addr = tokio::net::lookup_host((address, port))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no addresses")
+            })?;
+        let conn = endpoint
+            .connect(addr, address)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let (h3_conn, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Drive h3 control frames for the lifetime of this probe; the
+        // task resolves when the connection closes (the sender drops
+        // after the request, draining the connection).
+        let _driver = tokio::spawn(async move {
+            let mut h3_conn = h3_conn;
+            let _ = h3_conn.wait_idle().await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::HEAD)
+            .uri(format!("https://{address}{path}"))
+            .body(())
+            .expect("static builder");
+        let mut stream = send_req
+            .send_request(req)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        stream
+            .finish()
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let resp = stream
+            .recv_response()
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let status = resp.status().as_u16();
+        // Drain any body the server sends (HEAD should be empty, but be
+        // robust) so the stream closes cleanly.
+        while let Some(chunk) = stream
+            .recv_data()
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+        {
+            let _ = chunk.copy_to_bytes(chunk.remaining());
+        }
+        let _ = stream.recv_trailers().await;
+        Ok::<bool, std::io::Error>((200..300).contains(&status))
+    };
+    tokio::time::timeout(timeout, attempt)
+        .await
+        .map(|r| r.unwrap_or(false))
+        .unwrap_or(false)
+}
+
 // Process-local xorshift64* seed for full jitter (no `rand` dependency;
 // same approach as the balancer's random-2).
 static JITTER_RNG: AtomicU64 = AtomicU64::new(0x853c_49e6_748f_ea9b);
@@ -318,6 +403,10 @@ async fn probe_loop(
     passive: HealthParams,
     tls: Option<Arc<rustls::ClientConfig>>,
     happy: Option<Duration>,
+    // DW-108: when Some, the upstream is `protocol: h3` and the probe
+    // dials QUIC with this h3-ALPN rustls config. None for H1/H2/h2c
+    // upstreams. Only set when the `h3` cargo feature is on.
+    h3_tls: Option<Arc<rustls::ClientConfig>>,
 ) {
     let report = report_params(&active, &passive);
     let mut success_streak: u32 = 0;
@@ -327,16 +416,38 @@ async fn probe_loop(
         let jitter = Duration::from_millis(next_below(active.jitter.as_millis() as u64));
         sleep(jitter).await;
         let iteration = async {
-            let ok = probe_once(
-                active.kind,
-                tls.as_ref(),
-                &address,
-                port,
-                &active.path,
-                active.timeout,
-                happy,
-            )
-            .await;
+            // DW-108: H3 upstreams probe over QUIC; the rest use the
+            // TCP/TLS probe. The h3 branch is feature-gated; when the
+            // feature is off `h3_tls` is never Some (respawn skips H3
+            // upstreams), so the unreachable `false` arm never runs.
+            let ok = if h3_tls.is_some() {
+                #[cfg(feature = "h3")]
+                {
+                    probe_once_h3(
+                        h3_tls.as_ref().expect("h3_tls Some implies feature h3"),
+                        &address,
+                        port,
+                        &active.path,
+                        active.timeout,
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "h3"))]
+                {
+                    false
+                }
+            } else {
+                probe_once(
+                    active.kind,
+                    tls.as_ref(),
+                    &address,
+                    port,
+                    &active.path,
+                    active.timeout,
+                    happy,
+                )
+                .await
+            };
             let now = lb.now_ms();
             if ok {
                 success_streak += 1;
@@ -437,6 +548,12 @@ impl ActiveProbes {
                     passive,
                     tls.clone(),
                     handle.happy_eyeballs(),
+                    // DW-108: H3 upstreams probe over QUIC; pass the H3
+                    // TLS config when the feature is on, None otherwise.
+                    #[cfg(feature = "h3")]
+                    handle.h3_handle().map(|_| tls.clone()),
+                    #[cfg(not(feature = "h3"))]
+                    None,
                 ));
             }
         }

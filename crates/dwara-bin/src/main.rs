@@ -205,6 +205,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
     tls::install_aws_lc_rs_provider();
+
+    // DW-111: FIPS 140-3 mode startup self-test. When the `fips` cargo
+    // feature is ON, install the aws-lc-rs FIPS provider as the
+    // process-default (the same provider, but the self-test confirms the
+    // install took effect), run the self-test, and refuse to boot (exit
+    // 1) if the provider is not the FIPS-validated aws-lc-rs provider.
+    // The attestation is logged at startup and surfaced on /healthz.
+    #[cfg(feature = "fips")]
+    {
+        dwara_core::fips::install_fips_provider();
+        let attestation = dwara_core::fips::fips_self_test();
+        if !attestation.self_test_passed {
+            tracing::error!(
+                code = "fips_self_test_failed",
+                provider = %attestation.provider,
+                "FIPS self-test failed: the process-default crypto provider is not the \
+                 FIPS-validated aws-lc-rs provider (got '{}'); refusing to start in FIPS mode",
+                attestation.provider
+            );
+            std::process::exit(1);
+        }
+        tracing::info!(
+            code = "fips_mode_active",
+            provider = %attestation.provider,
+            self_test_passed = attestation.self_test_passed,
+            timestamp = attestation.timestamp,
+            "FIPS 140-3 mode active: aws-lc-rs FIPS provider installed and self-test passed"
+        );
+    }
+
     let config_path = PathBuf::from(
         std::env::var("DWARA_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
     );
@@ -252,6 +282,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // license. When the `ent` cargo feature is NOT compiled in, the
     // block is accepted but inert (the gate is always none()).
     let license_gate = build_license_gate(&gateway);
+
+    // DW-111: FIPS mode license assertion. A license that carries the
+    // `fips` feature claim REQUIRES the gateway to be running in FIPS
+    // mode. When the license requires FIPS but the gateway is not built
+    // with the `fips` cargo feature, refuse to start (exit 1). This is a
+    // config-time check: the assertion runs after the gate is built and
+    // before enterprise features engage.
+    if let Err(msg) = license_gate.assert_fips_compliance() {
+        tracing::error!(code = "license_fips_assertion_failed", "{msg}");
+        std::process::exit(1);
+    }
 
     // Credential pepper (#124): resolved through the SecretSource
     // extension seam BEFORE the state store is seeded (the pepper
@@ -378,6 +419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 authorization: None,
                 proxy_protocol: false,
                 alt_svc: None,
+                l4: None,
             }]
         }
         None => state.snapshot().gateway().listeners.clone(),
@@ -395,6 +437,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(feature = "h3")]
     let mut h3_listeners: Vec<(Listener, Arc<TlsTermination>)> = Vec::new();
     for l in &configured {
+        // DW-103: UDP listeners bind a UDP socket (not TCP). The UDP
+        // dispatcher is STUBBED, so skip them in the TCP bind loop --
+        // a log line documents that the listener is inert. TCP
+        // listeners go through the normal bind_listener path below.
+        if l.protocol == ListenerProtocol::Udp {
+            tracing::info!(
+                code = "udp_listener_skipped",
+                addr = %format!("{}:{}", l.address, l.port),
+                listener = %l.name,
+                "udp listener is stubbed (DW-103 follow-up); not binding"
+            );
+            continue;
+        }
         // DW-088: H3 listeners are handled separately (UDP/QUIC, not
         // TCP). Skip them in the TCP bind loop.
         #[cfg(feature = "h3")]
@@ -432,6 +487,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ListenerMode::Cleartext => "cleartext http/1.1+h2c",
                 ListenerMode::Terminate(_) => "tls terminate",
                 ListenerMode::Passthrough => "tls passthrough",
+                #[cfg(feature = "l4")]
+                ListenerMode::L4 { .. } => "l4 tcp proxy",
             },
             config = %config_path.display().to_string(),
             generation = info.generation,

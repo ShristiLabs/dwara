@@ -271,8 +271,22 @@ pub const SCHEMA_V9: &str = "
     CREATE INDEX IF NOT EXISTS idx_raw_correlation ON raw(correlation_id, ts_ms);
 ";
 
+/// Schema v10 (DW-102): add optional replay-capture columns to the
+/// `raw` table for time-travel debugging. `request_headers_redacted`
+/// holds the redacted request headers (opt-in, scrubbed via the
+/// existing PII redaction patterns) and `auth_identity` holds the
+/// authenticated consumer name (opt-in). Both default to `NULL` so
+/// pre-DW-102 rows and records that omit the fields (capture is
+/// opt-in) land as NULL — the replay reader treats NULL as "not
+/// captured". Uses ALTER TABLE (additive) so existing databases
+/// migrate in place.
+pub const SCHEMA_V10: &str = "
+    ALTER TABLE raw ADD COLUMN request_headers_redacted TEXT;
+    ALTER TABLE raw ADD COLUMN auth_identity TEXT;
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 9;
+pub const LATEST_SCHEMA_VERSION: u32 = 10;
 
 /// Schema v6 (DW-086): three tables for prompt experimentation.
 ///
@@ -410,6 +424,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 9 {
         conn.execute_batch(SCHEMA_V9)?;
         conn.pragma_update(None, "user_version", 9)?;
+    }
+    if version < 10 {
+        conn.execute_batch(SCHEMA_V10)?;
+        conn.pragma_update(None, "user_version", 10)?;
     }
     Ok(())
 }

@@ -30,6 +30,7 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
         policies: vec![],
         authorization: None,
         alt_svc: None,
+        l4: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn terminate_tls() -> ListenerTls {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }
 }
 
@@ -54,6 +56,7 @@ fn passthrough_tls(routes: Vec<SniRoute>) -> ListenerTls {
         certificates: vec![],
         sni_routes: routes,
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     }
 }
 
@@ -114,6 +117,9 @@ fn base_gateway(listener: Listener) -> Gateway {
             security_headers: None,
             masking: None,
             plugins: Vec::new(),
+            graphql: None,
+            grpc_web: None,
+            translation: None,
         }],
         services: vec![Service {
             name: "svc".into(),
@@ -149,6 +155,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             dns_discovery: None,
             peak_ewma: None,
             locality: None,
+            pq: false,
         }],
         consumers: vec![],
         policies: vec![],
@@ -174,6 +181,8 @@ fn base_gateway(listener: Listener) -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 
@@ -265,6 +274,7 @@ fn validation_rejects_terminate_with_neither_single_pair_nor_certificates() {
         certificates: vec![],
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
+        pq: false,
     };
     let issues = dwara_core::snapshot::validate(&base_gateway(https_listener("edge", 8443, tls)));
     assert_eq!(issues.len(), 2, "got: {issues:?}");

@@ -121,6 +121,8 @@ tonic = { workspace = true, optional = true }
 # by dwara-bin's OTLP metrics encoder); this makes it a direct dep of
 # dwara-core so the ent-gated cp_dp transport module can derive
 # prost::Message. MIT OR Apache-2.0 (both allow-listed).
+# DW-101: also enabled by the `grpc_web` feature for gRPC-Web framing +
+# JSON-to-gRPC transcoding (OSS, no license required).
 prost = { workspace = true, optional = true }
 # DW-066: tokio-stream for wrapping mpsc receivers as Stream items in the
 # CP/DP gRPC server-streaming transport (ent feature only). Already pulled
@@ -130,6 +132,15 @@ tokio-stream = { workspace = true, optional = true }
 # for AI prompts). Optional so the default build never pulls it in;
 # enabled via the `semantic_cache` feature. MIT OR Apache-2.0.
 hnsw_rs = { workspace = true, optional = true }
+# DW-108: HTTP/3 (QUIC) upstream transport. quinn is the QUIC transport,
+# h3 is the HTTP/3 framing layer, h3-quinn bridges them (all MIT, the
+# same crates the DW-088 H3 ingress uses on dwara-bin). Optional so the
+# default build never pulls them in; enabled via the `h3` feature. The
+# upstream connector (dataplane::upstream_h3) and the QUIC active health
+# probe (dataplane::active) compile only with the feature on.
+quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
 
 [features]
 # DW-025: swaps the health/breaker/retry-budget/rate-limiter-shard
@@ -148,6 +159,17 @@ ent = ["dep:licensing-core", "dep:redis", "dep:tonic", "dep:prost", "dep:tokio-s
 # Default OFF: wasmtime + cranelift are significant binary size against
 # the DW-026 25MB budget. Build with `cargo build --features wasm`.
 wasm = ["dep:wasmtime"]
+# DW-106: WASM route handlers (nano-services). When enabled, a route
+# action can run a WASM module that generates the response directly
+# (instead of proxying to an upstream). The module implements a simple
+# request->response handler ABI over the existing wasmtime runtime
+# (brought in by the `wasm` feature). Default OFF: it depends on the
+# wasm runtime (wasmtime + cranelift), which is significant binary size
+# against the DW-026 25MB budget. The config schema is always present
+# (so configs round-trip without the feature); when the feature is off
+# the action is accepted but inert (validation warns, the route returns
+# 502). Build with `cargo build --features nano_services`.
+nano_services = ["wasm"]
 # DW-119: native plugin filter trait + unified dispatch chain. When
 # enabled, the gateway can run compile-in Rust filters (linked into the
 # binary at build time) alongside proxy-wasm plugins, selected by config
@@ -198,13 +220,154 @@ mcp = []
 # + its transitive deps (rayon, mmap-rs, anndists) add binary size.
 # Build with `cargo build --features semantic_cache`.
 semantic_cache = ["dep:hnsw_rs"]
-# DW-088: HTTP/3 (QUIC) ingress. This is a flag-only feature on
-# dwara-core (no dependencies): it lets snapshot validation accept
-# `protocol: h3` listeners. The actual QUIC stack (quinn, h3, h3-quinn)
-# lives behind the `h3` feature on dwara-bin, which forwards to this
-# flag. Build with `cargo build --features h3` (or
+# DW-088 / DW-108: HTTP/3 (QUIC) ingress AND upstream transport. On
+# dwara-core this feature enables the QUIC stack (quinn, h3, h3-quinn)
+# so the upstream connector (dataplane::upstream_h3) and the QUIC active
+# health probe can compile, and so snapshot validation accepts
+# `protocol: h3` listeners and upstreams. dwara-bin's `h3` feature
+# forwards to this one (and adds its own deps for the H3 ingress
+# listener). Default OFF: quinn+h3 add significant compile time and
+# binary size. Build with `cargo build --features h3` (or
 # `--features dwara-bin/h3`).
-h3 = []
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
+# DW-114: A2A (agent-to-agent) protocol support. Flag-only feature
+# (no new dependencies): the scaffold adapter, Agent Card parser, and
+# config schema are hand-rolled (mirroring how MCP was done). The A2A
+# task lifecycle is STUBBED pending spec freeze -- every task-state
+# transition returns an A2AStub error. When the feature is off the
+# `ai.a2a` config block is accepted but inert (validation warns).
+# Build with `cargo build --features a2a`.
+a2a = []
+# DW-099: GraphQL awareness. When enabled, the gateway can enforce
+# query depth/complexity limits and persisted-query enforcement on
+# routes with a `graphql` block. Flag-only (no external dependency):
+# depth/complexity are computed by a bounded hand-rolled scanner, not a
+# full GraphQL parser crate, so no new dependency is introduced. Default
+# OFF. Build with `cargo build --features graphql`.
+graphql = []
+# DW-111: FIPS 140-3 mode (Enterprise). Flag-only feature (no new
+# dependencies): aws-lc-rs is already the default rustls crypto
+# provider, so the FIPS-validated code path is present in every build.
+# When this feature is ON, the gateway installs the aws-lc-rs FIPS
+# provider as the process-default at startup, runs a self-test,
+# restricts TLS cipher suites to the FIPS-approved allowlist, rejects
+# non-approved primitives (Ed25519 certs, Argon2 credential hashing)
+# at config validation, and asserts FIPS mode is active for licenses
+# that require it. Ent-only: the feature compiles in OSS builds but is
+# only meaningful with `ent` (license-gated enforcement). Build with
+# `cargo build --features fips` (combine with `ent` for full effect).
+fips = []
+# DW-101: gRPC-Web + JSON-to-gRPC transcoding. When enabled, the gateway
+# can translate gRPC-Web framing (content-type + chunk headers +
+# trailers-as-headers) to native gRPC for upstreams, and transcode JSON
+# request/response bodies to/from protobuf using .proto descriptors
+# supplied via config (google.api.http annotations). gRPC status codes
+# are mapped to HTTP status + google.rpc.Status JSON. Streaming
+# (server-streaming and bidi) is supported at day one via chunked
+# gRPC-Web framing. prost is the protobuf codec (already a workspace
+# dep, MIT OR Apache-2.0). Default OFF. Build with
+# `cargo build --features grpc_web`.
+grpc_web = ["dep:prost"]
+# DW-100: Full protocol translation framework. When enabled, the
+# gateway can translate between REST, gRPC, and GraphQL on a route's
+# forward and response paths via the shared `ProtocolTranslator` trait.
+# The general framework (`dataplane::translation`) and the REST<->GraphQL
+# translator (`dataplane::translation_graphql`) compile under this flag.
+# It depends on `grpc_web` because the REST<->gRPC translator reuses the
+# DW-101 gRPC-Web transcoding engine (the shared trait + the protobuf
+# codec live behind `grpc_web`), so the two features ship together.
+# Default OFF. Build with `cargo build --features protocol_translation`.
+protocol_translation = ["grpc_web"]
+# DW-100: SOAP/XML protocol translation. When enabled, the gateway can
+# translate between REST/JSON and SOAP/XML envelopes on a route's
+# forward and response paths via the `SoapTranslator` (a minimal
+# hand-rolled XML parser handles SOAP envelopes -- no external XML
+# crate, to avoid deny.toml review and binary size). Behind a separate
+# flag from `protocol_translation` because the XML parser + SOAP
+# envelope handling add binary size an operator who only needs
+# REST<->GraphQL or REST<->gRPC should not pay. Default OFF. Build with
+# `cargo build --features soap` (implies `protocol_translation`).
+soap = ["protocol_translation"]
+# DW-105: Post-quantum TLS (X25519+ML-KEM hybrid key exchange).
+# EXPERIMENTAL. Flag-only feature (no new dependencies): the rustls PQ
+# API for wiring the X25519+ML-KEM hybrid key-exchange group is
+# experimental and not yet stable. When this feature is ON, a listener
+# or upstream with `pq: true` prepends the hybrid kx group to the
+# rustls provider's kx group list (preferring the hybrid group while
+# keeping the classical X25519 fallback for non-PQ clients). When the
+# feature is OFF, `pq: true` in config is accepted but inert
+# (validation warns). Default OFF. Build with
+# `cargo build --features pq`. Must NOT be combined with FIPS mode
+# (validation rejects `pq: true` + `fips` unless both algorithms are
+# on a validated list).
+pq = []
+# DW-103: L4 TCP/UDP proxying with SNI routing reuse. Flag-only feature
+# (no new dependencies): the L4 dispatcher accepts a raw TCP connection,
+# optionally peeks the TLS ClientHello SNI (reusing the SNI extraction
+# from DW-008 TLS passthrough) to select the upstream, then splices the
+# client and upstream connections byte-for-byte (the same
+# copy_bidirectional tunnel the passthrough path uses). UDP proxying is
+# STUBBED (returns Unimplemented) -- UDP is harder to get right
+# (session semantics, NAT timeouts) and is a follow-up. The config
+# schema (ListenerProtocol::Tcp/Udp + the `l4` block) is always present
+# so configs round-trip without the feature; when the feature is off the
+# listener is accepted but inert (validation warns). Default OFF. Build
+# with `cargo build --features l4` (or `--features dwara-bin/l4`).
+l4 = []
+# DW-107: Service mesh mode (sidecar + SPIFFE/SPIRE mTLS identity).
+# Flag-only feature (no new dependencies): the sidecar controller
+# scaffold, the SPIFFE Workload API client scaffold, and the `mesh`
+# config block are hand-rolled. The actual iptables/tproxy redirect
+# configuration and the SPIRE Workload API calls are STUBBED (documented
+# no-ops) -- the `spiffe` crate would be added when production-ready.
+# Ent-only: the feature compiles in OSS builds but is only meaningful
+# with `ent` (validation warns when mesh is configured without the
+# `ent` feature, mirroring the FIPS/credential-pool ent-gate pattern).
+# Build with `cargo build --features mesh` (combine with `ent` for
+# license-gated enforcement).
+mesh = []
+# DW-110: API lifecycle management. Flag-only feature (no new
+# dependencies): the developer portal (auto-generated from OpenAPI
+# specs), environment profiles (dev/staging/prod config overlays), and
+# the API journey recorder (request flow visualization for debugging)
+# are hand-rolled over the existing OpenAPI spec handling, config
+# schema, and analytics raw table. The config schema (the top-level
+# `lifecycle` block) is always present so configs round-trip without
+# the feature; when the feature is off the block is accepted but inert
+# (validation warns). Default OFF. Build with
+# `cargo build --features api_lifecycle`.
+api_lifecycle = []
+# DW-109: Extism PDK plugin runtime. Flag-only scaffold (no new
+# dependencies): the ExtismHost/ExtismPlugin types and the
+# ExtismDispatch trait are hand-rolled so Extism plugins can be
+# registered alongside native and WASM plugins in the unified dispatch
+# chain. The actual `extism` crate would be added when the integration
+# is production-ready; the runtime calls are STUBBED (documented
+# no-ops). The config schema (the `extism` field on PluginConfig) is
+# always present so configs round-trip without the feature; when the
+# feature is off the block is accepted but inert (validation warns).
+# Default OFF. Build with `cargo build --features extism`.
+extism = []
+# DW-109: Upstream TLS certificate pinning (SPKI hash). Flag-only
+# feature (no new dependencies): the CertPin/CertPinVerifier types and
+# the `cert_pinning` config block on upstreams are hand-rolled. The
+# actual rustls custom certificate verifier integration is scaffolded
+# (the verifier computes SHA-256 of the upstream cert's SPKI and
+# compares against the configured pin). The config schema is always
+# present so configs round-trip without the feature; when the feature
+# is off the block is accepted but inert (validation warns). Default
+# OFF. Build with `cargo build --features cert_pinning`.
+cert_pinning = []
+# DW-109: Signed URL request authentication. Flag-only feature (no new
+# dependencies): the SignedUrlConfig/SignedUrlVerifier types and the
+# `signed_url` config block on routes are hand-rolled. The verifier
+# extracts the signature from the query string, recomputes the
+# HMAC-SHA256 over the canonical request (method, path, expires
+# timestamp), and checks the expiry. The config schema is always
+# present so configs round-trip without the feature; when the feature
+# is off the block is accepted but inert (validation warns). Default
+# OFF. Build with `cargo build --features signed_url`.
+signed_url = []
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

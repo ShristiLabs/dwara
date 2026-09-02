@@ -1954,7 +1954,36 @@ impl DataPlane {
 /// them too; TLS-passthrough listeners do not (they never speak HTTP).
 fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<ProxyBody>> {
     match path {
-        "/healthz" => Some(simple(StatusCode::OK, "ok", "ok", rid)),
+        // DW-111: when the `fips` cargo feature is ON, /healthz includes
+        // a `fips` field with the attestation (enabled, provider,
+        // self_test_passed). When the feature is OFF, the field is
+        // omitted (the health response is the same as before).
+        "/healthz" => {
+            #[cfg(feature = "fips")]
+            {
+                let attestation = crate::security::fips::fips_self_test();
+                let body = serde_json::json!({
+                    "status": "ok",
+                    "fips": {
+                        "enabled": attestation.enabled,
+                        "provider": attestation.provider,
+                        "self_test_passed": attestation.self_test_passed,
+                    },
+                });
+                Some(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(hyper::header::CONTENT_TYPE, "application/json")
+                        .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+                        .expect("static healthz body is valid"),
+                )
+            }
+            #[cfg(not(feature = "fips"))]
+            {
+                let _ = dp;
+                Some(simple(StatusCode::OK, "ok", "ok", rid))
+            }
+        }
         "/readyz" => {
             if dp.ready() {
                 Some(simple(StatusCode::OK, "ready", "ready", rid))
@@ -3099,6 +3128,67 @@ where
             if head_match.is_none() {
                 dp.obs.record_waf(&route.name, "all", "passed");
             }
+        }
+    }
+
+    // GraphQL awareness (DW-099): query depth/complexity limits and
+    // persisted-query enforcement. Runs AFTER the WAF-lite filter and
+    // BEFORE the route limits -- it is a content-shape filter that
+    // rejects abusive queries before any resource is spent on auth or
+    // rate limiting. Feature-gated behind the `graphql` cargo feature;
+    // the config block is always present (round-trips without the
+    // feature), but the runtime check compiles only with the feature.
+    // Only routes with an enabled `graphql` block are inspected.
+    #[cfg(feature = "graphql")]
+    if let Some(graphql_cfg) = &route.graphql {
+        if let Some(checker) = crate::dataplane::graphql::GraphQLChecker::from_config(graphql_cfg) {
+            let (parts, body) = req.into_parts();
+            let (result, depth, complexity, collected) = checker.check_body(body).await;
+            let outcome = result.outcome_label();
+            dp.obs.record_graphql(&route.name, outcome);
+            dp.obs.set_graphql_depth(&route.name, depth as i64);
+            dp.obs
+                .set_graphql_complexity(&route.name, complexity as i64);
+            if result.is_denied() {
+                let (code, msg) = match result {
+                    crate::dataplane::graphql::GraphQLCheckResult::DenyDepth => (
+                        "graphql_depth_exceeded",
+                        "GraphQL query depth exceeds the configured limit",
+                    ),
+                    crate::dataplane::graphql::GraphQLCheckResult::DenyComplexity => (
+                        "graphql_complexity_exceeded",
+                        "GraphQL query complexity exceeds the configured limit",
+                    ),
+                    crate::dataplane::graphql::GraphQLCheckResult::DenyPersistedQuery => (
+                        "graphql_persisted_query_required",
+                        "GraphQL query hash not found in the persisted-query store",
+                    ),
+                    crate::dataplane::graphql::GraphQLCheckResult::Allow => {
+                        unreachable!("is_denied is false for Allow")
+                    }
+                };
+                tracing::warn!(
+                    code = code,
+                    request_id = %rid,
+                    route = %route.name,
+                    depth = depth,
+                    complexity = complexity,
+                    "request rejected by GraphQL check"
+                );
+                let mut resp = simple(StatusCode::BAD_REQUEST, code, msg, rid);
+                stamp_security_headers(&mut resp, route);
+                return resp;
+            }
+            // The body was consumed by the check; reconstruct it from
+            // the collected bytes and forward to the rest of the
+            // request path. The check buffers up to max_body_bytes
+            // (default 1 MiB), the same bounded-buffering pattern as
+            // the WAF body inspection (DW-051).
+            let req = Request::from_parts(
+                parts,
+                crate::dataplane::graphql::GraphqlBody::new(collected),
+            );
+            return handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await;
         }
     }
 
@@ -6157,6 +6247,11 @@ fn classify_upstream_error(err: &UpstreamError) -> (StatusCode, &'static str, &'
             "invalid_upstream_configuration",
             "invalid upstream configuration",
         ),
+        UpstreamError::H3Unavailable => (
+            StatusCode::BAD_GATEWAY,
+            "upstream_h3_unavailable",
+            "upstream requires HTTP/3 support (build with --features h3)",
+        ),
     }
 }
 
@@ -6438,6 +6533,27 @@ where
             body,
             headers,
         } => respond(*status, body.as_deref(), headers),
+        RouteAction::NanoService { nano } => {
+            // DW-106: nano-service action. The runtime dispatch is
+            // feature-gated behind the `nano_services` cargo feature;
+            // when the feature is off the route returns 502 (the
+            // config schema is always present so configs round-trip,
+            // but the WASM runtime is not compiled in).
+            #[cfg(feature = "nano_services")]
+            {
+                serve_nano_service(req, &route.name, nano, rid, &dp.observability_arc()).await
+            }
+            #[cfg(not(feature = "nano_services"))]
+            {
+                let _ = nano;
+                let _ = rid;
+                respond(
+                    502,
+                    Some("nano-service action not compiled in"),
+                    &std::collections::BTreeMap::new(),
+                )
+            }
+        }
     }
 }
 
@@ -6494,6 +6610,159 @@ async fn serve_mock(
     builder
         .body(ProxyBody::Full(Full::new(body_bytes)))
         .expect("static mock body is valid")
+}
+
+/// The maximum request body size a nano-service route accepts (DW-106).
+/// The module receives the full request body, so it must be buffered;
+/// 1 MiB matches the default `memory_limit` and keeps buffering bounded.
+#[cfg(feature = "nano_services")]
+const NANO_SERVICE_BODY_CAP: usize = 1024 * 1024;
+
+/// Serve a nano-service response (DW-106): run the route's WASM module
+/// with the request and return the response it produces. The request
+/// body is buffered (capped at [`NANO_SERVICE_BODY_CAP`]); the module
+/// gets the full request (method, path, headers, body) via the
+/// nano-service ABI. Metrics are recorded for every outcome (success,
+/// error, timeout). A module load/execution failure answers 502; a
+/// timeout answers 504; a body over the cap answers 413.
+#[cfg(feature = "nano_services")]
+async fn serve_nano_service<B>(
+    req: Request<B>,
+    route_name: &str,
+    action: &crate::config::NanoServiceAction,
+    rid: &str,
+    obs: &Arc<Observability>,
+) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use http_body_util::BodyExt as _;
+
+    let started = std::time::Instant::now();
+    let (parts, body) = req.into_parts();
+    let method = parts.method.as_str().to_string();
+    let path = parts.uri.path().to_string();
+    let headers: Vec<(String, String)> = parts
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    // Buffer the request body (the module receives it whole).
+    let body_bytes = match Limited::new(body, NANO_SERVICE_BODY_CAP).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(err) => {
+            obs.record_nano_service_request(route_name, "error");
+            obs.record_nano_service_duration(route_name, started.elapsed().as_secs_f64());
+            if err.downcast_ref::<LengthLimitError>().is_some() {
+                return simple(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "nano_service_body_too_large",
+                    &format!(
+                        "nano-service request body exceeds {} bytes",
+                        NANO_SERVICE_BODY_CAP
+                    ),
+                    rid,
+                );
+            }
+            return simple(
+                StatusCode::BAD_REQUEST,
+                "nano_service_body_read_failed",
+                &err.to_string(),
+                rid,
+            );
+        }
+    };
+
+    let handler = match crate::dataplane::nano_service::shared_handler() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(
+                code = "nano_service_handler_init_failed",
+                request_id = %rid,
+                route = %route_name,
+                error = %e,
+                "nano-service handler initialization failed"
+            );
+            obs.record_nano_service_request(route_name, "error");
+            obs.record_nano_service_duration(route_name, started.elapsed().as_secs_f64());
+            return simple(
+                StatusCode::BAD_GATEWAY,
+                "nano_service_unavailable",
+                "nano-service runtime is unavailable",
+                rid,
+            );
+        }
+    };
+    let service = crate::dataplane::nano_service::NanoService::from_action(route_name, action);
+
+    match handler
+        .handle(&service, &method, &path, &headers, &body_bytes)
+        .await
+    {
+        Ok(resp) => {
+            obs.record_nano_service_request(route_name, "success");
+            obs.record_nano_service_duration(route_name, started.elapsed().as_secs_f64());
+            build_nano_service_response(resp)
+        }
+        Err(crate::dataplane::nano_service::NanoServiceError::Timeout) => {
+            tracing::warn!(
+                code = "nano_service_timeout",
+                request_id = %rid,
+                route = %route_name,
+                "nano-service execution timed out"
+            );
+            obs.record_nano_service_request(route_name, "timeout");
+            obs.record_nano_service_duration(route_name, started.elapsed().as_secs_f64());
+            simple(
+                StatusCode::GATEWAY_TIMEOUT,
+                "nano_service_timeout",
+                "nano-service execution timed out",
+                rid,
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                code = "nano_service_error",
+                request_id = %rid,
+                route = %route_name,
+                error = %e,
+                "nano-service execution failed"
+            );
+            obs.record_nano_service_request(route_name, "error");
+            obs.record_nano_service_duration(route_name, started.elapsed().as_secs_f64());
+            simple(
+                StatusCode::BAD_GATEWAY,
+                "nano_service_error",
+                &e.to_string(),
+                rid,
+            )
+        }
+    }
+}
+
+/// Build a [`Response`] from a nano-service module's response (DW-106).
+/// Unbuildable header name/value pairs are skipped (a misbehaving module
+/// must not panic the dataplane); the status defaults to 200 when the
+/// module set an out-of-range value.
+#[cfg(feature = "nano_services")]
+fn build_nano_service_response(
+    resp: crate::dataplane::nano_service::NanoServiceResponse,
+) -> Response<ProxyBody> {
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
+    for (name, value) in &resp.headers {
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            builder = builder.header(n, v);
+        }
+    }
+    builder
+        .body(ProxyBody::Full(Full::new(Bytes::from(resp.body))))
+        .expect("nano-service response body is valid")
 }
 
 /// Validate the request body against a JSON schema (DW-047). Buffers

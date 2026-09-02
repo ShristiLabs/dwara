@@ -116,6 +116,7 @@ fn render_contains_families() {
                 dns_discovery: None,
                 peak_ewma: None,
                 locality: None,
+                pq: false,
             }],
             consumers: vec![],
             policies: vec![],
@@ -143,6 +144,8 @@ fn render_contains_families() {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         })
         .expect("publish");
     let registry =

@@ -110,6 +110,23 @@ h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:bytes", "dwara-core/h3"]
 # DWARA_CONSOLE=1 at runtime to activate the gRPC server (default
 # 127.0.0.1:6669); unset = the layer is inert (no server spawned).
 console = ["dep:console-subscriber"]
+# DW-111: FIPS 140-3 mode (Enterprise). Forwards to dwara-core's `fips`
+# feature so the binary's startup self-test, provider install, and
+# validation paths compile in. Default OFF. Ent-only: combine with
+# `ent` for full license-gated enforcement. Build with
+# `cargo build --features fips` (or `--features fips,ent`).
+fips = ["dwara-core/fips"]
+# DW-105: Post-quantum TLS (X25519+ML-KEM hybrid key exchange).
+# EXPERIMENTAL. Forwards to dwara-core's `pq` feature so the binary's
+# PQ kx group wiring compiles in. Default OFF. Build with
+# `cargo build --features pq` (or `--features dwara-bin/pq`).
+pq = ["dwara-core/pq"]
+# DW-103: L4 TCP/UDP proxying with SNI routing reuse. Forwards to
+# dwara-core's `l4` feature so the L4 dispatcher module compiles in and
+# the listener wiring in listeners.rs spawns the L4 accept path. Flag-
+# only (no new dependencies on dwara-bin either). Default OFF. Build
+# with `cargo build --features l4` (or `--features dwara-bin/l4`).
+l4 = ["dwara-core/l4"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

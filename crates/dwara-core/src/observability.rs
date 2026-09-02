@@ -158,6 +158,40 @@
 //! - `dwara_mcp_tool_duration_seconds{tool}` histogram (DW-087) — MCP
 //!   tool call duration (authz check through upstream response), by
 //!   tool (config-bounded label).
+//! - `dwara_a2a_requests_total{agent,outcome}` counter (DW-114) — A2A
+//!   (agent-to-agent) requests, by agent (config-bounded) and outcome
+//!   (`success`, `error`, `stubbed`). No consumer label (cardinality
+//!   rule).
+//! - `dwara_a2a_sessions_total{state}` counter (DW-114) — A2A session
+//!   lifecycle transitions, by state (`initialized`, `closed`,
+//!   `expired`). A closed three-value label set (mirrors MCP), so
+//!   cardinality is three series total.
+//! - `dwara_tls_pq_handshakes_total{result}` counter (DW-105) —
+//!   post-quantum TLS handshake outcomes, by result (`success`,
+//!   `fallback`, `disabled`). A closed three-value label set, so
+//!   cardinality is three series total.
+//! - `dwara_graphql_requests_total{route,outcome}` counter (DW-099) —
+//!   GraphQL check outcomes, by route (config-bounded) and outcome
+//!   (`allowed`, `depth_exceeded`, `complexity_exceeded`,
+//!   `persisted_query_required` — a closed four-value set).
+//! - `dwara_graphql_depth{route}` gauge (DW-099) — last query depth for
+//!   a GraphQL-configured route (config-bounded label).
+//! - `dwara_nano_service_requests_total{route,outcome}` counter (DW-106)
+//!   — nano-service (WASM route handler) request outcomes, by route
+//!   (config-bounded) and outcome (`success`, `error`, `timeout` — a
+//!   closed three-value set). No consumer label (cardinality rule).
+//! - `dwara_nano_service_duration_seconds{route}` histogram (DW-106) —
+//!   nano-service `handle` call duration, by route (config-bounded
+//!   label).
+//! - `dwara_graphql_complexity{route}` gauge (DW-099) — last query
+//!   complexity for a GraphQL-configured route (config-bounded label).
+//! - `dwara_l4_connections_total{listener,protocol}` counter (DW-103) —
+//!   L4 connections proxied, by listener (config-bounded) and protocol
+//!   (`tcp`, `udp` — a closed two-value set). Counted once per accepted
+//!   L4 connection (before the splice is established).
+//! - `dwara_l4_connection_duration_seconds{listener}` histogram
+//!   (DW-103) — L4 connection duration (splice establishment through
+//!   close), by listener (config-bounded label).
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -529,6 +563,17 @@ pub struct Observability {
     /// dry-run match (the request was allowed); `passed` = the score was
     /// below the threshold (counted once per inspected request).
     anomaly_total: IntCounterVec,
+    /// DW-099: GraphQL check outcomes — a CLOSED label set (`allowed`,
+    /// `depth_exceeded`, `complexity_exceeded`,
+    /// `persisted_query_required`) over the route label space
+    /// (config-bounded). One increment per GraphQL-configured request.
+    graphql_requests_total: IntCounterVec,
+    /// DW-099: last query depth for a GraphQL-configured route (gauge;
+    /// config-bounded route label).
+    graphql_depth: IntGaugeVec,
+    /// DW-099: last query complexity for a GraphQL-configured route
+    /// (gauge; config-bounded route label).
+    graphql_complexity: IntGaugeVec,
     /// DW-032: license status gauge — 0 = no license (OSS), 1 = valid,
     /// 2 = expired within grace, 3 = expired past grace (degraded to
     /// OSS). Set once at startup and on every reload; no labels (closed
@@ -646,6 +691,35 @@ pub struct Observability {
     /// DW-087: MCP tool call duration (authz check through upstream
     /// response), by tool (config-bounded label), in seconds.
     mcp_tool_duration_seconds: HistogramVec,
+    /// DW-114: A2A (agent-to-agent) requests, by agent and outcome.
+    /// `agent` is the config-declared agent name (config-bounded);
+    /// `outcome` is the CLOSED set `success`, `error`, `stubbed`. No
+    /// consumer label (cardinality rule); the consumer is in the
+    /// access log.
+    a2a_requests_total: IntCounterVec,
+    /// DW-114: A2A session lifecycle transitions, by state
+    /// (`initialized`, `closed`, `expired`). A CLOSED three-value
+    /// label set (mirrors MCP), so the family's cardinality is three
+    /// series total.
+    a2a_sessions_total: IntCounterVec,
+    /// DW-106: nano-service (WASM route handler) request outcomes, by
+    /// route (config-bounded) and outcome (the CLOSED set `success`,
+    /// `error`, `timeout`). No consumer label (cardinality rule); the
+    /// consumer is in the access log.
+    nano_service_requests_total: IntCounterVec,
+    /// DW-106: nano-service `handle` call duration, by route
+    /// (config-bounded label). Observed once per request (success,
+    /// error, and timeout alike).
+    nano_service_duration_seconds: HistogramVec,
+    /// DW-105: post-quantum TLS handshake outcomes — a CLOSED label set
+    /// (`success`, `fallback`, `disabled`), one increment per PQ-
+    /// configured handshake. `success` = the X25519+ML-KEM hybrid kx
+    /// group was negotiated; `fallback` = the client did not support
+    /// the hybrid group and a classical group was negotiated;
+    /// `disabled` = PQ was off or the experimental API was inert. No
+    /// labels beyond `result` (a closed three-value set, so the
+    /// family's cardinality is three series total).
+    tls_pq_handshakes_total: IntCounterVec,
     /// DW-089: current adaptive rate-limit factor, by policy
     /// (config-bounded label). A factor of 1.0 = the configured rate;
     /// < 1.0 tightens, > 1.0 relaxes. Set on every `record_outcome`.
@@ -673,6 +747,30 @@ pub struct Observability {
     /// DW-091: current canary weight, by group (config-bounded
     /// label). Set on every applied adjustment.
     canary_weight: GaugeVec,
+    /// DW-107: sidecar connections proxied, by mode and direction.
+    /// `mode` is the CLOSED set `sidecar`; `direction` is the CLOSED
+    /// set `inbound`, `outbound`. Counted once per connection the
+    /// sidecar proxies (inbound: terminate mTLS + forward to local app;
+    /// outbound: apply policies + wrap mTLS + dial remote sidecar).
+    mesh_connections_total: IntCounterVec,
+    /// DW-107: SPIFFE SVID refresh attempts, by result. `result` is
+    /// the CLOSED set `success`, `error`. Counted once per Workload
+    /// API refresh attempt (the client refreshes before expiry; an
+    /// error keeps serving the previous SVID until it expires).
+    spiffe_svid_refresh_total: IntCounterVec,
+    /// DW-107: seconds until the current SVID expires (gauge). Set on
+    /// every successful refresh; counts down to 0 as the SVID nears
+    /// expiry. The refresh loop uses this to schedule the next fetch
+    /// (at half the remaining lifetime by default).
+    spiffe_svid_expiry_seconds: IntGauge,
+    /// DW-103: L4 connections proxied, by listener (config-bounded)
+    /// and protocol (the CLOSED set `tcp`, `udp`). Counted once per
+    /// accepted L4 connection (before the splice is established).
+    l4_connections_total: IntCounterVec,
+    /// DW-103: L4 connection duration (splice establishment through
+    /// close), by listener (config-bounded label), in seconds.
+    /// Observed once per connection (forwarded and closed alike).
+    l4_connection_duration_seconds: HistogramVec,
     /// Access-log sample rate [0.0, 1.0] as raw bits (f64 does not fit
     /// an atomic portably); read via [`Self::access_sample`].
     access_sample_bits: AtomicU64,
@@ -1071,6 +1169,37 @@ impl Observability {
             &["route", "outcome"],
         )
         .expect("valid metric definition");
+        let graphql_requests_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_graphql_requests_total",
+                "GraphQL check outcomes (DW-099), by route and outcome. \
+                 outcome: allowed (the query passed all checks), \
+                 depth_exceeded (the query depth exceeded the configured \
+                 limit), complexity_exceeded (the query complexity exceeded \
+                 the configured limit), persisted_query_required (the query \
+                 hash was not in the persisted-query store).",
+            ),
+            &["route", "outcome"],
+        )
+        .expect("valid metric definition");
+        let graphql_depth = IntGaugeVec::new(
+            Opts::new(
+                "dwara_graphql_depth",
+                "Last GraphQL query depth (DW-099), by route. The maximum \
+                 brace-nesting level of the most recently checked query.",
+            ),
+            &["route"],
+        )
+        .expect("valid metric definition");
+        let graphql_complexity = IntGaugeVec::new(
+            Opts::new(
+                "dwara_graphql_complexity",
+                "Last GraphQL query complexity (DW-099), by route. The sum \
+                 of per-field costs of the most recently checked query.",
+            ),
+            &["route"],
+        )
+        .expect("valid metric definition");
         let license_status = IntGauge::new(
             "dwara_license_status",
             "License status (DW-032): 0 = no license (OSS mode), 1 = valid, \
@@ -1308,6 +1437,68 @@ impl Observability {
             &["tool"],
         )
         .expect("valid metric definition");
+        let a2a_requests_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_a2a_requests_total",
+                "A2A (agent-to-agent) requests (DW-114), by agent and \
+                 outcome. agent is the config-declared agent name \
+                 (config-bounded); outcome is the closed set success, \
+                 error, stubbed (stubbed = the task lifecycle is not \
+                 yet implemented pending spec freeze). No consumer label \
+                 (cardinality rule); the consumer is in the access log.",
+            ),
+            &["agent", "outcome"],
+        )
+        .expect("valid metric definition");
+        let a2a_sessions_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_a2a_sessions_total",
+                "A2A session lifecycle transitions (DW-114), by state. \
+                 state: initialized (a new task session created), closed \
+                 (a session deleted), expired (a session reaped by the \
+                 TTL cleanup). A closed three-value label set, so \
+                 cardinality is three series total (mirrors MCP).",
+            ),
+            &["state"],
+        )
+        .expect("valid metric definition");
+        let nano_service_requests_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_nano_service_requests_total",
+                "Nano-service (WASM route handler) request outcomes (DW-106), \
+                 by route and outcome. route is the config-declared route \
+                 name (config-bounded); outcome is the closed set success, \
+                 error, timeout. No consumer label (cardinality rule); the \
+                 consumer is in the access log.",
+            ),
+            &["route", "outcome"],
+        )
+        .expect("valid metric definition");
+        let nano_service_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_nano_service_duration_seconds",
+                "Nano-service handle call duration (DW-106) -- the WASM \
+                 module's request->response execution -- by route \
+                 (config-bounded label).",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
+            &["route"],
+        )
+        .expect("valid metric definition");
+        let tls_pq_handshakes_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_tls_pq_handshakes_total",
+                "Post-quantum TLS handshake outcomes (DW-105), by result. \
+                 result: success (the X25519+ML-KEM hybrid kx group was \
+                 negotiated), fallback (the client did not support the \
+                 hybrid group and a classical group was negotiated), \
+                 disabled (PQ was off or the experimental API was inert). \
+                 A closed three-value label set, so cardinality is three \
+                 series total.",
+            ),
+            &["result"],
+        )
+        .expect("valid metric definition");
         let rate_limiter_adaptive_factor = GaugeVec::new(
             Opts::new(
                 "dwara_rate_limiter_adaptive_factor",
@@ -1379,6 +1570,59 @@ impl Observability {
             &["group"],
         )
         .expect("valid metric definition");
+        let mesh_connections_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_mesh_connections_total",
+                "Sidecar connections proxied (DW-107), by mode and direction. \
+                 `mode` is the closed set `sidecar`; `direction` is the closed \
+                 set `inbound`, `outbound`. Inbound: terminate mTLS, apply \
+                 policies, forward to the local app. Outbound: apply policies, \
+                 wrap in mTLS, dial the remote sidecar.",
+            ),
+            &["mode", "direction"],
+        )
+        .expect("valid metric definition");
+        let spiffe_svid_refresh_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_spiffe_svid_refresh_total",
+                "SPIFFE SVID refresh attempts (DW-107), by result. `result` is \
+                 the closed set `success`, `error`. Counted once per Workload \
+                 API refresh attempt; an error keeps serving the previous SVID \
+                 until it expires.",
+            ),
+            &["result"],
+        )
+        .expect("valid metric definition");
+        let spiffe_svid_expiry_seconds = IntGauge::new(
+            "dwara_spiffe_svid_expiry_seconds",
+            "Seconds until the current SPIFFE SVID expires (DW-107). Set on \
+             every successful refresh; counts down to 0 as the SVID nears \
+             expiry. The refresh loop schedules the next fetch at half the \
+             remaining lifetime by default.",
+        )
+        .expect("valid metric definition");
+        let l4_connections_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_l4_connections_total",
+                "L4 connections proxied (DW-103), by listener and protocol. \
+                 listener is the config-declared listener name (config-bounded); \
+                 protocol is the closed set tcp, udp. Counted once per accepted \
+                 L4 connection (before the splice is established).",
+            ),
+            &["listener", "protocol"],
+        )
+        .expect("valid metric definition");
+        let l4_connection_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_l4_connection_duration_seconds",
+                "L4 connection duration (DW-103) -- splice establishment through \
+                 close -- by listener (config-bounded label), in seconds. Observed \
+                 once per connection (forwarded and closed alike).",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
+            &["listener"],
+        )
+        .expect("valid metric definition");
         let ai_tokens_total = IntCounterVec::new(
             Opts::new(
                 "dwara_ai_tokens_total",
@@ -1446,6 +1690,9 @@ impl Observability {
             Box::new(admission_queue_depth.clone()),
             Box::new(waf_total.clone()),
             Box::new(anomaly_total.clone()),
+            Box::new(graphql_requests_total.clone()),
+            Box::new(graphql_depth.clone()),
+            Box::new(graphql_complexity.clone()),
             Box::new(license_status.clone()),
             Box::new(dns_discovery_endpoints.clone()),
             Box::new(dns_discovery_refresh_total.clone()),
@@ -1473,6 +1720,11 @@ impl Observability {
             Box::new(mcp_sessions_total.clone()),
             Box::new(mcp_tool_calls_total.clone()),
             Box::new(mcp_tool_duration_seconds.clone()),
+            Box::new(a2a_requests_total.clone()),
+            Box::new(a2a_sessions_total.clone()),
+            Box::new(nano_service_requests_total.clone()),
+            Box::new(nano_service_duration_seconds.clone()),
+            Box::new(tls_pq_handshakes_total.clone()),
             Box::new(rate_limiter_adaptive_factor.clone()),
             Box::new(rate_limiter_origin_signal_total.clone()),
             Box::new(rate_limiter_adaptive_tightened_total.clone()),
@@ -1480,6 +1732,11 @@ impl Observability {
             Box::new(canary_promotions_total.clone()),
             Box::new(canary_rollbacks_total.clone()),
             Box::new(canary_weight.clone()),
+            Box::new(mesh_connections_total.clone()),
+            Box::new(spiffe_svid_refresh_total.clone()),
+            Box::new(spiffe_svid_expiry_seconds.clone()),
+            Box::new(l4_connections_total.clone()),
+            Box::new(l4_connection_duration_seconds.clone()),
         ] {
             registry
                 .register(m)
@@ -1530,6 +1787,9 @@ impl Observability {
             admission_queue_depth,
             waf_total,
             anomaly_total,
+            graphql_requests_total,
+            graphql_depth,
+            graphql_complexity,
             license_status,
             dns_discovery_endpoints,
             dns_discovery_refresh_total,
@@ -1557,6 +1817,11 @@ impl Observability {
             mcp_sessions_total,
             mcp_tool_calls_total,
             mcp_tool_duration_seconds,
+            a2a_requests_total,
+            a2a_sessions_total,
+            nano_service_requests_total,
+            nano_service_duration_seconds,
+            tls_pq_handshakes_total,
             rate_limiter_adaptive_factor,
             rate_limiter_origin_signal_total,
             rate_limiter_adaptive_tightened_total,
@@ -1564,6 +1829,11 @@ impl Observability {
             canary_promotions_total,
             canary_rollbacks_total,
             canary_weight,
+            mesh_connections_total,
+            spiffe_svid_refresh_total,
+            spiffe_svid_expiry_seconds,
+            l4_connections_total,
+            l4_connection_duration_seconds,
             access_sample_bits: AtomicU64::new(1.0f64.to_bits()),
             rng: SampleRng::new(),
         }
@@ -1685,6 +1955,33 @@ impl Observability {
         self.canary_weight.with_label_values(&[group]).set(weight);
     }
 
+    /// Count one sidecar connection proxied (DW-107), by mode and
+    /// direction. `mode` is the closed set `sidecar`; `direction` is
+    /// the closed set `inbound`, `outbound`. Inbound: terminate mTLS,
+    /// apply policies, forward to the local app. Outbound: apply
+    /// policies, wrap in mTLS, dial the remote sidecar.
+    pub fn record_mesh_connection(&self, mode: &str, direction: &str) {
+        self.mesh_connections_total
+            .with_label_values(&[mode, direction])
+            .inc();
+    }
+
+    /// Count one SPIFFE SVID refresh attempt (DW-107), by result.
+    /// `result` is the closed set `success`, `error`. An error keeps
+    /// serving the previous SVID until it expires.
+    pub fn record_spiffe_svid_refresh(&self, result: &str) {
+        self.spiffe_svid_refresh_total
+            .with_label_values(&[result])
+            .inc();
+    }
+
+    /// Set the seconds-until-expiry gauge for the current SPIFFE SVID
+    /// (DW-107). Set on every successful refresh; counts down to 0 as
+    /// the SVID nears expiry.
+    pub fn set_spiffe_svid_expiry_seconds(&self, seconds: i64) {
+        self.spiffe_svid_expiry_seconds.set(seconds);
+    }
+
     /// Count one quota denial (429, DW-033) by consumer and binding
     /// budget. Deliberately NOT the `rate_limited_total` family: budgets
     /// and rates are separate mechanisms (the issue's headline
@@ -1758,6 +2055,28 @@ impl Observability {
         self.anomaly_total
             .with_label_values(&[route, outcome])
             .inc();
+    }
+
+    /// Count one GraphQL check outcome (DW-099). `route` is the matched
+    /// route name; `outcome` is one of the closed set `allowed`,
+    /// `depth_exceeded`, `complexity_exceeded`,
+    /// `persisted_query_required`. Both labels are config-bounded.
+    pub fn record_graphql(&self, route: &str, outcome: &str) {
+        self.graphql_requests_total
+            .with_label_values(&[route, outcome])
+            .inc();
+    }
+
+    /// Set the last GraphQL query depth gauge (DW-099), by route.
+    pub fn set_graphql_depth(&self, route: &str, depth: i64) {
+        self.graphql_depth.with_label_values(&[route]).set(depth);
+    }
+
+    /// Set the last GraphQL query complexity gauge (DW-099), by route.
+    pub fn set_graphql_complexity(&self, route: &str, complexity: i64) {
+        self.graphql_complexity
+            .with_label_values(&[route])
+            .set(complexity);
     }
 
     /// Count one dry-run (monitor) would-have-rejected observation
@@ -2085,6 +2404,63 @@ impl Observability {
         self.mcp_tool_duration_seconds
             .with_label_values(&[tool])
             .observe(seconds);
+    }
+
+    /// Count one A2A (agent-to-agent) request (DW-114) in
+    /// `dwara_a2a_requests_total{agent,outcome}`. `agent` is the
+    /// config-declared agent name (config-bounded); `outcome` is one
+    /// of the closed set `success`, `error`, `stubbed` (`stubbed` =
+    /// the task lifecycle is not yet implemented pending spec freeze).
+    /// No consumer label (cardinality rule); the consumer is in the
+    /// access log.
+    pub fn record_a2a_request(&self, agent: &str, outcome: &str) {
+        self.a2a_requests_total
+            .with_label_values(&[agent, outcome])
+            .inc();
+    }
+
+    /// Count one A2A session lifecycle transition (DW-114) in
+    /// `dwara_a2a_sessions_total{state}`. `state` is one of the closed
+    /// set `initialized` (a new task session created), `closed` (a
+    /// session deleted), or `expired` (a session reaped by the TTL
+    /// cleanup). Mirrors MCP's session counter.
+    pub fn record_a2a_session(&self, state: &str) {
+        self.a2a_sessions_total.with_label_values(&[state]).inc();
+    }
+
+    /// Count one nano-service (WASM route handler) request outcome
+    /// (DW-106) in `dwara_nano_service_requests_total{route,outcome}`.
+    /// `route` is the matched route name (config-bounded); `outcome` is
+    /// one of the closed set `success`, `error`, `timeout`. No consumer
+    /// label (cardinality rule); the consumer is in the access log.
+    pub fn record_nano_service_request(&self, route: &str, outcome: &str) {
+        self.nano_service_requests_total
+            .with_label_values(&[route, outcome])
+            .inc();
+    }
+
+    /// Record a nano-service `handle` call duration (DW-106) in
+    /// `dwara_nano_service_duration_seconds{route}`. `route` is the
+    /// matched route name (config-bounded label). Call once per request
+    /// (success, error, and timeout alike).
+    pub fn record_nano_service_duration(&self, route: &str, seconds: f64) {
+        self.nano_service_duration_seconds
+            .with_label_values(&[route])
+            .observe(seconds);
+    }
+
+    /// Count one post-quantum TLS handshake outcome (DW-105) in
+    /// `dwara_tls_pq_handshakes_total{result}`. `result` is one of the
+    /// closed set `success` (the X25519+ML-KEM hybrid kx group was
+    /// negotiated), `fallback` (the client did not support the hybrid
+    /// group and a classical group was negotiated), or `disabled` (PQ
+    /// was off or the experimental API was inert). Use
+    /// [`crate::security::pq::pq_handshake_metric`] to derive the label
+    /// from a [`crate::security::pq::PqHandshakeResult`].
+    pub fn record_tls_pq_handshake(&self, result: &str) {
+        self.tls_pq_handshakes_total
+            .with_label_values(&[result])
+            .inc();
     }
 
     /// Count one convergence refresh failure (DW-054) in
@@ -2649,5 +3025,26 @@ impl Observability {
             .encode(&families, &mut buf)
             .expect("text encoding of gathered families cannot fail");
         String::from_utf8(buf).expect("prometheus text format is ASCII")
+    }
+
+    /// Count one L4 connection (DW-103) in
+    /// `dwara_l4_connections_total{listener,protocol}`. `listener` is
+    /// the config-declared listener name (config-bounded); `protocol`
+    /// is one of the closed set `tcp`, `udp`. Counted once per accepted
+    /// L4 connection (before the splice is established).
+    pub fn record_l4_connection(&self, listener: &str, protocol: &str) {
+        self.l4_connections_total
+            .with_label_values(&[listener, protocol])
+            .inc();
+    }
+
+    /// Record an L4 connection duration (DW-103) in
+    /// `dwara_l4_connection_duration_seconds{listener}`. `listener` is
+    /// the config-declared listener name (config-bounded label). Call
+    /// once per connection (forwarded and closed alike).
+    pub fn record_l4_connection_duration(&self, listener: &str, seconds: f64) {
+        self.l4_connection_duration_seconds
+            .with_label_values(&[listener])
+            .observe(seconds);
     }
 }

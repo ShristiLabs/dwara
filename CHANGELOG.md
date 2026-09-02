@@ -9,6 +9,118 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- gRPC-Web framing translation and JSON-to-gRPC transcoding (DW-101): a
+  `grpc_web` cargo feature (OSS, default OFF) on dwara-core that adds a
+  `routes[].grpc_web` config block. When enabled, the gateway translates
+  gRPC-Web framing (5-byte-prefixed data/trailer frames) to native gRPC
+  on the forward path and wraps the native gRPC response (data + trailers)
+  back into gRPC-Web framing for the browser. Server-streaming responses
+  are supported via chunked data frames (one gRPC-Web data frame per
+  upstream chunk) followed by a single trailer frame. When the optional
+  `transcoding` sub-block is enabled, the gateway additionally accepts
+  plain JSON requests and translates them to/from protobuf using .proto
+  descriptors supplied via config (FileDescriptorSet files, binary
+  protobuf format). The transcoder works with the dynamic protobuf
+  descriptor model (no build-time code generation): it loads the
+  FileDescriptorSet, resolves message types by name, and encodes/decodes
+  fields by walking the descriptor. gRPC status codes are mapped to HTTP
+  status codes and a `google.rpc.Status` JSON body for non-gRPC clients
+  (OK->200, NOT_FOUND->404, PERMISSION_DENIED->403, INTERNAL->500, etc.).
+  The config schema (`GrpcWeb`, `GrpcWebTranscoding`, `GrpcWebDescriptor`)
+  is always present so configs round-trip without the feature; when the
+  feature is off the block is accepted but inert (validation warns, the
+  runtime translation does not run). Snapshot validation rejects a
+  `grpc_web` block with transcoding enabled but no descriptors, and
+  checks that every descriptor file exists and is readable at config
+  publish time. Build with `cargo build --features grpc_web`.
+- FIPS 140-3 mode (DW-111): a `fips` cargo feature (Ent-only, flag-only,
+  no new dependencies) that installs the aws-lc-rs FIPS provider as the
+  process-default rustls crypto provider, runs a startup self-test, and
+  restricts TLS cipher suites to the FIPS-approved allowlist (AES-256-GCM,
+  AES-128-GCM, ECDHE-ECDSA/RSA AES-GCM suites; ChaCha20-Poly1305
+  excluded). Non-approved primitives are rejected at config validation:
+  Ed25519 certificates (not on the FIPS-validated list for aws-lc-rs) and
+  Argon2 credential hashing (not FIPS-approved). The `/healthz` endpoint
+  includes a `fips` field when FIPS mode is active
+  (`{enabled, provider, self_test_passed}`). The license gate asserts
+  FIPS mode is active for licenses that carry the `fips` feature claim
+  (config-time check; refuses to start when the license requires FIPS but
+  the gateway is not built with the `fips` feature). Build with
+  `cargo build --features fips` (combine with `ent` for full
+  license-gated enforcement).
+- Replay time-travel debugging (DW-102): a pure decision replayer that
+  re-runs the gateway's request decision path (route match, authz,
+  rate-limit, transforms, upstream pick) against a captured request and
+  a compiled config snapshot, with NO side effects (no network, no live
+  GCRA counters, no breaker state). The `decide` function lives in
+  `dwara_core::dataplane::replay` and is the pure core; the `dwara
+  replay` CLI subcommand wraps it. A recording is a JSON document
+  (baseline config + captured requests) that the CLI loads, compiles
+  both the baseline and a candidate config, runs `decide` for each
+  request under both, and emits a per-request `DecisionDiff` report.
+  Exit codes: 0 = no diffs, 1 = diffs found (CI gate), 2 = operator
+  error. Recordings can be loaded from a file (`--recording`) or
+  exported from the analytics store (`--from`/`--to` time range on the
+  raw table). The analytics raw table schema is extended (v10) with
+  optional `request_headers_redacted` and `auth_identity` columns for
+  capture; capture is opt-in via the `analytics.replay_capture` config
+  block (enabled, retention, header/body capture toggles). Headers are
+  redacted at capture time via the existing PII redaction patterns.
+  `Snapshot::from_compiled` is a new constructor for offline tools that
+  need a snapshot without publishing through `ConfigState`.
+- A2A (agent-to-agent) protocol scaffold (DW-114): an `ai.a2a` config
+  block configures remote A2A agents the gateway can route chat
+  requests to. Each agent names an upstream (the transport) and an
+  Agent Card (discovery doc, inline JSON or file path). The
+  `A2AAdapter` implements the `ProviderAdapter` trait: it translates a
+  canonical chat request into an A2A task-submit JSON body and parses
+  the task response back. The `AgentCardParser` parses the JSON-LD-ish
+  Agent Card (name, description, url, version, capabilities,
+  authentication). The `TaskLifecycle` enum (Submitted, Working,
+  Completed, Failed, Canceled) and the `A2ASession` struct (mirroring
+  MCP's session model) are STUBBED pending spec freeze -- every
+  task-state transition returns an `A2AStub` error. A2A agents appear
+  as providers of kind `a2a` in the model alias table, so a model
+  alias can route to one by name. The `handle_a2a_request` function
+  routes A2A calls through the existing `dataplane::ai_proxy` path
+  (the transport is the agent's named upstream). Feature-gated behind
+  the `a2a` cargo feature (flag-only, no new dependencies, mirroring
+  MCP); when off the block is accepted but inert (validation warns).
+  Metrics: `dwara_a2a_requests_total{agent,outcome}` (outcomes:
+  success, error, stubbed) and `dwara_a2a_sessions_total{state}`
+  (initialized, closed, expired).
+- GraphQL awareness (DW-099): query depth/complexity limits and
+  persisted-query enforcement for routes that front a GraphQL server.
+  A `routes[].graphql` block configures `depth_limit`,
+  `complexity_limit`, `complexity_coefficient` (default cost per
+  field), `cost_per_field` (per-field cost overrides), and optional
+  `persisted_queries` (Apollo APQ + GET-by-hash variant with a
+  config-supplied hash-to-query store). The check runs after WAF-lite
+  and anomaly scoring and before the route limits; a denied query
+  answers 400 `graphql_depth_exceeded`,
+  `graphql_complexity_exceeded`, or `graphql_persisted_query_required`.
+  Depth and complexity are computed by a bounded hand-rolled scanner
+  (no external GraphQL parser dependency) with a parse-depth cap
+  (parser-DoS prevention) and a body-size cap (1 MiB default, rejected
+  before parsing). Feature-gated behind the `graphql` cargo feature;
+  the config schema is always present (round-trips without the
+  feature), the runtime check is feature-gated. Metrics:
+  `dwara_graphql_requests_total{route,outcome}`,
+  `dwara_graphql_depth{route}`, `dwara_graphql_complexity{route}`.
+- eBPF hooks research spike (DW-104): ADR-0002 documents the
+  kernel-hook analysis (connection tracing, XDP, SO_REUSEPORT,
+  ambient redirect) and recommends connection tracing as the first
+  hook. A companion crate scaffold (crates/dwara-ebpf/) defines the
+  EbpfSignal and EbpfEventConsumer trait for future integration.
+  Linux-only, not built by default (workspace exclude). See
+  docs/adr/0002-ebpf-hooks-research-spike.md.
+- Ent controller persistence decision (DW-116): ADR-0001 selects
+  PostgreSQL as the Ent controller's durable store for config
+  snapshots, license state, fleet membership, federated analytics,
+  and runtime override tables. The `extensions::ConfigSource` and
+  `analytics::AnalyticsSink` seams absorb the change; the OSS
+  embedded SQLite stores are unaffected. See
+  docs/adr/0001-controller-persistence.md.
 - web console v2 (DW-118, Ent): full management console with CRUD +
   fleet views. The v1 read-only SPA (DW-117) is upgraded to v2 with:
   - Fleet view: version skew check + fleet status (upgrade order,

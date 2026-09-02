@@ -39,14 +39,67 @@ pub mod cors;
 // observability, and `snapshot` may not import `extensions`.
 #[cfg(feature = "ent")]
 pub mod convergence;
+// DW-099: GraphQL awareness (query depth/complexity limits +
+// persisted-query enforcement). Feature-gated behind the `graphql`
+// cargo feature; the module compiles only when the feature is enabled.
+// The config schema is always present (so configs round-trip without
+// the feature), but the runtime check is feature-gated.
 pub mod discovery;
+// DW-101: gRPC-Web framing translation + JSON-to-gRPC transcoding.
+// Feature-gated behind the `grpc_web` cargo feature; the module
+// compiles only when the feature is enabled. The config schema is
+// always present (so configs round-trip without the feature), but the
+// runtime translation is feature-gated.
+#[cfg(feature = "graphql")]
+pub mod graphql;
+#[cfg(feature = "grpc_web")]
+pub mod grpc_web;
 pub mod hardening;
+// DW-106: WASM route handlers (nano-services). Feature-gated behind
+// the `nano_services` cargo feature (which pulls in `wasm`); the module
+// compiles only when the feature is enabled. The config schema is
+// always present (so configs round-trip without the feature), but the
+// runtime handler is feature-gated. When the feature is off the action
+// is accepted but inert (validation warns, the route returns 502).
+#[cfg(feature = "nano_services")]
+pub mod nano_service;
 pub mod proxy;
 pub mod proxy_proto;
+// DW-102: replay time-travel debugging (pure decision replayer).
+pub mod replay;
 pub mod response_cache;
 pub mod split;
+// DW-100: protocol translation framework. The general
+// ProtocolTranslator trait + the REST<->GraphQL translator compile
+// under the `protocol_translation` cargo feature (which implies
+// `grpc_web` so the REST<->gRPC translator reuses the DW-101 engine).
+// The SOAP/XML translator is further gated behind the `soap` feature
+// for binary size. The config schema is always present (so configs
+// round-trip without the feature), but the runtime translation is
+// feature-gated.
 pub mod transforms;
+#[cfg(feature = "protocol_translation")]
+pub mod translation;
+#[cfg(feature = "protocol_translation")]
+pub mod translation_graphql;
+#[cfg(feature = "soap")]
+pub mod translation_soap;
+// DW-103: L4 TCP/UDP proxying with SNI routing reuse. Feature-gated
+// behind the `l4` cargo feature; the module compiles only when the
+// feature is enabled. The config schema (ListenerProtocol::Tcp/Udp +
+// L4Config) is always present so configs round-trip without the
+// feature, but the runtime dispatcher is feature-gated. When the
+// feature is off, validation warns that the listener is inert.
+#[cfg(feature = "l4")]
+pub mod l4;
 pub mod upstream;
+// DW-108: HTTP/3 (QUIC) upstream transport. Feature-gated behind the
+// `h3` cargo feature; the module compiles only when the feature is
+// enabled (it pulls in quinn + h3 + h3-quinn). When the feature is off,
+// `protocol: h3` upstreams are accepted at validation but inert (every
+// dispatch fails closed with UpstreamError::H3Unavailable).
+#[cfg(feature = "h3")]
+pub mod upstream_h3;
 pub mod versioning;
 pub mod waf;
 pub mod websocket;

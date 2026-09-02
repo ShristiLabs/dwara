@@ -270,6 +270,7 @@ fn pricing_table_computes_correct_cost() {
         routing_policies: BTreeMap::new(),
         experiments: None,
         mcp: None,
+        a2a: None,
     };
     let table = PricingTable::compile(Some(&cfg));
 

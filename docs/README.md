@@ -159,3 +159,16 @@ it's built that way (cite the `DW-xxx`/`#nnn` markers and module-level
 `//!` doc comments — they carry most of the rationale already), a
 mermaid diagram if it clarifies a flow or state machine, and links to
 the owning source files and test suites.
+
+## Architecture Decision Records
+
+ADRs capture irreversible-or-costly-to-reverse design decisions and
+the context + alternatives that led to them. They live in
+[`./adr/`](./adr) and are numbered sequentially; once Accepted, an
+ADR is not edited in place — a superseding decision gets a new ADR
+that marks the prior one Superseded.
+
+- [ADR-0001: Ent controller durable store selection](./adr/0001-controller-persistence.md)
+  — PostgreSQL selected as the Ent controller's durable store for
+  config snapshots, license state, fleet membership, federated
+  analytics, and runtime override tables (DW-116).

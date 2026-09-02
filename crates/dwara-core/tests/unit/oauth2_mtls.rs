@@ -318,6 +318,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     }
 }
 

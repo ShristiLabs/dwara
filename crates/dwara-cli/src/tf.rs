@@ -254,6 +254,8 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     })
 }
 
@@ -275,6 +277,8 @@ fn listener_attrs(l: &Listener) -> Value {
             ListenerProtocol::Http => "http",
             ListenerProtocol::Https => "https",
             ListenerProtocol::H3 => "h3",
+            ListenerProtocol::Tcp => "tcp",
+            ListenerProtocol::Udp => "udp",
         },
     })
 }
@@ -308,6 +312,7 @@ fn parse_listener_attrs(v: &Value) -> Result<Listener, String> {
         policies: Vec::new(),
         authorization: None,
         alt_svc: None,
+        l4: None,
     })
 }
 
@@ -336,6 +341,7 @@ fn route_attrs(r: &Route) -> Value {
         RouteAction::Respond { .. } => "respond",
         RouteAction::Mock { .. } => "mock",
         RouteAction::Ai => "ai",
+        RouteAction::NanoService { .. } => "nano_service",
     };
     m.insert("action_type".to_string(), json!(action_type));
     if r.auth_required {
@@ -421,6 +427,9 @@ fn parse_route_attrs(v: &Value) -> Result<Route, String> {
         slo: None,
         websocket: None,
         waf: None,
+        graphql: None,
+        grpc_web: None,
+        translation: None,
         request_validation: None,
         openapi: None,
         mirror: None,
@@ -484,6 +493,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
             UpstreamProtocol::Http1 => "http1",
             UpstreamProtocol::Http2 => "http2",
             UpstreamProtocol::Https => "https",
+            UpstreamProtocol::H3 => "h3",
         }),
     );
     let endpoints: Vec<Value> = u
@@ -510,6 +520,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
     let protocol = match v.get("protocol").and_then(Value::as_str) {
         Some("http2") => UpstreamProtocol::Http2,
         Some("https") => UpstreamProtocol::Https,
+        Some("h3") => UpstreamProtocol::H3,
         _ => UpstreamProtocol::Http1,
     };
     let endpoints: Vec<Endpoint> = v
@@ -550,6 +561,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     })
 }
 
@@ -576,6 +588,8 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
                 ListenerProtocol::Http => "http",
                 ListenerProtocol::Https => "https",
                 ListenerProtocol::H3 => "h3",
+                ListenerProtocol::Tcp => "tcp",
+                ListenerProtocol::Udp => "udp",
             }
         ));
     }
@@ -616,6 +630,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             RouteAction::Respond { .. } => "respond",
             RouteAction::Mock { .. } => "mock",
             RouteAction::Ai => "ai",
+            RouteAction::NanoService { .. } => "nano_service",
         };
         out.push_str(&format!("  action_type = \"{}\"\n", action_type));
         if r.auth_required {
@@ -665,6 +680,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
                 UpstreamProtocol::Http1 => "http1",
                 UpstreamProtocol::Http2 => "http2",
                 UpstreamProtocol::Https => "https",
+                UpstreamProtocol::H3 => "h3",
             }
         ));
         out.push_str("  endpoints = [\n");
@@ -1060,6 +1076,7 @@ mod tests {
                 policies: Vec::new(),
                 authorization: None,
                 alt_svc: None,
+                l4: None,
             }],
             routes: vec![Route {
                 name: "api".to_string(),
@@ -1099,6 +1116,9 @@ mod tests {
                 mirror: None,
                 fault_injection: None,
                 plugins: Vec::new(),
+                graphql: None,
+                grpc_web: None,
+                translation: None,
             }],
             services: vec![Service {
                 name: "api-service".to_string(),
@@ -1143,6 +1163,7 @@ mod tests {
                 dns_discovery: None,
                 peak_ewma: None,
                 locality: None,
+                pq: false,
             }],
             consumers: Vec::new(),
             policies: Vec::new(),
@@ -1169,6 +1190,8 @@ mod tests {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         }
     }
 
@@ -1346,6 +1369,8 @@ mod tests {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         };
         let state = gateway_to_state(&gw);
         assert!(state.resources.is_empty());

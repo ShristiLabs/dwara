@@ -126,6 +126,8 @@ fn empty_gateway() -> Gateway {
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     }
 }
 
@@ -403,6 +405,9 @@ fn hcl_escapes_special_characters() {
         mirror: None,
         fault_injection: None,
         plugins: Vec::new(),
+        graphql: None,
+        grpc_web: None,
+        translation: None,
     });
     gw.services.push(Service {
         name: "svc".to_string(),
@@ -438,6 +443,7 @@ fn hcl_escapes_special_characters() {
         dns_discovery: None,
         peak_ewma: None,
         locality: None,
+        pq: false,
     });
     gw.allow_empty_routes = false;
     let hcl = gateway_to_hcl(&gw);

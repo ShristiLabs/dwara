@@ -54,6 +54,23 @@ pub(crate) enum ListenerMode {
     Terminate(Arc<TlsTermination>),
     /// TLS passthrough routed by SNI against the current snapshot.
     Passthrough,
+    /// DW-103: L4 TCP proxying. Accepted TCP connections are spliced
+    /// byte-for-byte to an upstream endpoint (optionally selected by
+    /// peeking the TLS ClientHello SNI). Feature-gated behind the `l4`
+    /// cargo feature; when the feature is off this variant is never
+    /// constructed (bind_listener returns an error for `protocol: tcp`
+    /// without the feature, mirroring the h3 pattern).
+    #[cfg(feature = "l4")]
+    L4 {
+        /// Compiled L4 proxying config (upstream, sni_routing, idle
+        /// timeout).
+        config: Arc<dwara_core::dataplane::l4::L4ProxyConfig>,
+        /// The listener's SNI routes (used when sni_routing is true).
+        /// Captured at bind time from the listener's tls.sni_routes;
+        /// hot-reloaded (read from the current snapshot at dispatch
+        /// time, same as passthrough).
+        sni_routes: Vec<dwara_core::config::SniRoute>,
+    },
 }
 
 /// Cloneable so the panic supervisor (#120) can hand a fresh copy to
@@ -108,6 +125,46 @@ pub(crate) async fn bind_listener(
         ListenerProtocol::H3 => {
             return Err(format!(
                 "h3 listener {} should not reach bind_listener (handled in main.rs)",
+                l.name
+            )
+            .into());
+        }
+        // DW-103: L4 TCP proxying. The l4 feature must be on for the
+        // dispatcher module to exist; without it, the listener is
+        // accepted at validation (inert warning) but bind_listener
+        // returns an error (the binary was not built with L4 support).
+        // UDP listeners are handled separately in main.rs (they bind
+        // a UDP socket, not TCP) -- same skip pattern as H3.
+        ListenerProtocol::Tcp => {
+            #[cfg(feature = "l4")]
+            {
+                let l4_cfg = l.l4.as_ref().expect("validated tcp listener has l4 block");
+                let config = Arc::new(dwara_core::dataplane::l4::L4ProxyConfig::from_config(
+                    l4_cfg,
+                ));
+                let sni_routes = l
+                    .tls
+                    .as_ref()
+                    .map(|t| t.sni_routes.clone())
+                    .unwrap_or_default();
+                ListenerMode::L4 { config, sni_routes }
+            }
+            #[cfg(not(feature = "l4"))]
+            {
+                return Err(format!(
+                    "tcp listener {} requires the `l4` cargo feature (build with --features l4); \
+                     the default build does not link the L4 dispatcher",
+                    l.name
+                )
+                .into());
+            }
+        }
+        ListenerProtocol::Udp => {
+            // DW-103: UDP listeners bind a UDP socket (handled in
+            // main.rs, same skip pattern as H3). bind_listener is never
+            // called for UDP listeners; if reached, return an error.
+            return Err(format!(
+                "udp listener {} should not reach bind_listener (handled in main.rs)",
                 l.name
             )
             .into());
@@ -248,6 +305,54 @@ pub(crate) async fn run_listener(
                     }
                 });
             }
+            #[cfg(feature = "l4")]
+            ListenerMode::L4 { config, sni_routes } => {
+                // DW-103: L4 TCP proxying. Consult the CURRENT
+                // snapshot for the gateway (SNI route resolution +
+                // endpoint fallback); the dispatcher picks through
+                // the CURRENT generation's balancers so L4 picks
+                // follow config reloads. L4 splices are not part of
+                // hyper graceful shutdown (same limitation as
+                // passthrough: no drain signaling through a raw byte
+                // pipe).
+                let snapshot = state.snapshot();
+                let gateway = snapshot.gateway().clone();
+                let name = bound.name.clone();
+                let dp = Arc::clone(&dp);
+                let config = Arc::clone(config);
+                let sni_routes = sni_routes.clone();
+                tokio::spawn(async move {
+                    let dispatcher =
+                        dwara_core::dataplane::l4::L4Dispatcher::new((*config).clone(), sni_routes);
+                    let started = std::time::Instant::now();
+                    let mut stream = stream;
+                    match dispatcher.dispatch(&mut stream, &dp, &gateway).await {
+                        Ok(dwara_core::dataplane::l4::L4DispatchAction::Forward { host, port }) => {
+                            tracing::debug!(
+                                code = "l4_forwarded",
+                                listener = %name,
+                                upstream = %format!("{host}:{port}"),
+                                "l4 tcp splice completed"
+                            );
+                        }
+                        Ok(dwara_core::dataplane::l4::L4DispatchAction::Close) => {
+                            tracing::debug!(
+                                code = "l4_closed",
+                                listener = %name,
+                                "l4 tcp connection closed (no upstream / no match)"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                code = "l4_error",
+                                listener = %name,
+                                "l4 tcp dispatch error: {err}"
+                            );
+                        }
+                    }
+                    let _ = started.elapsed();
+                });
+            }
             ListenerMode::Terminate(term) => {
                 // Snapshot the CURRENT ServerConfig for this handshake;
                 // a reload only affects handshakes started after it.
@@ -344,6 +449,11 @@ pub(crate) async fn run_listener(
                         let alt_svc = bound.alt_svc.clone();
                         match &bound.mode {
                             ListenerMode::Passthrough => {}
+                            // DW-103: L4 backlog connections are closed
+                            // (same limitation as passthrough: shutdown-
+                            // time splices are not established).
+                            #[cfg(feature = "l4")]
+                            ListenerMode::L4 { .. } => {}
                             ListenerMode::Cleartext => {
                                 if bound.proxy_protocol {
                                     let watcher = graceful.watcher();

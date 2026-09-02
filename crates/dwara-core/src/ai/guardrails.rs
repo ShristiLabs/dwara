@@ -695,6 +695,7 @@ mod tests {
             routing_policies: Default::default(),
             experiments: None,
             mcp: None,
+            a2a: None,
         };
         GuardrailEngine::compile(Some(&cfg))
     }

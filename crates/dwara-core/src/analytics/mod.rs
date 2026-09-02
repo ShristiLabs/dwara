@@ -108,6 +108,14 @@ struct RawRecord {
     broken: bool,
     shed: bool,
     dims: String,
+    /// DW-102: redacted request headers (opt-in, JSON object string),
+    /// or `None` when replay capture is off or headers are not
+    /// captured. Scrubbed via the existing PII redaction patterns
+    /// before the record is offered.
+    request_headers_redacted: Option<String>,
+    /// DW-102: the authenticated consumer name (opt-in), or `None`
+    /// when replay capture is off or the request was anonymous.
+    auth_identity: Option<String>,
 }
 
 /// The custom-dimensions JSON column for a (name, value) pair list.
@@ -350,6 +358,8 @@ impl RawRecord {
             broken: event.broken,
             shed: event.shed,
             dims: dims_json(&event.attributes),
+            request_headers_redacted: None,
+            auth_identity: None,
         }
     }
 
@@ -371,6 +381,8 @@ impl RawRecord {
             broken: rec.broken,
             shed: rec.shed,
             dims: dims_json(&rec.custom),
+            request_headers_redacted: None,
+            auth_identity: None,
         }
     }
 }
@@ -1241,9 +1253,10 @@ impl EmbeddedAnalytics {
             "INSERT INTO raw (ts_ms, request_id, correlation_id, listener,
                               route, consumer, upstream, method, status,
                               status_class, duration_ms, attempts,
-                              rate_limited, broken, shed, dims)
+                              rate_limited, broken, shed, dims,
+                              request_headers_redacted, auth_identity)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     ?13, ?14, ?15, ?16)",
+                     ?13, ?14, ?15, ?16, ?17, ?18)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1273,6 +1286,8 @@ impl EmbeddedAnalytics {
                 r.broken,
                 r.shed,
                 r.dims,
+                r.request_headers_redacted,
+                r.auth_identity,
             ]);
             if let Err(e) = res {
                 tracing::warn!(

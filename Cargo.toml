@@ -7,6 +7,12 @@ members = [
     "crates/dwara-cli",
     "crates/dwara-console",
 ]
+# DW-104: eBPF hooks research spike. The companion crate is a
+# Linux-only scaffold (kernel 5.4+ BTF/CO-RE) with no working eBPF
+# programs; excluded from the default workspace build and CI matrix so
+# `cargo build --workspace` and the macOS CI lane never touch it. See
+# docs/adr/0002-ebpf-hooks-research-spike.md.
+exclude = ["crates/dwara-ebpf"]
 
 [workspace.package]
 version = "0.1.0"
