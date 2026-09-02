@@ -91,6 +91,9 @@ fn index_html_has_nav_buttons() {
     assert!(html.contains("data-view=\"health\""));
     assert!(html.contains("data-view=\"analytics\""));
     assert!(html.contains("data-view=\"config\""));
+    // DW-118: fleet + editor views.
+    assert!(html.contains("data-view=\"fleet\""));
+    assert!(html.contains("data-view=\"editor\""));
 }
 
 #[test]
@@ -99,6 +102,14 @@ fn index_html_references_assets() {
     let html = std::str::from_utf8(file.body).unwrap();
     assert!(html.contains("/console/style.css"));
     assert!(html.contains("/console/app.js"));
+}
+
+#[test]
+fn index_html_has_workspace_switcher() {
+    let file = resolve("/console/").unwrap();
+    let html = std::str::from_utf8(file.body).unwrap();
+    // DW-118: workspace switcher in the top bar.
+    assert!(html.contains("workspace-switcher"));
 }
 
 #[test]
@@ -122,14 +133,33 @@ fn app_js_has_auto_refresh() {
 }
 
 #[test]
-fn app_js_is_read_only() {
+fn app_js_has_fleet_view() {
     let file = resolve("/console/app.js").unwrap();
     let js = std::str::from_utf8(file.body).unwrap();
-    // No PATCH, POST, PUT, or DELETE -- read-only.
-    assert!(!js.contains("method: 'PATCH'"));
-    assert!(!js.contains("method: 'POST'"));
-    assert!(!js.contains("method: 'PUT'"));
-    assert!(!js.contains("method: 'DELETE'"));
+    // DW-118: fleet view consumes the fleet admin endpoints.
+    assert!(js.contains("renderFleet"));
+    assert!(js.contains("/fleet/skew"));
+    assert!(js.contains("/fleet/status"));
+}
+
+#[test]
+fn app_js_has_config_editor() {
+    let file = resolve("/console/app.js").unwrap();
+    let js = std::str::from_utf8(file.body).unwrap();
+    // DW-118: config editor with validation preview + publish.
+    assert!(js.contains("renderEditor"));
+    assert!(js.contains("/config/validate"));
+    assert!(js.contains("method: 'PATCH'"));
+    assert!(js.contains("method: 'POST'"));
+}
+
+#[test]
+fn app_js_has_workspace_switcher() {
+    let file = resolve("/console/app.js").unwrap();
+    let js = std::str::from_utf8(file.body).unwrap();
+    // DW-118: workspace switcher fetches from /workspaces.
+    assert!(js.contains("initWorkspaceSwitcher"));
+    assert!(js.contains("/workspaces"));
 }
 
 #[test]

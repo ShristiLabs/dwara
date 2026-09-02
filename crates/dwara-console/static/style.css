@@ -160,3 +160,105 @@ pre {
 }
 
 .refresh-btn:hover { color: var(--fg); border-color: var(--accent); }
+
+/* DW-118: workspace switcher */
+#workspace-switcher {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+/* DW-118: config editor */
+.editor-area {
+  width: 100%;
+  min-height: 400px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.82rem;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.editor-area:focus { border-color: var(--accent); outline: none; }
+
+.editor-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.btn {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 0.4rem 0.9rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.btn.primary:hover { opacity: 0.9; }
+.btn.danger { border-color: var(--red); color: var(--red); }
+
+/* DW-118: validation preview */
+.validation-preview {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+.validation-preview.valid { background: rgba(63,185,80,0.1); border: 1px solid var(--green); }
+.validation-preview.invalid { background: rgba(248,81,73,0.1); border: 1px solid var(--red); }
+
+.validation-issue {
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.validation-issue:last-child { border-bottom: none; }
+
+.validation-issue .field { color: var(--yellow); font-family: monospace; }
+.validation-issue .message { color: var(--fg); }
+
+/* DW-118: fleet view */
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 0.75rem;
+}
+
+.fleet-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.fleet-card h3 { font-size: 0.9rem; margin-bottom: 0.5rem; }
+.fleet-card .label { color: var(--muted); font-size: 0.78rem; }
+.fleet-card .value { font-size: 0.85rem; }
+
+.skew-ok { color: var(--green); }
+.skew-bad { color: var(--red); }
+
+.version-badge {
+  display: inline-block;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  font-family: monospace;
+}
+
+.version-badge.current { background: rgba(63,185,80,0.15); color: var(--green); }
+.version-badge.skewed { background: rgba(248,81,73,0.15); color: var(--red); }

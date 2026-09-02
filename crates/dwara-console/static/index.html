@@ -15,8 +15,13 @@
       <button data-view="upstreams" class="nav-btn">Upstreams</button>
       <button data-view="health" class="nav-btn">Health</button>
       <button data-view="analytics" class="nav-btn">Analytics</button>
+      <button data-view="fleet" class="nav-btn">Fleet</button>
       <button data-view="config" class="nav-btn">Config</button>
+      <button data-view="editor" class="nav-btn">Editor</button>
     </nav>
+    <select id="workspace-switcher" title="Workspace">
+      <option value="">default</option>
+    </select>
     <div id="status-badge">connecting...</div>
   </header>
 
@@ -25,7 +30,7 @@
   </main>
 
   <footer id="footer">
-    <span>dwara console v1 (read-only)</span>
+    <span>dwara console v2</span>
     <span id="last-refresh"></span>
   </footer>
 

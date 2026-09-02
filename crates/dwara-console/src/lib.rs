@@ -1,4 +1,4 @@
-//! dwara web console v1 (read-only, OSS) -- DW-117.
+//! dwara web console v2 (CRUD + fleet, Enterprise) -- DW-118.
 //!
 //! A static SPA served from the mTLS admin listener. The SPA fetches
 //! from the admin API (same origin). No dataplane deps -- the SPA is
@@ -13,12 +13,28 @@
 //!   health, requests, errors).
 //! - Health: raw health JSON.
 //! - Analytics: Top-N analytics.
-//! - Config: current config YAML dump.
+//! - Fleet (DW-118): version skew check + fleet status (upgrade order,
+//!   concurrency cap, halt-on-failure). Consumes GET /fleet/skew and
+//!   GET /fleet/status.
+//! - Config: current config YAML dump (read-only).
+//! - Editor (DW-118): config YAML editor with validation preview
+//!   (POST /config/validate) and publish (PATCH /config). Shows
+//!   validation issues before the operator commits.
+//!
+//! ## Workspace switcher (DW-118)
+//!
+//! The top bar includes a workspace switcher that fetches the
+//! available workspaces from GET /workspaces (DW-067). When workspaces
+//! are not configured (OSS or no ent license), the switcher falls back
+//! to a single "default" option.
 //!
 //! ## Done-when
 //!
-//! Operator can diagnose an outage entirely from the console; no
-//! dataplane deps (SPA is static).
+//! An operator runs day-2 fleet operations (canary, rollback,
+//! credential rotation) from the console -- no CLI needed. CRUD on
+//! routes/services/policies/consumers shows a validation preview
+//! before publish. Fleet views show all CP-managed edges; workspace
+//! switcher scopes views to a workspace.
 //!
 //! ## Serving
 //!

@@ -1,4 +1,4 @@
-// dwara console v1 -- read-only SPA
+// dwara console v2 -- CRUD + fleet views (Enterprise)
 // Fetches from the admin API (same origin, mTLS listener).
 // No build step, no dependencies, vanilla JS.
 
@@ -277,6 +277,298 @@
       });
   }
 
+  // --- DW-118: Fleet view ---
+
+  function renderFleet() {
+    var content = document.getElementById('content');
+    content.innerHTML = '';
+    var wrap = el('div');
+    content.appendChild(card('Fleet Operations', wrap, renderFleet));
+    wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
+
+    // Fetch skew + status in parallel.
+    Promise.all([fetchJSON('/fleet/skew'), fetchJSON('/fleet/status')])
+      .then(function (results) {
+        var skew = results[0];
+        var status = results[1];
+        wrap.innerHTML = '';
+
+        // Skew check card.
+        var skewCard = el('div', { class: 'fleet-card' });
+        skewCard.appendChild(el('h3', { text: 'Version Skew Check' }));
+        var skewClass = skew.compatible ? 'skew-ok' : 'skew-bad';
+        skewCard.appendChild(el('div', { class: 'label', text: 'Policy' }));
+        skewCard.appendChild(el('div', { class: 'value', text: skew.skew_policy || 'n/a' }));
+        skewCard.appendChild(el('div', { class: 'label', text: 'Controller Version' }));
+        skewCard.appendChild(
+          el('div', { class: 'value' }, [
+            el('span', { class: 'version-badge current', text: skew.controller_version || 'n/a' }),
+          ])
+        );
+        skewCard.appendChild(el('div', { class: 'label', text: 'This Instance' }));
+        skewCard.appendChild(
+          el('div', { class: 'value' }, [
+            el(
+              'span',
+              { class: 'version-badge ' + (skew.compatible ? 'current' : 'skewed') },
+              skew.this_version || 'n/a'
+            ),
+          ])
+        );
+        skewCard.appendChild(el('div', { class: 'label', text: 'Compatible' }));
+        skewCard.appendChild(
+          el('div', { class: 'value ' + skewClass, text: skew.compatible ? 'yes' : 'no' })
+        );
+
+        // Fleet status card.
+        var statusCard = el('div', { class: 'fleet-card' });
+        statusCard.appendChild(el('h3', { text: 'Fleet Status' }));
+        statusCard.appendChild(el('div', { class: 'label', text: 'Enabled' }));
+        statusCard.appendChild(
+          el('div', { class: 'value', text: status.enabled ? 'yes' : 'no' })
+        );
+        statusCard.appendChild(el('div', { class: 'label', text: 'Stale Timeout (s)' }));
+        statusCard.appendChild(
+          el('div', { class: 'value', text: String(status.stale_timeout_secs || 'n/a') })
+        );
+
+        if (status.upgrade) {
+          var up = status.upgrade;
+          statusCard.appendChild(el('div', { class: 'label', text: 'Skew Policy' }));
+          statusCard.appendChild(el('div', { class: 'value', text: up.skew || 'n/a' }));
+          statusCard.appendChild(el('div', { class: 'label', text: 'Max Concurrent' }));
+          statusCard.appendChild(
+            el('div', { class: 'value', text: String(up.max_concurrent || 0) })
+          );
+          statusCard.appendChild(el('div', { class: 'label', text: 'Halt on Failure' }));
+          statusCard.appendChild(
+            el('div', { class: 'value', text: up.halt_on_failure ? 'yes' : 'no' })
+          );
+
+          if (up.order && up.order.length > 0) {
+            statusCard.appendChild(el('div', { class: 'label', text: 'Upgrade Order' }));
+            var orderList = el('ol');
+            up.order.forEach(function (entry) {
+              var labels = Object.keys(entry.labels || {})
+                .map(function (k) {
+                  return k + '=' + entry.labels[k];
+                })
+                .join(', ');
+              orderList.appendChild(
+                el('li', {}, entry.name + ' (' + labels + ')')
+              );
+            });
+            statusCard.appendChild(orderList);
+          }
+        }
+
+        var grid = el('div', { class: 'fleet-grid' });
+        grid.appendChild(skewCard);
+        grid.appendChild(statusCard);
+        wrap.appendChild(grid);
+        setLastRefresh();
+      })
+      .catch(function (err) {
+        wrap.innerHTML = '';
+        if (err.message && err.message.indexOf('404') >= 0) {
+          wrap.appendChild(
+            el('div', { class: 'error-msg', text: 'Fleet operations not configured (no fleet: block in config).' })
+          );
+        } else {
+          wrap.appendChild(el('div', { class: 'error-msg', text: err.message }));
+        }
+      });
+  }
+
+  // --- DW-118: Config editor with validation preview ---
+
+  var editorState = { yaml: '', dirty: false };
+
+  function renderEditor() {
+    var content = document.getElementById('content');
+    content.innerHTML = '';
+    var wrap = el('div');
+    content.appendChild(card('Config Editor', wrap));
+
+    // Toolbar.
+    var toolbar = el('div', { class: 'editor-toolbar' });
+    var validateBtn = el('button', { class: 'btn', text: 'Validate' });
+    var publishBtn = el('button', { class: 'btn primary', text: 'Publish' });
+    var resetBtn = el('button', { class: 'btn', text: 'Reset to Current' });
+    toolbar.appendChild(validateBtn);
+    toolbar.appendChild(publishBtn);
+    toolbar.appendChild(resetBtn);
+    wrap.appendChild(toolbar);
+
+    // Textarea.
+    var textarea = el('textarea', { class: 'editor-area' });
+    textarea.setAttribute('spellcheck', 'false');
+    wrap.appendChild(textarea);
+
+    // Validation preview area.
+    var preview = el('div');
+    wrap.appendChild(preview);
+
+    // Load current config.
+    fetchText('/config_dump')
+      .then(function (yaml) {
+        textarea.value = yaml;
+        editorState.yaml = yaml;
+        editorState.dirty = false;
+        setLastRefresh();
+      })
+      .catch(function (err) {
+        textarea.value = '# Failed to load config: ' + err.message;
+      });
+
+    // Validate button: POST /config/validate (no publish).
+    validateBtn.addEventListener('click', function () {
+      var body = textarea.value;
+      preview.innerHTML = '';
+      preview.appendChild(el('div', { class: 'stat-label', text: 'Validating...' }));
+      fetch('/config/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/yaml' },
+        body: body,
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) {
+            return { status: resp.status, data: data };
+          });
+        })
+        .then(function (result) {
+          renderValidationPreview(preview, result);
+        })
+        .catch(function (err) {
+          preview.innerHTML = '';
+          preview.appendChild(
+            el('div', { class: 'validation-preview invalid', text: 'Validation request failed: ' + err.message })
+          );
+        });
+    });
+
+    // Publish button: PATCH /config.
+    publishBtn.addEventListener('click', function () {
+      if (!confirm('Publish this config? This replaces the live gateway config.')) return;
+      var body = textarea.value;
+      preview.innerHTML = '';
+      preview.appendChild(el('div', { class: 'stat-label', text: 'Publishing...' }));
+      fetch('/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'text/yaml' },
+        body: body,
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) {
+            return { status: resp.status, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result.status >= 200 && result.status < 300) {
+            preview.appendChild(
+              el('div', { class: 'validation-preview valid', text: 'Config published successfully (generation ' + (result.data.generation || '?') + ').' })
+            );
+            editorState.yaml = body;
+            editorState.dirty = false;
+          } else {
+            var msg = (result.data && result.data.error && result.data.error.message) || 'Unknown error';
+            preview.appendChild(
+              el('div', { class: 'validation-preview invalid', text: 'Publish failed: ' + msg })
+            );
+          }
+        })
+        .catch(function (err) {
+          preview.appendChild(
+            el('div', { class: 'validation-preview invalid', text: 'Publish request failed: ' + err.message })
+          );
+        });
+    });
+
+    // Reset button: reload current config.
+    resetBtn.addEventListener('click', function () {
+      fetchText('/config_dump')
+        .then(function (yaml) {
+          textarea.value = yaml;
+          editorState.yaml = yaml;
+          editorState.dirty = false;
+          preview.innerHTML = '';
+        })
+        .catch(function (err) {
+          preview.innerHTML = '';
+          preview.appendChild(
+            el('div', { class: 'validation-preview invalid', text: 'Reset failed: ' + err.message })
+          );
+        });
+    });
+  }
+
+  function renderValidationPreview(container, result) {
+    container.innerHTML = '';
+    if (result.status === 400) {
+      var msg = (result.data && result.data.error && result.data.error.message) || 'Parse error';
+      container.appendChild(
+        el('div', { class: 'validation-preview invalid' }, [
+          el('div', { text: 'Parse error: ' + msg }),
+        ])
+      );
+      return;
+    }
+    var data = result.data || {};
+    var valid = data.valid !== false;
+    var issues = data.issues || [];
+    var cls = valid ? 'valid' : 'invalid';
+    var summary = valid
+      ? 'Config is valid (' + issues.length + ' issues).'
+      : 'Config has ' + issues.length + ' validation issue(s):';
+
+    var previewDiv = el('div', { class: 'validation-preview ' + cls });
+    previewDiv.appendChild(el('div', { text: summary }));
+    if (!valid) {
+      issues.forEach(function (issue) {
+        var issueDiv = el('div', { class: 'validation-issue' });
+        issueDiv.appendChild(
+          el('span', { class: 'field', text: issue.entity + '.' + issue.name + '.' + issue.field })
+        );
+        issueDiv.appendChild(el('span', { text: ' — ' + issue.message }));
+        previewDiv.appendChild(issueDiv);
+      });
+    }
+    container.appendChild(previewDiv);
+  }
+
+  // --- DW-118: Workspace switcher ---
+
+  function initWorkspaceSwitcher() {
+    var select = document.getElementById('workspace-switcher');
+    if (!select) return;
+    // Fetch workspaces from the admin API (DW-067). The endpoint
+    // returns the list of workspaces the caller has access to.
+    fetchJSON('/workspaces')
+      .then(function (data) {
+        var workspaces = data.workspaces || [];
+        select.innerHTML = '';
+        workspaces.forEach(function (ws) {
+          var opt = el('option', { value: ws.name || ws.id || '', text: ws.name || ws.id || 'unknown' });
+          select.appendChild(opt);
+        });
+        if (workspaces.length === 0) {
+          select.appendChild(el('option', { value: '', text: 'default' }));
+        }
+      })
+      .catch(function () {
+        // Workspaces not configured (OSS or no ent license) — keep
+        // the default option.
+        select.innerHTML = '';
+        select.appendChild(el('option', { value: '', text: 'default' }));
+      });
+    select.addEventListener('change', function () {
+      var ws = select.value;
+      // Refresh the current view when the workspace changes.
+      var renderer = views[currentView];
+      if (renderer) renderer();
+    });
+  }
+
   // --- Navigation ---
 
   var views = {
@@ -285,7 +577,9 @@
     upstreams: renderUpstreams,
     health: renderHealth,
     analytics: renderAnalytics,
+    fleet: renderFleet,
     config: renderConfig,
+    editor: renderEditor,
   };
 
   function switchView(view) {
@@ -320,6 +614,7 @@
         switchView(btn.dataset.view);
       });
     });
+    initWorkspaceSwitcher();
     setStatusBadge('connecting');
     switchView('overview');
     startAutoRefresh();

@@ -1360,6 +1360,7 @@ name = "dwara-admin"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dwara-console",
  "dwara-core",
  "http-body-util",
  "hyper",

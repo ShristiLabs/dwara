@@ -9,6 +9,25 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- web console v2 (DW-118, Ent): full management console with CRUD +
+  fleet views. The v1 read-only SPA (DW-117) is upgraded to v2 with:
+  - Fleet view: version skew check + fleet status (upgrade order,
+    concurrency cap, halt-on-failure). Consumes GET /fleet/skew and
+    GET /fleet/status (DW-098).
+  - Config editor: YAML editor with validation preview (POST
+    /config/validate) and publish (PATCH /config). Shows validation
+    issues before the operator commits.
+  - Workspace switcher: fetches available workspaces from GET
+    /workspaces (DW-067). Falls back to "default" when workspaces are
+    not configured.
+- config validation preview endpoint (DW-118, Ent): POST
+  /config/validate parses + compiles a candidate config WITHOUT
+  publishing. Returns 200 with `{valid, issues[]}` so the console can
+  show a preview before the operator commits. Validation issues
+  include entity, name, field, and message.
+- console serving (DW-117/DW-118): the admin listener now serves the
+  embedded web console SPA at /console/ before dispatching to the
+  admin API. The SPA fetches from the admin API on the same origin.
 - fleet operations (DW-098, Ent): version-skew policy and rolling-
   upgrade orchestration for a fleet of edge instances. A
   `gateway.fleet` block configures the skew policy (`allow`,

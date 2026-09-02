@@ -1671,6 +1671,77 @@ fn dry_run(gateway: &Gateway) -> Result<(), String> {
     compile(gateway).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// DW-118 (Ent): validation preview — parse + compile a candidate
+/// config WITHOUT publishing. Returns 200 with the validation issues
+/// (empty array = valid) or 400 with a parse error. The console uses
+/// this to show a preview before the operator commits a PATCH.
+async fn validate_config_preview(
+    _ctx: &AdminContext,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    if body.len() > MAX_PATCH_BODY {
+        return envelope(
+            413,
+            "config_too_large",
+            &format!("config body exceeds {} bytes", MAX_PATCH_BODY),
+            request_id,
+        );
+    }
+    let text = match std::str::from_utf8(&body) {
+        Ok(t) => t,
+        Err(_) => {
+            return envelope(
+                400,
+                "config_invalid",
+                "config body is not valid UTF-8",
+                request_id,
+            )
+        }
+    };
+    let gateway = match parse_gateway(text) {
+        Ok(g) => g,
+        Err(err) => {
+            return envelope(
+                400,
+                "config_invalid",
+                &format!("parse failed: {err}"),
+                request_id,
+            )
+        }
+    };
+    match compile(&gateway) {
+        Ok(_) => json_response(
+            200,
+            serde_json::json!({
+                "valid": true,
+                "issues": [],
+            }),
+        ),
+        Err(dwara_core::snapshot::CompileError::Validation(issues)) => {
+            let issue_list: Vec<serde_json::Value> = issues
+                .iter()
+                .map(|issue| {
+                    serde_json::json!({
+                        "entity": issue.entity,
+                        "name": issue.name,
+                        "field": issue.field,
+                        "message": issue.message,
+                    })
+                })
+                .collect();
+            json_response(
+                200,
+                serde_json::json!({
+                    "valid": false,
+                    "issues": issue_list,
+                }),
+            )
+        }
+        Err(err) => envelope(400, "config_invalid", &err.to_string(), request_id),
+    }
+}
+
 /// PATCH /config: full-YAML replacement. Dry-run first (400 with all
 /// issues on failure), then atomic file write, then publish + dataplane
 /// refresh. Serialized by the context's patch lock so two concurrent
@@ -1786,6 +1857,32 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             &request_id,
         );
     }
+    // DW-117/DW-118: serve the web console SPA (static files) at
+    // /console/ before dispatching to the admin API. The SPA fetches
+    // from the admin API endpoints on the same origin.
+    if method == hyper::Method::GET && dwara_console::is_console_path(&path) {
+        if let Some(file) = dwara_console::resolve(&path) {
+            return Response::builder()
+                .status(200)
+                .header(hyper::header::CONTENT_TYPE, file.content_type)
+                .header(hyper::header::CACHE_CONTROL, "no-cache")
+                .body(Full::new(Bytes::from(file.body)))
+                .unwrap_or_else(|_| {
+                    envelope(
+                        500,
+                        "internal_error",
+                        "failed to build response",
+                        &request_id,
+                    )
+                });
+        }
+        return envelope(
+            404,
+            "console_not_found",
+            "unknown console path",
+            &request_id,
+        );
+    }
     match (method.as_str(), path.as_str()) {
         // GET /config (the config-dump surface, DW-045): the TYPED-redacted
         // copy of the published gateway — inline api-key values become
@@ -1825,6 +1922,28 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
                 }
             };
             patch_config(&ctx, body, &request_id).await
+        }
+        // DW-118 (Ent): validation preview — parse + compile a
+        // candidate config WITHOUT publishing. Returns the validation
+        // issues (empty array = valid) so the console can show a
+        // preview before the operator commits.
+        ("POST", "/config/validate") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "config_too_large",
+                            &format!("config body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            validate_config_preview(&ctx, body, &request_id).await
         }
         ("GET", "/health") => json_response(200, health_body(&ctx)),
         // GET /stats (DW-021): default JSON shape. The `format=prometheus`
@@ -2210,6 +2329,7 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         (
             _,
             "/config"
+            | "/config/validate"
             | "/health"
             | "/stats"
             | "/clusters"

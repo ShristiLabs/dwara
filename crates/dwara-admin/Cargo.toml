@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 dwara-core = { path = "../dwara-core" }
+dwara-console = { path = "../dwara-console" }
 tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
