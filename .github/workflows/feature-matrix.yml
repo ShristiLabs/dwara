@@ -1,0 +1,214 @@
+name: feature-matrix
+
+# Build the dwara binary for Linux ARM64 (aarch64-unknown-linux-gnu)
+# with every feature flag individually, plus key combinations (all
+# OSS, enterprise, everything). Artifacts are retained for 3 days.
+#
+# The ent feature requires the LICENSING_TOKEN secret to fetch the
+# private ShristiLabs/licensing repo. Without the secret, ent builds
+# fail; all other builds succeed (fail-fast: false).
+#
+# loom is excluded (test-only, not a build artifact).
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/feature-matrix.yml"
+
+concurrency:
+  group: feature-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+  CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Baseline (no features) ---
+          - name: default
+            features: ""
+            cli_features: ""
+          # --- Individual dwara-bin features ---
+          - name: otlp
+            features: "otlp"
+            cli_features: ""
+          - name: ent
+            features: "ent"
+            cli_features: "ent"
+          - name: h3
+            features: "h3"
+            cli_features: ""
+          - name: console
+            features: "console"
+            cli_features: ""
+          - name: fips
+            features: "fips"
+            cli_features: ""
+          - name: pq
+            features: "pq"
+            cli_features: ""
+          - name: l4
+            features: "l4"
+            cli_features: ""
+          # --- Individual dwara-core features ---
+          - name: wasm
+            features: "dwara-core/wasm"
+            cli_features: ""
+          - name: nano_services
+            features: "dwara-core/nano_services"
+            cli_features: ""
+          - name: plugins
+            features: "dwara-core/plugins"
+            cli_features: ""
+          - name: cel
+            features: "dwara-core/cel"
+            cli_features: ""
+          - name: cedar
+            features: "dwara-core/cedar"
+            cli_features: ""
+          - name: openapi_validation
+            features: "dwara-core/openapi_validation"
+            cli_features: ""
+          - name: k8s
+            features: "dwara-core/k8s"
+            cli_features: "k8s"
+          - name: aggregation
+            features: "dwara-core/aggregation"
+            cli_features: ""
+          - name: mcp
+            features: "dwara-core/mcp"
+            cli_features: ""
+          - name: semantic_cache
+            features: "dwara-core/semantic_cache"
+            cli_features: ""
+          - name: a2a
+            features: "dwara-core/a2a"
+            cli_features: ""
+          - name: graphql
+            features: "dwara-core/graphql"
+            cli_features: ""
+          - name: grpc_web
+            features: "dwara-core/grpc_web"
+            cli_features: ""
+          - name: protocol_translation
+            features: "dwara-core/protocol_translation"
+            cli_features: ""
+          - name: soap
+            features: "dwara-core/soap"
+            cli_features: ""
+          - name: mesh
+            features: "dwara-core/mesh"
+            cli_features: ""
+          - name: api_lifecycle
+            features: "dwara-core/api_lifecycle"
+            cli_features: ""
+          - name: extism
+            features: "dwara-core/extism"
+            cli_features: ""
+          - name: cert_pinning
+            features: "dwara-core/cert_pinning"
+            cli_features: ""
+          - name: signed_url
+            features: "dwara-core/signed_url"
+            cli_features: ""
+          # --- Combinations ---
+          # All OSS packs (no ent, no fips, no pq incompatibility)
+          - name: all-oss
+            features: "otlp,h3,l4,console,pq,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            cli_features: "k8s"
+          # Enterprise core (ent + fips + mesh)
+          - name: enterprise
+            features: "ent,fips,dwara-core/mesh"
+            cli_features: "ent"
+          # Everything with fips (excludes pq -- fips+pq incompatible)
+          - name: all-with-fips
+            features: "ent,fips,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            cli_features: "ent,k8s"
+          # Everything with pq (excludes fips -- fips+pq incompatible)
+          - name: all-with-pq
+            features: "ent,pq,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            cli_features: "ent,k8s"
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable
+        with:
+          toolchain: "1.94.0"
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2
+        with:
+          key: feature-matrix-${{ matrix.name }}
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      # DW-032: the ent feature pulls in licensing-core from the private
+      # ShristiLabs/licensing repo. The configure-licensing-repo action
+      # is a no-op (warning only) when LICENSING_TOKEN is absent; ent
+      # builds will then fail on fetch, non-ent builds are unaffected.
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
+      - name: Build dwara-bin
+        run: |
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-bin --features "$FEATURES"
+          else
+            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-bin
+          fi
+
+      - name: Build dwara-cli
+        run: |
+          CLI_FEATURES="${{ matrix.cli_features }}"
+          if [ -n "$CLI_FEATURES" ]; then
+            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-cli --features "$CLI_FEATURES"
+          else
+            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-cli
+          fi
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          BIN_DIR="target/aarch64-unknown-linux-gnu/release"
+          cp "$BIN_DIR/dwara" dist/
+          for BIN in dwara-cli dwara-loadgen dwara-controller dwara-edge dwara-k8s-controller; do
+            if [ -f "$BIN_DIR/$BIN" ]; then
+              cp "$BIN_DIR/$BIN" dist/
+            fi
+          done
+          ( cd dist && sha256sum -- * > checksums.sha256 )
+          ls -la dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned: v4
+        with:
+          name: dwara-arm64-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
