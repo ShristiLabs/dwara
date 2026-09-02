@@ -32,3 +32,8 @@ pages cover each gated feature.
   and version skew tolerance.
 - [CP/DP split](./cp-dp-split) - the `dwara-controller` /
   `dwara-edge` control-plane / data-plane architecture.
+- [Global load balancing and data residency](./cp-dp-split#global-load-balancing-and-data-residency) - locality-aware endpoint selection and region-restricted routing for the CP/DP split fleet.
+- [Federated analytics](./analytics#federated-analytics) - aggregate analytics across all edges in a CP/DP split fleet.
+- [Fleet operations](./cluster-sync#fleet-operations) - version skew policy, fleet status, and rolling upgrade orchestration.
+- [Web console v2](./web-console#console-v2) - CRUD operations, fleet views, config editor, and workspace switcher.
+- [AI credential pools](./ai-gateway#credential-pools) - multi-key rotation with 429 quarantine for AI providers.

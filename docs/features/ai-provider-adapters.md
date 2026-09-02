@@ -364,12 +364,120 @@ rejected (it could never serve anything).
   deterministic per id, per-version metrics attribution, the routing
   validation matrix, and the compiled-plan unit case.
 
-## Future links
+## M4 additions (DW-079 through DW-087, DW-113)
 
-- DW-077 (streaming) and DW-078 (token budgets) have landed; see the
-  sections above.
-- DW-079 (cost attribution) consumes the provider-reported `Usage`
-  this layer normalizes and fills the `ai::budget::cost_micros`
-  pricing seam, turning the enforced-but-inert cost window live.
-- DW-080 (Ent) layers credential pools behind the same
-  `ProviderAdapter` seam.
+DW-077 (streaming) and DW-078 (token budgets) have landed; see the
+sections above. The remaining M4 AI-spine tasks are now implemented
+too. The end-user guide at
+[docs-site: AI gateway](../../docs-site/guide/ai-gateway.md) has the
+full configuration reference for each; this section describes the
+implementation approach and where the code lives.
+
+### DW-079 — cost attribution & metering
+
+Pricing tables (`ai::cost`) map provider/model to per-token
+micro-USD rates, filling the `ai::budget::cost_micros` seam that
+DW-078 left enforced-but-inert. Per-request spend is recorded to the
+analytics store's `ai_spend` table (schema v3), keyed by consumer,
+provider, model, and version, so the daily cost window reads real
+prices. Billing exports reuse the analytics aggregation path. Code:
+`crates/dwara-core/src/ai/cost.rs`, `crates/dwara-core/src/analytics/`
+(the `ai_spend` writer).
+
+### DW-080 — provider credential pools (Ent)
+
+Multi-key rotation behind the same `ProviderAdapter` seam: a
+provider's auth block can declare a pool of credentials; the
+transport picks one per call (round-robin or weighted) and quarantines
+a key on 429 for a configurable backoff window. Pool exhaustion
+degrades gracefully (the request fails with a clear error rather than
+retrying a known-bad key). Ent-gated at validation. Code:
+`crates/dwara-core/src/ai/credentials.rs`.
+
+### DW-081 — prompt/response logging
+
+Configurable per-consumer capture of the prompt and response text,
+sampled (a per-consumer sample rate), PII-redacted before storage
+(`ai::redaction` scrubs common PII patterns), and retention-bounded
+(rows age out on a schedule). Stored in the `ai_prompt_logs` table
+(schema v5) with its own fire-and-forget writer. Code:
+`crates/dwara-core/src/ai/{redaction,logging}.rs`,
+`crates/dwara-core/src/analytics/` (the `ai_prompt_logs` writer).
+
+### DW-082 — guardrails pack
+
+Policy-scoped checks run in two phases: prompt (before the provider
+call) and response (after translation). The prompt phase checks for
+injection signatures, PII leakage, and banned content; the response
+phase re-checks banned content and validates the response against an
+optional JSON schema. All regex patterns are compiled into a
+`RegexSet` at config-compile time (one scan over the text, not N);
+the jsonschema subset is compiled once per route. A rejection
+short-circuits with an OpenAI-shaped error. Code:
+`crates/dwara-core/src/ai/guardrails.rs`.
+
+### DW-083 — semantic caching (Ent)
+
+An embedding-similarity cache: the request prompt is embedded via an
+external embedding service, the embedding is looked up in an HNSW
+approximate-nearest-neighbor index (`hnsw_rs`), and a hit above the
+similarity threshold returns the cached response without a provider
+call. Feature-gated behind the `semantic_cache` cargo feature so the
+HNSW dependency stays out of the default build. Composes with the
+DW-037 exact-match cache (semantic cache is checked first, then the
+exact cache). Code: `crates/dwara-core/src/ai/semantic_cache.rs`.
+
+### DW-084 — model governance
+
+Per-team model allowlists: a consumer or consumer group can be
+restricted to a subset of the configured model aliases. A request for
+a disallowed model is rejected before any provider contact. Every
+model-usage decision is recorded to the `ai_governance_events` table
+(schema v4) for audit — the allowlist check, the serving provider,
+and the consumer. Shadow mode (log-only, no enforcement) is supported
+for safe rollout. Code: `crates/dwara-core/src/ai/governance.rs`.
+
+### DW-085 — fallback chains & routing policy
+
+Two routing-policy shapes composed over DW-076's failover: a
+`FallbackChain` escalates from a cheap model to a more capable one
+based on an external classifier's verdict (the classifier is an HTTP
+endpoint the gateway calls with the prompt); a `LatencyCost` policy
+selects among candidates by a static latency-vs-cost tradeoff
+configured per alias. Both are resolved at request time in
+`ai::policy`, layered over the compiled `AiRuntime`. Code:
+`crates/dwara-core/src/ai/policy.rs`.
+
+### DW-086 — prompt experimentation
+
+Prompt versioning with A/B model comparison, regression evals, and
+feedback ingestion. A prompt version is a named override (system
+prompt, temperature, etc.) stored in the `ai_prompt_overrides` /
+`ai_experiment_assignments` tables (schema v6); the gateway assigns
+request ids to variants by the same deterministic weighted hash
+DW-040 uses. Evals run a prompt version against a labeled dataset and
+record outcomes to `ai_eval_results`; feedback (thumbs up/down) lands
+in `ai_feedback`. A verdict is computed from eval + feedback signals.
+Code: `crates/dwara-core/src/ai/experiments.rs`.
+
+### DW-087 — MCP gateway
+
+An MCP (Model Context Protocol) server/router: the gateway exposes a
+JSON-RPC tool router that dispatches `tools/call` requests to
+configured upstream tool providers, manages sessions (the
+`mcp_sessions` table, schema v7), and enforces authN/authZ per tool.
+Tool calls are recorded to `mcp_tool_calls` (schema v7) for audit.
+The router is a route action (`mcp`) distinct from `ai` and `proxy`.
+Code: `crates/dwara-core/src/ai/mcp.rs`.
+
+### DW-113 — agent principals & governance
+
+Typed consumer principals for agent workloads: a consumer can declare
+`type: agent` with a tool allowlist (which MCP tools it may call) and
+a per-agent token/cost budget (distinct from the consumer's request
+quota). The agent principal flows through the policy chain so
+guardrails, governance, and budget checks all see the agent type.
+Tool-call audit records and spend records carry the `consumer_type`
+column (schema v8) so agent vs. human traffic is distinguishable in
+analytics. Code: `crates/dwara-core/src/ai/governance.rs`,
+`crates/dwara-core/src/config/ai.rs`.

@@ -146,3 +146,21 @@ a special case for reserved-path errors versus dataplane errors.
 never raw error text from `hyper` or an upstream — the boundary between
 "safe to show a caller" and "internal detail" is enforced once, here,
 rather than trusted to every call site that produces an error.
+
+## tokio-console integration (DW-097)
+
+An optional `console-subscriber` layer wraps the tokio runtime,
+exposing per-task diagnostics — task polls, waker stats, and task
+lifetimes — to the `tokio-console` TUI for async-task debugging. The
+subscriber is feature-gated behind the `tokio_console` cargo feature
+on `dwara-bin` (default off, because the subscriber adds per-poll
+overhead that is unacceptable on the hot path in production).
+
+When enabled, the `DWARA_TOKIO_CONSOLE_ADDR` env var binds a TCP
+listener for the tokio-console protocol; the TUI connects to that
+address to observe the running gateway's task graph in real time.
+With the feature off, the env var is inert.
+
+Code: `crates/dwara-bin/src/main.rs` (subscriber setup, gated on the
+feature + env var), `crates/dwara-bin/Cargo.toml` (the `tokio_console`
+feature declaration).

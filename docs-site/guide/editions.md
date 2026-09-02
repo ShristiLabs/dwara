@@ -113,6 +113,10 @@ default-OFF compile-time flag (no license; see
 | Config convergence across instances (Redis-backed) | — | Ent |
 | Cluster sync GA (conflict resolution, split-brain guards, version skew) | — | Ent |
 | CP/DP split (`dwara-controller` / `dwara-edge` fleet) | — | Ent |
+| Web console v2 (CRUD + fleet) | — | Ent |
+| Fleet operations (version skew, rolling upgrades) | — | Ent |
+| HTTP/3 ingress | Pack | — |
+| tokio-console integration | Pack | — |
 
 ### Observability and analytics
 
@@ -125,6 +129,37 @@ default-OFF compile-time flag (no license; see
 | Alert and event webhooks | OSS | — |
 | Synthetic monitoring (built-in probes feeding analytics) | OSS | — |
 | Usage reports and exports, quotas and metering | OSS | — |
+| ML insights (forecast, anomaly detection) | OSS | — |
+| Business metrics dimensions | OSS | — |
+| Federated analytics (cross-edge aggregation) | — | Ent |
+
+### Traffic and routing
+
+| Feature | OSS | Enterprise |
+|---|---|---|
+| Global load balancing (locality-aware) | — | Ent |
+| Data residency (region-restricted routing) | — | Ent |
+| Adaptive limits (origin-driven) | OSS | — |
+| Anomaly scoring + latency-aware LB | OSS | — |
+| Auto-canary analysis | OSS | — |
+
+### AI gateway
+
+| Feature | OSS | Enterprise |
+|---|---|---|
+| AI provider adapters (OpenAI/Anthropic/Gemini) | OSS | — |
+| AI routing, failover, canary | OSS | — |
+| Token rate limiting & budgets | OSS | — |
+| Cost attribution & metering | OSS | — |
+| Provider credential pools | — | Ent |
+| Prompt/response logging | OSS | — |
+| Guardrails pack | OSS | — |
+| Semantic caching | Pack | — |
+| Model governance | OSS | — |
+| Fallback chains & routing policy | OSS | — |
+| Prompt experimentation | OSS | — |
+| MCP gateway | Pack | — |
+| Agent principals & governance | OSS | — |
 
 ### Extensibility
 

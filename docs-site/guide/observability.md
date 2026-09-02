@@ -139,3 +139,42 @@ end-to-end duration exceeds `latency_ms`. Alert on the standard pair:
 empty at boot; the shipped dashboard's "SLO burn rate" panel draws both
 the 6x and 14.4x thresholds. Routes without an `slo` block export
 nothing.
+
+## tokio-console (DW-097)
+
+For development and debugging, dwara can expose
+[tokio-console](https://github.com/tokio-rs/console) diagnostics for its
+async task runtime. tokio-console is an optional async task inspector --
+connect with the `tokio-console` TUI to see live task polls, waker
+stats, and task lifetimes, which is invaluable for diagnosing stuck
+tasks, waker churn, or scheduler starvation.
+
+This is feature-gated behind the `tokio_console` cargo feature (default
+OFF) and is off at runtime unless explicitly enabled:
+
+```sh
+cargo build -p dwara-bin --features tokio_console
+```
+
+Enable it at runtime with the `DWARA_TOKIO_CONSOLE_ADDR` environment
+variable, which sets the address the console server binds to:
+
+```sh
+DWARA_TOKIO_CONSOLE_ADDR=127.0.0.1:6666 ./dwara run
+```
+
+Then connect from another terminal:
+
+```sh
+tokio-console http://127.0.0.1:6666
+```
+
+::: warning
+tokio-console adds per-poll instrumentation overhead. It is intended for
+development and debugging only -- never enable it in a production build
+serving live traffic.
+:::
+
+When the `tokio_console` feature is off, `DWARA_TOKIO_CONSOLE_ADDR` is
+reserved but inert -- setting it has no effect. When the feature is on
+but the variable is unset, the console server does not bind.

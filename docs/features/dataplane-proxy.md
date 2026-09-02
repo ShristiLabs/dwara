@@ -175,3 +175,33 @@ details worth knowing as a contributor:
   individual read, hyper owns the head as a whole, so neither a
   stalled connection nor a slow trickle can hold a listener resource
   hostage indefinitely.
+
+## HTTP/3 ingress (DW-088)
+
+An h3/QUIC listener is available alongside the h1/h2 listeners,
+feature-gated behind the `h3` cargo feature on `dwara-bin` (default
+off — the `quinn` + `h3` dependency tree is heavy and not needed for
+the default build). When enabled, a QUIC listener binds on the
+configured address and serves HTTP/3 requests through the SAME
+routing and config pipeline as the h1/h2 listeners — a route match,
+policy chain, and proxy action are protocol-agnostic, so no config
+change is needed to serve h3. The listener reuses the same TLS
+material (the QUIC TLS config is derived from the listener's cert/SNI
+config). Code: `crates/dwara-bin/src/listeners.rs` (listener bind),
+`crates/dwara-bin/src/h3.rs` (the h3 request loop).
+
+## Adaptive + origin-driven limits (DW-089)
+
+Per-route rate limits that adapt based on upstream response signals:
+when an origin returns 429 or 503, the gateway's own rate limit for
+that route is adjusted downward (an EWMA-driven tuning in
+`resilience::adaptive`), shedding load proactively before the origin
+is overwhelmed. When the origin recovers, the limit ramps back up.
+Origin-driven `Retry-After` headers are honored: a 429 with
+`Retry-After` sets a temporary floor on the route's limit for that
+duration. This is distinct from the static GCRA limiter (DW-017):
+the adaptive layer sits on top and modulates the static limit based
+on observed origin feedback. Code:
+`crates/dwara-core/src/dataplane/` (the limit-adjustment hook in the
+proxy response path), `crates/dwara-core/src/resilience/adaptive.rs`
+(EWMA-driven tuning).

@@ -112,3 +112,27 @@ upstream name — the same pattern the retry budget and breaker state
 use (see [Resilience: config reload semantics](./resilience.md#config-reload-semantics)).
 A reload changes the *policy* (algorithm, weights) without resetting
 *observed reality* about each endpoint.
+
+## Anomaly scoring + latency-aware load balancing (DW-090)
+
+DW-090 adds two balancing signals on top of the four base algorithms:
+
+- **Anomaly scoring**: the live sketch engine (DW-092, see
+  [Analytics](./analytics.md#live-sketches--ml-insights-dw-092))
+  produces a per-route anomaly score. The balancer consumes anomaly
+  scores from the live sketch engine to avoid endpoints that are
+  statistically unhealthy — an endpoint whose recent error rate or
+  latency diverges from its baseline is deprioritized in the pick,
+  without waiting for the passive-health outlier detector to eject
+  it outright. This is a softer, earlier signal than ejection.
+- **Latency-aware balancing**: the balancer tracks a rolling average
+  latency per endpoint and prefers low-latency endpoints when
+  multiple are eligible. This composes with the base algorithms
+  (e.g. `round_robin` with latency awareness biases the WRR weights
+  toward faster endpoints).
+
+Both signals are read-only inputs to the existing lock-free pick —
+no new mutex, no new channel. Code:
+`crates/dwara-core/src/dataplane/balance.rs` (anomaly + latency
+inputs into the pick), `crates/dwara-core/src/dataplane/anomaly.rs`
+(the scoring engine).

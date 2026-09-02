@@ -172,11 +172,57 @@ documented follow-up; the tonic transport layer supports it via
 `ServerTlsConfig` / `ClientTlsConfig` when the `tls` features are
 enabled.
 
+## Global load balancing and data residency (DW-094, Enterprise)
+
+DW-094 adds locality-aware load balancing and data-residency
+enforcement to the CP/DP split. Endpoints declare a `region` and
+optional `zone`; the dataplane's balancer prefers same-region
+endpoints (falling back to same-zone, then any) so traffic stays
+close to its origin. A `LocalityContext` is propagated from the
+controller to edges via the config stream, so every edge sees the
+same locality topology without per-edge configuration.
+
+Data residency: a route can declare `allowed_regions` — a list of
+regions whose endpoints are eligible to receive that route's traffic.
+The proxy enforces the constraint at pick time: a request is only
+forwarded to an endpoint whose region is in the allowed set. This
+lets an operator keep EU-personal-data traffic on EU endpoints
+without a separate gateway per region.
+
+Code: `crates/dwara-core/src/config/locality.rs` (the locality schema
+and `LocalityContext`), `crates/dwara-core/src/dataplane/balance.rs`
+(locality-aware pick), `crates/dwara-core/src/dataplane/proxy.rs`
+(residency enforcement at dispatch).
+
+## Fleet operations (DW-098, Enterprise)
+
+DW-098 adds fleet-wide operational controls to the CP/DP split:
+
+- **Version skew policy**: each edge registers with its build version
+  on connect. The controller checks the version against the
+  configured skew policy (`allow`, `allow_minor_skew`, or
+  `require_exact`) and rejects an edge that violates it — so a
+  rolling upgrade cannot silently mix incompatible versions. The
+  check lives in `check_edge_version_skew`.
+- **Fleet status API**: two admin endpoints expose the fleet's
+  health: `GET /fleet/skew` returns the version-skew status of every
+  connected edge (version, policy, compliant/flagged), and
+  `GET /fleet/status` returns each edge's connection state, last-ack
+  generation, and cached-config status.
+- **Rolling upgrade orchestration**: the controller can drive a
+  rolling upgrade by label-selector waves — targeting a subset of
+  edges (by label) for a config push, waiting for acks, then
+  proceeding to the next wave. This bounds the blast radius of a bad
+  config to one wave.
+
+Code: `crates/dwara-core/src/cp_dp/mod.rs`
+(`check_edge_version_skew`, `edge_skew_status`),
+`crates/dwara-core/src/cp_dp/transport.rs` (fleet status RPCs),
+`crates/dwara-admin/src/lib.rs` (the `/fleet/*` admin endpoints).
+
 ## Not yet implemented
 
 - Production leader election (Redis/etcd distributed lock or Raft)
-- DW-074 (Cluster sync GA): conflict resolution, split-brain, version
-  skew hardening
 - mTLS for the gRPC transport
 - Additional config sources (etcd, Consul, K8s API) beyond file
   watching

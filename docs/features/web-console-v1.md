@@ -1,4 +1,4 @@
-# Web Console v1 (Read-Only, OSS) (DW-117)
+# Web Console (DW-117, DW-118)
 
 ## Overview
 
@@ -58,9 +58,36 @@ Current config YAML dump.
 
 ## Read-only
 
-The console is read-only: no PATCH/POST/PUT/DELETE. The SPA only
-fetches data from the admin API. A v2 (full CRUD + fleet/workspace
-views, Enterprise) is a follow-on (DW-118).
+The v1 console is read-only: no PATCH/POST/PUT/DELETE. The SPA only
+fetches data from the admin API. The v2 upgrade (below) adds full
+CRUD; the v1 read-only views remain.
+
+## Web Console v2 (DW-118, Enterprise)
+
+DW-118 upgrades the console from read-only to full CRUD, adds fleet
+and workspace views, and a config editor with validation preview —
+all still a static SPA (HTML + CSS + vanilla JS, no build step, no
+dependencies), embedded at compile time via `include_str!`/
+`include_bytes!`.
+
+- **Full CRUD**: routes, services, policies, and consumers can be
+  created, edited, and deleted via the admin API
+  (`PATCH /config` publishes; the editor builds the patch in the
+  browser). The v1 read-only views remain; v2 adds the editor views
+  alongside them.
+- **Fleet views**: version skew status (`GET /fleet/skew`) and fleet
+  status (`GET /fleet/status`) surface the CP/DP split's edge health
+  in the console — see
+  [CP/DP split: fleet operations](./cp-dp-split.md#fleet-operations-dw-098-enterprise).
+- **Config editor with validation preview**: `POST /config/validate`
+  validates a candidate config without publishing it, so the operator
+  sees errors before pressing publish (`PATCH /config`).
+- **Workspace switcher**: `GET /workspaces` lists available
+  workspaces; the operator switches context in the console.
+
+Code: `crates/dwara-console/static/{index.html,style.css,app.js}`
+(the SPA), `crates/dwara-console/src/lib.rs` (embedding + path
+resolution).
 
 ## API
 

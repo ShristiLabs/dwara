@@ -249,3 +249,51 @@ seasonal baseline. Requires `anomaly_baseline: true`.
 
 Both endpoints answer 404 (`analytics_not_configured`) when the
 `insights` block is absent or the relevant capability is disabled.
+
+### Business metrics dimensions (DW-093)
+
+In addition to the header-derived custom dimensions described in
+[Custom dimensions](#custom-dimensions), routes can attach arbitrary
+key-value business dimensions to every access record they produce.
+These are configured per-route via a `dimensions` block in the route
+config:
+
+```yaml
+routes:
+  - name: checkout
+    match: { path: "/checkout" }
+    dimensions:
+      product_line: electronics
+      channel: web
+```
+
+Each key-value pair is stored on the access record alongside the
+built-in and header-derived dimensions. Business dimensions appear in
+query results and are accepted in `group_by` by the
+[structured query](#querying) endpoint, so you can slice traffic by
+`product_line` or `channel` exactly as you would by `route` or
+`consumer`. The same additive-rollup model applies: any time range at
+any granularity merges exactly.
+
+### Federated analytics (DW-095, Enterprise)
+
+In a CP/DP split (see [CP/DP split](./cp-dp-split)), each edge records
+analytics locally just as a single-instance gateway does. The
+controller aggregates every edge's data into one store so that admin
+API queries return fleet-wide numbers.
+
+- **Edge-side**: a `FederatedAnalyticsSink` (an implementation of the
+  `AnalyticsSink` extension trait) batches completed-request events and
+  streams them to the controller over gRPC via the `PublishAnalytics`
+  RPC. Batching is bounded; a saturated stream drops and counts rather
+  than blocking the request path.
+- **Controller-side**: an `AnalyticsCollector` aggregates all edges'
+  streamed data into a single analytics store. The standard admin API
+  analytics endpoints (see [Querying](#querying)) then answer
+  fleet-wide data -- a query with no edge filter returns the aggregate
+  across every edge.
+- **Per-edge filter**: an optional `?edge=<edge-id>` query parameter
+  narrows a query to a single edge's records.
+
+This is an enterprise feature, gated behind the `ent` cargo feature and
+a valid license. In an OSS build the `FederatedAnalyticsSink` is inert.

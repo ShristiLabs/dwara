@@ -15,7 +15,7 @@ AGENTS.md's index-level summaries.
 
 ## Status of this directory
 
-Feature areas written up so far (M1 complete; M2 in progress):
+Feature areas written up so far (M1-M4 complete):
 
 - [Architecture](./architecture.md) — bounded-context layout, the
   config pipeline, dependency direction, and the request/reload
@@ -23,13 +23,21 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [AI provider adapters](./features/ai-provider-adapters.md) — the
   DW-075 translation layer: OpenAI facade in, OpenAI/Anthropic/Gemini
   adapters out, providers-as-upstreams, the pure `ProviderAdapter`
-  seam DW-076+ compose on.
+  seam DW-076+ compose on. Now also covers DW-076 routing/failover,
+  DW-077 streaming, DW-078 token budgets, DW-079 cost attribution,
+  DW-080 credential pools, DW-081 prompt logging, DW-082 guardrails,
+  DW-083 semantic caching, DW-084 model governance, DW-085 routing
+  policies, DW-086 prompt experimentation, DW-087 MCP gateway,
+  DW-113 agent principals.
 - [TLS](./features/tls.md) — termination (multi-SNI), passthrough, hot
   reload, outbound trust.
 - [Dataplane and proxy](./features/dataplane-proxy.md) — routing,
-  matching precedence, rewrites, streaming proxy semantics.
+  matching precedence, rewrites, streaming proxy semantics. Now also
+  covers DW-088 HTTP/3 ingress and DW-089 adaptive + origin-driven
+  limits.
 - [Load balancing](./features/load-balancing.md) — the four
-  algorithms, lock-free picks, slow start.
+  algorithms, lock-free picks, slow start. Now also covers DW-090
+  anomaly scoring + latency-aware load balancing.
 - [Admission queues and backpressure](./features/admission-queue.md)
   — bounded admission queues that make the gateway concurrency cap
   degrade gracefully (latency rises before shedding begins) instead
@@ -44,7 +52,8 @@ Feature areas written up so far (M1 complete; M2 in progress):
   blue-green switches) with a stateless weighted-hash pick, and the
   gateway-set sticky cookie that pins a session to its branch (and to
   one endpoint when the branch runs ip_hash), layered over the
-  per-upstream balancer (DW-040).
+  per-upstream balancer (DW-040). Now also covers DW-091 auto-canary
+  analysis.
 - [Resilience](./features/resilience.md) — passive/active health,
   retries, circuit breaking, load shedding, and how the layers compose.
 - [Rate limiting](./features/rate-limiting.md) — GCRA, stacked
@@ -83,7 +92,8 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [Embedded analytics](./features/analytics.md) — the analytics store
   behind the admin `/analytics/*` endpoints: the fire-and-forget write
   path, the rollup cascade, bounded disk, and the query surface
-  (DW-043).
+  (DW-043). Now also covers DW-092 ML insights, DW-093 business
+  metrics dimensions, and DW-095 federated analytics.
 - [Real-time analytics stream](./features/analytics-stream.md) — the
   opt-in access-record firehose: every completed request's record to
   an external sink as ordered NDJSON batches (one webhook delivery per
@@ -109,7 +119,8 @@ Feature areas written up so far (M1 complete; M2 in progress):
 - [State store](./features/state-store.md) — SQLite store, migrations,
   cache coherence model.
 - [Observability](./features/observability.md) — spans, logs, metrics,
-  the OTLP feature gate, redaction.
+  the OTLP feature gate, redaction. Now also covers DW-097
+  tokio-console integration.
 - [Admin API](./features/admin-api.md) — mTLS-only auth, the
   `PATCH /config` pipeline, why a separate crate.
 - [CLI](./features/cli.md) — the library-shaped subcommands, exit-code
@@ -133,6 +144,14 @@ Feature areas written up so far (M1 complete; M2 in progress):
   and gates enterprise features behind feature-claim flags; the `ent`
   cargo feature, offline Ed25519 verification, the grace-period
   degradation curve, and the `dwara_license_status` metric (DW-032).
+- [CP/DP split](./features/cp-dp-split.md) — the control-plane /
+  data-plane split architecture: controller-to-edge gRPC config
+  distribution, HA controller, edge-survives-outage caching (DW-066).
+  Now also covers DW-094 global load balancing + data residency and
+  DW-098 fleet operations.
+- [Web Console](./features/web-console-v1.md) — the static SPA served
+  from the mTLS admin listener: read-only diagnostic views (DW-117)
+  and the v2 full-CRUD + fleet/workspace views (DW-118).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

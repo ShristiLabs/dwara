@@ -194,10 +194,62 @@ the EWMA and ring-buffer depth; validated to be > 0 when either
 capability is enabled. When the block is absent, both endpoints answer
 `analytics_not_configured` (404).
 
+## Business metrics dimensions (DW-093)
+
+Custom dimensions are key-value string pairs attached to each request
+record, configured per-route via a `dimensions` block. Each dimension
+declares a name and a source (header, JWT claim, or body JSON pointer
+— see the write-path section above for the three extraction points).
+The dimensions are stored in the analytics store's `rollup_dim` table
+and the `raw` table's JSON column, and are queryable via the admin API
+(`POST /analytics/dimensions`, `POST /analytics/query` with
+`group_by`). The dimension list is read from the current generation,
+so a reload adds or renames dimensions live. Code:
+`crates/dwara-core/src/config/analytics.rs` (the `dimensions` schema),
+`crates/dwara-core/src/analytics/` (capture, rollup, query).
+
+## Federated analytics (DW-095, Enterprise)
+
+In the CP/DP split, each edge has its own embedded analytics store.
+DW-095 adds the federated pipeline that streams edge-side records to
+the controller for centralized aggregation, so an operator queries
+one controller instead of N edges.
+
+```mermaid
+flowchart LR
+    E1[Edge 1\nFederatedAnalyticsSink] -->|gRPC client-streaming\nPublishAnalytics| C[Controller\nEmbeddedCollector]
+    E2[Edge 2\nFederatedAnalyticsSink] -->|PublishAnalytics| C
+    C --> AC[AnalyticsCollector trait\nforward + aggregate]
+```
+
+- **Edge side**: `FederatedAnalyticsSink` implements the same
+  `extensions::analytics::AnalyticsSink` contract the embedded store
+  uses. It batches `AccessRecord`s into `PbAnalyticsBatch` messages
+  and streams them to the controller over a gRPC client-streaming
+  `PublishAnalytics` RPC. The sink is fire-and-forget (a full buffer
+  drops and counts, same never-blocks-the-dataplane contract as the
+  embedded store).
+- **Controller side**: `EmbeddedCollector` receives
+  `PbAnalyticsBatch` messages, deserializes them into
+  `PbAnalyticsRecord`s, and forwards each to an `AnalyticsCollector`
+  trait (the embedded store implements it; an external collector can
+  plug in). The RPC returns a `PbAnalyticsAck` per batch.
+- **Wire protocol**: hand-written prost structs
+  (`PbAnalyticsRecord`, `PbAnalyticsBatch`, `PbAnalyticsAck`) — no
+  protoc/build-script dependency, same approach as the CP/DP config
+  transport.
+- **Feature gate**: the `ent` cargo feature. Without it, the
+  federated sink is not compiled and edges use the embedded store
+  only.
+
+Code: `crates/dwara-core/src/cp_dp/analytics.rs` (sink, collector,
+prost structs), `crates/dwara-core/src/cp_dp/transport.rs` (the
+`PublishAnalytics` RPC wired into the gRPC service).
+
 ## The seam
 
 The store implements the M1 `extensions::analytics::AnalyticsSink`
 contract (extended additively with the per-request fields DW-043
 needed). That trait is the OSS/Ent seam: the federated analytics
-pipeline (DW-095) and the raw-record firehose (DW-121) are future
-sibling implementations of the same contract.
+pipeline (DW-095, now implemented — see above) and the raw-record
+firehose (DW-121) are sibling implementations of the same contract.

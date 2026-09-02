@@ -143,6 +143,10 @@ export default withMermaid(
                 },
                 { text: "gRPC and WebSockets", link: "/guide/grpc-websockets" },
                 {
+                  text: "HTTP/3 ingress",
+                  link: "/guide/http3",
+                },
+                {
                   text: "Dynamic upstream discovery",
                   link: "/guide/dynamic-discovery",
                 },

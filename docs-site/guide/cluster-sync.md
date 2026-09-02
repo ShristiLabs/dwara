@@ -88,6 +88,58 @@ controller:
    or exact mismatch).
 4. The edge continues serving traffic with its cached generation.
 
+### Fleet operations (DW-098, Enterprise)
+
+Fleet operations extend the cluster sync layer with fleet-wide status
+APIs and rolling upgrade orchestration. This is an enterprise feature
+-- build with `--features ent` and a valid license.
+
+**Fleet status APIs:**
+
+- `GET /fleet/skew` -- returns per-edge version compatibility against
+  the controller. Each entry reports the edge's version, the
+  controller's version, and whether the pair satisfies the configured
+  skew policy.
+- `GET /fleet/status` -- returns the full fleet configuration and every
+  registered edge's version, giving a single snapshot of the whole
+  fleet.
+
+**Rolling upgrade orchestration:**
+
+The fleet config block declares the upgrade order so the controller
+can roll a new generation out in controlled waves rather than all at
+once. A wave is a set of edges selected by a Kubernetes-style
+label selector; the controller waits for each wave to converge before
+starting the next.
+
+```yaml
+fleet:
+  upgrade:
+    waves:
+      - selector: { env: staging }
+        max_concurrent: 2
+      - selector: { env: canary }
+        max_concurrent: 1
+      - selector: { env: prod }
+        max_concurrent: 3
+    halt_on_failure: true
+```
+
+- `waves` is an ordered list; each wave's `selector` picks the edges
+  it applies to and `max_concurrent` caps how many edges in that wave
+  receive the new generation at once.
+- `halt_on_failure` (default `true`) stops the rollout when an edge in
+  an earlier wave fails to converge, so a bad generation never reaches
+  the prod wave.
+
+**Version skew on registration:**
+
+When an edge registers with the controller, the controller checks the
+edge's version against the configured skew policy. A skew violation is
+**fail-open**: the edge is accepted and continues serving traffic, and
+the controller logs a warning so the operator can see the skew. This
+keeps the fleet serving during upgrades while making the skew visible.
+
 ## Convergence state
 
 The controller tracks convergence state for each generation:
