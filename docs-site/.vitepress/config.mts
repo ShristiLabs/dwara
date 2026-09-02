@@ -115,6 +115,10 @@ export default withMermaid(
                   text: "Terraform state tool",
                   link: "/guide/terraform-state",
                 },
+                {
+                  text: "Replay time-travel debugging",
+                  link: "/guide/replay-debugging",
+                },
               ],
             },
             {
@@ -163,10 +167,6 @@ export default withMermaid(
                   link: "/guide/api-aggregation",
                 },
                 {
-                  text: "AI gateway",
-                  link: "/guide/ai-gateway",
-                },
-                {
                   text: "OpenAPI response validation",
                   link: "/guide/openapi-response-validation",
                 },
@@ -194,13 +194,45 @@ export default withMermaid(
                   text: "L4 TCP/UDP proxying",
                   link: "/guide/l4-proxying",
                 },
+              ],
+            },
+            {
+              text: "AI gateway",
+              link: "/guide/ai-gateway",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/ai-gateway" },
                 {
-                  text: "Nano-services (WASM handlers)",
-                  link: "/guide/nano-services",
+                  text: "Routing policies",
+                  link: "/guide/ai-routing-policies",
                 },
                 {
-                  text: "Replay time-travel debugging",
-                  link: "/guide/replay-debugging",
+                  text: "Prompt experimentation",
+                  link: "/guide/ai-prompt-experimentation",
+                },
+                {
+                  text: "Token budgets and cost attribution",
+                  link: "/guide/ai-token-budgets",
+                },
+                {
+                  text: "Prompt and response logging",
+                  link: "/guide/ai-prompt-logging",
+                },
+                {
+                  text: "Governance and agent principals",
+                  link: "/guide/ai-governance",
+                },
+                {
+                  text: "Guardrails",
+                  link: "/guide/ai-guardrails",
+                },
+                {
+                  text: "Semantic caching",
+                  link: "/guide/ai-semantic-caching",
+                },
+                {
+                  text: "MCP gateway",
+                  link: "/guide/ai-mcp-gateway",
                 },
                 {
                   text: "A2A protocol",
@@ -257,6 +289,13 @@ export default withMermaid(
                   text: "FIPS mode",
                   link: "/guide/fips-mode",
                 },
+              ],
+            },
+            {
+              text: "Plugins and WASM",
+              link: "/guide/proxy-wasm-plugins",
+              collapsed: false,
+              items: [
                 {
                   text: "Proxy-Wasm plugins",
                   link: "/guide/proxy-wasm-plugins",
@@ -268,6 +307,10 @@ export default withMermaid(
                 {
                   text: "Extism plugin development kit",
                   link: "/guide/extism-pdk",
+                },
+                {
+                  text: "Nano-services (WASM handlers)",
+                  link: "/guide/nano-services",
                 },
                 {
                   text: "Plugin lifecycle",
@@ -347,6 +390,13 @@ export default withMermaid(
                   text: "CP/DP split",
                   link: "/guide/cp-dp-split",
                 },
+              ],
+            },
+            {
+              text: "Enterprise platform",
+              link: "/guide/h3-quic-upstream",
+              collapsed: false,
+              items: [
                 {
                   text: "H3/QUIC upstream transport",
                   link: "/guide/h3-quic-upstream",
