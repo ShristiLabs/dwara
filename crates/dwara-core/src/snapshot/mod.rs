@@ -1512,6 +1512,34 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             }
         }
     }
+    // DW-092: live sketches freshness target bounds.
+    if let Some(ls) = &a.live_sketches {
+        if ls.enabled && !(100..=5000).contains(&ls.freshness_target_ms) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.live_sketches.freshness_target_ms",
+                format!(
+                    "freshness_target_ms {} is out of range: must be 100..=5000 \
+                     (below 100 is timer churn; above 5000 is no longer 'live')",
+                    ls.freshness_target_ms
+                ),
+            ));
+        }
+    }
+    // DW-092: insights baseline_windows must be > 0 when either feature
+    // is enabled.
+    if let Some(ins) = &a.insights {
+        if (ins.forecast || ins.anomaly_baseline) && ins.baseline_windows == 0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.insights.baseline_windows",
+                "baseline_windows must be > 0 when forecast or anomaly_baseline \
+                 is enabled (the ring buffer must hold at least one window)",
+            ));
+        }
+    }
 }
 
 /// Validate GeoIP rules (DW-050): every `authorization.geoip`

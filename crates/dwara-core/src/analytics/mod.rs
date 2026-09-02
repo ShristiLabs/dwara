@@ -49,12 +49,14 @@
 //! construction and stays that way.
 
 pub mod exports;
+pub mod insights;
 pub mod query;
 pub mod rollup;
 pub mod schema;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -381,6 +383,297 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The maximum number of latency samples retained per route per window
+/// (DW-092). Capped to bound memory and snapshot-time sort cost
+/// (O(n log n) with n <= 1000 — fast enough for an admin-path
+/// snapshot, never on the request hot path).
+const MAX_LATENCY_SAMPLES: usize = 1000;
+
+/// One per-route sketch within the live rolling window (DW-092).
+/// Updated in place under atomics (counts) and a short mutex over a
+/// capped latency-sample vector. The route key is held by the parent
+/// map, not here.
+struct RouteSketch {
+    /// Total requests in the current window.
+    requests: AtomicU64,
+    /// Total errors (status >= 500) in the current window.
+    errors: AtomicU64,
+    /// Capped latency samples (ms) for percentile computation at
+    /// snapshot time. Once the cap is reached, new samples replace the
+    /// oldest (a simple ring) so the retained set stays representative
+    /// of the recent tail.
+    latency_samples: Mutex<LatencySamples>,
+}
+
+/// A capped latency-sample buffer with a write cursor (ring
+/// replacement once full). The retained set is sorted at snapshot
+/// time for nearest-rank percentile selection.
+struct LatencySamples {
+    samples: Vec<f64>,
+    cursor: usize,
+}
+
+impl LatencySamples {
+    fn new() -> Self {
+        LatencySamples {
+            samples: Vec::with_capacity(MAX_LATENCY_SAMPLES),
+            cursor: 0,
+        }
+    }
+
+    /// Record one latency sample. Once the cap is reached, the oldest
+    /// sample (by insertion order) is overwritten — a bounded ring
+    /// that keeps the most recent `MAX_LATENCY_SAMPLES` observations.
+    fn push(&mut self, ms: f64) {
+        if self.samples.len() < MAX_LATENCY_SAMPLES {
+            self.samples.push(ms);
+        } else {
+            self.samples[self.cursor] = ms;
+            self.cursor = (self.cursor + 1) % MAX_LATENCY_SAMPLES;
+        }
+    }
+
+    /// Nearest-rank percentile over the retained samples (sorted in
+    /// place). `p` is 0.0-1.0. Returns 0.0 when no samples are held.
+    fn percentile(&mut self, p: f64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples
+            .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p = p.clamp(0.0, 1.0);
+        let rank = ((self.samples.len() as f64) * p).ceil() as usize;
+        self.samples[rank.clamp(1, self.samples.len()) - 1]
+    }
+
+    /// The arithmetic mean of the retained samples.
+    fn mean(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples.iter().sum::<f64>() / self.samples.len() as f64
+    }
+}
+
+impl RouteSketch {
+    fn new() -> Self {
+        RouteSketch {
+            requests: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            latency_samples: Mutex::new(LatencySamples::new()),
+        }
+    }
+}
+
+/// One route's snapshot from the current live window (DW-092).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveRouteSnapshot {
+    /// The route name.
+    pub route: String,
+    /// Total requests in the current window.
+    pub requests: u64,
+    /// Total errors (status >= 500) in the current window.
+    pub errors: u64,
+    /// The error rate as a fraction in [0, 1].
+    pub error_rate: f64,
+    /// The p50 latency in milliseconds.
+    pub p50_ms: f64,
+    /// The p95 latency in milliseconds.
+    pub p95_ms: f64,
+    /// The p99 latency in milliseconds.
+    pub p99_ms: f64,
+    /// The average (mean) latency in milliseconds.
+    pub avg_ms: f64,
+}
+
+/// A snapshot of the current live window across all routes (DW-092).
+/// Returned by [`EmbeddedAnalytics::live_snapshot`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveSnapshot {
+    /// The window's start time (wall-clock ms since the Unix epoch).
+    pub window_start_ms: u64,
+    /// The window's end time (start + window_size_ms).
+    pub window_end_ms: u64,
+    /// Per-route snapshots, sorted by route name for stable output.
+    pub routes: Vec<LiveRouteSnapshot>,
+}
+
+/// Live in-process sketches (DW-092): sub-second-freshness per-route
+/// rolling window with counts, errors, and capped latency samples.
+/// Maintained inside [`EmbeddedAnalytics`] and updated synchronously
+/// on every `record()` call — never blocks the dataplane (atomics for
+/// counts, a short mutex over a capped vector for samples). When the
+/// window expires, the completed window's aggregates are handed to
+/// the insights engine (if attached) for forecasting and anomaly
+/// detection.
+pub struct LiveSketches {
+    /// Per-route current-window data, behind a RwLock so the snapshot
+    /// read path (admin) does not block the record write path
+    /// (dataplane).
+    routes: RwLock<HashMap<String, RouteSketch>>,
+    /// The current window's start time (wall-clock ms). Atomic so the
+    /// rotation check on the hot path is lock-free.
+    window_start_ms: AtomicU64,
+    /// The window size in milliseconds (= the freshness target).
+    window_size_ms: u64,
+    /// The insights engine fed on window rotation (None when insights
+    /// are disabled).
+    insights: RwLock<Option<Arc<insights::InsightsEngine>>>,
+}
+
+impl LiveSketches {
+    /// Construct a new live-sketches store with the given window size.
+    pub fn new(window_size_ms: u64) -> Arc<Self> {
+        Arc::new(LiveSketches {
+            routes: RwLock::new(HashMap::new()),
+            window_start_ms: AtomicU64::new(0),
+            window_size_ms,
+            insights: RwLock::new(None),
+        })
+    }
+
+    /// Attach the insights engine so window rotations feed it. Called
+    /// once during [`EmbeddedAnalytics::open`] wiring.
+    pub fn set_insights(&self, engine: Arc<insights::InsightsEngine>) {
+        *self.insights.write().unwrap() = Some(engine);
+    }
+
+    /// The current window's start time (wall-clock ms).
+    pub fn window_start(&self) -> u64 {
+        self.window_start_ms.load(Ordering::Relaxed)
+    }
+
+    /// Record one request completion into the current window. Rotates
+    /// the window (handing the completed aggregates to the insights
+    /// engine) when `now_ms` has passed the window boundary.
+    pub fn record(&self, route: &str, status: u16, duration_ms: f64, now_ms: u64) {
+        // Rotate the window if it has expired. The rotation is under
+        // the write lock so a concurrent snapshot sees a consistent
+        // window boundary.
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if start == 0 || now_ms >= start + self.window_size_ms {
+            self.rotate(now_ms);
+        }
+        // Look up or create the route sketch under a short write lock.
+        // The map is keyed by route name; a missing entry is inserted.
+        let map = self.routes.read().unwrap();
+        if let Some(sketch) = map.get(route) {
+            sketch.requests.fetch_add(1, Ordering::Relaxed);
+            if status >= 500 {
+                sketch.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            sketch.latency_samples.lock().unwrap().push(duration_ms);
+            return;
+        }
+        drop(map);
+        let mut map = self.routes.write().unwrap();
+        let sketch = map
+            .entry(route.to_string())
+            .or_insert_with(RouteSketch::new);
+        sketch.requests.fetch_add(1, Ordering::Relaxed);
+        if status >= 500 {
+            sketch.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        sketch.latency_samples.lock().unwrap().push(duration_ms);
+    }
+
+    /// Rotate the window: snapshot the current aggregates, hand them
+    /// to the insights engine (if attached), then reset the per-route
+    /// sketches for the new window. The new window starts at `now_ms`
+    /// (aligned to the rotation, not the expiry — a missed rotation
+    /// catches up to the present).
+    fn rotate(&self, now_ms: u64) {
+        let mut map = self.routes.write().unwrap();
+        let old_start = self.window_start_ms.swap(now_ms, Ordering::Relaxed);
+        // Feed the completed window to the insights engine (if any).
+        if old_start != 0 {
+            let mut total_requests: u64 = 0;
+            let mut total_errors: u64 = 0;
+            let mut latency_sum: f64 = 0.0;
+            let mut latency_count: u64 = 0;
+            for sketch in map.values() {
+                let req = sketch.requests.load(Ordering::Relaxed);
+                let err = sketch.errors.load(Ordering::Relaxed);
+                total_requests += req;
+                total_errors += err;
+                let mean = sketch.latency_samples.lock().unwrap().mean();
+                latency_sum += mean * req as f64;
+                latency_count += req;
+            }
+            let avg_latency = if latency_count > 0 {
+                latency_sum / latency_count as f64
+            } else {
+                0.0
+            };
+            let window = insights::BaselineWindow {
+                ts_ms: old_start as i64,
+                requests: total_requests,
+                errors: total_errors,
+                avg_latency_ms: avg_latency,
+            };
+            if let Some(engine) = self.insights.read().unwrap().as_ref() {
+                engine.observe(window);
+            }
+        }
+        // Reset the per-route sketches for the new window. Clearing
+        // the map is simplest and avoids retaining stale routes; the
+        // first record of the new window re-creates each route's
+        // sketch.
+        map.clear();
+    }
+
+    /// Snapshot the current window's per-route aggregates. Computes
+    /// p50/p95/p99 from the retained latency samples (sort-and-pick,
+    /// O(n log n) with n capped at 1000). This is an admin-path
+    /// operation, never on the request hot path.
+    pub fn snapshot(&self, now_ms: u64) -> LiveSnapshot {
+        // Rotate if the window has expired so a snapshot reflects a
+        // current (non-stale) window.
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if start == 0 || now_ms >= start + self.window_size_ms {
+            self.rotate(now_ms);
+        }
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        let map = self.routes.read().unwrap();
+        let mut routes: Vec<LiveRouteSnapshot> = map
+            .iter()
+            .map(|(route, sketch)| {
+                let requests = sketch.requests.load(Ordering::Relaxed);
+                let errors = sketch.errors.load(Ordering::Relaxed);
+                let (p50, p95, p99, avg) = {
+                    let mut samples = sketch.latency_samples.lock().unwrap();
+                    (
+                        samples.percentile(0.50),
+                        samples.percentile(0.95),
+                        samples.percentile(0.99),
+                        samples.mean(),
+                    )
+                };
+                LiveRouteSnapshot {
+                    route: route.clone(),
+                    requests,
+                    errors,
+                    error_rate: if requests == 0 {
+                        0.0
+                    } else {
+                        errors as f64 / requests as f64
+                    },
+                    p50_ms: p50,
+                    p95_ms: p95,
+                    p99_ms: p99,
+                    avg_ms: avg,
+                }
+            })
+            .collect();
+        routes.sort_by(|a, b| a.route.cmp(&b.route));
+        LiveSnapshot {
+            window_start_ms: start,
+            window_end_ms: start + self.window_size_ms,
+            routes,
+        }
+    }
+}
+
 /// The embedded analytics store (DW-043): SQLite file + bounded
 /// channel + background writer. Rollup/retention workers are spawned
 /// by [`EmbeddedAnalytics::spawn_workers`].
@@ -453,6 +746,19 @@ pub struct EmbeddedAnalytics {
     flush_ms: u64,
     /// Records dropped on a full channel (the never-block counter).
     dropped: AtomicU64,
+    /// DW-092: live in-process sketches (sub-second-freshness per-route
+    /// rolling window). None when `analytics.live_sketches` is absent
+    /// or disabled — the `GET /analytics/live` endpoint answers
+    /// `analytics_not_configured` in that case. Updated synchronously
+    /// in [`EmbeddedAnalytics::record`].
+    live: Mutex<Option<Arc<LiveSketches>>>,
+    /// DW-092: the ML traffic insights engine (EWMA forecasting +
+    /// seasonal-baseline anomaly detection). None when
+    /// `analytics.insights` is absent or both features are disabled —
+    /// the `GET /analytics/forecast` and `GET /analytics/anomalies`
+    /// endpoints answer `analytics_not_configured` in that case. Fed
+    /// by the live-sketch window rotation.
+    insights: Mutex<Option<Arc<insights::InsightsEngine>>>,
 }
 
 impl EmbeddedAnalytics {
@@ -510,6 +816,8 @@ impl EmbeddedAnalytics {
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
+            live: Mutex::new(None),
+            insights: Mutex::new(None),
         }))
     }
 
@@ -1506,10 +1814,110 @@ impl EmbeddedAnalytics {
 
     /// The request-completion hot path (DW-043): fire-and-forget record
     /// of one finished request. NEVER blocks — a bounded-channel
-    /// `try_send` that drops and counts on full.
+    /// `try_send` that drops and counts on full. DW-092: also feeds the
+    /// live in-process sketches (synchronous, lock-free counts + a
+    /// short mutex over a capped sample vector) when attached.
     pub fn record(&self, rec: &AccessRecord) {
-        let raw = RawRecord::from(rec, now_ms());
+        let ts = now_ms();
+        // DW-092: feed the live sketches synchronously (never blocks —
+        // atomics for counts, a short mutex over a capped vector).
+        if let Ok(live) = self.live.lock() {
+            if let Some(sketches) = live.as_ref() {
+                sketches.record(&rec.route, rec.status, rec.duration_ms, ts as u64);
+            }
+        }
+        let raw = RawRecord::from(rec, ts);
         self.offer(raw);
+    }
+
+    /// Attach the live sketches (DW-092). Called once during startup
+    /// wiring (dwara-bin) when `analytics.live_sketches.enabled`. The
+    /// insights engine, when also configured, is attached to the
+    /// sketches so window rotations feed it.
+    pub fn set_live_sketches(&self, sketches: Arc<LiveSketches>) {
+        *self.live.lock().unwrap() = Some(sketches);
+    }
+
+    /// Attach the insights engine (DW-092). Called once during startup
+    /// wiring when `analytics.insights.forecast` or
+    /// `analytics.insights.anomaly_baseline`. Also wired into the live
+    /// sketches so window rotations feed the engine.
+    pub fn set_insights(&self, engine: Arc<insights::InsightsEngine>) {
+        if let Ok(live) = self.live.lock() {
+            if let Some(sketches) = live.as_ref() {
+                sketches.set_insights(Arc::clone(&engine));
+            }
+        }
+        *self.insights.lock().unwrap() = Some(engine);
+    }
+
+    /// The live sketches store when attached (DW-092; None = the
+    /// `GET /analytics/live` endpoint answers
+    /// `analytics_not_configured`).
+    pub fn live_sketches(&self) -> Option<Arc<LiveSketches>> {
+        self.live.lock().unwrap().as_ref().map(Arc::clone)
+    }
+
+    /// The insights engine when attached (DW-092; None = the
+    /// `GET /analytics/forecast` and `GET /analytics/anomalies`
+    /// endpoints answer `analytics_not_configured`).
+    pub fn insights_engine(&self) -> Option<Arc<insights::InsightsEngine>> {
+        self.insights.lock().unwrap().as_ref().map(Arc::clone)
+    }
+
+    /// Snapshot the current live window (DW-092). Returns None when
+    /// live sketches are not attached.
+    pub fn live_snapshot(&self) -> Option<LiveSnapshot> {
+        let live = self.live.lock().unwrap();
+        live.as_ref().map(|s| s.snapshot(now_ms() as u64))
+    }
+
+    /// Forecast the next window (DW-092). Returns None when the
+    /// insights engine is not attached or forecasting is disabled.
+    pub fn insights_forecast(&self) -> Option<insights::ForecastResult> {
+        let engine = self.insights.lock().unwrap();
+        engine.as_ref().map(|e| e.forecast(now_ms()))
+    }
+
+    /// Detect whether the current live window is anomalous (DW-092).
+    /// Builds a `BaselineWindow` from the current live snapshot and
+    /// hands it to the insights engine. Returns None when the insights
+    /// engine is not attached or anomaly detection is disabled.
+    pub fn insights_detect_anomaly(&self) -> Option<insights::AnomalyResult> {
+        // Clone the engine Arc and drop the insights lock BEFORE
+        // acquiring the live lock — `set_insights` takes the live lock
+        // first, so locking insights-then-live here would invert the
+        // order and risk a deadlock.
+        let engine = {
+            let guard = self.insights.lock().unwrap();
+            guard.as_ref()?.clone()
+        };
+        // Build the current window from the live snapshot so the
+        // anomaly check reflects the in-flight window, not a stale
+        // rotation.
+        let snapshot = self.live_snapshot()?;
+        let mut total_requests: u64 = 0;
+        let mut total_errors: u64 = 0;
+        let mut latency_sum: f64 = 0.0;
+        let mut latency_count: u64 = 0;
+        for r in &snapshot.routes {
+            total_requests += r.requests;
+            total_errors += r.errors;
+            latency_sum += r.avg_ms * r.requests as f64;
+            latency_count += r.requests;
+        }
+        let avg_latency = if latency_count > 0 {
+            latency_sum / latency_count as f64
+        } else {
+            0.0
+        };
+        let current = insights::BaselineWindow {
+            ts_ms: snapshot.window_start_ms as i64,
+            requests: total_requests,
+            errors: total_errors,
+            avg_latency_ms: avg_latency,
+        };
+        Some(engine.detect_anomaly(&current))
     }
 
     /// Offer one raw record to the writer channel; drop-and-count on a

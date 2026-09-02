@@ -695,6 +695,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let flush = cfg.flush_ms.unwrap_or(1000);
             match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush, 0) {
                 Ok(store) => {
+                    // DW-092: attach live in-process sketches when the
+                    // config carries a `live_sketches` block (default
+                    // enabled when the block is present). The sketches
+                    // are updated synchronously on every record() call.
+                    if let Some(ls) = &cfg.live_sketches {
+                        if ls.enabled {
+                            let sketches =
+                                dwara_core::analytics::LiveSketches::new(ls.freshness_target_ms);
+                            store.set_live_sketches(sketches);
+                            tracing::info!(
+                                code = "analytics_live_sketches_open",
+                                freshness_target_ms = ls.freshness_target_ms,
+                                "live in-process sketches enabled"
+                            );
+                        }
+                    }
+                    // DW-092: attach the ML traffic insights engine
+                    // when the config carries an `insights` block with
+                    // either forecast or anomaly_baseline enabled. The
+                    // engine is fed by the live-sketch window
+                    // rotation.
+                    if let Some(ins) = &cfg.insights {
+                        if ins.forecast || ins.anomaly_baseline {
+                            let engine = dwara_core::analytics::insights::InsightsEngine::new(ins);
+                            store.set_insights(engine);
+                            tracing::info!(
+                                code = "analytics_insights_open",
+                                forecast = ins.forecast,
+                                anomaly_baseline = ins.anomaly_baseline,
+                                baseline_windows = ins.baseline_windows,
+                                "ML traffic insights engine enabled"
+                            );
+                        }
+                    }
                     dp.set_analytics(Arc::clone(&store));
                     let handles = store.spawn_workers(shutdown_rx.clone());
                     tracing::info!(

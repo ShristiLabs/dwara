@@ -180,3 +180,72 @@ billing consumer can reject them, and the scheduler never auto-exports
 past that horizon — only a manual trigger can, still flagged. Windows
 with no traffic are not loss: counts are exact whenever `partial` is
 false.
+
+## Live sketches (DW-092)
+
+The durable store answers "what happened"; live sketches answer "what
+is happening right now" with sub-second freshness. An opt-in
+`live_sketches` block adds in-process, hand-rolled aggregation with no
+new dependencies:
+
+```yaml
+analytics:
+  path: /var/lib/dwara/analytics.db
+  live_sketches:
+    enabled: true               # default true when the block is present
+    freshness_target_ms: 500    # rolling window size; 100..=5000, default 500
+```
+
+A per-route rolling window (size = `freshness_target_ms`) is maintained
+synchronously on the request-completion hot path — request/error counts
+and capped latency samples. Percentiles (p50/p95/p99) are computed at
+snapshot time, never on the hot path. The update never blocks the
+dataplane.
+
+```
+GET /analytics/live
+```
+
+Returns a JSON snapshot of all routes' current windows: request count,
+error count, error rate, p50/p95/p99 latency, and the window's time
+bounds. When the block is absent, the endpoint answers 404
+(`analytics_not_configured`).
+
+## ML insights (DW-092)
+
+An opt-in `insights` block adds hand-rolled ML traffic insights over
+the live sketch window rotations — no ML crates, no external services:
+
+```yaml
+analytics:
+  path: /var/lib/dwara/analytics.db
+  live_sketches:
+    freshness_target_ms: 500
+  insights:
+    forecast: true              # capacity forecasting; default false
+    anomaly_baseline: true      # anomaly detection; default false
+    baseline_windows: 1440      # 24h of 1-minute windows; default 1440
+```
+
+The engine maintains two models: an EWMA (exponentially-weighted moving
+average) over recent window counts for the short-term trend, and a
+minute-of-day ring buffer (1440 entries) for the seasonal baseline.
+
+```
+GET /analytics/forecast
+```
+
+Returns a prediction for the next window — the seasonal average for the
+upcoming minute adjusted by the EWMA trend — with a confidence score.
+Requires `forecast: true`.
+
+```
+GET /analytics/anomalies
+```
+
+Returns the current window's anomaly status: an `is_anomalous` boolean
+and a `score` (0..1) from comparing the current window's shape to the
+seasonal baseline. Requires `anomaly_baseline: true`.
+
+Both endpoints answer 404 (`analytics_not_configured`) when the
+`insights` block is absent or the relevant capability is disabled.

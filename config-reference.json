@@ -1391,6 +1391,28 @@
           "format": "uint64",
           "minimum": 0
         },
+        "insights": {
+          "description": "ML traffic insights (DW-092): EWMA-based capacity forecasting\nand seasonal-baseline anomaly detection over the live sketch\nwindow rotations. The insights engine is in-process and\nhand-rolled (no ML crates): a minute-of-day ring buffer holds\nthe seasonal pattern, an EWMA over recent windows carries the\ntrend, and anomaly detection compares the current window's\nshape to the seasonal baseline. Absent (the default): no\nforecasting or anomaly detection; the\n`GET /analytics/forecast` and `GET /analytics/anomalies`\nendpoints answer `analytics_not_configured`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsInsights"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "live_sketches": {
+          "description": "Live in-process sketches (DW-092): sub-second-freshness\naggregation maintained synchronously on the request-completion\nhot path (per-route rolling window with counts, errors, and\nlatency samples). Never blocks the dataplane — the sketch is\nupdated in place under atomics and a short mutex over a capped\nsample vector. Absent (the default): no live sketches; the\n`GET /analytics/live` endpoint answers\n`analytics_not_configured`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsLiveSketches"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "path": {
           "description": "Filesystem path of the analytics SQLite database. The file is\ncreated (and migrated) on first open. A separate file from the\nstate store on purpose: retention deletes and incremental\nvacuum churn must never compact the identity store.",
           "type": "string"
@@ -1506,6 +1528,45 @@
       "required": [
         "directory"
       ]
+    },
+    "AnalyticsInsights": {
+      "description": "ML traffic insights config (DW-092, `analytics.insights`).\n\nThe insights engine is hand-rolled (no ML crates): an EWMA over\nrecent sketch-window rotations carries the trend, a minute-of-day\nring buffer (1440 entries) holds the seasonal baseline, and anomaly\ndetection compares the current window's shape to the seasonal\nbaseline with a configurable factor. Forecasting combines the\nseasonal average for the next minute with the EWMA trend\nadjustment.",
+      "type": "object",
+      "properties": {
+        "anomaly_baseline": {
+          "description": "Whether seasonal-baseline anomaly detection is enabled (default\nfalse). When true, the `GET /analytics/anomalies` endpoint\nreturns the current window's anomaly status.",
+          "type": "boolean"
+        },
+        "baseline_windows": {
+          "description": "The number of recent windows retained for the EWMA trend and\nthe seasonal baseline ring (default 1440 = 24 hours of 1-minute\nwindows). Validated to be > 0 when forecast or anomaly_baseline\nis enabled.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forecast": {
+          "description": "Whether capacity forecasting is enabled (default false). When\ntrue, the `GET /analytics/forecast` endpoint returns a\nprediction for the next window.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AnalyticsLiveSketches": {
+      "description": "Live in-process sketches config (DW-092, `analytics.live_sketches`).\n\nThe sketches are maintained inside the embedded analytics runtime\nand updated on every `record()` call — a per-route rolling window\n(size = `freshness_target_ms`) with request/error counts and a capped\nlatency-sample vector. Percentiles are computed at snapshot time\n(sort-and-pick, O(n log n) with n capped at 1000), never on the hot\npath. No new dependencies: the sketches are hand-rolled with atomics\nand a short mutex, the same approach as the load-generator's\nhistogram.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether live sketches are maintained (default true when the\nblock is present). Setting false disables the in-process\nsketches while keeping the block present (a no-op shape that\nreads as coverage).",
+          "type": "boolean",
+          "default": true
+        },
+        "freshness_target_ms": {
+          "description": "The rolling window size in milliseconds (default 500). Also the\nfreshness target: a snapshot reflects at most this much\nstaleness. Validated to [100, 5000] — below 100 is timer churn,\nabove 5000 is no longer \"live\".",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "AnalyticsRetention": {
       "description": "Per-granularity retention (DW-043, `analytics.retention`).",

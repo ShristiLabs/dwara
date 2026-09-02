@@ -43,6 +43,14 @@
 //! - `DELETE /mcp/sessions/:id` — teardown an MCP session (DW-087).
 //! - `GET /mcp/tools` — list configured MCP tools (DW-087).
 //! - `GET /mcp/calls` — query MCP tool call analytics (DW-087).
+//! - `GET /analytics/live` — live in-process sketch snapshot (DW-092):
+//!   sub-second-freshness per-route rolling window with request/error
+//!   counts and p50/p95/p99 latency.
+//! - `GET /analytics/forecast` — ML traffic forecast for the next
+//!   window (DW-092): EWMA-trend-adjusted seasonal prediction.
+//! - `GET /analytics/anomalies` — current window's anomaly status
+//!   (DW-092): seasonal-baseline comparison of requests, error rate,
+//!   and latency.
 //!
 //! AUTHENTICATION IS THE TLS LAYER (decision 6): the admin listener
 //! REQUIRES a client certificate chaining to the configured CA; there is
@@ -870,6 +878,76 @@ async fn analytics_journey(
         ),
         Err(e) => envelope(500, "analytics_journey_failed", &e.to_string(), request_id),
     }
+}
+
+/// GET /analytics/live (DW-092): the live in-process sketch snapshot —
+/// sub-second-freshness per-route rolling window with request/error
+/// counts and p50/p95/p99 latency. Answers `analytics_not_configured`
+/// when live sketches are not attached (no `analytics.live_sketches`
+/// block, or `enabled: false`).
+async fn analytics_live(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let Some(snapshot) = store.live_snapshot() else {
+        return envelope(
+            404,
+            "analytics_live_not_configured",
+            "live sketches are not enabled (set analytics.live_sketches.enabled \
+             to enable the in-process rolling window)",
+            request_id,
+        );
+    };
+    json_response(
+        200,
+        serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// GET /analytics/forecast (DW-092): the ML traffic forecast for the
+/// next window — EWMA-trend-adjusted seasonal prediction of requests,
+/// error rate, and latency. Answers `analytics_not_configured` when
+/// the insights engine is not attached or forecasting is disabled.
+async fn analytics_forecast(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let Some(forecast) = store.insights_forecast() else {
+        return envelope(
+            404,
+            "analytics_insights_not_configured",
+            "traffic insights are not enabled (set analytics.insights.forecast \
+             to enable capacity forecasting)",
+            request_id,
+        );
+    };
+    json_response(
+        200,
+        serde_json::to_value(forecast).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// GET /analytics/anomalies (DW-092): the current window's anomaly
+/// status — seasonal-baseline comparison of requests, error rate, and
+/// latency. Answers `analytics_not_configured` when the insights
+/// engine is not attached or anomaly detection is disabled.
+async fn analytics_anomalies(ctx: Arc<AdminContext>, request_id: &str) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let Some(anomaly) = store.insights_detect_anomaly() else {
+        return envelope(
+            404,
+            "analytics_insights_not_configured",
+            "traffic insights are not enabled (set \
+             analytics.insights.anomaly_baseline to enable anomaly detection)",
+            request_id,
+        );
+    };
+    json_response(
+        200,
+        serde_json::to_value(anomaly).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// POST /analytics/governance-audit (DW-084): the governance audit
@@ -1937,6 +2015,15 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // by time ascending. Query params: correlation_id (required),
         // from_ms, to_ms (optional).
         ("GET", "/analytics/journey") => analytics_journey(ctx, &req, &request_id).await,
+        // GET /analytics/live (DW-092): the live in-process sketch
+        // snapshot — sub-second-freshness per-route rolling window.
+        ("GET", "/analytics/live") => analytics_live(ctx, &request_id).await,
+        // GET /analytics/forecast (DW-092): the ML traffic forecast
+        // for the next window (EWMA + seasonal baseline).
+        ("GET", "/analytics/forecast") => analytics_forecast(ctx, &request_id).await,
+        // GET /analytics/anomalies (DW-092): the current window's
+        // anomaly status (seasonal-baseline comparison).
+        ("GET", "/analytics/anomalies") => analytics_anomalies(ctx, &request_id).await,
         // POST /analytics/governance-audit (DW-084): the governance
         // audit query — a time window over the ai_governance_events
         // table, returning raw allow/deny events for shadow review.
@@ -2120,6 +2207,9 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/analytics/spend"
             | "/analytics/dimensions"
             | "/analytics/journey"
+            | "/analytics/live"
+            | "/analytics/forecast"
+            | "/analytics/anomalies"
             | "/analytics/governance-audit"
             | "/analytics/exports"
             | "/analytics/exports/run"

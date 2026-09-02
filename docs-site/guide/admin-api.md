@@ -70,6 +70,7 @@ CA) fails the TLS handshake before any HTTP is exchanged.
 | `GET` / `POST /consumers/{name}/credentials` | list a consumer's credentials (lifecycle stamps only) / issue a new API key, opening the dual-validity window — see [Key rotation workflows](#key-rotation-workflows) |
 | `POST /credentials/{id}/retire` | retire (or schedule retirement of) a credential — see [Key rotation workflows](#key-rotation-workflows) |
 | `GET /analytics/dashboard`, `GET /analytics/top`, `POST /analytics/query`, `GET /analytics/exports`, `POST /analytics/exports/run` | the embedded analytics store's query surface — see [Analytics](./analytics) |
+| `GET /analytics/live`, `GET /analytics/forecast`, `GET /analytics/anomalies` | live sketch snapshot, capacity forecast, and anomaly status (DW-092) — see [Analytics](./analytics#live-sketches-dw-092) |
 
 `PATCH /config` bodies over 4 MiB are rejected with 413; concurrent
 PATCHes are serialized. Errors use the same JSON error envelope as the

@@ -393,6 +393,19 @@ fn default_true() -> bool {
     true
 }
 
+/// Default freshness target for live sketches (DW-092): 500 ms —
+/// sub-second freshness for the in-process rolling window.
+fn default_freshness_target() -> u64 {
+    500
+}
+
+/// Default baseline window count for the insights engine (DW-092):
+/// 1440 = 24 hours of 1-minute windows (one minute-of-day seasonal
+/// cycle).
+fn default_baseline_windows() -> u64 {
+    1440
+}
+
 /// mTLS client-certificate consumer mapping (DW-035,
 /// `gateway.mtls_consumer_mapping`).
 ///
@@ -732,6 +745,99 @@ pub struct AnalyticsConfig {
     /// the quota-column window-alignment rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<AnalyticsExports>,
+    /// Live in-process sketches (DW-092): sub-second-freshness
+    /// aggregation maintained synchronously on the request-completion
+    /// hot path (per-route rolling window with counts, errors, and
+    /// latency samples). Never blocks the dataplane — the sketch is
+    /// updated in place under atomics and a short mutex over a capped
+    /// sample vector. Absent (the default): no live sketches; the
+    /// `GET /analytics/live` endpoint answers
+    /// `analytics_not_configured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_sketches: Option<AnalyticsLiveSketches>,
+    /// ML traffic insights (DW-092): EWMA-based capacity forecasting
+    /// and seasonal-baseline anomaly detection over the live sketch
+    /// window rotations. The insights engine is in-process and
+    /// hand-rolled (no ML crates): a minute-of-day ring buffer holds
+    /// the seasonal pattern, an EWMA over recent windows carries the
+    /// trend, and anomaly detection compares the current window's
+    /// shape to the seasonal baseline. Absent (the default): no
+    /// forecasting or anomaly detection; the
+    /// `GET /analytics/forecast` and `GET /analytics/anomalies`
+    /// endpoints answer `analytics_not_configured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insights: Option<AnalyticsInsights>,
+}
+
+/// Live in-process sketches config (DW-092, `analytics.live_sketches`).
+///
+/// The sketches are maintained inside the embedded analytics runtime
+/// and updated on every `record()` call — a per-route rolling window
+/// (size = `freshness_target_ms`) with request/error counts and a capped
+/// latency-sample vector. Percentiles are computed at snapshot time
+/// (sort-and-pick, O(n log n) with n capped at 1000), never on the hot
+/// path. No new dependencies: the sketches are hand-rolled with atomics
+/// and a short mutex, the same approach as the load-generator's
+/// histogram.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsLiveSketches {
+    /// Whether live sketches are maintained (default true when the
+    /// block is present). Setting false disables the in-process
+    /// sketches while keeping the block present (a no-op shape that
+    /// reads as coverage).
+    #[serde(default = "default_true", skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// The rolling window size in milliseconds (default 500). Also the
+    /// freshness target: a snapshot reflects at most this much
+    /// staleness. Validated to [100, 5000] — below 100 is timer churn,
+    /// above 5000 is no longer "live".
+    #[serde(
+        default = "default_freshness_target",
+        skip_serializing_if = "is_default_freshness_target"
+    )]
+    pub freshness_target_ms: u64,
+}
+
+fn is_default_freshness_target(v: &u64) -> bool {
+    *v == 500
+}
+
+/// ML traffic insights config (DW-092, `analytics.insights`).
+///
+/// The insights engine is hand-rolled (no ML crates): an EWMA over
+/// recent sketch-window rotations carries the trend, a minute-of-day
+/// ring buffer (1440 entries) holds the seasonal baseline, and anomaly
+/// detection compares the current window's shape to the seasonal
+/// baseline with a configurable factor. Forecasting combines the
+/// seasonal average for the next minute with the EWMA trend
+/// adjustment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsInsights {
+    /// Whether capacity forecasting is enabled (default false). When
+    /// true, the `GET /analytics/forecast` endpoint returns a
+    /// prediction for the next window.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forecast: bool,
+    /// Whether seasonal-baseline anomaly detection is enabled (default
+    /// false). When true, the `GET /analytics/anomalies` endpoint
+    /// returns the current window's anomaly status.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub anomaly_baseline: bool,
+    /// The number of recent windows retained for the EWMA trend and
+    /// the seasonal baseline ring (default 1440 = 24 hours of 1-minute
+    /// windows). Validated to be > 0 when forecast or anomaly_baseline
+    /// is enabled.
+    #[serde(
+        default = "default_baseline_windows",
+        skip_serializing_if = "is_default_baseline_windows"
+    )]
+    pub baseline_windows: u64,
+}
+
+fn is_default_baseline_windows(v: &u64) -> bool {
+    *v == 1440
 }
 
 /// Scheduled usage-report exports (DW-120, `analytics.exports`).

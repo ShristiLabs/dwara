@@ -1,7 +1,8 @@
 # Embedded analytics
 
-Source: `crates/dwara-core/src/analytics/` (DW-043). Tests:
+Source: `crates/dwara-core/src/analytics/` (DW-043, DW-092). Tests:
 `analytics` (dwara-core, end-to-end record path),
+`streaming_analytics` (dwara-core, live sketches + ML insights),
 `tests/unit/analytics_store.rs` (schema, math, cascade, retention,
 queries), `admin_api` analytics cases (dwara-admin). Served by the
 admin API's `/analytics/*` endpoints.
@@ -137,6 +138,61 @@ configured:
 The scheduled usage-report exports (DW-120) build their per-consumer
 statement by calling this same `structured` aggregation — see
 [Usage reports and exports](./usage-reports.md).
+
+## Live sketches + ML insights (DW-092)
+
+The durable store answers "what happened"; live sketches answer "what
+is happening right now, sub-second". Two opt-in config blocks add
+in-process, hand-rolled analytics with no new dependencies:
+
+### `analytics.live_sketches` — sub-second-freshness aggregation
+
+A per-route rolling window (size = `freshness_target_ms`, default 500,
+validated to [100, 5000]) maintained synchronously on the
+request-completion hot path inside `EmbeddedAnalytics::record()`.
+Each `RouteSketch` holds request/error counts (atomics) and a capped
+latency-sample vector (1000 entries, short mutex). Percentiles
+(p50/p95/p99) are computed at snapshot time (sort-and-pick, O(n log n)
+with n capped) — never on the hot path. The sketches are updated in
+place; there is no background rotation thread, and the update never
+blocks the dataplane (the mutex guards only the sample vector append).
+
+`GET /analytics/live` returns a JSON snapshot of all routes' current
+windows: request count, error count, error rate, p50/p95/p99 latency,
+and the window's time bounds. When the block is absent, the endpoint
+answers `analytics_not_configured` (404).
+
+### `analytics.insights` — ML traffic insights
+
+The insights engine (`analytics/insights.rs`) runs over the live
+sketch window rotations — each time a window expires (or a snapshot is
+requested), the engine ingests the completed window's aggregate
+(requests, errors, latency) and updates two models:
+
+- **EWMA trend** — an exponentially-weighted moving average over recent
+  window counts, carrying the short-term trend.
+- **Seasonal baseline** — a minute-of-day ring buffer (1440 entries,
+  one per minute of a 24-hour day) holding the average request count
+  for each minute slot. The ring is seeded from the first windows and
+  refined as more data arrives.
+
+Two capabilities, each independently toggleable:
+
+- **Capacity forecasting** (`forecast: true`): `GET /analytics/forecast`
+  returns a prediction for the next window — the seasonal average for
+  the upcoming minute adjusted by the EWMA trend — with a confidence
+  score derived from the baseline's data coverage.
+- **Anomaly detection** (`anomaly_baseline: true`):
+  `GET /analytics/anomalies` returns the current window's anomaly
+  status: a shape comparison of the current window against the seasonal
+  baseline, producing an `is_anomalous` boolean and a `score` (0..1).
+  A window is anomalous when its request count deviates from the
+  baseline by more than a configurable factor.
+
+`baseline_windows` (default 1440 = 24 hours of 1-minute windows) sets
+the EWMA and ring-buffer depth; validated to be > 0 when either
+capability is enabled. When the block is absent, both endpoints answer
+`analytics_not_configured` (404).
 
 ## The seam
 

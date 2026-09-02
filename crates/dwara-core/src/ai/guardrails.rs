@@ -7,7 +7,7 @@
 //! reload, so a guardrail change applies to the next request with no
 //! restart). Each rule is compiled once: regex patterns into a
 //! [`regex::RegexSet`] (injection/pii/banned kinds) and JSON schemas
-//! into a [`jsonschema::Validator`] (schema kind, feature-gated).
+//! into a JSON-schema validator (schema kind, feature-gated).
 //!
 //! # Enforcement order
 //!

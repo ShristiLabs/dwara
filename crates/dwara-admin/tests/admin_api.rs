@@ -402,7 +402,7 @@ async fn unknown_path_and_wrong_method_use_error_envelope() {
     .await
     .unwrap();
     assert_eq!(status, 404);
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v = json_body(&body);
     assert_eq!(v["error"]["code"], "not_found");
     assert!(v["error"]["request_id"].is_string());
 
@@ -2324,7 +2324,7 @@ async fn get_clusters_shape() {
     .await
     .unwrap();
     assert_eq!(status, 200);
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v = json_body(&body);
     let upstreams = &v["upstreams"];
     assert!(upstreams.is_object());
     let echo = &upstreams["echo"];
@@ -2364,7 +2364,7 @@ async fn get_config_dump_returns_json_with_generation_headers() {
     assert!(headers.contains("content-type: application/json"));
     assert!(headers.contains("x-dwara-config-generation: "));
     assert!(headers.contains("x-dwara-config-hash: "));
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v = json_body(&body);
     // The config dump is the full gateway JSON — it has the upstream.
     assert!(v["upstreams"].is_array());
     assert!(v["upstreams"]
@@ -2391,7 +2391,7 @@ async fn get_runtime_info_shape() {
     .await
     .unwrap();
     assert_eq!(status, 200);
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v = json_body(&body);
     assert!(v["version"].is_string());
     assert!(v["uptime_seconds"].is_i64());
     assert_eq!(v["ready"], true);
@@ -2443,7 +2443,7 @@ async fn get_stats_default_is_json() {
     .unwrap();
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/json"));
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v = json_body(&body);
     // The default JSON shape has breakers and config_generation.
     assert!(v["breakers"].is_object());
     assert_eq!(v["config_generation"], 1);
@@ -2467,7 +2467,211 @@ async fn new_admin_endpoints_reject_wrong_method() {
         .await
         .unwrap();
         assert_eq!(status, 405, "POST {path} should be 405");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let v = json_body(&body);
+        assert_eq!(v["error"]["code"], "method_not_allowed");
+    }
+}
+
+// --- DW-092: streaming analytics + ML insights endpoints -------------------
+
+/// Extract the JSON body from a raw HTTP response text (the part after
+/// the blank line separating headers from body).
+fn json_body(text: &str) -> serde_json::Value {
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or(text);
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("invalid JSON body: {e}\n{body}"))
+}
+
+#[tokio::test]
+async fn analytics_live_endpoint_returns_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw092-live-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+        0,
+    )
+    .unwrap();
+    // Attach live sketches.
+    let sketches = dwara_core::analytics::LiveSketches::new(60_000);
+    store.set_live_sketches(sketches);
+    server.dp.set_analytics(Arc::clone(&store));
+    // Record a request directly so the live window has data.
+    let mut rec = dwara_core::observability::AccessRecord::new(
+        "req-1".to_string(),
+        "GET".to_string(),
+        "/api".to_string(),
+        "edge".to_string(),
+    );
+    rec.route = "all".to_string();
+    rec.status = 200;
+    rec.duration_ms = 12.0;
+    store.record(&rec);
+    // GET /analytics/live returns the snapshot.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let v = json_body(&body);
+    assert!(v["routes"].is_array(), "routes is an array: {body}");
+    let routes = v["routes"].as_array().unwrap();
+    let all = routes
+        .iter()
+        .find(|r| r["route"] == "all")
+        .expect("route 'all' in live snapshot");
+    assert!(all["requests"].as_u64().unwrap() >= 1, "requests >= 1");
+    assert!(all["p50_ms"].as_f64().is_some() || all["p50_ms"].as_u64().is_some());
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn analytics_forecast_endpoint_returns_prediction() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw092-forecast-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+        0,
+    )
+    .unwrap();
+    // Attach live sketches + insights engine with forecasting.
+    let sketches = dwara_core::analytics::LiveSketches::new(60_000);
+    store.set_live_sketches(sketches);
+    let engine = dwara_core::analytics::insights::InsightsEngine::new(
+        &dwara_core::config::AnalyticsInsights {
+            forecast: true,
+            anomaly_baseline: false,
+            baseline_windows: 100,
+        },
+    );
+    store.set_insights(engine);
+    server.dp.set_analytics(Arc::clone(&store));
+    // GET /analytics/forecast returns a forecast result.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/forecast HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let v = json_body(&body);
+    assert!(
+        v["predicted_requests"].as_f64().is_some(),
+        "predicted_requests present"
+    );
+    assert!(v["confidence"].as_f64().is_some(), "confidence present");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn analytics_anomalies_endpoint_returns_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw092-anomalies-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+        0,
+    )
+    .unwrap();
+    // Attach live sketches + insights engine with anomaly detection.
+    let sketches = dwara_core::analytics::LiveSketches::new(60_000);
+    store.set_live_sketches(sketches);
+    let engine = dwara_core::analytics::insights::InsightsEngine::new(
+        &dwara_core::config::AnalyticsInsights {
+            forecast: false,
+            anomaly_baseline: true,
+            baseline_windows: 100,
+        },
+    );
+    store.set_insights(engine);
+    server.dp.set_analytics(Arc::clone(&store));
+    // GET /analytics/anomalies returns an anomaly result.
+    let (status, body) = plaintext_request(
+        server.addr,
+        "GET /analytics/anomalies HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let v = json_body(&body);
+    assert!(
+        v["is_anomalous"].is_boolean(),
+        "is_anomalous is a bool: {body}"
+    );
+    assert!(v["score"].as_f64().is_some(), "score present");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn analytics_live_forecast_anomalies_404_without_features() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    let db = std::env::temp_dir().join(format!(
+        "dwara-dw092-absent-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let store = dwara_core::analytics::EmbeddedAnalytics::open(
+        db.to_str().unwrap(),
+        dwara_core::analytics::DEFAULT_RETENTION_MS,
+        1000,
+        0,
+    )
+    .unwrap();
+    // Attach the store WITHOUT live sketches or insights — the
+    // endpoints should answer 404 with a named envelope.
+    server.dp.set_analytics(Arc::clone(&store));
+    for path in [
+        "/analytics/live",
+        "/analytics/forecast",
+        "/analytics/anomalies",
+    ] {
+        let (status, body) = plaintext_request(
+            server.addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(
+            status, 404,
+            "GET {path} without features should be 404: {body}"
+        );
+    }
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn analytics_live_forecast_anomalies_reject_wrong_method() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ListenMode::DevPlaintext, dir).await;
+    for path in [
+        "/analytics/live",
+        "/analytics/forecast",
+        "/analytics/anomalies",
+    ] {
+        let (status, body) = plaintext_request(
+            server.addr,
+            &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 405, "POST {path} should be 405: {body}");
+        let v = json_body(&body);
         assert_eq!(v["error"]["code"], "method_not_allowed");
     }
 }

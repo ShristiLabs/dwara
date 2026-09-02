@@ -9,6 +9,27 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Streaming analytics + ML insights (DW-092): sub-second-freshness
+  aggregation with live in-process sketches, plus ML traffic insights
+  (anomaly detection on traffic shapes, capacity forecasting, seasonal
+  baselines). A new `analytics.live_sketches` block enables a
+  per-route rolling window (size = `freshness_target_ms`, default 500)
+  maintained synchronously on the request-completion hot path —
+  request/error counts and capped latency samples (p50/p95/p99
+  computed at snapshot time, never on the hot path). A new
+  `analytics.insights` block enables EWMA-based capacity forecasting
+  (`forecast: true`) and seasonal-baseline anomaly detection
+  (`anomaly_baseline: true`) over the live sketch window rotations —
+  a minute-of-day ring buffer (1440 entries) holds the seasonal
+  pattern, an EWMA over recent windows carries the trend, and anomaly
+  detection compares the current window's shape to the baseline. Three
+  new admin endpoints: `GET /analytics/live` (live sketch snapshot),
+  `GET /analytics/forecast` (next-window prediction), and
+  `GET /analytics/anomalies` (current anomaly status). No new
+  dependencies — the sketches and insights engine are hand-rolled
+  with atomics and a simple sorted-Vec percentile approach (same as
+  the existing loadgen).
+
 - Business metrics dimensions (DW-093): custom KPI dimensions
   (`analytics.dimensions[]`) now support three sources beyond the
   original header extraction. `source: claim` reads from the verified

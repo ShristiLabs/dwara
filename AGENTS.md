@@ -125,7 +125,15 @@ crates/dwara-core/src/
                       DW-093 request_id and correlation_id columns on
                       the raw table with a correlation_id index
                       (schema v9), each with its own fire-and-forget
-                      writer;
+                      writer; and the DW-092 live in-process sketches
+                      (sub-second-freshness per-route rolling window
+                      with counts, errors, and capped latency samples,
+                      updated synchronously in record()) and the
+                      DW-092 ML traffic insights engine
+                      (insights.rs: EWMA-based capacity forecasting +
+                      seasonal-baseline anomaly detection over the
+                      live sketch window rotations, hand-rolled with
+                      no ML crates);
                       implements extensions::analytics::AnalyticsSink;
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)
@@ -392,6 +400,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | Response caching (DW-037) + request coalescing (DW-038) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation; coalescing single-flight, fail-open fallbacks, saturation, SWR no-deadlock), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
 | Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
 | Embedded analytics (DW-043) | dwara-core / dwara-admin | `analytics` (e2e record path incl. custom dims), `tests/unit/analytics_store.rs` (schema, percentile math, rollup cascade exactness/idempotence/cursor-restart, retention, drop-on-full, writer drain, query layer), `admin_api` analytics cases (dashboard/top/query endpoints, closed grammar, 404 without store) |
+| Streaming analytics + ML insights (DW-092) | dwara-core / dwara-admin | `streaming_analytics` (live sketches: rolling window, percentile computation, multi-route aggregation, error counts, window expiry; insights: EWMA forecasting, seasonal baseline anomaly detection, config validation, end-to-end through gateway), `admin_api` analytics live/forecast/anomalies cases (200 with features, 404 without, 405 wrong method) |
 | GeoIP ACL (DW-050) | dwara-core | `tests/unit/geoip.rs` (reader + decision semantics over generated .mmdb fixtures), `authz` geoip e2e (country block on the effective IP, hot-reload decision swap), `config_schema_extended` geoip validation |
 | Key rotation (DW-046) | dwara-core / dwara-admin | `authn` rotation cases (dual-validity zero-failure, lazy scheduled expiry, JWKS retired-key grace + grace-0 cutoff + no-grace-extension), `store` retirement lifecycle + list view, `admin_api` credential endpoints (issue/list/retire, 404 shapes) |
 | SLO & error-budget export (DW-052) | dwara-core | `observability` (SLO e2e: config→refresh→traffic→/metrics series), `tests/unit/observability.rs` SLO cases (window math, expiry, ring wrap+reset, unconfigured/removal, empty-family safety), `config_schema_extended` slo validation matrix |

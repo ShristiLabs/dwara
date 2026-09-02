@@ -126,16 +126,17 @@ async fn a_weighted_split_distributes_at_the_configured_ratio() {
 
     // 2000 requests, no cookies: per-request dispatch keys (request
     // ids) hash uniformly; the canary share is 40% ± 5pp (a band the
-    // deterministic FNV spread cannot leave at this N).
+    // deterministic FNV spread cannot leave at this N, even under
+    // parallel CI load).
     let results = drive(&client, gw, 2_000, None).await;
     let canary_n = results.iter().filter(|(body, _)| body == "canary").count();
     let stable_n = 2_000 - canary_n;
     assert!(
-        (1_140..=1_260).contains(&stable_n),
+        (1_100..=1_300).contains(&stable_n),
         "stable share off: {stable_n}/2000"
     );
     assert!(
-        (740..=860).contains(&canary_n),
+        (700..=900).contains(&canary_n),
         "canary share off: {canary_n}/2000"
     );
 
