@@ -177,12 +177,16 @@ The extension traits are OSS in both editions — enterprise backends
 ## Compile-time feature packs
 
 These optional packs are OSS (no license) but default OFF because each
-adds binary size or a heavy dependency. Enable them per build:
+adds binary size or a heavy dependency. Enable them per build. See
+[Feature reference](./feature-reference) for the complete list of all
+28 feature flags with build commands, dependency chains, and maturity
+status.
 
 | Flag | What it adds | Why default OFF |
 |---|---|---|
 | `otlp` | OTLP trace/metrics export to a collector (build with `-p dwara-bin`) | the opentelemetry stack adds ~405 KiB to the binary |
 | `wasm` | proxy-wasm host | wasmtime + cranelift are a large binary-size cost |
+| `nano_services` | WASM route handlers (implies `wasm`) | wasmtime dependency; opt-in extension model |
 | `plugins` | native Rust filter chain | the compile-in extension path, opt-in by design |
 | `cel` | CEL expression evaluation | cel-interpreter adds binary size |
 | `cedar` | Cedar policies + OPA callout authorization | cedar-policy adds binary size |
@@ -190,8 +194,22 @@ adds binary size or a heavy dependency. Enable them per build:
 | `k8s` | Kubernetes Gateway API / Ingress translation + controller | kube-rs + k8s-openapi add significant binary size |
 | `aggregation` | multi-upstream response composition | aggregation buffers bodies (size-capped), kept off the default zero-buffering build |
 | `mcp` | agent-operable administration via MCP | opt-in attack-surface reduction |
+| `semantic_cache` | embedding-similarity AI prompt cache (HNSW ANN) | hnsw_rs adds binary size; external embedding service required |
+| `h3` | HTTP/3 (QUIC) ingress + upstream transport | quinn + h3 add binary size |
+| `graphql` | GraphQL awareness (depth/complexity limits, persisted queries) | opt-in; only relevant for GraphQL traffic |
+| `grpc_web` | gRPC-Web framing + JSON-to-gRPC transcoding | prost dependency; opt-in protocol support |
+| `protocol_translation` | general protocol translation (REST/gRPC/GraphQL); implies `grpc_web` | prost dependency; opt-in protocol support |
+| `soap` | SOAP/XML translation; implies `protocol_translation` | opt-in legacy protocol support |
+| `pq` | post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | experimental; incompatible with `fips` |
+| `l4` | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
+| `a2a` | A2A (agent-to-agent) protocol support | opt-in; task lifecycle currently stubbed |
+| `api_lifecycle` | API lifecycle: dev portal, environment profiles, journey recorder | opt-in; config-accepted, partially wired |
+| `extism` | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
+| `cert_pinning` | upstream TLS certificate pinning by SPKI hash | opt-in; scaffolded |
+| `signed_url` | signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
+| `console` | tokio-console diagnostics server (build with `-p dwara-bin`) | console-subscriber adds binary size |
 
-Enterprise builds can enable any of these packs alongside `ent` — for
+Enterprise builds can enable any of these packs alongside `ent` -- for
 example `--features ent,wasm` for an enterprise fleet running
 proxy-wasm filters.
 

@@ -359,6 +359,10 @@ export default withMermaid(
                   link: "/guide/editions",
                 },
                 {
+                  text: "Feature reference",
+                  link: "/guide/feature-reference",
+                },
+                {
                   text: "Enterprise licensing",
                   link: "/guide/licensing",
                 },
