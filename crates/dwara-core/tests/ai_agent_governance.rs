@@ -561,6 +561,8 @@ fn analytics_schema_v8_adds_consumer_type_columns() {
     let conn = Connection::open(dir.path().join("test.db")).unwrap();
 
     // Create the v7 schema (tables with the pre-v8 column set).
+    // Includes a minimal `raw` table so the v9 migration (which ALTERs
+    // `raw` to add request_id/correlation_id) can run.
     conn.execute_batch(
         "CREATE TABLE ai_spend (
             ts_ms INTEGER NOT NULL,
@@ -584,6 +586,23 @@ fn analytics_schema_v8_adds_consumer_type_columns() {
             duration_ms REAL NOT NULL,
             error_code TEXT,
             status TEXT NOT NULL
+        );
+        CREATE TABLE raw (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            listener TEXT NOT NULL,
+            route TEXT NOT NULL,
+            consumer TEXT NOT NULL,
+            upstream TEXT NOT NULL,
+            method TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            status_class TEXT NOT NULL,
+            duration_ms REAL NOT NULL,
+            attempts INTEGER NOT NULL,
+            rate_limited INTEGER NOT NULL,
+            broken INTEGER NOT NULL,
+            shed INTEGER NOT NULL,
+            dims TEXT NOT NULL
         );
         PRAGMA user_version = 7;",
     )

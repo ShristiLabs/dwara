@@ -91,6 +91,8 @@ pub use crate::config::ANALYTICS_DEFAULT_RETENTION_MS as DEFAULT_RETENTION_MS;
 /// across the channel).
 struct RawRecord {
     ts_ms: i64,
+    request_id: String,
+    correlation_id: String,
     listener: String,
     route: String,
     consumer: String,
@@ -324,6 +326,8 @@ impl RawRecord {
     fn from_event(event: &crate::extensions::analytics::Event) -> Self {
         RawRecord {
             ts_ms: event.timestamp_ms as i64,
+            request_id: String::new(),
+            correlation_id: String::new(),
             listener: event.listener.clone().unwrap_or_default(),
             route: event.route.clone().unwrap_or_else(|| "unrouted".into()),
             consumer: event.consumer.clone().unwrap_or_else(|| "anonymous".into()),
@@ -350,6 +354,8 @@ impl RawRecord {
     fn from(rec: &AccessRecord, now_ms: i64) -> Self {
         RawRecord {
             ts_ms: now_ms,
+            request_id: rec.request_id.clone(),
+            correlation_id: rec.correlation_id.clone(),
             listener: rec.listener.clone(),
             route: rec.route.clone(),
             consumer: rec.consumer.clone(),
@@ -924,10 +930,12 @@ impl EmbeddedAnalytics {
             }
         };
         let mut stmt = match tx.prepare(
-            "INSERT INTO raw (ts_ms, listener, route, consumer, upstream,
-                              method, status, status_class, duration_ms,
-                              attempts, rate_limited, broken, shed, dims)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO raw (ts_ms, request_id, correlation_id, listener,
+                              route, consumer, upstream, method, status,
+                              status_class, duration_ms, attempts,
+                              rate_limited, broken, shed, dims)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     ?13, ?14, ?15, ?16)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -942,6 +950,8 @@ impl EmbeddedAnalytics {
         for r in batch {
             let res = stmt.execute(rusqlite::params![
                 r.ts_ms,
+                r.request_id,
+                r.correlation_id,
                 r.listener,
                 r.route,
                 r.consumer,

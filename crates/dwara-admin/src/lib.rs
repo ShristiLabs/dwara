@@ -777,6 +777,101 @@ async fn analytics_spend(
     }
 }
 
+/// POST /analytics/dimensions (DW-093): the custom-dimension query
+/// endpoint — a closed JSON grammar over the `rollup_dim` table,
+/// aggregated per (window, dimension name, value). Never SQL text.
+async fn analytics_dimensions(
+    ctx: Arc<AdminContext>,
+    body: Bytes,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let q: dwara_core::analytics::query::DimensionQuery = match serde_json::from_slice(&body) {
+        Ok(q) => q,
+        Err(err) => {
+            return envelope(
+                400,
+                "analytics_dimensions_invalid",
+                &format!("body is not a valid dimension query: {err}"),
+                request_id,
+            )
+        }
+    };
+    if let Err(err) = q.validate() {
+        return envelope(
+            400,
+            "analytics_dimensions_invalid",
+            &err.to_string(),
+            request_id,
+        );
+    }
+    match store.query(|c| dwara_core::analytics::query::dimension_query(c, &q)) {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "query": { "from_ms": q.from_ms, "to_ms": q.to_ms, "gran": q.gran,
+                           "dim": q.dim, "value": q.value },
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(
+            500,
+            "analytics_dimensions_failed",
+            &e.to_string(),
+            request_id,
+        ),
+    }
+}
+
+/// GET /analytics/journey (DW-093): the journey/funnel query endpoint
+/// — returns all raw records matching a correlation id, ordered by
+/// time ascending. Query params: correlation_id (required), from_ms,
+/// to_ms (optional time range filter).
+async fn analytics_journey(
+    ctx: Arc<AdminContext>,
+    req: &Request<Incoming>,
+    request_id: &str,
+) -> Response<AdminBody> {
+    let Some(store) = ctx.dp.analytics() else {
+        return analytics_absent(request_id);
+    };
+    let params = query_params(req.uri());
+    let Some(correlation_id) = param(&params, "correlation_id") else {
+        return envelope(
+            400,
+            "analytics_journey_missing_correlation_id",
+            "correlation_id is required",
+            request_id,
+        );
+    };
+    if correlation_id.is_empty() {
+        return envelope(
+            400,
+            "analytics_journey_missing_correlation_id",
+            "correlation_id must be non-empty",
+            request_id,
+        );
+    }
+    let from_ms = param(&params, "from_ms").and_then(|v| v.parse::<i64>().ok());
+    let to_ms = param(&params, "to_ms").and_then(|v| v.parse::<i64>().ok());
+    match store
+        .query(|c| dwara_core::analytics::query::journey_query(c, correlation_id, from_ms, to_ms))
+    {
+        Ok(rows) => json_response(
+            200,
+            serde_json::json!({
+                "correlation_id": correlation_id,
+                "from_ms": from_ms,
+                "to_ms": to_ms,
+                "rows": rows,
+            }),
+        ),
+        Err(e) => envelope(500, "analytics_journey_failed", &e.to_string(), request_id),
+    }
+}
+
 /// POST /analytics/governance-audit (DW-084): the governance audit
 /// endpoint — a time window over the `ai_governance_events` table,
 /// returning the raw allow/deny events for shadow review (which
@@ -1816,6 +1911,32 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             };
             analytics_spend(ctx, body, &request_id).await
         }
+        // POST /analytics/dimensions (DW-093): the custom-dimension
+        // query — a closed JSON grammar over the rollup_dim table,
+        // aggregated per (window, dimension name, value).
+        ("POST", "/analytics/dimensions") => {
+            let limited = Limited::new(req.into_body(), MAX_PATCH_BODY);
+            let body = match limited.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(err) => {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        return envelope(
+                            413,
+                            "query_too_large",
+                            &format!("query body exceeds {} bytes", MAX_PATCH_BODY),
+                            &request_id,
+                        );
+                    }
+                    return envelope(400, "body_read_failed", &err.to_string(), &request_id);
+                }
+            };
+            analytics_dimensions(ctx, body, &request_id).await
+        }
+        // GET /analytics/journey (DW-093): the journey/funnel query —
+        // returns all raw records matching a correlation id, ordered
+        // by time ascending. Query params: correlation_id (required),
+        // from_ms, to_ms (optional).
+        ("GET", "/analytics/journey") => analytics_journey(ctx, &req, &request_id).await,
         // POST /analytics/governance-audit (DW-084): the governance
         // audit query — a time window over the ai_governance_events
         // table, returning raw allow/deny events for shadow review.
@@ -1997,6 +2118,8 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/analytics/top"
             | "/analytics/query"
             | "/analytics/spend"
+            | "/analytics/dimensions"
+            | "/analytics/journey"
             | "/analytics/governance-audit"
             | "/analytics/exports"
             | "/analytics/exports/run"

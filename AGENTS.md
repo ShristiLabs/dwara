@@ -121,8 +121,11 @@ crates/dwara-core/src/
                       ai_eval_results, and ai_feedback tables (schema
                       v6), and the DW-087 mcp_tool_calls table (schema
                       v7), and the DW-113 consumer_type columns on
-                      ai_spend and mcp_tool_calls (schema v8), each with
-                      its own fire-and-forget writer;
+                      ai_spend and mcp_tool_calls (schema v8), and the
+                      DW-093 request_id and correlation_id columns on
+                      the raw table with a correlation_id index
+                      (schema v9), each with its own fire-and-forget
+                      writer;
                       implements extensions::analytics::AnalyticsSink;
                       the fire-and-forget channel writers must never
                       block the request path (drop and count on full)

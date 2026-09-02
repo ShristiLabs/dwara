@@ -2724,19 +2724,33 @@ where
         route = tracing::field::Empty
     );
     let mut rec = AccessRecord::new(request_id.clone(), method, path, listener);
-    // Custom analytics dimensions (DW-043): header-sourced tags read
-    // HERE, while the request head is still in hand (the completion
-    // seam has only the record). The dimension list is read from the
+    // Correlation ID (DW-093): resolve from X-Correlation-Id (falls
+    // back to the request id) and store on the record so the analytics
+    // raw table carries it for the journey/funnel query. The response
+    // echoes it below.
+    rec.correlation_id = observability::resolve_correlation_id(req.headers(), &request_id);
+    // Custom analytics dimensions (DW-043/DW-093): header-sourced tags
+    // read HERE, while the request head is still in hand (the
+    // completion seam has only the record). Claim-sourced dimensions
+    // are extracted after authn resolves Identity (in handle_inner);
+    // body-path dimensions are extracted when the body is buffered
+    // (in handle_inner, after the body is collected for retries/
+    // transforms/validation). The dimension list is read from the
     // CURRENT generation, so reloads add/rename dimensions live.
     if let Some(dims) = dp.current().snapshot.gateway().analytics.as_ref() {
         for dim in &dims.dimensions {
-            if let Some(v) = req.headers().get(&dim.header) {
-                // First value of a repeated header wins; non-UTF-8 and
-                // over-128-byte values are skipped (bounded rollup
-                // cardinality per value, documented in the config).
-                if let Ok(s) = v.to_str() {
-                    if !s.is_empty() && s.len() <= 128 {
-                        rec.custom.push((dim.name.clone(), s.to_string()));
+            if dim.effective_source() == crate::config::DimensionSource::Header {
+                if let Some(header_name) = &dim.header {
+                    if let Some(v) = req.headers().get(header_name.as_str()) {
+                        // First value of a repeated header wins; non-UTF-8
+                        // and over-128-byte values are skipped (bounded
+                        // rollup cardinality per value, documented in the
+                        // config).
+                        if let Ok(s) = v.to_str() {
+                            if !s.is_empty() && s.len() <= 128 {
+                                rec.custom.push((dim.name.clone(), s.to_string()));
+                            }
+                        }
                     }
                 }
             }
@@ -2755,6 +2769,7 @@ where
     dp.record_analytics(&rec);
     dp.record_stream_offer(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
+    observability::stamp_correlation_id(resp.headers_mut(), &rec.correlation_id);
     if obs.should_log_access(status) {
         observability::emit_access(&rec);
     }
@@ -3268,6 +3283,26 @@ where
     if let Some(id) = &identity {
         rec.consumer = id.consumer_name.clone();
         root.record("consumer", id.consumer_name.as_str());
+        // Claim-sourced analytics dimensions (DW-093): extract from
+        // the verified JWT's claims map. Only string-valued claims are
+        // available (authn flattens arrays and skips non-string/
+        // non-number claims); absent claims and over-128-byte values
+        // are skipped for that request. The dimension list is read
+        // from the current generation (the same list the header
+        // extraction in `handle` walked).
+        if let Some(dims) = gateway.analytics.as_ref() {
+            for dim in &dims.dimensions {
+                if dim.effective_source() == crate::config::DimensionSource::Claim {
+                    if let Some(claim_name) = &dim.claim {
+                        if let Some(v) = id.claims.get(claim_name) {
+                            if !v.is_empty() && v.len() <= 128 {
+                                rec.custom.push((dim.name.clone(), v.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     // Spoof prevention: any client-supplied X-Consumer-* header is
     // stripped here; the trusted identity header is injected on the
@@ -4646,6 +4681,78 @@ fn resolve_ref<'a>(
         .unwrap_or("")
 }
 
+/// Extract body-path analytics dimensions (DW-093) from a buffered
+/// request body. Only dimensions with `source: body_path` are
+/// considered; the body is parsed as JSON once and each dimension's
+/// JSON pointer is resolved against it. Non-JSON bodies, unresolved
+/// pointers, non-string values, and over-128-byte values are skipped
+/// for that request (the same bounded-cardinality posture as
+/// header-sourced dimensions). Reuses the RFC 6901 `JsonPointer` from
+/// `config::transforms` — no new JSON-pointer code.
+fn extract_body_path_dims(
+    dimensions: &[crate::config::AnalyticsDimension],
+    body_bytes: &Bytes,
+    rec: &mut AccessRecord,
+) {
+    if dimensions
+        .iter()
+        .all(|d| d.effective_source() != crate::config::DimensionSource::BodyPath)
+    {
+        return;
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(body_bytes) else {
+        return;
+    };
+    for dim in dimensions {
+        if dim.effective_source() != crate::config::DimensionSource::BodyPath {
+            continue;
+        }
+        let Some(path) = &dim.body_path else { continue };
+        let Some(pointer) = crate::config::transforms::JsonPointer::parse(path) else {
+            continue;
+        };
+        if let Some(value) = resolve_json_pointer(&pointer, &doc) {
+            if !value.is_empty() && value.len() <= 128 {
+                rec.custom.push((dim.name.clone(), value));
+            }
+        }
+    }
+}
+
+/// Resolve a JSON pointer to a string value (DW-093): walks the
+/// document following the pointer's tokens, returning the scalar as a
+/// string. Object keys, array indices, and the root pointer are
+/// handled; a miss or a non-scalar (object/array) target returns
+/// `None` (the dimension is skipped for that request).
+fn resolve_json_pointer(
+    pointer: &crate::config::transforms::JsonPointer,
+    doc: &serde_json::Value,
+) -> Option<String> {
+    if pointer.is_root() {
+        return doc.as_str().map(str::to_string);
+    }
+    let tokens = pointer.tokens();
+    let indexes = pointer.indexes();
+    let mut cur = doc;
+    for (i, token) in tokens.iter().enumerate() {
+        let index = indexes.get(i).copied().flatten();
+        cur = match cur {
+            serde_json::Value::Object(map) => map.get(token)?,
+            serde_json::Value::Array(items) => {
+                let idx = index?;
+                items.get(idx)?
+            }
+            _ => return None,
+        };
+    }
+    match cur {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 // Eleven parameters is the price of keeping every input explicit on the
 // per-request proxy path (no per-request allocation of a context struct);
 // DW-021's request id, access record, and metrics are the newest.
@@ -5122,6 +5229,20 @@ where
             rest: Box::pin(body_rest.take().expect("untransformed body present")),
         }
     };
+
+    // Body-path analytics dimensions (DW-093): extract from the
+    // request body via JSON pointer, but ONLY when the body was
+    // buffered (retries, hedging, or a request transform). The
+    // zero-buffering default skips body-path dimensions silently —
+    // the gateway never buffers just for analytics. The body must be
+    // valid JSON; non-JSON bodies and unresolved pointers are skipped
+    // for that request. Values are capped at 128 bytes (the same
+    // bound as header-sourced dimensions).
+    if let Some(body_bytes) = &replay {
+        if let Some(dims) = gateway.analytics.as_ref() {
+            extract_body_path_dims(&dims.dimensions, body_bytes, rec);
+        }
+    }
 
     let mut first_body = Some(first_body);
     let mut done_tries: u32 = 0;

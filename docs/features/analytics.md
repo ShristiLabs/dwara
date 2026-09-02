@@ -28,13 +28,36 @@ records). On shutdown the writer drains what is queued, takes a final
 flush and a final rollup/retention pass, and stops — a clean restart
 loses nothing.
 
-Custom dimensions (`analytics.dimensions[]`: name + request header)
-are captured at record-creation time, while the request head is still
-in hand: first value of a repeated header wins, non-UTF-8 and
-over-128-byte values are skipped, and the list is read from the
-CURRENT generation (reload adds/renames dimensions live). They are
-analytics-only — the access log's redacted field list stays exactly
-what it was.
+Custom dimensions (`analytics.dimensions[]`: name + source) are
+captured at three points in the request path, and the list is read
+from the CURRENT generation (reload adds/renames dimensions live).
+They are analytics-only — the access log's redacted field list stays
+exactly what it was.
+
+- **Header** (`source: header`, the default when `source` is absent):
+  read from the request header named by the `header` field, while the
+  request head is still in hand. First value of a repeated header
+  wins; non-UTF-8 and over-128-byte values are skipped. This is the
+  original DW-043 shape.
+- **Claim** (`source: claim`, DW-093): read from the verified JWT's
+  claims map (the `claim` field names the claim). Only string- and
+  number-valued top-level claims are available (the same subset authn
+  exposes); absent claims and over-128-byte values are skipped.
+  Extracted after authn resolves Identity.
+- **Body path** (`source: body_path`, DW-093): read from the request
+  body via an RFC 6901 JSON pointer (the `body_path` field). Only
+  works when the body is buffered (retries, hedging, request
+  transforms, or request validation); the zero-buffering default
+  skips body-path dimensions silently — the gateway never buffers just
+  for analytics. The body must be valid JSON; non-JSON bodies and
+  unresolved pointers are skipped. Extracted after the body is
+  collected for replay.
+
+A **correlation ID** (DW-093) is resolved per request from the
+`X-Correlation-Id` header (falling back to the request ID) and stored
+on the raw record. The response echoes it as `X-Correlation-Id`. The
+`raw` table's `correlation_id` column (indexed) drives the
+journey/funnel query.
 
 ## Storage: a separate SQLite file, additive rollups
 
@@ -89,7 +112,7 @@ without ever blocking the writer with a full VACUUM.
 
 ## The query surface (closed grammar, parameterized SQL)
 
-Three admin endpoints, all 404 with a named envelope when no store is
+Five admin endpoints, all 404 with a named envelope when no store is
 configured:
 
 - `GET /analytics/dashboard?from_ms&to_ms&gran&group_by&<filters>` —
@@ -101,6 +124,15 @@ configured:
 - `POST /analytics/query` — a structured query over a closed grammar:
   `group_by` accepts exactly the six dimension columns, values bind as
   SQL parameters, and SQL TEXT from the caller is never executed.
+- `POST /analytics/dimensions` (DW-093) — a custom-dimension query
+  over the `rollup_dim` table: aggregate per (window, dimension name,
+  value) at a granularity, filtered by dimension name and optional
+  value. Closed JSON grammar; SQL TEXT from the caller is never
+  executed.
+- `GET /analytics/journey?correlation_id&from_ms&to_ms` (DW-093) —
+  the journey/funnel query: all raw records matching a correlation
+  ID, ordered by time ascending. The `correlation_id` index keeps the
+  scan bounded; optional `from_ms`/`to_ms` narrow the window.
 
 The scheduled usage-report exports (DW-120) build their per-consumer
 statement by calling this same `structured` aggregation — see

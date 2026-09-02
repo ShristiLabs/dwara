@@ -548,6 +548,15 @@ impl JsonPointer {
     pub fn tokens(&self) -> &[String] {
         &self.tokens
     }
+
+    /// The precomputed array-index form per token, parallel to
+    /// [`tokens`](Self::tokens) (`None`: the token is not index-shaped
+    /// or does not fit usize). Exposed so the analytics body-path
+    /// dimension extractor (DW-093) can walk a JSON document without
+    /// duplicating the RFC 6901 array-index discipline.
+    pub fn indexes(&self) -> &[Option<usize>] {
+        &self.indexes
+    }
 }
 
 /// Array-index form of one reference token: digits without leading

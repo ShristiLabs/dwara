@@ -913,3 +913,209 @@ pub fn mcp_tool_calls(
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// DW-093: custom-dimension query and journey/funnel query.
+// ---------------------------------------------------------------------------
+
+/// One custom-dimension query row (DW-093): aggregated metrics for one
+/// (window, dimension name, value) tuple, read from the `rollup_dim`
+/// table. The dimension name is config-bounded (the rollup key); the
+/// value is the captured tag value.
+#[derive(Debug, Serialize)]
+pub struct DimensionRow {
+    /// Window start (ms since epoch).
+    pub window_start: i64,
+    /// The dimension name (the config-declared rollup key).
+    pub dim: String,
+    /// The dimension value for this group.
+    pub value: String,
+    /// Request count in the window.
+    pub requests: i64,
+    /// Error count (status >= 500) in the window.
+    pub error_count: i64,
+    /// Average duration in milliseconds.
+    pub avg_duration_ms: f64,
+}
+
+/// The custom-dimension query endpoint's request body (DW-093): a
+/// closed grammar over the `rollup_dim` table — never SQL text.
+#[derive(Debug, Deserialize)]
+pub struct DimensionQuery {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Granularity index 0..=3 (1m/5m/1h/1d).
+    pub gran: usize,
+    /// The dimension name to query (the config-declared rollup key).
+    pub dim: String,
+    /// Optional dimension value filter (only rows with this value).
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Maximum returned rows (default 10 000, hard cap 10 000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Why a dimension query was rejected before SQL was built.
+#[derive(Debug)]
+pub enum DimensionQueryError {
+    BadGranularity(usize),
+    BadRange,
+    EmptyDim,
+}
+
+impl std::fmt::Display for DimensionQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DimensionQueryError::BadGranularity(g) => {
+                write!(f, "gran must be 0..=3 (1m/5m/1h/1d), got {g}")
+            }
+            DimensionQueryError::BadRange => write!(f, "from_ms must be < to_ms"),
+            DimensionQueryError::EmptyDim => write!(f, "dim must be non-empty"),
+        }
+    }
+}
+
+impl std::error::Error for DimensionQueryError {}
+
+impl DimensionQuery {
+    /// Reject anything outside the closed grammar.
+    pub fn validate(&self) -> Result<(), DimensionQueryError> {
+        if self.gran >= GRANULARITIES_MS.len() {
+            return Err(DimensionQueryError::BadGranularity(self.gran));
+        }
+        if self.from_ms >= self.to_ms {
+            return Err(DimensionQueryError::BadRange);
+        }
+        if self.dim.is_empty() {
+            return Err(DimensionQueryError::EmptyDim);
+        }
+        Ok(())
+    }
+}
+
+/// Execute a validated custom-dimension query (DW-093): aggregate the
+/// `rollup_dim` table over a time range at a granularity, filtered by
+/// dimension name and optional value. Rows order by window start
+/// ascending, then request count descending within each window.
+pub fn dimension_query(
+    conn: &Connection,
+    q: &DimensionQuery,
+) -> rusqlite::Result<Vec<DimensionRow>> {
+    let limit = q.limit.unwrap_or(10_000).min(10_000);
+    let mut sql = String::from(
+        "SELECT window_start, dim, value, requests, errors, duration_sum_ms \
+         FROM rollup_dim \
+         WHERE gran = ? AND window_start >= ? AND window_start < ? AND dim = ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(q.gran as i64),
+        Box::new(q.from_ms),
+        Box::new(q.to_ms),
+        Box::new(q.dim.clone()),
+    ];
+    if let Some(v) = &q.value {
+        sql.push_str(" AND value = ?");
+        params.push(Box::new(v.clone()));
+    }
+    sql.push_str(" ORDER BY window_start ASC, requests DESC LIMIT ?");
+    params.push(Box::new(limit as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let requests: i64 = row.get(3)?;
+        let duration_sum_ms: f64 = row.get(5)?;
+        out.push(DimensionRow {
+            window_start: row.get(0)?,
+            dim: row.get(1)?,
+            value: row.get(2)?,
+            requests,
+            error_count: row.get(4)?,
+            avg_duration_ms: if requests > 0 {
+                duration_sum_ms / requests as f64
+            } else {
+                0.0
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// One journey/funnel query row (DW-093): a raw `raw` table record for
+/// one correlation id — the per-request step in a business journey.
+/// Ordered by time ascending so the caller sees the request sequence.
+#[derive(Debug, Serialize)]
+pub struct JourneyRow {
+    /// Wall-clock ms since the Unix epoch.
+    pub ts_ms: i64,
+    /// The request id (the gateway's resolved correlation handle).
+    pub request_id: String,
+    /// The correlation id (the business journey key).
+    pub correlation_id: String,
+    /// The listener that accepted the request.
+    pub listener: String,
+    /// The matched route name, or "unrouted".
+    pub route: String,
+    /// The authenticated consumer, or "anonymous".
+    pub consumer: String,
+    /// The upstream that served the request (or empty).
+    pub upstream: String,
+    /// The HTTP method.
+    pub method: String,
+    /// The HTTP status code.
+    pub status: u16,
+    /// The request duration in milliseconds.
+    pub duration_ms: f64,
+    /// The custom dimensions JSON object (as stored).
+    pub dims: String,
+}
+
+/// Execute a journey/funnel query (DW-093): return all raw records
+/// matching a correlation id, ordered by time ascending. Optional
+/// time range filter narrows the scan. Reads the RAW `raw` table
+/// directly (journey analysis is per-request, not rolled up). The
+/// `correlation_id` index keeps the scan bounded.
+pub fn journey_query(
+    conn: &Connection,
+    correlation_id: &str,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> rusqlite::Result<Vec<JourneyRow>> {
+    let mut sql = String::from(
+        "SELECT ts_ms, request_id, correlation_id, listener, route, \
+         consumer, upstream, method, status, duration_ms, dims \
+         FROM raw WHERE correlation_id = ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(correlation_id.to_string())];
+    if let Some(from) = from_ms {
+        sql.push_str(" AND ts_ms >= ?");
+        params.push(Box::new(from));
+    }
+    if let Some(to) = to_ms {
+        sql.push_str(" AND ts_ms < ?");
+        params.push(Box::new(to));
+    }
+    sql.push_str(" ORDER BY ts_ms ASC LIMIT 10000");
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(JourneyRow {
+            ts_ms: row.get(0)?,
+            request_id: row.get(1)?,
+            correlation_id: row.get(2)?,
+            listener: row.get(3)?,
+            route: row.get(4)?,
+            consumer: row.get(5)?,
+            upstream: row.get(6)?,
+            method: row.get(7)?,
+            status: row.get::<_, i64>(8)? as u16,
+            duration_ms: row.get(9)?,
+            dims: row.get(10)?,
+        });
+    }
+    Ok(out)
+}

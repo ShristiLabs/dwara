@@ -197,6 +197,12 @@ use prometheus::{
 /// outbound always set by the gateway).
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
+/// Request header carrying the business correlation ID (DW-093):
+/// inbound respected (falls back to `X-Request-Id`), outbound echoed
+/// on the response so a client can tie a reply to its journey across
+/// multiple gateway requests.
+pub const X_CORRELATION_ID: HeaderName = HeaderName::from_static("x-correlation-id");
+
 /// Extension inserted by the listener frontend (dwara-bin) naming the
 /// listener that accepted the request; absent when `proxy::handle` is
 /// driven directly (tests), in which case the label is "unknown".
@@ -228,6 +234,12 @@ pub fn status_class(status: u16) -> String {
 #[derive(Debug)]
 pub struct AccessRecord {
     pub request_id: String,
+    /// The correlation ID (DW-093): the inbound `X-Correlation-Id`
+    /// when present and valid, else the `request_id` (the fallback
+    /// so every request carries a non-empty correlation handle for
+    /// the journey/funnel query). Stored in the analytics `raw`
+    /// table; echoed on the response as `X-Correlation-Id`.
+    pub correlation_id: String,
     pub method: String,
     /// Request path WITHOUT the query string (redaction).
     pub path: String,
@@ -255,6 +267,7 @@ impl AccessRecord {
     pub fn new(request_id: String, method: String, path: String, listener: String) -> Self {
         AccessRecord {
             request_id,
+            correlation_id: String::new(),
             method,
             path,
             listener,
@@ -2279,6 +2292,32 @@ impl Observability {
 pub fn stamp_request_id(headers: &mut HeaderMap, request_id: &str) {
     if let Ok(v) = HeaderValue::from_str(request_id) {
         headers.insert(&X_REQUEST_ID, v);
+    }
+}
+
+/// Resolve the request's business correlation ID (DW-093): a valid
+/// inbound `X-Correlation-Id` verbatim, else the already-resolved
+/// `request_id` (so every request carries a non-empty correlation
+/// handle for the journey/funnel query even when the client did not
+/// send one). The validity gate mirrors `valid_inbound_request_id`
+/// (printable ASCII, at most 128 bytes) so hostile IDs cannot smuggle
+/// control characters into the analytics store.
+pub fn resolve_correlation_id(headers: &HeaderMap, request_id: &str) -> String {
+    if let Some(v) = headers.get(&X_CORRELATION_ID) {
+        if valid_inbound_request_id(v.as_bytes()) {
+            if let Ok(s) = v.to_str() {
+                return s.to_string();
+            }
+        }
+    }
+    request_id.to_string()
+}
+
+/// Echo the correlation ID onto a response (insert, never append:
+/// exactly one `X-Correlation-Id`, the gateway's resolved one).
+pub fn stamp_correlation_id(headers: &mut HeaderMap, correlation_id: &str) {
+    if let Ok(v) = HeaderValue::from_str(correlation_id) {
+        headers.insert(&X_CORRELATION_ID, v);
     }
 }
 

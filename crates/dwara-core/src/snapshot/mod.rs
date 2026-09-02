@@ -1389,14 +1389,79 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 ),
             ));
         }
-        match hyper::header::HeaderName::try_from(dim.header.as_str()) {
-            Ok(_) => {}
-            Err(e) => issues.push(issue(
-                "gateway",
-                "(root)",
-                &format!("{field}.header"),
-                format!("header name '{}' is not representable: {e}", dim.header),
-            )),
+        // Source-specific field validation (DW-093): each source
+        // requires its own field, and the field must be well-formed.
+        match dim.effective_source() {
+            crate::config::DimensionSource::Header => {
+                if let Some(header) = &dim.header {
+                    if let Err(e) = hyper::header::HeaderName::try_from(header.as_str()) {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("{field}.header"),
+                            format!("header name '{header}' is not representable: {e}"),
+                        ));
+                    }
+                } else {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("{field}.header"),
+                        "source 'header' (or absent source) requires the \
+                         'header' field",
+                    ));
+                }
+            }
+            crate::config::DimensionSource::Claim => {
+                if let Some(claim) = &dim.claim {
+                    if claim.is_empty()
+                        || !claim.bytes().all(|b| b.is_ascii_graphic())
+                        || claim.len() > 128
+                    {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("{field}.claim"),
+                            format!(
+                                "claim name '{}' is invalid: non-empty \
+                                 printable ASCII, at most 128 bytes",
+                                claim
+                            ),
+                        ));
+                    }
+                } else {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("{field}.claim"),
+                        "source 'claim' requires the 'claim' field",
+                    ));
+                }
+            }
+            crate::config::DimensionSource::BodyPath => {
+                if let Some(path) = &dim.body_path {
+                    if crate::config::transforms::JsonPointer::parse(path).is_none() {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("{field}.body_path"),
+                            format!(
+                                "body_path '{}' is not a valid RFC 6901 JSON \
+                                 pointer (must start with '/' or be empty for \
+                                 the whole document)",
+                                path
+                            ),
+                        ));
+                    }
+                } else {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("{field}.body_path"),
+                        "source 'body_path' requires the 'body_path' field",
+                    ));
+                }
+            }
         }
         if !seen.insert(dim.name.to_ascii_lowercase()) {
             issues.push(issue(

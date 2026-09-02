@@ -9,6 +9,23 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Business metrics dimensions (DW-093): custom KPI dimensions
+  (`analytics.dimensions[]`) now support three sources beyond the
+  original header extraction. `source: claim` reads from the verified
+  JWT's claims map (string- and number-valued top-level claims);
+  `source: body_path` reads from the request body via an RFC 6901 JSON
+  pointer (only when the body is buffered for retries, hedging, or
+  transforms — the zero-buffering default skips body-path dimensions
+  silently). The original header-only shape (`header` without `source`)
+  is preserved for backward compatibility. A per-request correlation
+  ID is resolved from `X-Correlation-Id` (falling back to the request
+  ID), stored on the raw record, and echoed on the response. Two new
+  admin endpoints: `POST /analytics/dimensions` (custom-dimension
+  rollup query) and `GET /analytics/journey` (correlation-ID
+  journey/funnel query over the raw table). Analytics schema v9 adds
+  `request_id` and `correlation_id` columns to the `raw` table with an
+  index on `correlation_id`. No new dependencies.
+
 - Auto-canary analysis (DW-091): metrics-driven promotion and rollback
   of canary split weights. A `canary_analysis` block on a service
   split (exactly 2 targets: baseline + canary) or an AI model alias

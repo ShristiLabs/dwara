@@ -885,18 +885,77 @@ pub struct GeoipConfig {
     pub path: String,
 }
 
+/// The source of a custom analytics dimension value (DW-093). The
+/// default (when `source` is absent) is [`DimensionSource::Header`],
+/// preserving the original DW-043 header-only config shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DimensionSource {
+    /// Read the value from a request header (the original DW-043
+    /// source; requires the `header` field).
+    Header,
+    /// Read the value from a verified JWT claim (requires the `claim`
+    /// field; the claim must be present in the resolved `Identity`'s
+    /// claims map — only string- and number-valued top-level claims
+    /// are available, the same subset authn exposes).
+    Claim,
+    /// Read the value from the request body via an RFC 6901 JSON
+    /// pointer (requires the `body_path` field; only works when the
+    /// body is buffered — retries, hedging, request transforms, or
+    /// request validation opt the route into buffering; the
+    /// zero-buffering default skips body-path dimensions).
+    BodyPath,
+}
+
 /// One custom analytics dimension (DW-043,
 /// `analytics.dimensions[]`).
+///
+/// DW-093 extends the source beyond headers: a `source` of `claim`
+/// extracts from the verified JWT's claims, and `body_path` extracts
+/// from the request body via a JSON pointer (only when the body is
+/// buffered). The original header-only shape (`header` without
+/// `source`) is preserved for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsDimension {
     /// The dimension name: lowercase `[a-z0-9_]`, at most 32 bytes —
     /// it becomes the rollup table's `dim` key and the query field.
     pub name: String,
+    /// The dimension source (DW-093). Absent defaults to `header`
+    /// (the original DW-043 behavior). When `header`, the `header`
+    /// field is required; when `claim`, the `claim` field is
+    /// required; when `body_path`, the `body_path` field is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DimensionSource>,
     /// The request header whose value is captured (case-insensitive,
-    /// as HTTP header names are). The FIRST value of a repeated
-    /// header wins; non-UTF-8 and over-128-byte values are skipped.
-    pub header: String,
+    /// as HTTP header names are). Required when `source` is `header`
+    /// (or absent). The FIRST value of a repeated header wins;
+    /// non-UTF-8 and over-128-byte values are skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The JWT claim name whose value is captured (DW-093). Required
+    /// when `source` is `claim`. The claim must be a string- or
+    /// number-valued top-level claim in the verified token; other
+    /// types and absent claims are skipped for that request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    /// An RFC 6901 JSON pointer into the request body (DW-093).
+    /// Required when `source` is `body_path`. Only works when the
+    /// body is buffered (retries, hedging, request transforms, or
+    /// request validation); the zero-buffering default skips
+    /// body-path dimensions silently. The body must be valid JSON;
+    /// non-JSON bodies and unresolved pointers are skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_path: Option<String>,
+}
+
+impl AnalyticsDimension {
+    /// The effective source (defaults to [`DimensionSource::Header`]
+    /// when `source` is absent — the backward-compatible DW-043
+    /// behavior).
+    pub fn effective_source(&self) -> DimensionSource {
+        self.source.unwrap_or(DimensionSource::Header)
+    }
 }
 
 /// One alert/event webhook target (DW-044, `gateway.webhooks[]`).

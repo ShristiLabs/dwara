@@ -1413,22 +1413,49 @@
       ]
     },
     "AnalyticsDimension": {
-      "description": "One custom analytics dimension (DW-043,\n`analytics.dimensions[]`).",
+      "description": "One custom analytics dimension (DW-043,\n`analytics.dimensions[]`).\n\nDW-093 extends the source beyond headers: a `source` of `claim`\nextracts from the verified JWT's claims, and `body_path` extracts\nfrom the request body via a JSON pointer (only when the body is\nbuffered). The original header-only shape (`header` without\n`source`) is preserved for backward compatibility.",
       "type": "object",
       "properties": {
+        "body_path": {
+          "description": "An RFC 6901 JSON pointer into the request body (DW-093).\nRequired when `source` is `body_path`. Only works when the\nbody is buffered (retries, hedging, request transforms, or\nrequest validation); the zero-buffering default skips\nbody-path dimensions silently. The body must be valid JSON;\nnon-JSON bodies and unresolved pointers are skipped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim": {
+          "description": "The JWT claim name whose value is captured (DW-093). Required\nwhen `source` is `claim`. The claim must be a string- or\nnumber-valued top-level claim in the verified token; other\ntypes and absent claims are skipped for that request.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "header": {
-          "description": "The request header whose value is captured (case-insensitive,\nas HTTP header names are). The FIRST value of a repeated\nheader wins; non-UTF-8 and over-128-byte values are skipped.",
-          "type": "string"
+          "description": "The request header whose value is captured (case-insensitive,\nas HTTP header names are). Required when `source` is `header`\n(or absent). The FIRST value of a repeated header wins;\nnon-UTF-8 and over-128-byte values are skipped.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The dimension name: lowercase `[a-z0-9_]`, at most 32 bytes —\nit becomes the rollup table's `dim` key and the query field.",
           "type": "string"
+        },
+        "source": {
+          "description": "The dimension source (DW-093). Absent defaults to `header`\n(the original DW-043 behavior). When `header`, the `header`\nfield is required; when `claim`, the `claim` field is\nrequired; when `body_path`, the `body_path` field is required.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "header"
+        "name"
       ]
     },
     "AnalyticsExportFormat": {
@@ -2445,6 +2472,26 @@
         }
       },
       "additionalProperties": false
+    },
+    "DimensionSource": {
+      "description": "The source of a custom analytics dimension value (DW-093). The\ndefault (when `source` is absent) is [`DimensionSource::Header`],\npreserving the original DW-043 header-only config shape.",
+      "oneOf": [
+        {
+          "description": "Read the value from a request header (the original DW-043\nsource; requires the `header` field).",
+          "type": "string",
+          "const": "header"
+        },
+        {
+          "description": "Read the value from a verified JWT claim (requires the `claim`\nfield; the claim must be present in the resolved `Identity`'s\nclaims map — only string- and number-valued top-level claims\nare available, the same subset authn exposes).",
+          "type": "string",
+          "const": "claim"
+        },
+        {
+          "description": "Read the value from the request body via an RFC 6901 JSON\npointer (requires the `body_path` field; only works when the\nbody is buffered — retries, hedging, request transforms, or\nrequest validation opt the route into buffering; the\nzero-buffering default skips body-path dimensions).",
+          "type": "string",
+          "const": "body_path"
+        }
+      ]
     },
     "DnsDiscovery": {
       "description": "DNS-based dynamic upstream discovery (DW-042): when present on an\nupstream, a background discovery task resolves `hostname` via DNS,\nwatches the record TTL, and re-resolves when the TTL expires (or at\n`refresh_interval_s`, whichever comes first), updating the upstream's\nendpoint set live — without a restart. The `endpoints` field becomes\nthe INITIAL/fallback set: used until the first resolution completes\nand as a fallback when DNS fails and `fail_open` is true. When\nabsent, endpoints remain static (the current behavior — no change).\n\nOnly A and SRV records are supported. A records pair each resolved\naddress with `port`; SRV records carry their own port. Consul watch\nand Kubernetes EndpointSlice watch are deferred to a future\nmilestone — DNS is the first discovery source.",
