@@ -1,20 +1,50 @@
 name: feature-matrix
 
 # Build the dwara binary for Linux ARM64 (aarch64-unknown-linux-gnu)
-# with every feature flag individually, plus key combinations (all
-# OSS, enterprise, everything). Artifacts are retained for 3 days.
+# with cargo feature flags. Two modes:
+#
+# 1. full-matrix (default, also runs on push to main): builds every
+#    feature individually (28 entries) plus key combinations (default,
+#    all-oss, enterprise, all-with-fips, all-with-pq) -- 32 jobs total.
+#
+# 2. custom (workflow_dispatch only): builds one OSS variant and one
+#    enterprise variant with user-specified features. The operator
+#    provides comma-separated feature names (without the dwara-core/
+#    prefix); the workflow auto-prefixes core features and adds ent
+#    to the enterprise variant automatically.
 #
 # The ent feature requires the LICENSING_TOKEN secret to fetch the
 # private ShristiLabs/licensing repo. Without the secret, ent builds
 # fail; all other builds succeed (fail-fast: false).
 #
 # loom is excluded (test-only, not a build artifact).
+# Artifacts are retained for 3 days by default (configurable in custom mode).
 
 permissions:
   contents: read
 
 on:
   workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'full-matrix: all 32 combinations. custom: user-specified features (OSS + enterprise).'
+        type: choice
+        options:
+          - full-matrix
+          - custom
+        default: full-matrix
+      oss_features:
+        description: 'OSS build features (comma-separated, no prefix): h3,l4,wasm,cel,cedar,k8s,... Ent is NOT included. Only used in custom mode.'
+        type: string
+        default: ''
+      enterprise_features:
+        description: 'Enterprise build features (comma-separated, no prefix): fips,mesh,h3,... Ent is added automatically. Only used in custom mode.'
+        type: string
+        default: ''
+      retention_days:
+        description: 'Artifact retention in days (custom mode only).'
+        type: string
+        default: '3'
   push:
     branches: [main]
     paths:
@@ -30,15 +60,19 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-  CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-  CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Full matrix: 32 builds (28 individual features + 4 combinations).
+  # Runs on push to main and on workflow_dispatch with build_mode=full-matrix.
+  # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.build_mode != 'custom')
     strategy:
       fail-fast: false
       matrix:
@@ -149,66 +183,134 @@ jobs:
             cli_features: "ent,k8s"
 
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
-
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable
+      - uses: ./.github/actions/build-dwara-arm64
         with:
-          toolchain: "1.94.0"
-          targets: aarch64-unknown-linux-gnu
+          features: ${{ matrix.features }}
+          cli_features: ${{ matrix.cli_features }}
+          artifact_name: dwara-arm64-${{ matrix.name }}
+          retention_days: 3
+          cache_key: ${{ matrix.name }}
+          licensing_token: ${{ secrets.LICENSING_TOKEN }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2
-        with:
-          key: feature-matrix-${{ matrix.name }}
-
-      - name: Install cross-compilation tools
+  # ---------------------------------------------------------------------------
+  # Custom build: one OSS variant + one enterprise variant with
+  # user-specified features. Runs only on workflow_dispatch with
+  # build_mode=custom.
+  #
+  # The operator provides bare feature names (e.g. "h3,l4,wasm,cel").
+  # The prepare job auto-prefixes core features with dwara-core/ and
+  # adds ent to the enterprise variant. The build job consumes the
+  # generated matrix.
+  # ---------------------------------------------------------------------------
+  prepare-custom:
+    name: Prepare custom matrix
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.event.inputs.build_mode == 'custom'
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      retention: ${{ steps.gen.outputs.retention }}
+    steps:
+      - id: gen
+        shell: bash
+        env:
+          OSS_IN: ${{ github.event.inputs.oss_features }}
+          ENT_IN: ${{ github.event.inputs.enterprise_features }}
+          RETENTION: ${{ github.event.inputs.retention_days }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          # Features that live on dwara-bin (stay bare, no prefix).
+          # Everything else is a dwara-core feature and gets the
+          # dwara-core/ prefix added automatically.
+          BIN_FEATS="otlp ent h3 console fips pq l4"
 
-      # DW-032: the ent feature pulls in licensing-core from the private
-      # ShristiLabs/licensing repo. The configure-licensing-repo action
-      # is a no-op (warning only) when LICENSING_TOKEN is absent; ent
-      # builds will then fail on fetch, non-ent builds are unaffected.
-      - name: Configure private licensing repo access
-        uses: ./.github/actions/configure-licensing-repo
-        with:
-          token: ${{ secrets.LICENSING_TOKEN }}
+          # Transform a bare comma-separated feature list into a
+          # cargo feature string with dwara-core/ prefixes added
+          # to core features. Also detect k8s for the CLI features.
+          transform_features() {
+            local input="$1"
+            local result=""
+            local has_k8s="false"
+            for f in $(echo "$input" | tr ',' ' '); do
+              # Skip empty tokens
+              [ -z "$f" ] && continue
+              if echo "$BIN_FEATS" | grep -qw "$f"; then
+                result="${result},${f}"
+              else
+                result="${result},dwara-core/${f}"
+              fi
+              [ "$f" = "k8s" ] && has_k8s="true"
+            done
+            # Strip leading comma
+            result="${result#,}"
+            echo "$result"
+            echo "$has_k8s" >&2
+          }
 
-      - name: Build dwara-bin
-        run: |
-          FEATURES="${{ matrix.features }}"
-          if [ -n "$FEATURES" ]; then
-            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-bin --features "$FEATURES"
+          # --- OSS variant (no ent) ---
+          OSS_FEATS=$(transform_features "$OSS_IN" 2>/tmp/oss_k8s)
+          OSS_HAS_K8S=$(cat /tmp/oss_k8s)
+          if [ "$OSS_HAS_K8S" = "true" ]; then
+            OSS_CLI="k8s"
           else
-            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-bin
+            OSS_CLI=""
           fi
 
-      - name: Build dwara-cli
-        run: |
-          CLI_FEATURES="${{ matrix.cli_features }}"
-          if [ -n "$CLI_FEATURES" ]; then
-            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-cli --features "$CLI_FEATURES"
+          # --- Enterprise variant (ent added automatically) ---
+          ENT_FEATS_RAW=$(transform_features "$ENT_IN" 2>/tmp/ent_k8s)
+          ENT_HAS_K8S=$(cat /tmp/ent_k8s)
+          if [ -n "$ENT_FEATS_RAW" ]; then
+            ENT_FEATS="ent,${ENT_FEATS_RAW}"
           else
-            cargo build --release --target aarch64-unknown-linux-gnu -p dwara-cli
+            ENT_FEATS="ent"
+          fi
+          if [ "$ENT_HAS_K8S" = "true" ]; then
+            ENT_CLI="ent,k8s"
+          else
+            ENT_CLI="ent"
           fi
 
-      - name: Package artifacts
-        run: |
-          mkdir -p dist
-          BIN_DIR="target/aarch64-unknown-linux-gnu/release"
-          cp "$BIN_DIR/dwara" dist/
-          for BIN in dwara-cli dwara-loadgen dwara-controller dwara-edge dwara-k8s-controller; do
-            if [ -f "$BIN_DIR/$BIN" ]; then
-              cp "$BIN_DIR/$BIN" dist/
-            fi
-          done
-          ( cd dist && sha256sum -- * > checksums.sha256 )
-          ls -la dist/
+          # Build the matrix JSON. Only include a variant if its
+          # feature input was non-empty (so an operator can build
+          # just OSS, just enterprise, or both).
+          MATRIX="[]"
+          if [ -n "$OSS_IN" ]; then
+            MATRIX=$(echo "$MATRIX" | jq --arg f "$OSS_FEATS" --arg c "$OSS_CLI" \
+              '. + [{name: "custom-oss", features: $f, cli_features: $c}]')
+          fi
+          if [ -n "$ENT_IN" ]; then
+            MATRIX=$(echo "$MATRIX" | jq --arg f "$ENT_FEATS" --arg c "$ENT_CLI" \
+              '. + [{name: "custom-enterprise", features: $f, cli_features: $c}]')
+          fi
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned: v4
+          # If both inputs were empty, build the default (no features)
+          # for both editions so the run is never a no-op.
+          if [ "$MATRIX" = "[]" ]; then
+            MATRIX=$(jq -n \
+              '[{name: "custom-oss", features: "", cli_features: ""},
+                {name: "custom-enterprise", features: "ent", cli_features: "ent"}]')
+          fi
+
+          echo "Generated matrix:"
+          echo "$MATRIX" | jq .
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "retention=${RETENTION:-3}" >> "$GITHUB_OUTPUT"
+
+  custom-build:
+    name: ${{ matrix.name }}
+    needs: prepare-custom
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-custom.outputs.matrix) }}
+    steps:
+      - uses: ./.github/actions/build-dwara-arm64
         with:
-          name: dwara-arm64-${{ matrix.name }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 3
+          features: ${{ matrix.features }}
+          cli_features: ${{ matrix.cli_features }}
+          artifact_name: dwara-arm64-${{ matrix.name }}
+          retention_days: ${{ needs.prepare-custom.outputs.retention }}
+          cache_key: ${{ matrix.name }}
+          licensing_token: ${{ secrets.LICENSING_TOKEN }}
