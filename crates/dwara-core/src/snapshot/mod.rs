@@ -5399,6 +5399,71 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 &mut issues,
             );
         }
+        // DW-113: tool_allowlist entries must reference configured MCP
+        // tools. When no `ai.mcp` block is configured, a non-empty
+        // allowlist is an error (the tools do not exist).
+        if !c.tool_allowlist.is_empty() {
+            let mcp_tools: Option<std::collections::BTreeSet<&str>> = gateway
+                .ai
+                .as_ref()
+                .and_then(|ai| ai.mcp.as_ref())
+                .map(|mcp| mcp.tools.keys().map(|s| s.as_str()).collect());
+            match mcp_tools {
+                None => {
+                    issues.push(issue(
+                        "consumer",
+                        &c.name,
+                        "tool_allowlist",
+                        "tool_allowlist is non-empty but no ai.mcp block is configured \
+                         (the tools do not exist)",
+                    ));
+                }
+                Some(tool_names) => {
+                    for tool in &c.tool_allowlist {
+                        if !tool_names.contains(tool.as_str()) {
+                            issues.push(issue(
+                                "consumer",
+                                &c.name,
+                                "tool_allowlist",
+                                format!(
+                                    "tool_allowlist references unknown tool '{tool}' \
+                                     (not in ai.mcp.tools)"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // DW-113: per-consumer token_budget — same shape checks as a
+        // policy's token_budget (at least one window, positive values).
+        if let Some(tb) = &c.token_budget {
+            if tb.tokens_per_min.is_none() && tb.cost_per_day_micros.is_none() {
+                issues.push(issue(
+                    "consumer",
+                    &c.name,
+                    "token_budget",
+                    "a token_budget must set tokens_per_min and/or cost_per_day_micros \
+                     (an empty budget bounds nothing)",
+                ));
+            }
+            if tb.tokens_per_min == Some(0) {
+                issues.push(issue(
+                    "consumer",
+                    &c.name,
+                    "token_budget.tokens_per_min",
+                    "tokens_per_min must be > 0 (omit the field for no token window)",
+                ));
+            }
+            if tb.cost_per_day_micros == Some(0) {
+                issues.push(issue(
+                    "consumer",
+                    &c.name,
+                    "token_budget.cost_per_day_micros",
+                    "cost_per_day_micros must be > 0 (omit the field for no cost window)",
+                ));
+            }
+        }
     }
 
     for p in &gateway.policies {

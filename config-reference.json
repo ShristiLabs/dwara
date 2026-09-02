@@ -1947,6 +1947,29 @@
               "type": "null"
             }
           ]
+        },
+        "token_budget": {
+          "description": "Per-agent AI token budget (DW-113): when set, this consumer's\nAI traffic is bounded by this budget BEFORE the policy chain\n(the most-specific budget). Same shape as a policy's\n`token_budget`. `None` (the default) = no per-agent budget;\nthe policy chain governs as before.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_allowlist": {
+          "description": "MCP tool allowlist (DW-113): when non-empty, the consumer may\nonly call the named tools through the MCP gateway. Empty (the\ndefault) = no restriction. Validation checks that every name\nreferences a configured `ai.mcp.tools` entry.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "description": "The principal kind (DW-113): `user` (default) or `agent`.\nAgent consumers gain a tool allowlist, a per-agent token\nbudget, and typed analytics attribution. The field is renamed\nto `type` in YAML (`type` is a Rust keyword).",
+          "$ref": "#/$defs/ConsumerType",
+          "default": "user"
         }
       },
       "additionalProperties": false,
@@ -1978,6 +2001,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "ConsumerType": {
+      "description": "The principal kind of a consumer (DW-113): `user` (the default —\na human or application calling the gateway) or `agent` (a bot\nprincipal with bot credentials, per-agent quotas/token budgets,\ntool allowlists, and a session audit trail). Agent traffic is\nidentifiable, governable, and billable; the type threads through\nIdentity into analytics for typed attribution.",
+      "oneOf": [
+        {
+          "description": "A human or application caller (the default).",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "A bot principal: tool allowlists, per-agent token budgets,\nand typed analytics attribution apply.",
+          "type": "string",
+          "const": "agent"
+        }
+      ]
     },
     "Cors": {
       "description": "Route-scoped CORS policy (DW-027, feature analysis 4.14).\n\nSemantics (frozen; evaluation lives in `dataplane::cors`):\n\n- `allowed_origins` is a closed set of exact origins\n  (`https://api.example.com`, scheme + host + optional port, compared\n  in normalized form: lowercase scheme/host, default port dropped) or\n  the single entry `*` (any origin). It must be non-empty; `*`\n  combined with `allow_credentials: true` is rejected by validation\n  (the Fetch spec forbids wildcard-credentialed responses).\n- A PREFLIGHT (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)\n  on a CORS-configured route is answered 204 by the gateway —\n  validated against the policy, never forwarded upstream, and never\n  subject to authn/authz/rate limiting (browsers send preflights\n  without credentials). A preflight that fails validation (origin,\n  method, or requested headers not allowed) still short-circuits:\n  204 with NO CORS headers, which the browser reads as a failed\n  preflight. A plain `OPTIONS` without the preflight markers is NOT\n  intercepted; it proxies normally.\n- ACTUAL responses on the route carry `Access-Control-Allow-Origin`\n  (`*`, or the echoed request origin when the list is specific),\n  `Access-Control-Allow-Credentials: true` when configured,\n  `Access-Control-Expose-Headers` when configured, and `Vary: Origin`\n  (merged into any existing `Vary`). A request whose `Origin` is not\n  allowed simply gets no CORS headers — the response passes through\n  as-is (same-origin reads do not consult CORS at all).",

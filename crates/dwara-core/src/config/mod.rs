@@ -3816,6 +3816,23 @@ pub struct Timeouts {
     pub happy_eyeballs_ms: Option<u64>,
 }
 
+/// The principal kind of a consumer (DW-113): `user` (the default —
+/// a human or application calling the gateway) or `agent` (a bot
+/// principal with bot credentials, per-agent quotas/token budgets,
+/// tool allowlists, and a session audit trail). Agent traffic is
+/// identifiable, governable, and billable; the type threads through
+/// Identity into analytics for typed attribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerType {
+    /// A human or application caller (the default).
+    #[default]
+    User,
+    /// A bot principal: tool allowlists, per-agent token budgets,
+    /// and typed analytics attribution apply.
+    Agent,
+}
+
 /// Identity of an API caller (app/team/user); owns credentials, quotas, and
 /// the analytics identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -3826,6 +3843,25 @@ pub struct Consumer {
     pub credentials: Vec<Credential>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
+    /// The principal kind (DW-113): `user` (default) or `agent`.
+    /// Agent consumers gain a tool allowlist, a per-agent token
+    /// budget, and typed analytics attribution. The field is renamed
+    /// to `type` in YAML (`type` is a Rust keyword).
+    #[serde(default, rename = "type")]
+    pub consumer_type: ConsumerType,
+    /// MCP tool allowlist (DW-113): when non-empty, the consumer may
+    /// only call the named tools through the MCP gateway. Empty (the
+    /// default) = no restriction. Validation checks that every name
+    /// references a configured `ai.mcp.tools` entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_allowlist: Vec<String>,
+    /// Per-agent AI token budget (DW-113): when set, this consumer's
+    /// AI traffic is bounded by this budget BEFORE the policy chain
+    /// (the most-specific budget). Same shape as a policy's
+    /// `token_budget`. `None` (the default) = no per-agent budget;
+    /// the policy chain governs as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<TokenBudget>,
     /// Consumer priority class for load shedding (DW-016): 0 (lowest) to 10
     /// (highest). Stored and validated now; it takes effect only once
     /// authentication (DW-019/DW-020) identifies the consumer on a request —

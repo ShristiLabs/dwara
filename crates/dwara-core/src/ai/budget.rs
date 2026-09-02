@@ -168,6 +168,11 @@ impl BudgetLedger {
 pub struct AiBudgetEngine {
     /// Policy name -> its token budget (config-declared).
     budgets: HashMap<String, TokenBudget>,
+    /// Per-consumer token budgets (DW-113): consumer name -> its
+    /// direct token budget. Checked FIRST in resolve (before the
+    /// policy chain) as the most-specific budget. A consumer with no
+    /// entry here falls through to the policy chain.
+    consumer_budgets: HashMap<String, TokenBudget>,
     /// Shared spend ledger — carried across generations.
     ledger: Arc<BudgetLedger>,
     /// Whether the anonymous-fall-through warning already fired this
@@ -194,17 +199,27 @@ impl AiBudgetEngine {
             .iter()
             .filter_map(|p| p.token_budget.as_ref().map(|b| (p.name.clone(), *b)))
             .collect();
-        ledger.retain(&derivable_keys(gateway, &budgets));
+        // DW-113: per-consumer token budgets. A consumer with a
+        // `token_budget` set gets its own budget, checked before the
+        // policy chain (the most-specific budget).
+        let consumer_budgets = gateway
+            .consumers
+            .iter()
+            .filter_map(|c| c.token_budget.map(|b| (c.name.clone(), b)))
+            .collect();
+        ledger.retain(&derivable_keys(gateway, &budgets, &consumer_budgets));
         AiBudgetEngine {
             budgets,
+            consumer_budgets,
             ledger,
             warned_anonymous: AtomicBool::new(false),
         }
     }
 
-    /// Whether any policy declares a budget (cheap dataplane skip).
+    /// Whether any policy or consumer declares a budget (cheap
+    /// dataplane skip).
     pub fn is_empty(&self) -> bool {
-        self.budgets.is_empty()
+        self.budgets.is_empty() && self.consumer_budgets.is_empty()
     }
 
     /// The shared ledger (carried into the next generation).
@@ -233,6 +248,22 @@ impl AiBudgetEngine {
         listener_policies: &[String],
         global_policies: &[String],
     ) -> Option<BudgetGuard> {
+        // DW-113: per-consumer token budget — the MOST specific
+        // budget, checked before the policy chain. A consumer with a
+        // direct `token_budget` binds it (consumer-scoped by
+        // definition); an anonymous caller cannot bind one (no
+        // consumer name).
+        if let Some(consumer_name) = consumer {
+            if let Some(budget) = self.consumer_budgets.get(consumer_name) {
+                return Some(BudgetGuard {
+                    ledger: Arc::clone(&self.ledger),
+                    key: consumer_name.to_string(),
+                    tokens_per_min: budget.tokens_per_min,
+                    cost_per_day_micros: budget.cost_per_day_micros,
+                    scope: TokenBudgetScope::Consumer,
+                });
+            }
+        }
         let levels = [
             consumer_policies,
             route_policies,
@@ -285,12 +316,19 @@ impl AiBudgetEngine {
 /// consumer-scoped budgets — the consumers that can bind them (direct
 /// attachers, and every consumer when the policy is attached at a
 /// level any authenticated consumer can hit:
-/// route/service/listener/global).
+/// route/service/listener/global), plus the per-consumer direct
+/// budgets (DW-113, keyed by the consumer name).
 fn derivable_keys(
     gateway: &crate::config::Gateway,
     budgets: &HashMap<String, TokenBudget>,
+    consumer_budgets: &HashMap<String, TokenBudget>,
 ) -> HashSet<String> {
     let mut keep: HashSet<String> = HashSet::new();
+    // DW-113: per-consumer direct budgets are always derivable while
+    // the consumer carries the budget.
+    for name in consumer_budgets.keys() {
+        keep.insert(name.clone());
+    }
     for (name, budget) in budgets {
         match budget.scope {
             TokenBudgetScope::Policy => {
@@ -553,6 +591,9 @@ mod tests {
             } else {
                 vec![]
             },
+            consumer_type: crate::config::ConsumerType::User,
+            tool_allowlist: vec![],
+            token_budget: None,
             priority: None,
             quotas: None,
             groups: vec![],

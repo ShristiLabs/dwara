@@ -42,7 +42,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -134,6 +134,11 @@ pub struct CompiledMcp {
     pub sessions_max_concurrent: usize,
     /// The reserved HTTP path for the MCP endpoint.
     pub path: String,
+    /// Per-consumer tool allowlists (DW-113): consumer name -> the
+    /// set of tool names that consumer may call. A consumer NOT in
+    /// this map has no restriction (may call any tool). Built from
+    /// `gateway.consumers[].tool_allowlist` at compile time.
+    pub consumer_tool_allowlists: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The outcome of an MCP tool call (DW-087): the result the dataplane
@@ -191,6 +196,18 @@ impl CompiledMcp {
         let path = config.path.clone().unwrap_or_else(|| "/mcp".to_string());
 
         let mut tools = BTreeMap::new();
+        let mut consumer_tool_allowlists: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // DW-113: compile per-consumer tool allowlists from the gateway
+        // consumers. Only consumers with a non-empty tool_allowlist are
+        // inserted; a consumer absent from the map has no restriction.
+        for consumer in &gateway.consumers {
+            if !consumer.tool_allowlist.is_empty() {
+                consumer_tool_allowlists.insert(
+                    consumer.name.clone(),
+                    consumer.tool_allowlist.iter().cloned().collect(),
+                );
+            }
+        }
         for (name, tool) in &config.tools {
             let Some(upstream) = gateway.upstreams.iter().find(|u| u.name == tool.upstream) else {
                 tracing::warn!(
@@ -243,6 +260,7 @@ impl CompiledMcp {
             sessions_ttl_secs,
             sessions_max_concurrent,
             path,
+            consumer_tool_allowlists,
         })
     }
 
@@ -264,6 +282,18 @@ impl CompiledMcp {
     /// `tools/list` response.
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
         self.tools.keys().map(|s| s.as_str())
+    }
+
+    /// Whether `consumer` is allowed to call `tool` (DW-113). A
+    /// consumer NOT in the allowlist map has no restriction (may call
+    /// any tool); a consumer IN the map may call only the tools in its
+    /// set. The dataplane checks this BEFORE the authz attachment for
+    /// `tools/call` and filters `tools/list` by it.
+    pub fn consumer_allowed_tool(&self, consumer: &str, tool: &str) -> bool {
+        match self.consumer_tool_allowlists.get(consumer) {
+            None => true,
+            Some(allowed) => allowed.contains(tool),
+        }
     }
 
     /// Handle one JSON-RPC request. The `session_id` is extracted

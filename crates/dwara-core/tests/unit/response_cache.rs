@@ -16,6 +16,7 @@ fn identity(name: &str) -> Identity {
     Identity {
         consumer_name: name.to_string(),
         credential_kind: dwara_core::state::store::CredentialKind::ApiKey,
+        consumer_type: dwara_core::config::ConsumerType::User,
         groups: Vec::new(),
         claims: BTreeMap::new(),
         body_digest: None,

@@ -9,6 +9,24 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Agent principals & governance (DW-113): typed consumer principals
+  with per-agent tool allowlists, per-agent token budgets, and typed
+  analytics attribution. (1) `consumer_type`: a new `Consumer` field
+  (`type` in YAML, `user` or `agent`, defaults `user`) threads through
+  `Identity` into analytics records. (2) `tool_allowlist`: a new
+  `Consumer` field (list of MCP tool names); when non-empty, the
+  consumer may only call those tools through the MCP gateway
+  (`tools/call` is denied with `tool_not_in_agent_allowlist`;
+  `tools/list` is filtered). Validation checks that every name
+  references a configured `ai.mcp.tools` entry. (3) `token_budget`: a
+  new per-`Consumer` `TokenBudget` (checked FIRST in the budget
+  engine, before the policy chain -- the most-specific budget);
+  validation checks shape (at least one window, positive values).
+  (4) Analytics schema v8: `consumer_type` column on `ai_spend` and
+  `mcp_tool_calls` (defaults `'user'`, additive ALTER TABLE
+  migration). (5) `consumer_type_str` helper in the dataplane for
+  the analytics record builders.
+
 - MCP gateway (DW-087): dwara as an MCP (Model Context Protocol)
   server/router over JSON-RPC 2.0. Configured tools are exposed on a
   reserved HTTP path (default `/mcp`); the gateway proxies tool calls

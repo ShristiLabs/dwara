@@ -105,7 +105,7 @@ fn schema_v2_export_runs_table_exists() {
             )?;
             assert_eq!(n, 1);
             let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            assert_eq!(v, 7);
+            assert_eq!(v, 8);
             Ok(())
         })
         .unwrap();

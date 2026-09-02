@@ -281,7 +281,8 @@ use crate::config::credentials::{
     credential_selector, hmac_stored_hash, sha256_hex, sha256_stored_hash,
 };
 use crate::config::{
-    Credential, Gateway, JwtProvider as JwtProviderConfig, DEFAULT_HMAC_CLOCK_SKEW_SECS,
+    ConsumerType, Credential, Gateway, JwtProvider as JwtProviderConfig,
+    DEFAULT_HMAC_CLOCK_SKEW_SECS,
 };
 use crate::observability::Observability;
 use crate::state::store::{CredentialKind, CredentialRecord, StateStore};
@@ -304,6 +305,11 @@ const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Identity {
     pub consumer_name: String,
     pub credential_kind: CredentialKind,
+    /// The principal kind (DW-113): `User` (the default) or `Agent`.
+    /// From the CONFIG consumer record when config-declared; `User`
+    /// for store-managed consumers (the state store has no type column
+    /// in this edition). Threads into analytics for typed attribution.
+    pub consumer_type: ConsumerType,
     /// Group memberships of the authenticated consumer (#124): from the
     /// CONFIG consumer record when the consumer is config-declared, from
     /// the state store's `consumers.groups` for store-managed consumers.
@@ -1633,6 +1639,11 @@ pub struct CompositeAuthenticator {
     /// fast lookup for identity group resolution; store-managed
     /// consumers fall through to a (cached) store lookup.
     consumer_groups_index: HashMap<String, Vec<String>>,
+    /// consumer name -> consumer type from the CONFIG consumers
+    /// (DW-113): the fast lookup for identity type resolution;
+    /// store-managed consumers default to `User` (the state store has
+    /// no type column in this edition).
+    consumer_type_index: HashMap<String, ConsumerType>,
     /// The per-deployment credential pepper (#124): raw bytes resolved
     /// ABOVE this domain through the SecretSource seam, held Arc-shared
     /// with the dataplane's Zeroizing holder so the buffer is zeroized
@@ -1689,6 +1700,7 @@ impl CompositeAuthenticator {
             oidc_cache: Arc::new(crate::security::oidc::OidcIntrospectionCache::new()),
             jwt_consumer_index: HashMap::new(),
             consumer_groups_index: HashMap::new(),
+            consumer_type_index: HashMap::new(),
             pepper: None,
             pepper_missing_logged: AtomicBool::new(false),
             hmac_keys: HashMap::new(),
@@ -1757,6 +1769,7 @@ impl CompositeAuthenticator {
         }
         let mut jwt_consumer_index = HashMap::new();
         let mut consumer_groups_index = HashMap::new();
+        let mut consumer_type_index = HashMap::new();
         // DW-036: HMAC keys are config-served ONLY (raw key bytes in
         // memory; see the module docs), so they are collected here
         // regardless of the registry variant. `${...}` secret references
@@ -1769,6 +1782,7 @@ impl CompositeAuthenticator {
         let mut hmac_keys = HashMap::new();
         for consumer in &gateway.consumers {
             consumer_groups_index.insert(consumer.name.clone(), consumer.groups.clone());
+            consumer_type_index.insert(consumer.name.clone(), consumer.consumer_type);
             for credential in &consumer.credentials {
                 if let Credential::Jwt { issuer, audiences } = credential {
                     jwt_consumer_index
@@ -1819,6 +1833,7 @@ impl CompositeAuthenticator {
             oidc_cache,
             jwt_consumer_index,
             consumer_groups_index,
+            consumer_type_index,
             pepper: pepper.cloned(),
             pepper_missing_logged: AtomicBool::new(false),
             hmac_keys,
@@ -1846,6 +1861,18 @@ impl CompositeAuthenticator {
             }
         }
         Vec::new()
+    }
+
+    /// Resolve the consumer type of a consumer by name (DW-113):
+    /// config consumers from the config-built index; store-managed
+    /// consumers default to `User` (the state store has no type column
+    /// in this edition). Unknown name = `User` (fail-open, the
+    /// default posture).
+    fn consumer_type_of(&self, consumer_name: &str) -> ConsumerType {
+        self.consumer_type_index
+            .get(consumer_name)
+            .copied()
+            .unwrap_or(ConsumerType::User)
     }
 
     /// A peppered stored hash failed closed because no pepper is
@@ -1901,9 +1928,11 @@ impl CompositeAuthenticator {
                 }
                 let consumer_name = cred.consumer_name.clone();
                 let groups = self.consumer_groups_of(&consumer_name);
+                let consumer_type = self.consumer_type_of(&consumer_name);
                 return Ok(Some(Identity {
                     consumer_name,
                     credential_kind: CredentialKind::ApiKey,
+                    consumer_type,
                     groups,
                     claims: BTreeMap::new(),
                     body_digest: None,
@@ -1947,9 +1976,11 @@ impl CompositeAuthenticator {
             if !map.is_empty() {
                 if let Some(consumer_name) = map.resolve(cert) {
                     let groups = self.consumer_groups_of(consumer_name);
+                    let consumer_type = self.consumer_type_of(consumer_name);
                     return Ok(Some(Identity {
                         consumer_name: consumer_name.to_string(),
                         credential_kind: CredentialKind::Mtls,
+                        consumer_type,
                         groups,
                         claims: BTreeMap::new(),
                         body_digest: None,
@@ -1976,9 +2007,11 @@ impl CompositeAuthenticator {
                 }
                 let consumer_name = cred.consumer_name.clone();
                 let groups = self.consumer_groups_of(&consumer_name);
+                let consumer_type = self.consumer_type_of(&consumer_name);
                 return Ok(Some(Identity {
                     consumer_name,
                     credential_kind: CredentialKind::Mtls,
+                    consumer_type,
                     groups,
                     claims: BTreeMap::new(),
                     body_digest: None,
@@ -2087,6 +2120,7 @@ impl CompositeAuthenticator {
                             .unwrap_or_else(|| "oidc-anonymous".to_string()),
                     };
                     let groups = self.consumer_groups_of(&consumer_name);
+                    let consumer_type = self.consumer_type_of(&consumer_name);
                     // Build the identity claims map from the
                     // introspection response (the JWT claims-map
                     // precedent: string and number scalars, arrays of
@@ -2122,6 +2156,7 @@ impl CompositeAuthenticator {
                     return Ok(Some(Identity {
                         consumer_name,
                         credential_kind: CredentialKind::Oidc,
+                        consumer_type,
                         groups,
                         claims,
                         body_digest: None,
@@ -2247,6 +2282,7 @@ impl CompositeAuthenticator {
             }
         };
         let groups = self.consumer_groups_of(&consumer_name);
+        let consumer_type = self.consumer_type_of(&consumer_name);
         let mut identity_claims = BTreeMap::new();
         if let Some(map) = claims.as_object() {
             for (k, v) in map {
@@ -2286,6 +2322,7 @@ impl CompositeAuthenticator {
         Ok(Identity {
             consumer_name,
             credential_kind: CredentialKind::Jwt,
+            consumer_type,
             groups,
             claims: identity_claims,
             body_digest: None,
@@ -2411,9 +2448,11 @@ impl CompositeAuthenticator {
         }
         let consumer_name = credential.consumer_name.clone();
         let groups = self.consumer_groups_of(&consumer_name);
+        let consumer_type = self.consumer_type_of(&consumer_name);
         Ok(Some(Identity {
             consumer_name,
             credential_kind: CredentialKind::Hmac,
+            consumer_type,
             groups,
             claims: BTreeMap::new(),
             body_digest: Some(body_digest),

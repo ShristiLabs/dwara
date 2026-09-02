@@ -30,6 +30,7 @@ fn identity(consumer: &str, claims: &[(&str, &str)]) -> Identity {
     Identity {
         consumer_name: consumer.to_string(),
         credential_kind: CredentialKind::Jwt,
+        consumer_type: dwara_core::config::ConsumerType::User,
         groups: Vec::new(),
         claims: claims
             .iter()

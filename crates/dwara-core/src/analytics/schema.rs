@@ -248,7 +248,7 @@ pub const SCHEMA_V5: &str = "
 ";
 
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 /// Schema v6 (DW-086): three tables for prompt experimentation.
 ///
@@ -335,6 +335,16 @@ pub const SCHEMA_V7: &str = "
     CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_consumer ON mcp_tool_calls(consumer);
 ";
 
+/// Schema v8 (DW-113): add the `consumer_type` column to `ai_spend`
+/// and `mcp_tool_calls` for typed agent/user attribution. The column
+/// defaults to `'user'` so pre-DW-113 rows and records that omit the
+/// field land as user traffic (the pre-existing default). Uses ALTER
+/// TABLE (additive) so existing databases migrate in place.
+pub const SCHEMA_V8: &str = "
+    ALTER TABLE ai_spend ADD COLUMN consumer_type TEXT NOT NULL DEFAULT 'user';
+    ALTER TABLE mcp_tool_calls ADD COLUMN consumer_type TEXT NOT NULL DEFAULT 'user';
+";
+
 /// Apply migrations to a fresh-or-existing analytics connection. A
 /// database at a NEWER version than this build is a hard error (the
 /// state store's forward-only rule, same rationale).
@@ -378,6 +388,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 7 {
         conn.execute_batch(SCHEMA_V7)?;
         conn.pragma_update(None, "user_version", 7)?;
+    }
+    if version < 8 {
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.pragma_update(None, "user_version", 8)?;
     }
     Ok(())
 }

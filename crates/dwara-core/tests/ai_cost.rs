@@ -642,6 +642,7 @@ async fn spend_record_direct_insert_and_query() {
     store.offer_ai_spend(AiSpendRecord {
         ts_ms: 1000,
         consumer: "acme".to_string(),
+        consumer_type: "user".to_string(),
         team: "".to_string(),
         provider: "p".to_string(),
         model: "claude-x".to_string(),
@@ -654,6 +655,7 @@ async fn spend_record_direct_insert_and_query() {
     store.offer_ai_spend(AiSpendRecord {
         ts_ms: 2000,
         consumer: "acme".to_string(),
+        consumer_type: "user".to_string(),
         team: "".to_string(),
         provider: "p".to_string(),
         model: "gpt-4o".to_string(),

@@ -129,6 +129,9 @@ pub struct AiSpendRecord {
     pub ts_ms: i64,
     /// The authenticated consumer name (or "anonymous").
     pub consumer: String,
+    /// The consumer type (DW-113): `"user"` or `"agent"`. Defaults to
+    /// `"user"` for pre-DW-113 records and anonymous traffic.
+    pub consumer_type: String,
     /// The policy-scoped team key (the policy name a `scope: policy`
     /// budget uses), or empty when no team budget binds the request.
     pub team: String,
@@ -297,6 +300,9 @@ pub struct McpToolCallRecord {
     pub session_id: String,
     /// The authenticated consumer name (or "anonymous").
     pub consumer: String,
+    /// The consumer type (DW-113): `"user"` or `"agent"`. Defaults to
+    /// `"user"` for pre-DW-113 records and anonymous traffic.
+    pub consumer_type: String,
     /// The tool name that was called.
     pub tool_name: String,
     /// Whether the call was authorized (passed the per-tool authz
@@ -991,9 +997,9 @@ impl EmbeddedAnalytics {
             }
         };
         let mut stmt = match tx.prepare(
-            "INSERT INTO ai_spend (ts_ms, consumer, team, provider, model, version,
+            "INSERT INTO ai_spend (ts_ms, consumer, consumer_type, team, provider, model, version,
                                    prompt_tokens, completion_tokens, total_tokens, cost_micros)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1009,6 +1015,7 @@ impl EmbeddedAnalytics {
             let res = stmt.execute(rusqlite::params![
                 r.ts_ms,
                 r.consumer,
+                r.consumer_type,
                 r.team,
                 r.provider,
                 r.model,
@@ -1368,9 +1375,9 @@ impl EmbeddedAnalytics {
         };
         let mut stmt = match tx.prepare(
             "INSERT INTO mcp_tool_calls \
-             (ts_ms, request_id, session_id, consumer, tool_name, allowed, \
+             (ts_ms, request_id, session_id, consumer, consumer_type, tool_name, allowed, \
               duration_ms, error_code, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1388,6 +1395,7 @@ impl EmbeddedAnalytics {
                 r.request_id,
                 r.session_id,
                 r.consumer,
+                r.consumer_type,
                 r.tool_name,
                 r.allowed as i64,
                 r.duration_ms,

@@ -53,7 +53,7 @@ use crate::ai::adapter::{adapter_for, ProviderAdapter};
 use crate::ai::openai_compat;
 use crate::ai::stream::StreamTranslator;
 use crate::ai::types::{ChatRequest, Usage};
-use crate::dataplane::proxy::{DataPlane, Generation, ProxyBody};
+use crate::dataplane::proxy::{consumer_type_str, DataPlane, Generation, ProxyBody};
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::Body;
@@ -696,6 +696,9 @@ where
             let consumer_name = identity
                 .map(|id| id.consumer_name.clone())
                 .unwrap_or_else(|| "anonymous".to_string());
+            let consumer_type = identity
+                .map(|id| consumer_type_str(id.consumer_type).to_string())
+                .unwrap_or_else(|| "user".to_string());
             let team = budget
                 .as_ref()
                 .map(|g| g.team_key().to_string())
@@ -730,6 +733,7 @@ where
                 dp.ai_pricing(),
                 dp.analytics(),
                 consumer_name,
+                consumer_type,
                 team,
                 prompt_log_ctx,
                 Arc::clone(&guardrails),
@@ -853,6 +857,10 @@ where
                 analytics.offer_ai_spend(crate::analytics::AiSpendRecord {
                     ts_ms: now_ms(),
                     consumer: consumer_name.to_string(),
+                    consumer_type: identity
+                        .map(|i| consumer_type_str(i.consumer_type))
+                        .unwrap_or("user")
+                        .to_string(),
                     team,
                     provider: provider.name.clone(),
                     model: target.provider_model.clone(),
@@ -1287,6 +1295,9 @@ pub struct AiStreamBody {
     analytics: Option<std::sync::Arc<crate::analytics::EmbeddedAnalytics>>,
     /// DW-079: the consumer name for spend attribution.
     consumer: String,
+    /// DW-113: the consumer type for spend attribution (`user` or
+    /// `agent`).
+    consumer_type: String,
     /// DW-079: the team key for spend attribution (policy name when
     /// a team budget binds, else empty).
     team: String,
@@ -1345,6 +1356,7 @@ impl AiStreamBody {
         pricing: std::sync::Arc<crate::ai::cost::PricingTable>,
         analytics: Option<std::sync::Arc<crate::analytics::EmbeddedAnalytics>>,
         consumer: String,
+        consumer_type: String,
         team: String,
         prompt_log_ctx: Option<PromptLogCtx>,
         guardrails: std::sync::Arc<crate::ai::guardrails::GuardrailEngine>,
@@ -1372,6 +1384,7 @@ impl AiStreamBody {
             pricing,
             analytics,
             consumer,
+            consumer_type,
             team,
             spend_recorded: false,
             prompt_log_ctx,
@@ -1546,6 +1559,7 @@ impl AiStreamBody {
                 analytics.offer_ai_spend(crate::analytics::AiSpendRecord {
                     ts_ms: now_ms(),
                     consumer: self.consumer.clone(),
+                    consumer_type: self.consumer_type.clone(),
                     team: self.team.clone(),
                     provider: self.gauges.provider.clone(),
                     model: self.provider_model.clone(),

@@ -270,7 +270,7 @@ use zeroize::Zeroizing;
 
 use crate::config::net::peer_is_trusted;
 use crate::config::{
-    Consumer, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
+    Consumer, ConsumerType, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
 use crate::dataplane::split::{mint_affinity_id, read_cookie};
 use crate::dataplane::upstream::{
@@ -1904,6 +1904,61 @@ where
             .and_then(|p| p.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // DW-113: per-agent tool allowlist. Checked BEFORE the authz
+        // attachment (the most-specific restriction). A consumer with
+        // no allowlist entry passes through (no restriction).
+        if !mcp.consumer_allowed_tool(&consumer, tool_name) {
+            let duration_ms = mcp_tool_started
+                .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let outcome = crate::ai::mcp::McpToolCallOutcome {
+                tool_name: tool_name.to_string(),
+                allowed: false,
+                duration_ms,
+                error_code: Some("tool_not_in_agent_allowlist".to_string()),
+                status: "denied".to_string(),
+            };
+            dp.obs.record_mcp_tool_call(tool_name, "denied");
+            dp.obs
+                .record_mcp_tool_duration(tool_name, duration_ms / 1000.0);
+            if let Some(analytics) = dp.analytics() {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                analytics.offer_mcp_tool_call(crate::analytics::McpToolCallRecord {
+                    ts_ms: now_ms,
+                    request_id: rid.to_string(),
+                    session_id: session_id_hdr.clone().unwrap_or_default(),
+                    consumer: consumer.clone(),
+                    consumer_type: identity
+                        .as_ref()
+                        .map(|i| consumer_type_str(i.consumer_type))
+                        .unwrap_or("user")
+                        .to_string(),
+                    tool_name: outcome.tool_name.clone(),
+                    allowed: outcome.allowed,
+                    duration_ms: outcome.duration_ms,
+                    error_code: outcome.error_code.clone(),
+                    status: outcome.status.clone(),
+                });
+            }
+            let result_json = serde_json::json!({
+                "content": [{"type": "text", "text": "tool not in agent allowlist"}],
+                "isError": true,
+            });
+            let resp = if rpc_req.id.is_none() {
+                serde_json::json!({})
+            } else {
+                crate::ai::mcp::json_rpc_result_pub(rpc_req.id.clone(), result_json)
+            };
+            let status = if rpc_req.id.is_none() {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            return mcp_json_response(status, &resp, session_id_hdr.as_deref());
+        }
         if let Some(authz) = mcp.tool_authz(tool_name) {
             let authz_chain = crate::security::authz::AuthzChain {
                 consumer: None,
@@ -1950,6 +2005,11 @@ where
                         request_id: rid.to_string(),
                         session_id: session_id_hdr.clone().unwrap_or_default(),
                         consumer: consumer.clone(),
+                        consumer_type: identity
+                            .as_ref()
+                            .map(|i| consumer_type_str(i.consumer_type))
+                            .unwrap_or("user")
+                            .to_string(),
                         tool_name: outcome.tool_name.clone(),
                         allowed: outcome.allowed,
                         duration_ms: outcome.duration_ms,
@@ -1992,6 +2052,12 @@ where
                     let mut filtered = Vec::new();
                     for tool in tools_arr {
                         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        // DW-113: per-agent tool allowlist filter. A
+                        // consumer with no allowlist entry sees all
+                        // tools (no restriction).
+                        if !mcp.consumer_allowed_tool(&consumer, name) {
+                            continue;
+                        }
                         let allowed = match mcp.tool_authz(name) {
                             None => true,
                             Some(authz) => {
@@ -2118,6 +2184,11 @@ where
                 request_id: rid.to_string(),
                 session_id: result.session_id.clone().unwrap_or_default(),
                 consumer: consumer.clone(),
+                consumer_type: identity
+                    .as_ref()
+                    .map(|i| consumer_type_str(i.consumer_type))
+                    .unwrap_or("user")
+                    .to_string(),
                 tool_name: outcome.tool_name.clone(),
                 allowed: outcome.allowed,
                 duration_ms: outcome.duration_ms,
@@ -2141,6 +2212,15 @@ where
                 session_id_for_hdr.as_deref(),
             )
         }
+    }
+}
+
+/// The analytics string for a consumer type (DW-113): `"user"` or
+/// `"agent"`. Used by the MCP and AI spend analytics record builders.
+pub(super) fn consumer_type_str(t: ConsumerType) -> &'static str {
+    match t {
+        ConsumerType::User => "user",
+        ConsumerType::Agent => "agent",
     }
 }
 

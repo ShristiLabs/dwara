@@ -554,6 +554,67 @@ per-variant average latencies:
   name; `variant` is the selected variant name. Both labels are
   config-bounded. No consumer label (cardinality rule).
 
+## Agent principals & governance
+
+Agent principals (DW-113) extend the consumer model with typed
+identities, per-agent tool allowlists, per-agent token budgets, and
+typed analytics attribution. An `agent` consumer is a bot principal
+with its own governance rules; a `user` consumer (the default) is a
+human or application caller.
+
+### Consumer type
+
+Each consumer declares a `type` field (`user` or `agent`, defaults
+`user`). The type threads through the authenticated `Identity` into
+analytics records (`ai_spend.consumer_type`, `mcp_tool_calls.
+consumer_type`) so agent traffic is identifiable, governable, and
+billable separately from user traffic.
+
+```yaml
+consumers:
+  - name: agent-bot
+    type: agent
+    credentials:
+      - type: api_key
+        key: agent-key
+    tool_allowlist: [search, fetch]
+    token_budget:
+      tokens_per_min: 1000
+      scope: consumer
+  - name: human-user
+    type: user
+    credentials:
+      - type: api_key
+        key: user-key
+```
+
+### Tool allowlist
+
+A consumer with a non-empty `tool_allowlist` may only call the named
+tools through the MCP gateway. `tools/call` for a non-allowlisted tool
+is denied with `tool_not_in_agent_allowlist`; `tools/list` is filtered
+to show only allowlisted tools. A consumer with an empty allowlist
+(the default) has no restriction. Validation checks that every name
+references a configured `ai.mcp.tools` entry and rejects an allowlist
+when no `ai.mcp` block is configured.
+
+### Per-agent token budget
+
+A consumer with a `token_budget` gets its own direct token budget,
+checked FIRST in the budget engine -- before the policy chain (the
+most-specific budget wins). The budget is consumer-scoped by
+definition; an anonymous caller cannot bind one. A consumer without a
+`token_budget` falls through to the policy chain (route, service,
+listener, global). Validation checks the same shape as a policy
+`token_budget` (at least one window, positive values).
+
+### Analytics
+
+Analytics schema v8 adds a `consumer_type` column to `ai_spend` and
+`mcp_tool_calls` (defaults `'user'`, additive ALTER TABLE migration).
+Every spend record and tool-call record carries the consumer type for
+typed attribution.
+
 ## MCP gateway
 
 The MCP gateway (DW-087) turns dwara into an MCP (Model Context
