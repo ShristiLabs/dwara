@@ -178,6 +178,34 @@ export default withMermaid(
                   text: "Kubernetes Gateway API",
                   link: "/guide/kubernetes-gateway-api",
                 },
+                {
+                  text: "GraphQL awareness",
+                  link: "/guide/graphql",
+                },
+                {
+                  text: "gRPC-Web and transcoding",
+                  link: "/guide/grpc-web",
+                },
+                {
+                  text: "Protocol translation",
+                  link: "/guide/protocol-translation",
+                },
+                {
+                  text: "L4 TCP/UDP proxying",
+                  link: "/guide/l4-proxying",
+                },
+                {
+                  text: "Nano-services (WASM handlers)",
+                  link: "/guide/nano-services",
+                },
+                {
+                  text: "Replay time-travel debugging",
+                  link: "/guide/replay-debugging",
+                },
+                {
+                  text: "A2A protocol",
+                  link: "/guide/a2a-protocol",
+                },
               ],
             },
             {
@@ -222,12 +250,24 @@ export default withMermaid(
                   link: "/guide/cedar-opa-authz",
                 },
                 {
+                  text: "Post-quantum TLS",
+                  link: "/guide/post-quantum-tls",
+                },
+                {
+                  text: "FIPS mode",
+                  link: "/guide/fips-mode",
+                },
+                {
                   text: "Proxy-Wasm plugins",
                   link: "/guide/proxy-wasm-plugins",
                 },
                 {
                   text: "Native plugin filters",
                   link: "/guide/native-plugins",
+                },
+                {
+                  text: "Extism plugin development kit",
+                  link: "/guide/extism-pdk",
                 },
                 {
                   text: "Plugin lifecycle",
@@ -306,6 +346,26 @@ export default withMermaid(
                 {
                   text: "CP/DP split",
                   link: "/guide/cp-dp-split",
+                },
+                {
+                  text: "H3/QUIC upstream transport",
+                  link: "/guide/h3-quic-upstream",
+                },
+                {
+                  text: "Service mesh mode",
+                  link: "/guide/service-mesh",
+                },
+                {
+                  text: "API lifecycle and dev portal",
+                  link: "/guide/api-lifecycle",
+                },
+                {
+                  text: "Ent controller persistence",
+                  link: "/guide/ent-controller-persistence",
+                },
+                {
+                  text: "eBPF hooks (research spike)",
+                  link: "/guide/ebpf-hooks",
                 },
               ],
             },

@@ -152,6 +152,48 @@ Feature areas written up so far (M1-M4 complete):
 - [Web Console](./features/web-console-v1.md) — the static SPA served
   from the mTLS admin listener: read-only diagnostic views (DW-117)
   and the v2 full-CRUD + fleet/workspace views (DW-118).
+- [GraphQL awareness](./features/graphql-awareness.md) — depth and
+  complexity limits, persisted-query enforcement, and query parsing
+  for GraphQL routes (DW-099).
+- [gRPC-Web and JSON-to-gRPC transcoding](./features/grpc-web-transcoding.md)
+  — gRPC-Web framing (base64/text, trailers) for browser clients and
+  JSON-to-gRPC request transcoding via prost descriptors (DW-101).
+- [Replay time-travel debugging](./features/replay-debugging.md) —
+  the pure-decide replayer: capture request inputs, reconstruct
+  routing decisions offline, and replay with modified config
+  (DW-102).
+- [A2A protocol scaffold](./features/a2a-protocol.md) — the
+  Agent-to-Agent protocol adapter, Agent Card parsing, and the stub
+  adapter extending the AI gateway for inter-agent communication
+  (DW-114).
+- [Protocol translation](./features/protocol-translation.md) — the
+  translation framework for REST-to-gRPC, REST-to-GraphQL, and
+  SOAP-to-REST protocol bridging (DW-100).
+- [L4 TCP/UDP proxying](./features/l4-proxying.md) — raw TCP/UDP
+  proxying with SNI-based routing reuse, the L4Dispatcher, and
+  listener.l4 config (DW-103).
+- [Post-quantum TLS](./features/post-quantum-tls.md) — X25519+ML-KEM
+  hybrid key exchange for post-quantum TLS, the experimental pq
+  feature, and the rustls kx group installation (DW-105).
+- [Nano-services](./features/nano-services.md) — WASM route handlers
+  via wasmtime with fuel-based execution limits and memory caps
+  (DW-106).
+- [Service mesh mode](./features/service-mesh.md) — sidecar mesh
+  mode with SPIFFE/SPIRE mTLS identity, inbound/outbound listeners,
+  and iptables/TPROXY redirect (DW-107).
+- [H3/QUIC upstream transport](./features/h3-quic-upstream.md) —
+  HTTP/3 over QUIC as an upstream transport via quinn/h3/h3-quinn,
+  distinct from HTTP/3 ingress (DW-108).
+- [Extism PDK, bot hooks, signed-URL, cert pinning](./features/extism-pdk-bot-hooks.md)
+  — Extism PDK scaffold for plugin development, bot detection hooks,
+  signed-URL verification, and upstream TLS certificate pinning by
+  SPKI hash (DW-109).
+- [API lifecycle](./features/api-lifecycle.md) — developer portal
+  scaffold, environment profiles (dev/staging/prod), and the journey
+  recorder for request tracing (DW-110).
+- [FIPS 140-3 mode](./features/fips-mode.md) — aws-lc-rs FIPS
+  provider, self-test attestation, primitive allowlist, and
+  validation rules that reject non-approved primitives (DW-111).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why
@@ -172,3 +214,8 @@ that marks the prior one Superseded.
   — PostgreSQL selected as the Ent controller's durable store for
   config snapshots, license state, fleet membership, federated
   analytics, and runtime override tables (DW-116).
+- [ADR-0002: eBPF hooks research spike](./adr/0002-ebpf-hooks-research-spike.md)
+  — research spike on aya-rs eBPF integration for ambient mesh
+  redirect, connection-identity enrichment, and drop-notification
+  capture; the `crates/dwara-ebpf/` scaffold and the roadmap for
+  DW-107 ambient mesh (DW-104).

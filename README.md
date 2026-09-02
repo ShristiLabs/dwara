@@ -16,7 +16,9 @@ in the open at [shristilabs/dwara](https://github.com/shristilabs/dwara).
 > security, observability, AI gateway, analytics) is stable and
 > production-shaped. Enterprise and extension features (CP/DP split, Wasm
 > plugins, CEL, aggregation, MCP, K8s translator, fleet operations, global
-> load balancing) are feature-gated and shipping iteratively. See the
+> load balancing, FIPS mode, post-quantum TLS, service mesh, protocol
+> translation, nano-services, API lifecycle, A2A protocol) are
+> feature-gated and shipping iteratively. See the
 > [changelog](./CHANGELOG.md) for what shipped.
 
 ## Documentation
@@ -40,6 +42,15 @@ orientation; treat the docs site as the source of truth.
 | Web console | <https://shristilabs.github.io/dwara/guide/web-console> |
 | AI gateway | <https://shristilabs.github.io/dwara/guide/ai-gateway> |
 | HTTP/3 ingress | <https://shristilabs.github.io/dwara/guide/http3> |
+| GraphQL awareness | <https://shristilabs.github.io/dwara/guide/graphql> |
+| gRPC-Web and transcoding | <https://shristilabs.github.io/dwara/guide/grpc-web> |
+| Protocol translation | <https://shristilabs.github.io/dwara/guide/protocol-translation> |
+| L4 TCP/UDP proxying | <https://shristilabs.github.io/dwara/guide/l4-proxying> |
+| Nano-services (WASM) | <https://shristilabs.github.io/dwara/guide/nano-services> |
+| Service mesh mode | <https://shristilabs.github.io/dwara/guide/service-mesh> |
+| Post-quantum TLS | <https://shristilabs.github.io/dwara/guide/post-quantum-tls> |
+| FIPS 140-3 mode | <https://shristilabs.github.io/dwara/guide/fips-mode> |
+| API lifecycle and dev portal | <https://shristilabs.github.io/dwara/guide/api-lifecycle> |
 | Enterprise features | <https://shristilabs.github.io/dwara/guide/enterprise> |
 | Environment variables | <https://shristilabs.github.io/dwara/reference/environment-variables> |
 | Configuration schema | <https://shristilabs.github.io/dwara/reference/configuration-schema> |
@@ -52,9 +63,17 @@ orientation; treat the docs site as the source of truth.
   bodies pass through with frame-based backpressure).
 - HTTP/3 (h3 over QUIC) ingress with 0-RTT early data policy and Alt-Svc
   advertisement (feature-gated).
+- H3/QUIC upstream transport: dial upstreams over QUIC for reduced
+  connection latency and head-of-line blocking avoidance (feature-gated).
 - TLS termination with multi-SNI certificate selection, plus SNI passthrough.
+- L4 TCP/UDP proxying with SNI-based routing reuse for non-HTTP protocols
+  (feature-gated).
 - gRPC over H2 and managed WebSocket tunnels (origin allowlist, frame-rate
   policing).
+- gRPC-Web framing and JSON-to-gRPC transcoding for browser clients
+  (feature-gated).
+- Protocol translation: REST-to-gRPC, REST-to-GraphQL, and SOAP-to-REST
+  bridging (feature-gated).
 
 **Routing**
 - `exact` (with path parameters), `regex`, and `prefix` matching with fixed
@@ -62,6 +81,8 @@ orientation; treat the docs site as the source of truth.
 - Non-path criteria: host, methods, headers, query, cookies.
 - Path rewrites (`strip_prefix`, `replace_prefix`, `regex`) and
   `redirect` / `respond` direct actions.
+- GraphQL awareness: depth and complexity limits, persisted-query
+  enforcement, and query parsing (feature-gated).
 
 **Load balancing**
 - `round_robin`, `least_requests`, `random`, `ip_hash`, `peak_ewma`
@@ -95,6 +116,13 @@ orientation; treat the docs site as the source of truth.
 - mTLS-only admin API for live config inspection and patching.
 - Secret references resolved at compile time with exhaustive redaction;
   secrets are never logged or included in Debug output.
+- FIPS 140-3 mode: aws-lc-rs FIPS provider with self-test attestation
+  and primitive allowlist (enterprise, feature-gated).
+- Post-quantum TLS: X25519+ML-KEM hybrid key exchange for
+  quantum-resistant transport (experimental, feature-gated).
+- Upstream TLS certificate pinning by SPKI hash (fail-closed).
+- Signed-URL verification for pre-authenticated request routing.
+- Bot detection hooks for automated traffic classification.
 
 **Operability**
 - Hot config reload (file change, debounced, or SIGHUP) with atomic
@@ -115,6 +143,11 @@ orientation; treat the docs site as the source of truth.
 - Synthetic probes with alert firing/recovery and per-route failure
   thresholds.
 - tokio-console integration for live async task diagnostics (feature-gated).
+- Replay time-travel debugging: capture request inputs and reconstruct
+  routing decisions offline with modified config (CLI-driven).
+- API lifecycle: developer portal scaffold, environment profiles
+  (dev/staging/prod), and journey recorder for request tracing
+  (feature-gated).
 
 **Extensions (feature-gated)**
 - Proxy-Wasm plugin lifecycle: loading, hot-swap on reload, failure
@@ -133,6 +166,15 @@ orientation; treat the docs site as the source of truth.
 - Control-plane / data-plane split with cluster sync, conflict resolution,
   split-brain detection, version skew tolerance, fleet operations, and
   federated analytics (enterprise).
+- Nano-services: WASM route handlers via wasmtime with fuel-based
+  execution limits and memory caps (feature-gated).
+- Extism PDK scaffold for cross-language plugin development (feature-gated).
+- Service mesh mode: sidecar deployment with SPIFFE/SPIRE mTLS identity
+  and iptables/TPROXY traffic capture (feature-gated).
+- A2A (Agent-to-Agent) protocol scaffold: Agent Card discovery and
+  routing for inter-agent communication (feature-gated).
+- eBPF hooks research spike: aya-rs scaffold for ambient mesh redirect
+  and connection-identity enrichment (research stage).
 
 **AI gateway**
 - One client dialect (OpenAI chat-completions) in, three provider

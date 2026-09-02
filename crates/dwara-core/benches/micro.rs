@@ -80,7 +80,8 @@ fn bench_gateway() -> Gateway {
                 plugins: Vec::new(),
                 graphql: None,
                 grpc_web: None,
-                translation: None,            });
+                translation: None,
+            });
         }
     }
     let services = (0..10)
@@ -156,7 +157,8 @@ fn bench_gateway() -> Gateway {
         ai: None,
         fleet: None,
         lifecycle: None,
-        mesh: None,    }
+        mesh: None,
+    }
 }
 
 fn bench_micro(c: &mut Criterion) {
