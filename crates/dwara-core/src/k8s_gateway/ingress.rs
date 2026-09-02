@@ -341,6 +341,7 @@ pub fn translate_ingress(
                         dns_discovery: None,
                         locality: None,
                         pq: false,
+                        peak_ewma: None,
                     };
                     upstreams.push(upstream);
 
@@ -401,6 +402,7 @@ pub fn translate_ingress(
                     plugins: Vec::new(),
                     graphql: None,
                     grpc_web: None,
+                    translation: None,
                 };
                 dwara_routes.push(dwara_route);
             }
@@ -418,6 +420,8 @@ pub fn translate_ingress(
         proxy_protocol: false,
         policies: Vec::new(),
         authorization: None,
+        alt_svc: None,
+        l4: None,
     });
 
     if !tls_configs.is_empty() {
@@ -456,6 +460,8 @@ pub fn translate_ingress(
             proxy_protocol: false,
             policies: Vec::new(),
             authorization: None,
+            alt_svc: None,
+            l4: None,
         });
     }
 
@@ -489,6 +495,8 @@ pub fn translate_ingress(
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
 
     Ok(TranslationResult {

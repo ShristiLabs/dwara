@@ -273,6 +273,8 @@ impl Reconciler {
             plugins: Vec::new(),
             ai: None,
             fleet: None,
+            lifecycle: None,
+            mesh: None,
         };
 
         for gw in &self.gateways {

@@ -248,11 +248,9 @@ pub fn is_primitive_allowed(primitive: &str) -> bool {
         // allowed. A primitive that does not match any allowlist is
         // allowed UNLESS it is a known-non-approved primitive (the
         // explicit denylist below).
-        if FIPS_ALLOWED_CIPHERS.iter().any(|c| *c == lower.as_str())
-            || FIPS_ALLOWED_SIGNATURES.iter().any(|s| *s == lower.as_str())
-            || FIPS_ALLOWED_CREDENTIAL_HASHES
-                .iter()
-                .any(|h| *h == lower.as_str())
+        if FIPS_ALLOWED_CIPHERS.contains(&lower.as_str())
+            || FIPS_ALLOWED_SIGNATURES.contains(&lower.as_str())
+            || FIPS_ALLOWED_CREDENTIAL_HASHES.contains(&lower.as_str())
         {
             return true;
         }
@@ -289,7 +287,7 @@ pub fn is_cipher_suite_disallowed(cipher: &str) -> bool {
     #[cfg(feature = "fips")]
     {
         let lower = cipher.to_ascii_lowercase();
-        !FIPS_ALLOWED_CIPHERS.iter().any(|c| *c == lower.as_str())
+        !FIPS_ALLOWED_CIPHERS.contains(&lower.as_str())
     }
 
     #[cfg(not(feature = "fips"))]
@@ -308,7 +306,7 @@ pub fn is_signature_disallowed(signature: &str) -> bool {
     #[cfg(feature = "fips")]
     {
         let lower = signature.to_ascii_lowercase();
-        !FIPS_ALLOWED_SIGNATURES.iter().any(|s| *s == lower.as_str())
+        !FIPS_ALLOWED_SIGNATURES.contains(&lower.as_str())
     }
 
     #[cfg(not(feature = "fips"))]
@@ -329,9 +327,7 @@ pub fn is_credential_hash_disallowed(hash_prefix: &str) -> bool {
     #[cfg(feature = "fips")]
     {
         let lower = hash_prefix.to_ascii_lowercase();
-        !FIPS_ALLOWED_CREDENTIAL_HASHES
-            .iter()
-            .any(|h| *h == lower.as_str())
+        !FIPS_ALLOWED_CREDENTIAL_HASHES.contains(&lower.as_str())
     }
 
     #[cfg(not(feature = "fips"))]

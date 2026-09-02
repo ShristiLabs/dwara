@@ -411,6 +411,8 @@ pub fn translate(
             proxy_protocol: false,
             policies: Vec::new(),
             authorization: None,
+            alt_svc: None,
+            l4: None,
         };
         listeners.push(dwara_listener);
     }
@@ -501,6 +503,7 @@ pub fn translate(
                             dns_discovery: None,
                             locality: None,
                             pq: false,
+                            peak_ewma: None,
                         };
                         upstreams.push(upstream);
 
@@ -564,6 +567,7 @@ pub fn translate(
                     plugins: Vec::new(),
                     graphql: None,
                     grpc_web: None,
+                    translation: None,
                 };
                 dwara_routes.push(dwara_route);
             }
@@ -601,6 +605,8 @@ pub fn translate(
         plugins: Vec::new(),
         ai: None,
         fleet: None,
+        lifecycle: None,
+        mesh: None,
     };
 
     Ok(TranslationResult {

@@ -62,7 +62,7 @@ use h3::client::{self, SendRequest};
 use h3_quinn::OpenStreams;
 use http::{HeaderMap, Response, StatusCode};
 use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{ClientConfig, Connection as QuinnConnection, Endpoint};
+use quinn::{ClientConfig, Endpoint};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -97,7 +97,7 @@ pub enum H3Error {
     Endpoint(std::io::Error),
     /// The rustls client config could not be turned into a QUIC client
     /// config.
-    Crypto(rustls::Error),
+    Crypto(String),
 }
 
 impl std::fmt::Display for H3Error {
@@ -127,7 +127,16 @@ impl From<H3Error> for UpstreamError {
             H3Error::H3(e) => UpstreamError::Io(std::io::Error::other(e.to_string())),
             H3Error::Stream(e) => UpstreamError::Io(std::io::Error::other(e.to_string())),
             H3Error::Endpoint(e) => UpstreamError::Io(e),
-            H3Error::Crypto(e) => UpstreamError::Io(std::io::Error::other(e.to_string())),
+            H3Error::Crypto(e) => UpstreamError::Io(std::io::Error::other(e)),
+        }
+    }
+}
+
+impl From<UpstreamError> for H3Error {
+    fn from(e: UpstreamError) -> Self {
+        match e {
+            UpstreamError::Io(io) => H3Error::Endpoint(io),
+            other => H3Error::Endpoint(std::io::Error::other(other.to_string())),
         }
     }
 }
@@ -206,8 +215,8 @@ impl QuicStreamPool {
         stats: Arc<UpstreamStats>,
     ) -> Result<Self, H3Error> {
         let tls = Arc::new(https_h3_client_config(roots));
-        let quic_client_config =
-            QuicClientConfig::try_from(Arc::clone(&tls)).map_err(H3Error::Crypto)?;
+        let quic_client_config = QuicClientConfig::try_from(Arc::clone(&tls))
+            .map_err(|e| H3Error::Crypto(e.to_string()))?;
         let mut client_config = ClientConfig::new(Arc::new(quic_client_config));
         // Keep the client config's transport defaults; quinn's defaults
         // are sane for short-lived request streams. A follow-up can wire
@@ -242,14 +251,17 @@ impl QuicStreamPool {
     /// task pumps h3 control frames; the returned entry keeps a
     /// cloneable `SendRequest` for opening streams.
     async fn dial(&self, addr: SocketAddr, server_name: &str) -> Result<ConnEntry, H3Error> {
-        let quinn_conn = match timeout(
-            self.connect_timeout,
-            self.endpoint.connect(addr, server_name),
-        )
+        let quinn_conn = match timeout(self.connect_timeout, async {
+            self.endpoint
+                .connect(addr, server_name)
+                .map_err(|e| H3Error::Endpoint(std::io::Error::other(e.to_string())))?
+                .await
+                .map_err(H3Error::Connect)
+        })
         .await
         {
             Ok(Ok(c)) => c,
-            Ok(Err(e)) => return Err(H3Error::Connect(e)),
+            Ok(Err(e)) => return Err(e),
             Err(_elapsed) => {
                 return Err(H3Error::Connect(quinn::ConnectionError::TimedOut));
             }
@@ -381,17 +393,12 @@ pub async fn h3_request(
     let status: StatusCode = resp_head.status();
     let headers: HeaderMap = resp_head.headers().clone();
     let mut buf = Vec::new();
-    loop {
-        match stream.recv_data().await.map_err(H3Error::Stream)? {
-            Some(chunk) => {
-                // `recv_data` yields `impl Buf`; copy it out. The chunk
-                // is already decrypted QUIC stream data, so a copy is the
-                // cost of buffering (documented v1 limitation).
-                let bytes = chunk.copy_to_bytes(chunk.remaining());
-                buf.extend_from_slice(&bytes);
-            }
-            None => break,
-        }
+    while let Some(mut chunk) = stream.recv_data().await.map_err(H3Error::Stream)? {
+        // `recv_data` yields `impl Buf`; copy it out. The chunk
+        // is already decrypted QUIC stream data, so a copy is the
+        // cost of buffering (documented v1 limitation).
+        let bytes = chunk.copy_to_bytes(chunk.remaining());
+        buf.extend_from_slice(&bytes);
     }
     // Trailers are discarded (the proxy does not forward upstream
     // trailers today); drain to cleanly close the stream.

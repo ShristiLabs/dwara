@@ -547,9 +547,17 @@ pub fn serialize_request(
     buf
 }
 
+/// The deserialized parts of a nano-service wire-format request.
+pub struct DeserializedRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
 /// Deserialize a nano-service wire-format request back into its parts.
 /// Returns `None` on a truncated/corrupt buffer.
-pub fn deserialize_request(buf: &[u8]) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
+pub fn deserialize_request(buf: &[u8]) -> Option<DeserializedRequest> {
     let mut pos = 0;
     let method = read_str(buf, &mut pos)?;
     let path = read_str(buf, &mut pos)?;
@@ -565,7 +573,12 @@ pub fn deserialize_request(buf: &[u8]) -> Option<(String, String, Vec<(String, S
         return None;
     }
     let body = buf[pos..pos + body_len].to_vec();
-    Some((method, path, headers, body))
+    Some(DeserializedRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
 fn write_str(buf: &mut Vec<u8>, s: &str) {
@@ -604,21 +617,21 @@ mod tests {
         ];
         let body = b"{\"hello\":\"world\"}";
         let wire = serialize_request("POST", "/v1/echo", &headers, body);
-        let (method, path, hs, bd) = deserialize_request(&wire).expect("round trip");
-        assert_eq!(method, "POST");
-        assert_eq!(path, "/v1/echo");
-        assert_eq!(hs, headers);
-        assert_eq!(bd, body);
+        let req = deserialize_request(&wire).expect("round trip");
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, "/v1/echo");
+        assert_eq!(req.headers, headers);
+        assert_eq!(req.body, body);
     }
 
     #[test]
     fn request_round_trip_empty() {
         let wire = serialize_request("GET", "/", &[], &[]);
-        let (method, path, hs, bd) = deserialize_request(&wire).expect("round trip");
-        assert_eq!(method, "GET");
-        assert_eq!(path, "/");
-        assert!(hs.is_empty());
-        assert!(bd.is_empty());
+        let req = deserialize_request(&wire).expect("round trip");
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/");
+        assert!(req.headers.is_empty());
+        assert!(req.body.is_empty());
     }
 
     #[test]

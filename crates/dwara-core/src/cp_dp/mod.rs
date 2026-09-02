@@ -255,11 +255,11 @@ impl ControllerState {
     /// (or log a warning, depending on the policy's enforcement mode).
     pub fn check_edge_version_skew(
         &self,
-        policy: super::cluster_sync::VersionSkewPolicy,
+        policy: cluster_sync::VersionSkewPolicy,
         controller_version: &str,
         edge_version: &str,
-    ) -> Result<(), super::cluster_sync::VersionSkewError> {
-        super::cluster_sync::check_version_skew(policy, controller_version, edge_version)
+    ) -> Result<(), cluster_sync::VersionSkewError> {
+        cluster_sync::check_version_skew(policy, controller_version, edge_version)
     }
 
     /// DW-098 (Ent): the per-edge version skew status. Returns one
@@ -267,14 +267,14 @@ impl ControllerState {
     /// version, and whether it passes the skew check.
     pub fn edge_skew_status(
         &self,
-        policy: super::cluster_sync::VersionSkewPolicy,
+        policy: cluster_sync::VersionSkewPolicy,
         controller_version: &str,
     ) -> Vec<EdgeSkewStatus> {
         let edges = self.edges.read().unwrap();
         edges
             .values()
             .map(|info| {
-                let compatible = super::cluster_sync::check_version_skew(
+                let compatible = cluster_sync::check_version_skew(
                     policy,
                     controller_version,
                     &info.registration.version,

@@ -1194,10 +1194,12 @@ impl UpstreamHandle {
                     if let Some(h3) = &self.h3 {
                         // Buffer the request body (the H3 path sends it as
                         // one DATA frame; see `dataplane::upstream_h3`).
+                        let method = req.method().clone();
+                        let headers = req.headers().clone();
                         let body_bytes = match req.into_body().collect().await {
                             Ok(collected) => collected.to_bytes(),
                             Err(e) => {
-                                let err = UpstreamError::Io(std::io::Error::other(e.to_string()));
+                                let err = UpstreamError::Io(std::io::Error::other(e));
                                 if let Some(health) = &dispatch.health {
                                     health.report(self.lb.now_ms(), true);
                                 }
@@ -1207,12 +1209,14 @@ impl UpstreamHandle {
                             }
                         };
                         let mut h3_req = hyper::Request::builder()
-                            .method(req.method().clone())
+                            .method(method)
                             .uri(format!("https://{authority}{path}"));
-                        *h3_req.headers_mut() = req.headers().clone();
+                        if let Some(h) = h3_req.headers_mut() {
+                            *h = headers;
+                        }
                         // H3 speaks HTTP/3; stamp the version so the
                         // upstream sees its own dialect.
-                        *h3_req.version_mut() = hyper::Version::HTTP_3;
+                        h3_req = h3_req.version(hyper::Version::HTTP_3);
                         let h3_req = h3_req.body(body_bytes).expect("static builder");
                         h3.send(&dispatch.address, dispatch.port, &dispatch.address, h3_req)
                             .await
@@ -1462,7 +1466,9 @@ fn build_handle(
         if matches!(u.protocol, UpstreamProtocol::H3) {
             match crate::dataplane::upstream_h3::H3UpstreamHandle::new(
                 u.name.clone(),
-                tls_roots.clone().unwrap_or_default(),
+                tls_roots
+                    .clone()
+                    .unwrap_or_else(rustls::RootCertStore::empty),
                 connect_timeout,
                 cap,
                 effective_read_timeout(u),

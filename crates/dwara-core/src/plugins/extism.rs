@@ -45,7 +45,7 @@ use std::fmt;
 
 use crate::config::PluginPhase;
 
-use super::filter::{FilterOutcome, LocalResponse, NativeFilter};
+use super::filter::{FilterOutcome, NativeFilter};
 
 /// An Extism PDK plugin definition (DW-109).
 ///

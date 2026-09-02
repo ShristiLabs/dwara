@@ -144,9 +144,7 @@ fn fips_provider() -> rustls::crypto::CryptoProvider {
         .iter()
         .filter(|suite| {
             let name = format!("{:?}", suite.suite()).to_ascii_lowercase();
-            FIPS_ALLOWED_CIPHERS
-                .iter()
-                .any(|allowed| *allowed == name.as_str())
+            FIPS_ALLOWED_CIPHERS.contains(&name.as_str())
         })
         .copied()
         .collect();
@@ -803,13 +801,13 @@ impl TlsTermination {
                     .map_err(|e| TlsError::ClientAuth(format!("building client verifier: {e}")))?;
                     ServerConfig::builder_with_provider(Arc::clone(&provider))
                         .with_safe_default_protocol_versions()
-                        .map_err(|e| TlsError::Rustls(e))?
+                        .map_err(TlsError::Rustls)?
                         .with_client_cert_verifier(verifier)
                         .with_cert_resolver(Arc::new(resolver))
                 }
                 None => ServerConfig::builder_with_provider(Arc::clone(&provider))
                     .with_safe_default_protocol_versions()
-                    .map_err(|e| TlsError::Rustls(e))?
+                    .map_err(TlsError::Rustls)?
                     .with_no_client_auth()
                     .with_cert_resolver(Arc::new(resolver)),
             };
@@ -904,7 +902,7 @@ pub fn admin_mtls_server_config(
         .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;
         let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_safe_default_protocol_versions()
-            .map_err(|e| TlsError::Rustls(e))?
+            .map_err(TlsError::Rustls)?
             .with_client_cert_verifier(verifier)
             .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
         config.alpn_protocols = vec![b"http/1.1".to_vec()];

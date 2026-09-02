@@ -319,7 +319,7 @@ async fn probe_once_h3(
         let status = resp.status().as_u16();
         // Drain any body the server sends (HEAD should be empty, but be
         // robust) so the stream closes cleanly.
-        while let Some(chunk) = stream
+        while let Some(mut chunk) = stream
             .recv_data()
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?
@@ -420,17 +420,10 @@ async fn probe_loop(
             // TCP/TLS probe. The h3 branch is feature-gated; when the
             // feature is off `h3_tls` is never Some (respawn skips H3
             // upstreams), so the unreachable `false` arm never runs.
-            let ok = if h3_tls.is_some() {
+            let ok = if let Some(_h3_cfg) = &h3_tls {
                 #[cfg(feature = "h3")]
                 {
-                    probe_once_h3(
-                        h3_tls.as_ref().expect("h3_tls Some implies feature h3"),
-                        &address,
-                        port,
-                        &active.path,
-                        active.timeout,
-                    )
-                    .await
+                    probe_once_h3(_h3_cfg, &address, port, &active.path, active.timeout).await
                 }
                 #[cfg(not(feature = "h3"))]
                 {
@@ -551,7 +544,7 @@ impl ActiveProbes {
                     // DW-108: H3 upstreams probe over QUIC; pass the H3
                     // TLS config when the feature is on, None otherwise.
                     #[cfg(feature = "h3")]
-                    handle.h3_handle().map(|_| tls.clone()),
+                    handle.h3_handle().map(|h| Arc::clone(h.tls_config())),
                     #[cfg(not(feature = "h3"))]
                     None,
                 ));

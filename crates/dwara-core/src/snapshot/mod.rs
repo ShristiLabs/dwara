@@ -7365,7 +7365,7 @@ fn spki_algorithm_of_leaf(cert: &rustls_pki_types::CertificateDer<'_>) -> Option
         // caller to decide. The FIPS check treats unknown algorithms as
         // allowed (conservative: only known non-approved primitives are
         // denied).
-        Some(format!("unknown:{}", hex_oid(&oid)))
+        Some(format!("unknown:{}", hex_oid(oid)))
     }
 }
 
