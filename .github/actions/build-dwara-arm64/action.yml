@@ -34,8 +34,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
-
     - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable
       with:
         toolchain: "1.94.0"

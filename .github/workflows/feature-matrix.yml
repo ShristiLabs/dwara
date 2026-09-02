@@ -183,6 +183,9 @@ jobs:
             cli_features: "ent,k8s"
 
     steps:
+      # Checkout must run before referencing a local composite action.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
+
       - uses: ./.github/actions/build-dwara-arm64
         with:
           features: ${{ matrix.features }}
@@ -306,6 +309,9 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.prepare-custom.outputs.matrix) }}
     steps:
+      # Checkout must run before referencing a local composite action.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
+
       - uses: ./.github/actions/build-dwara-arm64
         with:
           features: ${{ matrix.features }}
