@@ -60,6 +60,53 @@ fn free_port() -> u16 {
 }
 
 fn wait_for_ready(addr: &str, deadline: Instant) -> bool {
+    // Send an actual HTTP request to the reserved /healthz path,
+    // not just a TCP connect: the listener binds before the route
+    // table is compiled, and a bare-TCP-connect check returns true
+    // before the server can process requests. In CI this causes the
+    // body-stall test to connect, send headers, and get an immediate
+    // close (the server is not ready yet) — which trips the lower-
+    // bound assertion. Using /healthz (a reserved path handled before
+    // route resolution) avoids proxying to the backend and polluting
+    // the backend's request log.
+    while Instant::now() < deadline {
+        if let Ok(mut s) = TcpStream::connect(addr) {
+            if s.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .is_ok()
+            {
+                let mut buf = Vec::new();
+                if s.read_to_end(&mut buf).is_ok() {
+                    let resp = String::from_utf8_lossy(&buf);
+                    if resp.contains("HTTP/1.1 200") {
+                        return true;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// Readiness check for the admin listener (mTLS): a bare TCP connect
+/// is the best we can do without a client certificate. The admin
+/// listener binds after its TLS config is loaded, so a successful
+/// TCP connect means it is ready to accept TLS handshakes.
+fn wait_for_admin_ready(addr: &str, deadline: Instant) -> bool {
+    while Instant::now() < deadline {
+        if TcpStream::connect(addr).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// Readiness check for proxy-protocol listeners: a bare TCP connect
+/// is the only option because the listener expects a PROXY header
+/// before any HTTP data, so an HTTP /healthz request would be
+/// rejected as a missing proxy header.
+fn wait_for_ready_tcp(addr: &str, deadline: Instant) -> bool {
     while Instant::now() < deadline {
         if TcpStream::connect(addr).is_ok() {
             return true;
@@ -261,7 +308,7 @@ fn start_server_ex(
     );
     if with_admin {
         assert!(
-            wait_for_ready(&admin_addr, Instant::now() + Duration::from_secs(10)),
+            wait_for_admin_ready(&admin_addr, Instant::now() + Duration::from_secs(10)),
             "admin listener did not become ready on {admin_addr} within 10s"
         );
     }
@@ -1806,7 +1853,7 @@ fn start_proxy_protocol_server(tag: &str) -> (String, Arc<Mutex<Vec<String>>>, S
         .stderr(std::fs::File::create(&stderr_log).expect("stderr log"));
     let guard = ServerGuard(cmd.spawn().expect("failed to spawn dwara binary"));
     assert!(
-        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        wait_for_ready_tcp(&addr, Instant::now() + Duration::from_secs(10)),
         "dwara did not become ready on {addr} within 10s"
     );
     std::fs::remove_file(&config).ok();
@@ -2018,7 +2065,7 @@ fn start_proxy_protocol_tls_server(
         .stderr(Stdio::null());
     let guard = ServerGuard(cmd.spawn().expect("failed to spawn dwara binary"));
     assert!(
-        wait_for_ready(&addr, Instant::now() + Duration::from_secs(10)),
+        wait_for_ready_tcp(&addr, Instant::now() + Duration::from_secs(10)),
         "dwara did not become ready on {addr} within 10s"
     );
     (addr, log, guard, cert.cert.der().clone())

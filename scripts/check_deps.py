@@ -76,7 +76,10 @@ ALLOWED = {
     # The controller watch loop compiles configs via snapshot, so the
     # domain may depend on config and snapshot. The gRPC transport
     # (tonic) is feature-gated behind `ent`.
-    "cp_dp": {"config", "snapshot"},
+    # DW-095: federated analytics — the controller-side collector
+    # implements the AnalyticsSink trait and uses Event/ExtensionsError
+    # from extensions, so cp_dp may depend on extensions.
+    "cp_dp": {"config", "snapshot", "extensions"},
     # DW-075: AI provider-adapter pack. Pure translation over the
     # canonical chat types plus the compiled alias table; the config
     # block's schema lives in config. The HTTP transport is the
