@@ -84,22 +84,24 @@
     var grid = el('div', { class: 'stat-grid' });
     content.appendChild(card('Gateway Overview', grid));
 
-    // Fetch health + stats in parallel.
-    Promise.all([fetchJSON('/health'), fetchJSON('/stats')])
+    // Fetch health + stats + config_dump in parallel.
+    Promise.all([fetchJSON('/health'), fetchJSON('/stats'), fetchJSON('/config_dump')])
       .then(function (results) {
         var health = results[0];
         var stats = results[1];
+        var config = results[2];
 
-        // Health status.
-        var healthStatus = health.status || 'unknown';
-        setStatusBadge(healthStatus === 'ok' ? 'healthy' : 'unhealthy');
+        // Health status: /health returns {ready, config_generation, upstreams}.
+        var isReady = health.ready !== false;
+        var healthStatus = isReady ? 'ok' : 'degraded';
+        setStatusBadge(isReady ? 'healthy' : 'unhealthy');
 
         grid.appendChild(makeStat('Status', healthStatus));
         grid.appendChild(makeStat('Active Requests', stats.active_requests || 0));
-        grid.appendChild(makeStat('Uptime', formatUptime(health.uptime_secs)));
-        grid.appendChild(makeStat('Config Epoch', health.config_epoch || 'n/a'));
-        grid.appendChild(makeStat('Routes', health.routes || 0));
-        grid.appendChild(makeStat('Listeners', health.listeners || 0));
+        grid.appendChild(makeStat('Config Generation', health.config_generation || 'n/a'));
+        grid.appendChild(makeStat('Routes', (config.routes || []).length));
+        grid.appendChild(makeStat('Listeners', (config.listeners || []).length));
+        grid.appendChild(makeStat('Upstreams', Object.keys(health.upstreams || {}).length));
 
         setLastRefresh();
       })
@@ -130,10 +132,10 @@
     content.appendChild(card('Routes', tableWrap, renderRoutes));
     tableWrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
 
-    fetchJSON('/config')
+    fetchJSON('/config_dump')
       .then(function (config) {
         tableWrap.innerHTML = '';
-        var routes = (config.gateway && config.gateway.routes) || [];
+        var routes = config.routes || [];
         if (routes.length === 0) {
           tableWrap.appendChild(el('p', { text: 'No routes configured.' }));
           return;
@@ -147,11 +149,17 @@
         ])));
         var tbody = el('tbody');
         routes.forEach(function (r) {
+          var pathMatch = r.match && r.match.path;
+          var pathStr = '';
+          if (pathMatch) {
+            pathStr = (pathMatch.type || '') + ': ' + (pathMatch.value || '');
+          }
+          var methods = (r.match && r.match.methods) || ['*'];
           tbody.appendChild(el('tr', {}, [
             el('td', { text: r.name || '' }),
-            el('td', { text: (r.match && r.match.path) || '' }),
+            el('td', { text: pathStr }),
             el('td', { text: r.service || '' }),
-            el('td', { text: (r.methods || ['*']).join(', ') }),
+            el('td', { text: methods.join(', ') }),
           ]));
         });
         table.appendChild(tbody);
@@ -171,11 +179,20 @@
     content.appendChild(card('Upstreams / Services', tableWrap, renderUpstreams));
     tableWrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
 
-    fetchJSON('/stats')
-      .then(function (stats) {
+    fetchJSON('/health')
+      .then(function (health) {
         tableWrap.innerHTML = '';
-        var upstreams = stats.upstreams || [];
-        if (upstreams.length === 0) {
+        var upstreams = health.upstreams || {};
+        var rows = [];
+        for (var upName in upstreams) {
+          if (!Object.prototype.hasOwnProperty.call(upstreams, upName)) continue;
+          var endpoints = upstreams[upName].endpoints || {};
+          for (var addr in endpoints) {
+            if (!Object.prototype.hasOwnProperty.call(endpoints, addr)) continue;
+            rows.push({ service: upName, address: addr, health: endpoints[addr] });
+          }
+        }
+        if (rows.length === 0) {
           tableWrap.appendChild(el('p', { text: 'No upstream data available.' }));
           return;
         }
@@ -184,20 +201,17 @@
           el('th', { text: 'Service' }),
           el('th', { text: 'Address' }),
           el('th', { text: 'Health' }),
-          el('th', { text: 'Requests' }),
-          el('th', { text: 'Errors' }),
         ])));
         var tbody = el('tbody');
-        upstreams.forEach(function (u) {
+        rows.forEach(function (u) {
           var healthClass = 'health-ok';
           if (u.health === 'down') healthClass = 'health-down';
-          else if (u.health === 'degraded') healthClass = 'health-degraded';
+          else if (u.health === 'degraded' || u.health === 'half_open') healthClass = 'health-degraded';
+          else if (u.health === 'ejected') healthClass = 'health-down';
           tbody.appendChild(el('tr', {}, [
             el('td', { text: u.service || '' }),
             el('td', { text: u.address || '' }),
             el('td', { class: healthClass, text: u.health || 'unknown' }),
-            el('td', { text: u.requests || 0 }),
-            el('td', { text: u.errors || 0 }),
           ]));
         });
         table.appendChild(tbody);
@@ -224,8 +238,8 @@
         pre.textContent = JSON.stringify(health, null, 2);
         wrap.appendChild(pre);
 
-        var status = health.status || 'unknown';
-        setStatusBadge(status === 'ok' ? 'healthy' : 'unhealthy');
+        var status = health.ready ? 'ok' : 'degraded';
+        setStatusBadge(health.ready ? 'healthy' : 'unhealthy');
         setLastRefresh();
       })
       .catch(function (err) {
@@ -242,7 +256,11 @@
     content.appendChild(card('Analytics Top-N', wrap, renderAnalytics));
     wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
 
-    fetchJSON('/analytics/top?limit=10')
+    // /analytics/top requires kind + from_ms + to_ms epoch-millisecond bounds.
+    var now = Date.now();
+    var fromMs = now - 3600000; // last 1 hour
+    var toMs = now;
+    fetchJSON('/analytics/top?kind=routes&from_ms=' + fromMs + '&to_ms=' + toMs + '&limit=10')
       .then(function (data) {
         wrap.innerHTML = '';
         var pre = el('pre');
@@ -260,10 +278,12 @@
     var content = document.getElementById('content');
     content.innerHTML = '';
     var wrap = el('div');
-    content.appendChild(card('Current Config', wrap, renderConfig));
+    content.appendChild(card('Current Config (YAML)', wrap, renderConfig));
     wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
 
-    fetchText('/config_dump')
+    // /config returns the YAML text (application/yaml); /config_dump
+    // returns the typed JSON. Display the YAML for readability.
+    fetchText('/config')
       .then(function (yaml) {
         wrap.innerHTML = '';
         var pre = el('pre');
@@ -409,8 +429,8 @@
     var preview = el('div');
     wrap.appendChild(preview);
 
-    // Load current config.
-    fetchText('/config_dump')
+    // Load current config as YAML from /config (application/yaml).
+    fetchText('/config')
       .then(function (yaml) {
         textarea.value = yaml;
         editorState.yaml = yaml;
@@ -486,7 +506,7 @@
 
     // Reset button: reload current config.
     resetBtn.addEventListener('click', function () {
-      fetchText('/config_dump')
+      fetchText('/config')
         .then(function (yaml) {
           textarea.value = yaml;
           editorState.yaml = yaml;
