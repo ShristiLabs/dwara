@@ -1,8 +1,13 @@
-# Quickstart (DW-026): one command, TLS proxying a demo upstream.
+# OSS quickstart: a comprehensive, feature-complete demonstration of
+# every OSS capability in a single runnable gateway.
 #
-#   ../gen-certs.sh
-#   docker compose up
+#   ../gen-certs.sh          # server + client CA + client cert
+#   docker compose up        # builds the gateway image (../../Dockerfile.scratch)
 #   curl --cacert ../certs/server.crt https://localhost:8443/
+#
+# The gateway terminates TLS on :8443, serves plaintext HTTP on :8080,
+# and exposes the mTLS-only admin API on :2019. The analytics SQLite
+# database is persisted in a named volume.
 #
 # The gateway image is built from ../../Dockerfile.scratch (static musl
 # binary on FROM scratch). Scratch has no users, so the service injects
@@ -21,11 +26,27 @@ services:
     user: "65532:65532"
     environment:
       DWARA_CONFIG: /etc/dwara/dwara.yaml
+      # State store (DW-018): SQLite DB for consumer quotas, prompt
+      # overrides, MCP sessions. Without this, consumer quotas are
+      # NOT enforced (the gateway logs a warning on each request).
+      DWARA_STATE_DB: /var/lib/dwara/state.db
     volumes:
       - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
       - ../certs:/etc/dwara/certs:ro
+      # Analytics SQLite database (DW-043): persisted across restarts.
+      # The ./data directory is bind-mounted; on Linux it must be
+      # writable by UID 65532 (sudo chown -R 65532:65532 data).
+      - ./data:/var/lib/dwara
     ports:
+      # TLS-terminated HTTPS (the primary entry point).
       - "8443:8443"
+      # Plaintext HTTP (local dev / health checks).
+      - "8080:8080"
+      # mTLS-only admin API (DW-022): GET/PATCH /config, /health, /stats.
+      # Requires a client cert signed by ../certs/client-ca.crt:
+      #   curl --cert ../certs/client.crt --key ../certs/client.key \
+      #     --cacert ../certs/server.crt https://localhost:2019/health
+      - "2019:2019"
     depends_on:
       - upstream
   upstream:

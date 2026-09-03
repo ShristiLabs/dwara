@@ -1,6 +1,9 @@
 # gen-certs.sh output: local self-signed material, never committed
 certs/
 
+# oss/ quickstart: analytics SQLite database (bind-mounted, runtime state)
+oss/data/
+
 # enterprise/ quickstart: edge config caches (seeded per README, then
 # maintained by dwara-edge at runtime) -- derived state, never committed
 enterprise/edge-1/
