@@ -1910,6 +1910,52 @@ fn validate_redis_rate_limiter(gateway: &Gateway, issues: &mut Vec<ValidationIss
     }
 }
 
+/// Validate the `gateway.redis_quotas` block (DW-155): the URL must be
+/// non-empty, the connection timeout must be in 100..=30 000 ms, and
+/// the key prefix must be non-empty. The license check (does the
+/// license grant `redis_quotas`?) is NOT a validation concern — it
+/// runs at startup in dwara-bin (where a missing claim can log a
+/// warning and fall back to the local SQLite checker), not in the
+/// compile pipeline.
+fn validate_redis_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(rq) = &gateway.redis_quotas else {
+        return;
+    };
+    if rq.url.trim().is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_quotas.url",
+            "redis_quotas.url must be a non-empty Redis URL",
+        ));
+    }
+    let timeout = rq.connection_timeout_ms;
+    if !(crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS
+        ..=crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS)
+        .contains(&timeout)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_quotas.connection_timeout_ms",
+            format!(
+                "redis_quotas.connection_timeout_ms {} is out of range: must be {}..={}",
+                timeout,
+                crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS,
+                crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS,
+            ),
+        ));
+    }
+    if rq.key_prefix.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_quotas.key_prefix",
+            "redis_quotas.key_prefix must be a non-empty string",
+        ));
+    }
+}
+
 /// Validate the `gateway.config_convergence` block (DW-054): the
 /// backend must be `"redis"` (the only v1 backend; etcd/Consul are
 /// deferred behind the trait), `redis_url` must be present and
@@ -4176,6 +4222,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // startup in dwara-bin, where a missing claim logs a warning and
     // falls back to the local limiter).
     validate_redis_rate_limiter(gateway, &mut issues);
+
+    // DW-155: Redis quotas config (URL non-empty, timeout bounds; the
+    // license claim check is NOT validation — it runs at startup in
+    // dwara-bin, where a missing claim logs a warning and falls back to
+    // the local SQLite checker).
+    validate_redis_quotas(gateway, &mut issues);
 
     // DW-054: config convergence (backend type, redis_url presence,
     // interval bounds; the license claim check is NOT validation — it
@@ -7913,6 +7965,7 @@ impl Snapshot {
                 license: None,
                 oidc_providers: Vec::new(),
                 redis_rate_limiter: None,
+                redis_quotas: None,
                 config_convergence: None,
                 plugins: Vec::new(),
                 ai: None,

@@ -150,6 +150,7 @@ fn base_gateway() -> Gateway {
         license: None,
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
+        redis_quotas: None,
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,
@@ -2347,4 +2348,78 @@ fn compiled_body_ops_mirror_route_config_in_lockstep() {
     let idx2 = compiled2.route_table().find("/").unwrap_or(0);
     assert!(compiled2.route_table().request_body_ops(idx2).is_none());
     assert!(compiled2.route_table().response_body_ops(idx2).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// DW-155: Redis quotas config validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redis_quotas_empty_url_rejected() {
+    let mut gw = base_gateway();
+    gw.redis_quotas = Some(dwara_core::config::RedisQuotaConfig {
+        url: "   ".into(),
+        fail_open: true,
+        key_prefix: "dwara:quota:".into(),
+        connection_timeout_ms: 1000,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "redis_quotas.url" && i.message.contains("non-empty Redis URL")),
+        "expected redis_quotas.url non-empty validation issue, got: {issues:?}"
+    );
+}
+
+#[test]
+fn redis_quotas_connection_timeout_out_of_range_rejected() {
+    let mut gw = base_gateway();
+    gw.redis_quotas = Some(dwara_core::config::RedisQuotaConfig {
+        url: "redis://127.0.0.1:6379".into(),
+        fail_open: true,
+        key_prefix: "dwara:quota:".into(),
+        connection_timeout_ms: 10, // below MIN_REDIS_CONNECTION_TIMEOUT_MS (100)
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.field == "redis_quotas.connection_timeout_ms"
+                && i.message.contains("out of range")),
+        "expected redis_quotas.connection_timeout_ms out-of-range issue, got: {issues:?}"
+    );
+}
+
+#[test]
+fn redis_quotas_empty_key_prefix_rejected() {
+    let mut gw = base_gateway();
+    gw.redis_quotas = Some(dwara_core::config::RedisQuotaConfig {
+        url: "redis://127.0.0.1:6379".into(),
+        fail_open: true,
+        key_prefix: "".into(),
+        connection_timeout_ms: 1000,
+    });
+    let issues = validate(&gw);
+    assert!(
+        issues.iter().any(|i| i.field == "redis_quotas.key_prefix"
+            && i.message.contains("non-empty string")),
+        "expected redis_quotas.key_prefix non-empty validation issue, got: {issues:?}"
+    );
+}
+
+#[test]
+fn redis_quotas_valid_config_accepted() {
+    let mut gw = base_gateway();
+    gw.redis_quotas = Some(dwara_core::config::RedisQuotaConfig {
+        url: "redis://127.0.0.1:6379".into(),
+        fail_open: true,
+        key_prefix: "dwara:quota:".into(),
+        connection_timeout_ms: 1000,
+    });
+    let issues = validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.starts_with("redis_quotas.")),
+        "expected no redis_quotas validation issues for valid config, got: {issues:?}"
+    );
 }

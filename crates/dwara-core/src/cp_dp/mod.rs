@@ -179,7 +179,53 @@ impl ControllerState {
     }
 
     /// Register an edge.
+    ///
+    /// #151: after a controller restart the in-memory generation counter
+    /// resets to 1, so every edge with a cached generation > 1 rejects
+    /// subsequent publishes until the counter climbs past their cache.
+    /// To survive a controller outage without durable persistence, seed
+    /// the controller's counter from the registering edge's
+    /// `current_generation` (taking the max across edges) so the next
+    /// publish always produces a generation newer than every connected
+    /// edge's cache. This is the short-term fix; durable persistence
+    /// (DW-116, ADR-0001) is the long-term fix.
     pub fn register_edge(&self, registration: EdgeRegistration) {
+        let edge_gen = registration.current_generation;
+
+        // Seed the generation counter from the edge's cached generation.
+        // Only bump upward (never go backwards), and only when the
+        // controller's counter is below the edge's — a fresh controller
+        // (counter = None) always seeds; an already-warm controller only
+        // bumps if an edge reports a higher generation than the controller
+        // knows (e.g. the controller restarted mid-fleet).
+        {
+            let current = self.current_generation.read().unwrap();
+            let controller_gen = current.as_ref().map(|g| g.generation).unwrap_or(0);
+            if edge_gen > controller_gen {
+                drop(current);
+                // Bump the counter to edge_gen so the next publish produces
+                // edge_gen + 1 — strictly newer than every connected edge's
+                // cache. We do NOT create a ConfigGeneration here (no config
+                // body to publish); we only advance the counter so
+                // publish_generation's `current + 1` logic produces the
+                // right number.
+                let mut gen = self.current_generation.write().unwrap();
+                let controller_gen = gen.as_ref().map(|g| g.generation).unwrap_or(0);
+                if edge_gen > controller_gen {
+                    // Record a synthetic generation at the edge's level so
+                    // publish_generation computes edge_gen + 1. The config
+                    // body is empty — this is a counter seed, not a real
+                    // publish; the next real publish overwrites it.
+                    *gen = Some(ConfigGeneration {
+                        generation: edge_gen,
+                        config: String::new(),
+                        config_hash: String::new(),
+                        timestamp_ms: now_unix_ms(),
+                    });
+                }
+            }
+        }
+
         let mut edges = self.edges.write().unwrap();
         edges.insert(
             registration.edge_id.clone(),

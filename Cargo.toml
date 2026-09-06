@@ -12,7 +12,11 @@ members = [
 # programs; excluded from the default workspace build and CI matrix so
 # `cargo build --workspace` and the macOS CI lane never touch it. See
 # docs/adr/0002-ebpf-hooks-research-spike.md.
-exclude = ["crates/dwara-ebpf"]
+# DW-096: io_uring engine experiment. The companion crate is a
+# Linux-only scaffold (kernel 5.1+ io_uring) with no linked runtime;
+# excluded from the default workspace build and CI matrix. See
+# docs/adr/0003-io-uring-engine.md.
+exclude = ["crates/dwara-ebpf", "crates/dwara-uring"]
 
 [workspace.package]
 version = "0.1.0"

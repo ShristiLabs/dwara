@@ -1,0 +1,29 @@
+[package]
+name = "dwara-uring"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.94"
+publish = false
+description = """
+io_uring engine experiment for dwara (DW-096, research scaffold).
+
+EXPERIMENT SCAFFOLD: this crate defines the engine-selection trait and
+documents the integration point for a future io_uring-backed runtime,
+but links no io_uring runtime. See docs/adr/0003-io-uring-engine.md
+for the decision (defer adoption; tokio remains default).
+
+Linux-only: io_uring requires Linux 5.1+. This crate is excluded from
+the default workspace build and CI matrix.
+"""
+
+# This crate is NOT a workspace member (see the workspace exclude list
+# in the root Cargo.toml). It is a standalone scaffold so the default
+# `cargo build --workspace` and the macOS CI lane never touch it.
+#
+# When this advances from experiment to implementation, add the monoio
+# dependency under the Linux-only target gate below. It is intentionally
+# omitted from this scaffold -- no io_uring runtime is linked.
+#
+# [target.'cfg(target_os = "linux")'.dependencies]
+# monoio = { version = "0.5", features = ["bytes"] }

@@ -644,12 +644,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                  compiled in; using the local rate limiter"
             );
         }
+        if state.snapshot().gateway().redis_quotas.is_some() {
+            tracing::info!(
+                code = "redis_quotas_inert",
+                "redis_quotas config block present but the ent cargo feature is not \
+                 compiled in; using the local SQLite quota checker"
+            );
+        }
         if state.snapshot().gateway().config_convergence.is_some() {
             tracing::info!(
                 code = "config_convergence_inert",
                 "config_convergence config block present but the ent cargo feature is not \
                  compiled in; serving local config only (the local file watcher runs alone)"
             );
+        }
+    }
+
+    // DW-155: Distributed Redis-backed consumer request quotas (ent
+    // feature only). Activated when ALL three conditions hold:
+    //   1. The `ent` cargo feature is compiled in.
+    //   2. The config carries a `redis_quotas` block.
+    //   3. The license grants the `redis_quotas` feature claim.
+    // When any condition fails, the block is accepted but inert and the
+    // local SQLite quota checker is used. The Redis connection is
+    // established ONCE here (with the configured timeout) and the
+    // RedisQuotaChecker is built over it and attached to the dataplane.
+    #[cfg(feature = "ent")]
+    {
+        if let Some(rq_cfg) = state.snapshot().gateway().redis_quotas.clone() {
+            if license_gate.has_feature("redis_quotas") {
+                match establish_redis_quota_connection(&rq_cfg).await {
+                    Ok(conn) => {
+                        let checker = Arc::new(
+                            dwara_core::extensions::redis_quotas::RedisQuotaChecker::from_config(
+                                conn, &rq_cfg,
+                            ),
+                        );
+                        dp.set_redis_quota_checker(checker);
+                        tracing::info!(
+                            code = "redis_quotas_active",
+                            url = %rq_cfg.url,
+                            fail_open = rq_cfg.fail_open,
+                            "Redis distributed quotas activated (DW-155)"
+                        );
+                    }
+                    Err(err) => {
+                        if rq_cfg.fail_open {
+                            tracing::warn!(
+                                code = "redis_quotas_connect_failed",
+                                url = %rq_cfg.url,
+                                "Redis connection failed ({err}); serving with the LOCAL \
+                                 SQLite quota checker (fail_open=true)"
+                            );
+                        } else {
+                            tracing::error!(
+                                code = "redis_quotas_connect_failed",
+                                url = %rq_cfg.url,
+                                "Redis connection failed ({err}); refusing to start \
+                                 (fail_open=false)"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            } else {
+                tracing::info!(
+                    code = "redis_quotas_not_licensed",
+                    "redis_quotas config block present but the license does not grant \
+                     the redis_quotas feature claim; using the local SQLite quota checker"
+                );
+            }
         }
     }
 
@@ -1196,6 +1260,21 @@ const DEFAULT_BIND_PORT: u16 = 8080;
 #[cfg(feature = "ent")]
 async fn establish_redis_connection(
     config: &dwara_core::config::RedisRateLimiterConfig,
+) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
+    let client = redis::Client::open(config.url.as_str())?;
+    let timeout = Duration::from_millis(config.connection_timeout_ms);
+    let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+    Ok(conn)
+}
+
+/// Establish a pooled Redis connection for the distributed quota checker
+/// (DW-155, ent feature only). Same shape as the rate-limiter connection
+/// helper but over the `RedisQuotaConfig` schema. The connection is
+/// established once at startup with the configured timeout. Returns a
+/// `ConnectionManager` (multiplexed, auto-reconnecting) on success.
+#[cfg(feature = "ent")]
+async fn establish_redis_quota_connection(
+    config: &dwara_core::config::RedisQuotaConfig,
 ) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
     let client = redis::Client::open(config.url.as_str())?;
     let timeout = Duration::from_millis(config.connection_timeout_ms);

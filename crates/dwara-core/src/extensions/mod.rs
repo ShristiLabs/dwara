@@ -39,6 +39,12 @@ pub mod rate_limiter;
 // builds never pull in the redis dependency.
 #[cfg(feature = "ent")]
 pub mod redis_rate_limiter;
+// DW-155: Distributed Redis-backed consumer request quotas (ent feature
+// only). The module compiles only when the `ent` cargo feature is
+// enabled; OSS builds never pull in the redis dependency. The local
+// SQLite-backed quota checker (state::quotas) remains the OSS default.
+#[cfg(feature = "ent")]
+pub mod redis_quotas;
 // DW-068: Redis-backed distributed cache (Enterprise). Feature-gated
 // behind the `ent` cargo feature (default OFF).
 #[cfg(feature = "ent")]

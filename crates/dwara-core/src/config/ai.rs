@@ -232,10 +232,11 @@ pub enum AiProviderKind {
     /// DW-114: A2A (agent-to-agent) protocol. An A2A provider is a
     /// configured `ai.a2a.agents[]` entry: the adapter translates a
     /// canonical chat request into an A2A task-submit body and parses
-    /// the task response back. The task lifecycle is STUBBED pending
-    /// spec freeze (every task-state transition returns an A2AStub
-    /// error). Feature-gated behind the `a2a` cargo feature; without
-    /// it the `ai.a2a` block is accepted but inert.
+    /// the task response back. The task lifecycle state machine is
+    /// implemented against the A2A Protocol Specification draft (legal
+    /// and illegal transitions are enforced). Feature-gated behind
+    /// the `a2a` cargo feature; without it the `ai.a2a` block is
+    /// accepted but inert.
     A2a,
 }
 

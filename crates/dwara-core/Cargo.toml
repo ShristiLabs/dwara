@@ -231,10 +231,13 @@ semantic_cache = ["dep:hnsw_rs"]
 # `--features dwara-bin/h3`).
 h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 # DW-114: A2A (agent-to-agent) protocol support. Flag-only feature
-# (no new dependencies): the scaffold adapter, Agent Card parser, and
-# config schema are hand-rolled (mirroring how MCP was done). The A2A
-# task lifecycle is STUBBED pending spec freeze -- every task-state
-# transition returns an A2AStub error. When the feature is off the
+# (no new dependencies): the adapter, Agent Card parser, task lifecycle
+# state machine, and config schema are hand-rolled (mirroring how MCP
+# was done). The task lifecycle state machine is implemented against
+# the A2A Protocol Specification draft (legal and illegal transitions
+# are enforced); the network call (handle_a2a_request) remains a
+# documented stub (the adapter does not own an HTTP client; the
+# transport is the agent's upstream). When the feature is off the
 # `ai.a2a` config block is accepted but inert (validation warns).
 # Build with `cargo build --features a2a`.
 a2a = []

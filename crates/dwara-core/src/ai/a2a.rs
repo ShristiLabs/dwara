@@ -1,11 +1,28 @@
 //! A2A (agent-to-agent) protocol support (DW-114).
 //!
-//! This module is SCAFFOLDED behind the `a2a` cargo feature. The A2A
-//! protocol is an emerging standard for inter-agent communication; the
-//! spec is NOT yet frozen, so the task lifecycle here is STUBBED: every
-//! task-state transition returns an [`A2AStub`] error explaining that
-//! the spec is not frozen. What IS implemented today:
+//! This module implements the A2A protocol's task lifecycle state
+//! machine against the A2A Protocol Specification draft (the task
+//! state vocabulary: `submitted`, `working`, `completed`, `failed`,
+//! `canceled`). The draft is not a formally stable standard; the
+//! implemented contract is the task lifecycle state machine as
+//! documented in the A2A Protocol Specification repository
+//! (<https://github.com/a2aproject/A2A>) as of 2025-Q4. The state
+//! vocabulary and the legal transitions are stable in the draft; the
+//! wire format (JSON-RPC method names, envelope shapes) may evolve.
 //!
+//! # What is implemented
+//!
+//! - The [`TaskStateMachine`] struct: a validating state machine for
+//!   A2A task lifecycle transitions. Legal transitions:
+//!   - `Submitted -> Working` (the agent starts processing)
+//!   - `Submitted -> Failed` (the agent rejects the task)
+//!   - `Submitted -> Canceled` (the caller cancels before processing)
+//!   - `Working -> Completed` (the agent finishes successfully)
+//!   - `Working -> Failed` (the agent fails mid-processing)
+//!   - `Working -> Canceled` (the caller cancels during processing)
+//!   - `Completed`, `Failed`, `Canceled` are terminal (no transitions
+//!     out). Illegal transitions return an [`A2AError`] naming the
+//!     attempted and target states.
 //! - The [`A2AAdapter`] struct implementing [`ProviderAdapter`]: it
 //!   translates a canonical [`ChatRequest`] into an A2A task-submit
 //!   JSON body ([`A2AAdapter::build_request`]) and parses an A2A task
@@ -16,12 +33,11 @@
 //!   JSON-LD-ish Agent Card discovery doc (name, description, url,
 //!   version, capabilities, authentication) from an inline JSON value
 //!   or a file path.
-//! - The [`TaskLifecycle`] enum: the task state machine
-//!   (`Submitted`, `Working`, `Completed`, `Failed`, `Canceled`). The
-//!   transitions are stubbed pending spec freeze.
+//! - The [`TaskLifecycle`] enum: the task state vocabulary
+//!   (`Submitted`, `Working`, `Completed`, `Failed`, `Canceled`).
 //! - The [`A2ASession`] struct: reuses the MCP session-management
 //!   patterns (session id, TTL, max-concurrent) for agent-to-agent
-//!   task sessions.
+//!   task sessions. Each session owns a [`TaskStateMachine`].
 //! - The [`handle_a2a_request`] function: routes an A2A call through
 //!   the existing `dataplane::ai_proxy` path (the transport is the
 //!   agent's named upstream, exactly like a regular provider).
@@ -53,26 +69,67 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The error returned by every stubbed task-lifecycle method. The A2A
-/// task state machine is not implemented pending spec freeze; each
-/// transition surfaces this error so callers fail loudly and
-/// attributably rather than silently no-op'ing.
+/// Error returned by A2A task lifecycle operations. Replaces the
+/// former `A2AStub` (the spec is now sufficiently stable for the task
+/// state machine; the wire format may still evolve). The [`A2AStub`]
+/// type is kept as an alias for backward compatibility with the
+/// `handle_a2a_request` function (which is about the network call,
+/// not the state machine).
+#[derive(Debug, Clone, PartialEq)]
+pub enum A2AError {
+    /// An illegal state transition was attempted (e.g. Completed ->
+    /// Working). The `from` and `to` fields name the states.
+    IllegalTransition {
+        from: TaskLifecycle,
+        to: TaskLifecycle,
+    },
+    /// A parse error (Agent Card JSON, response JSON, etc.).
+    ParseError(String),
+    /// The network call is not yet wired (the adapter intentionally
+    /// does not own an HTTP client; the transport is the agent's
+    /// upstream). This is the only remaining "stub" surface.
+    NetworkNotWired(String),
+}
+
+impl std::fmt::Display for A2AError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            A2AError::IllegalTransition { from, to } => {
+                write!(
+                    f,
+                    "a2a illegal task transition: {} -> {}",
+                    from.as_str(),
+                    to.as_str()
+                )
+            }
+            A2AError::ParseError(m) => write!(f, "a2a parse error: {m}"),
+            A2AError::NetworkNotWired(m) => write!(f, "a2a network not wired: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for A2AError {}
+
+/// The former stub error type, kept as a compatibility alias for the
+/// `handle_a2a_request` function (which is about the network call, not
+/// the state machine). New code should use [`A2AError`] directly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct A2AStub {
-    /// The task-state transition that was attempted (e.g.
-    /// `submit`, `get_status`, `cancel`).
+    /// The operation that was attempted.
     pub transition: String,
-    /// Why it is stubbed (always the spec-not-frozen reason today).
+    /// Why it is not wired.
     pub reason: String,
 }
 
 impl A2AStub {
-    /// Build the standard stub error for a transition.
+    /// Build the standard stub error for a network-not-wired
+    /// operation.
     pub fn new(transition: impl Into<String>) -> Self {
         A2AStub {
             transition: transition.into(),
-            reason: "a2a task lifecycle is stubbed: the spec is not yet frozen \
-                     (DW-114)"
+            reason: "a2a network call is not wired (DW-114): the adapter does \
+                     not own an HTTP client; the transport is the agent's \
+                     upstream"
                 .to_string(),
         }
     }
@@ -86,9 +143,23 @@ impl std::fmt::Display for A2AStub {
 
 impl std::error::Error for A2AStub {}
 
-/// The A2A task lifecycle state machine (DW-114). The states follow
-/// the emerging A2A spec vocabulary; the transitions between them are
-/// STUBBED (every transition returns [`A2AStub`]) pending spec freeze.
+impl A2AStub {
+    /// Attach a parse-detail message to a stub, producing a stub
+    /// whose `reason` carries the detail (used by the card parser so
+    /// the caller sees both the context and the concrete parse
+    /// failure).
+    fn into_parse_error(self, detail: impl Into<String>) -> A2AStub {
+        A2AStub {
+            transition: self.transition,
+            reason: format!("{}: {}", self.reason, detail.into()),
+        }
+    }
+}
+
+/// The A2A task lifecycle state vocabulary (DW-114). The states follow
+/// the A2A Protocol Specification draft: `submitted`, `working`,
+/// `completed`, `failed`, `canceled`. The legal transitions between
+/// them are enforced by [`TaskStateMachine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskLifecycle {
     /// A task has been submitted to the agent (the initial state).
@@ -96,10 +167,11 @@ pub enum TaskLifecycle {
     /// The agent is processing the task.
     Working,
     /// The task completed successfully; the result is available.
+    /// Terminal state.
     Completed,
-    /// The task failed; the error is available.
+    /// The task failed; the error is available. Terminal state.
     Failed,
-    /// The task was canceled by the caller.
+    /// The task was canceled by the caller. Terminal state.
     Canceled,
 }
 
@@ -129,23 +201,114 @@ impl TaskLifecycle {
         }
     }
 
-    /// Submit a task (STUBBED). Returns the standard [`A2AStub`] error;
-    /// the actual task-submit state transition waits for spec freeze.
-    pub fn submit(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("submit"))
+    /// Whether this state is terminal (no transitions out).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            TaskLifecycle::Completed | TaskLifecycle::Failed | TaskLifecycle::Canceled
+        )
     }
 
-    /// Query a task's status (STUBBED). Returns the standard
-    /// [`A2AStub`] error; the actual status-query state transition
-    /// waits for spec freeze.
-    pub fn get_status(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("get_status"))
+    /// Whether the transition `self -> target` is legal per the A2A
+    /// task lifecycle state machine.
+    pub fn can_transition_to(&self, target: TaskLifecycle) -> bool {
+        matches!(
+            (self, target),
+            (TaskLifecycle::Submitted, TaskLifecycle::Working)
+                | (TaskLifecycle::Submitted, TaskLifecycle::Failed)
+                | (TaskLifecycle::Submitted, TaskLifecycle::Canceled)
+                | (TaskLifecycle::Working, TaskLifecycle::Completed)
+                | (TaskLifecycle::Working, TaskLifecycle::Failed)
+                | (TaskLifecycle::Working, TaskLifecycle::Canceled)
+        )
+    }
+}
+
+/// A validating state machine for A2A task lifecycle transitions
+/// (DW-114). Holds the current state; transition methods validate the
+/// transition and return the new state, or an [`A2AError`] when the
+/// transition is illegal.
+///
+/// The state machine is the in-process task tracker; it does NOT own
+/// a network connection (the adapter intentionally does not own an
+/// HTTP client — the transport is the agent's upstream, driven from
+/// `dataplane::ai_proxy`). The state machine is updated by the
+/// dataplane as it observes task responses and events.
+#[derive(Debug, Clone)]
+pub struct TaskStateMachine {
+    state: TaskLifecycle,
+}
+
+impl TaskStateMachine {
+    /// Create a new task in the `Submitted` state (the initial state).
+    pub fn new() -> Self {
+        TaskStateMachine {
+            state: TaskLifecycle::Submitted,
+        }
     }
 
-    /// Cancel a task (STUBBED). Returns the standard [`A2AStub`] error;
-    /// the actual cancel state transition waits for spec freeze.
-    pub fn cancel(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("cancel"))
+    /// Create a state machine at a specific state (used when
+    /// reconstructing a task from a persisted or observed state).
+    pub fn from_state(state: TaskLifecycle) -> Self {
+        TaskStateMachine { state }
+    }
+
+    /// The current state.
+    pub fn state(&self) -> TaskLifecycle {
+        self.state
+    }
+
+    /// Transition to `target`, returning the new state on success or
+    /// an [`A2AError::IllegalTransition`] when the transition is not
+    /// legal from the current state.
+    pub fn transition_to(&mut self, target: TaskLifecycle) -> Result<TaskLifecycle, A2AError> {
+        if self.state.can_transition_to(target) {
+            self.state = target;
+            Ok(self.state)
+        } else {
+            Err(A2AError::IllegalTransition {
+                from: self.state,
+                to: target,
+            })
+        }
+    }
+
+    /// Start processing the task (Submitted -> Working). Returns the
+    /// new state or an error when the task is not in the Submitted
+    /// state.
+    pub fn start_work(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.transition_to(TaskLifecycle::Working)
+    }
+
+    /// Mark the task as completed (Working -> Completed). Returns the
+    /// new state or an error when the task is not in the Working
+    /// state.
+    pub fn complete(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.transition_to(TaskLifecycle::Completed)
+    }
+
+    /// Mark the task as failed (Submitted|Working -> Failed). Returns
+    /// the new state or an error when the task is in a terminal state.
+    pub fn fail(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.transition_to(TaskLifecycle::Failed)
+    }
+
+    /// Cancel the task (Submitted|Working -> Canceled). Returns the
+    /// new state or an error when the task is in a terminal state.
+    pub fn cancel(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.transition_to(TaskLifecycle::Canceled)
+    }
+
+    /// Whether the task is in a terminal state (Completed, Failed, or
+    /// Canceled — no further transitions are possible).
+    pub fn is_terminal(&self) -> bool {
+        self.state.is_terminal()
+    }
+}
+
+impl Default for TaskStateMachine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -257,19 +420,6 @@ impl AgentCardParser {
             capabilities,
             authentication,
         })
-    }
-}
-
-impl A2AStub {
-    /// Attach a parse-detail message to a stub, producing a stub
-    /// whose `reason` carries the detail (used by the card parser so
-    /// the caller sees both the spec-not-frozen context and the
-    /// concrete parse failure).
-    fn into_parse_error(self, detail: impl Into<String>) -> A2AStub {
-        A2AStub {
-            transition: self.transition,
-            reason: format!("{}: {}", self.reason, detail.into()),
-        }
     }
 }
 
@@ -584,8 +734,8 @@ fn generate_session_id(agent: &str) -> String {
 
 /// One A2A task session (DW-114), mirroring MCP's session model: a
 /// session id, a TTL, and a max-concurrent cap. The session is a
-/// correlation handle for an agent-to-agent task exchange; the actual
-/// task state machine is stubbed pending spec freeze.
+/// correlation handle for an agent-to-agent task exchange and owns a
+/// [`TaskStateMachine`] tracking the task's lifecycle state.
 #[derive(Debug, Clone)]
 pub struct A2ASession {
     /// The session id (a 128-bit hex handle, unique per process).
@@ -596,17 +746,21 @@ pub struct A2ASession {
     pub ttl_secs: u64,
     /// Max concurrent sessions.
     pub max_concurrent: usize,
+    /// The task lifecycle state machine for this session's task.
+    pub task: TaskStateMachine,
 }
 
 impl A2ASession {
     /// Create a new session for `agent`, using the configured session
-    /// policy (or the defaults when none is set).
+    /// policy (or the defaults when none is set). The task starts in
+    /// the `Submitted` state.
     pub fn new(agent: &str, ttl_secs: u64, max_concurrent: usize) -> Self {
         A2ASession {
             id: generate_session_id(agent),
             agent: agent.to_string(),
             ttl_secs,
             max_concurrent,
+            task: TaskStateMachine::new(),
         }
     }
 
@@ -615,23 +769,30 @@ impl A2ASession {
         &self.id
     }
 
-    /// Submit a task on this session (STUBBED). Returns the standard
-    /// [`A2AStub`] error; the actual task-submit transition waits for
-    /// spec freeze.
-    pub fn submit_task(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("submit_task"))
+    /// The current task lifecycle state.
+    pub fn task_state(&self) -> TaskLifecycle {
+        self.task.state()
     }
 
-    /// Query the task status on this session (STUBBED). Returns the
-    /// standard [`A2AStub`] error.
-    pub fn get_task_status(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("get_task_status"))
+    /// Start processing the task (Submitted -> Working). Delegates to
+    /// the session's [`TaskStateMachine`].
+    pub fn start_work(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.task.start_work()
     }
 
-    /// Cancel the task on this session (STUBBED). Returns the standard
-    /// [`A2AStub`] error.
-    pub fn cancel_task(&self) -> Result<TaskLifecycle, A2AStub> {
-        Err(A2AStub::new("cancel_task"))
+    /// Mark the task as completed (Working -> Completed).
+    pub fn complete(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.task.complete()
+    }
+
+    /// Mark the task as failed (Submitted|Working -> Failed).
+    pub fn fail(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.task.fail()
+    }
+
+    /// Cancel the task (Submitted|Working -> Canceled).
+    pub fn cancel(&mut self) -> Result<TaskLifecycle, A2AError> {
+        self.task.cancel()
     }
 }
 
@@ -751,13 +912,15 @@ impl CompiledA2a {
 /// a regular provider: the [`A2AAdapter`] builds the task-submit
 /// request, `ai_proxy` places the call through the upstream, and the
 /// response is parsed back to the canonical shape. This function is
-/// the seam the dataplane calls for an A2A-routed alias; today it is
-/// STUBBED (the task lifecycle is not implemented), returning an
-/// [`A2AStub`] error so the caller fails loudly.
+/// the seam the dataplane calls for an A2A-routed alias; today it
+/// returns an [`A2AStub`] error because the adapter intentionally
+/// does not own an HTTP client (the transport is the agent's
+/// upstream, driven from `dataplane::ai_proxy`). The task lifecycle
+/// state machine itself is implemented (see [`TaskStateMachine`]);
+/// this function is the network-call seam, not the state machine.
 ///
-/// The actual wiring lands when the spec freezes; the scaffold keeps
-/// the call-site shape stable so the dataplane path compiles
-/// unchanged with or without the feature.
+/// The scaffold keeps the call-site shape stable so the dataplane
+/// path compiles unchanged with or without the feature.
 pub fn handle_a2a_request(
     _agent: &CompiledA2aAgent,
     _req: &ChatRequest,
@@ -815,23 +978,214 @@ mod tests {
     }
 
     #[test]
-    fn task_lifecycle_transitions_are_stubbed() {
-        let s = TaskLifecycle::Submitted;
-        assert!(s.submit().is_err());
-        assert!(s.get_status().is_err());
-        assert!(s.cancel().is_err());
-        let err = s.submit().unwrap_err();
-        assert_eq!(err.transition, "submit");
-        assert!(err.reason.contains("not yet frozen"));
+    fn task_lifecycle_is_terminal() {
+        assert!(!TaskLifecycle::Submitted.is_terminal());
+        assert!(!TaskLifecycle::Working.is_terminal());
+        assert!(TaskLifecycle::Completed.is_terminal());
+        assert!(TaskLifecycle::Failed.is_terminal());
+        assert!(TaskLifecycle::Canceled.is_terminal());
     }
 
     #[test]
-    fn session_task_methods_are_stubbed() {
-        let s = A2ASession::new("my-agent", 3600, 1000);
+    fn task_lifecycle_can_transition_to_legal() {
+        assert!(TaskLifecycle::Submitted.can_transition_to(TaskLifecycle::Working));
+        assert!(TaskLifecycle::Submitted.can_transition_to(TaskLifecycle::Failed));
+        assert!(TaskLifecycle::Submitted.can_transition_to(TaskLifecycle::Canceled));
+        assert!(TaskLifecycle::Working.can_transition_to(TaskLifecycle::Completed));
+        assert!(TaskLifecycle::Working.can_transition_to(TaskLifecycle::Failed));
+        assert!(TaskLifecycle::Working.can_transition_to(TaskLifecycle::Canceled));
+    }
+
+    #[test]
+    fn task_lifecycle_cannot_transition_to_illegal() {
+        // No transitions out of terminal states.
+        for terminal in [
+            TaskLifecycle::Completed,
+            TaskLifecycle::Failed,
+            TaskLifecycle::Canceled,
+        ] {
+            for target in [
+                TaskLifecycle::Submitted,
+                TaskLifecycle::Working,
+                TaskLifecycle::Completed,
+                TaskLifecycle::Failed,
+                TaskLifecycle::Canceled,
+            ] {
+                assert!(
+                    !terminal.can_transition_to(target),
+                    "terminal {:?} should not transition to {:?}",
+                    terminal,
+                    target
+                );
+            }
+        }
+        // No Submitted -> Completed (must go through Working).
+        assert!(!TaskLifecycle::Submitted.can_transition_to(TaskLifecycle::Completed));
+        // No Working -> Submitted (no going back).
+        assert!(!TaskLifecycle::Working.can_transition_to(TaskLifecycle::Submitted));
+    }
+
+    #[test]
+    fn state_machine_happy_path_submitted_to_working_to_completed() {
+        let mut sm = TaskStateMachine::new();
+        assert_eq!(sm.state(), TaskLifecycle::Submitted);
+        assert!(!sm.is_terminal());
+
+        let s = sm.start_work().expect("submitted -> working");
+        assert_eq!(s, TaskLifecycle::Working);
+        assert_eq!(sm.state(), TaskLifecycle::Working);
+
+        let s = sm.complete().expect("working -> completed");
+        assert_eq!(s, TaskLifecycle::Completed);
+        assert_eq!(sm.state(), TaskLifecycle::Completed);
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn state_machine_fail_from_submitted() {
+        let mut sm = TaskStateMachine::new();
+        let s = sm.fail().expect("submitted -> failed");
+        assert_eq!(s, TaskLifecycle::Failed);
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn state_machine_fail_from_working() {
+        let mut sm = TaskStateMachine::new();
+        sm.start_work().expect("submitted -> working");
+        let s = sm.fail().expect("working -> failed");
+        assert_eq!(s, TaskLifecycle::Failed);
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn state_machine_cancel_from_submitted() {
+        let mut sm = TaskStateMachine::new();
+        let s = sm.cancel().expect("submitted -> canceled");
+        assert_eq!(s, TaskLifecycle::Canceled);
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn state_machine_cancel_from_working() {
+        let mut sm = TaskStateMachine::new();
+        sm.start_work().expect("submitted -> working");
+        let s = sm.cancel().expect("working -> canceled");
+        assert_eq!(s, TaskLifecycle::Canceled);
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn state_machine_rejects_completed_to_working() {
+        let mut sm = TaskStateMachine::new();
+        sm.start_work().expect("submitted -> working");
+        sm.complete().expect("working -> completed");
+        let err = sm.start_work().expect_err("completed is terminal");
+        assert!(matches!(
+            err,
+            A2AError::IllegalTransition {
+                from: TaskLifecycle::Completed,
+                to: TaskLifecycle::Working,
+            }
+        ));
+    }
+
+    #[test]
+    fn state_machine_rejects_failed_to_completed() {
+        let mut sm = TaskStateMachine::new();
+        sm.fail().expect("submitted -> failed");
+        let err = sm.complete().expect_err("failed is terminal");
+        assert!(matches!(
+            err,
+            A2AError::IllegalTransition {
+                from: TaskLifecycle::Failed,
+                to: TaskLifecycle::Completed,
+            }
+        ));
+    }
+
+    #[test]
+    fn state_machine_rejects_canceled_to_working() {
+        let mut sm = TaskStateMachine::new();
+        sm.cancel().expect("submitted -> canceled");
+        let err = sm.start_work().expect_err("canceled is terminal");
+        assert!(matches!(
+            err,
+            A2AError::IllegalTransition {
+                from: TaskLifecycle::Canceled,
+                to: TaskLifecycle::Working,
+            }
+        ));
+    }
+
+    #[test]
+    fn state_machine_rejects_submitted_to_completed() {
+        let mut sm = TaskStateMachine::new();
+        let err = sm.complete().expect_err("must go through working");
+        assert!(matches!(
+            err,
+            A2AError::IllegalTransition {
+                from: TaskLifecycle::Submitted,
+                to: TaskLifecycle::Completed,
+            }
+        ));
+    }
+
+    #[test]
+    fn state_machine_rejects_working_to_submitted() {
+        let mut sm = TaskStateMachine::new();
+        sm.start_work().expect("submitted -> working");
+        let err = sm
+            .transition_to(TaskLifecycle::Submitted)
+            .expect_err("no going back");
+        assert!(matches!(
+            err,
+            A2AError::IllegalTransition {
+                from: TaskLifecycle::Working,
+                to: TaskLifecycle::Submitted,
+            }
+        ));
+    }
+
+    #[test]
+    fn state_machine_from_state() {
+        let sm = TaskStateMachine::from_state(TaskLifecycle::Working);
+        assert_eq!(sm.state(), TaskLifecycle::Working);
+    }
+
+    #[test]
+    fn session_task_lifecycle() {
+        let mut s = A2ASession::new("my-agent", 3600, 1000);
         assert!(s.id().starts_with("a2a-"));
-        assert!(s.submit_task().is_err());
-        assert!(s.get_task_status().is_err());
-        assert!(s.cancel_task().is_err());
+        assert_eq!(s.task_state(), TaskLifecycle::Submitted);
+
+        s.start_work().expect("submitted -> working");
+        assert_eq!(s.task_state(), TaskLifecycle::Working);
+
+        s.complete().expect("working -> completed");
+        assert_eq!(s.task_state(), TaskLifecycle::Completed);
+    }
+
+    #[test]
+    fn session_cancel_from_submitted() {
+        let mut s = A2ASession::new("my-agent", 3600, 1000);
+        s.cancel().expect("submitted -> canceled");
+        assert_eq!(s.task_state(), TaskLifecycle::Canceled);
+    }
+
+    #[test]
+    fn session_fail_from_working() {
+        let mut s = A2ASession::new("my-agent", 3600, 1000);
+        s.start_work().expect("submitted -> working");
+        s.fail().expect("working -> failed");
+        assert_eq!(s.task_state(), TaskLifecycle::Failed);
+    }
+
+    #[test]
+    fn session_rejects_illegal_transition() {
+        let mut s = A2ASession::new("my-agent", 3600, 1000);
+        s.complete().expect_err("submitted -> completed is illegal");
+        assert_eq!(s.task_state(), TaskLifecycle::Submitted);
     }
 
     #[test]

@@ -317,6 +317,24 @@ pub struct Gateway {
     /// rejects with 429.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_rate_limiter: Option<RedisRateLimiterConfig>,
+    /// Distributed Redis-backed consumer request quotas (DW-155, ent
+    /// feature). Absent (the default): the local SQLite-backed quota
+    /// checker is used (one counter per instance, so a fleet of N
+    /// instances enforces N x the configured cap). When present, the
+    /// `ent` cargo feature is compiled in, AND a valid license with the
+    /// `redis_quotas` feature claim is loaded, the gateway uses a
+    /// Redis-backed quota checker so two or more instances share one
+    /// counter per (consumer, budget, window) — a fleet of N instances
+    /// enforces the CONFIGURED cap. The same daily/monthly budget
+    /// semantics run, but the counters live in Redis and are updated
+    /// atomically via a Lua script in a single round-trip. When the
+    /// `ent` feature is NOT compiled in, or the license lacks the
+    /// claim, the block is accepted but inert (the local SQLite checker
+    /// is used and a warning is logged). When Redis is unreachable,
+    /// `fail_open` (default true) lets requests through; `false`
+    /// rejects with 429.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_quotas: Option<RedisQuotaConfig>,
     /// Config convergence (DW-054, enterprise feature). Absent (the
     /// default): each gateway instance serves only its local config
     /// generation and never watches remote instances. When present,
@@ -627,6 +645,62 @@ pub struct RedisRateLimiterConfig {
         skip_serializing_if = "is_default_redis_key_ttl_s"
     )]
     pub key_ttl_s: u64,
+}
+
+/// Distributed Redis-backed consumer request quotas config (DW-155,
+/// `gateway.redis_quotas`).
+///
+/// When present and the `ent` cargo feature is compiled in AND a valid
+/// license with the `redis_quotas` feature claim is loaded, the gateway
+/// uses a Redis-backed quota checker instead of the local SQLite-backed
+/// one — so two or more gateway instances share one quota counter per
+/// (consumer, budget, window). The same daily/monthly budget semantics
+/// run, but the counters live in Redis and are updated atomically via a
+/// Lua script in a single round-trip. When the `ent` feature is NOT
+/// compiled in, or the license lacks the claim, the block is accepted
+/// but inert (the local SQLite checker is used). When Redis is
+/// unreachable, `fail_open` (default true) lets requests through; set
+/// it to false to reject with 429 instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedisQuotaConfig {
+    /// Redis connection URL (e.g. `redis://127.0.0.1:6379` or
+    /// `redis-cluster://...`). The connection is established once at
+    /// startup and pooled via a multiplexed `ConnectionManager`.
+    /// May be the same Redis instance as the rate limiter
+    /// (`redis_rate_limiter.url`) — the key prefixes are distinct.
+    pub url: String,
+    /// Fail-open behavior when Redis is unreachable (default true):
+    /// `true` allows the request (no quota enforcement); `false`
+    /// rejects with 429. Fail-open is the safer default for
+    /// availability — a Redis outage should not take down the gateway
+    /// — but operators who need hard quotas can set this to `false`.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub fail_open: bool,
+    /// Prefix for quota keys in Redis (default `dwara:quota:`). Each
+    /// (consumer, budget, window) counter is stored as
+    /// `{prefix}{consumer_id}:{budget}:{window_start}`.
+    #[serde(
+        default = "default_redis_quota_key_prefix",
+        skip_serializing_if = "is_default_redis_quota_key_prefix"
+    )]
+    pub key_prefix: String,
+    /// Connection timeout in milliseconds (default 1000; validated to
+    /// 100..=30 000). The timeout applies to the initial connection
+    /// establishment at startup, not to per-request Lua script calls.
+    #[serde(
+        default = "default_redis_connection_timeout_ms",
+        skip_serializing_if = "is_default_redis_connection_timeout_ms"
+    )]
+    pub connection_timeout_ms: u64,
+}
+
+fn default_redis_quota_key_prefix() -> String {
+    "dwara:quota:".to_string()
+}
+
+fn is_default_redis_quota_key_prefix(p: &str) -> bool {
+    p == "dwara:quota:"
 }
 
 fn default_redis_key_prefix() -> String {

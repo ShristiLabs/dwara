@@ -1062,7 +1062,12 @@ upstreams:
     std::fs::rename(&tmp_k, &ca.key).unwrap();
 
     for (i, h) in handshakes.into_iter().enumerate() {
-        tokio::time::timeout(Duration::from_secs(10), h)
+        // #139: the 10s budget tripped intermittently under full-suite load
+        // (8 parallel TLS handshakes racing a cert-reload while every other
+        // suite hammers the machine). 30s is load margin for CI parallelism;
+        // a genuine hang still trips this well before the caller's outer
+        // deadline, and isolated runs complete in milliseconds.
+        tokio::time::timeout(Duration::from_secs(30), h)
             .await
             .unwrap_or_else(|_| panic!("handshake {i} hung"))
             .unwrap_or_else(|e| panic!("handshake {i} failed: {e}"));

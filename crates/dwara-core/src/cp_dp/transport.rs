@@ -273,8 +273,14 @@ impl<U: ProstMessage + Default> Decoder for ProstDecoder<U> {
     type Error = Status;
 
     fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+        // #150: an empty response (e.g. PbAckResponse {}) encodes to zero
+        // bytes on the wire. Returning Ok(None) here makes tonic's unary()
+        // client report "Missing response message" (Internal) because it
+        // expects exactly one message. tonic-prost's decoder decodes an
+        // empty buffer into the default instance, so we match that: an empty
+        // buffer yields the default value, not "no message".
         if !src.has_remaining() {
-            return Ok(None);
+            return Ok(Some(U::default()));
         }
         let item =
             U::decode(src).map_err(|e| Status::internal(format!("prost decode error: {e}")))?;

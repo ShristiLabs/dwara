@@ -206,6 +206,7 @@ fn good_gateway() -> Gateway {
         license: None,
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
+        redis_quotas: None,
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,

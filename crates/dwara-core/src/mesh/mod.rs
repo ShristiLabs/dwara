@@ -22,8 +22,19 @@
 //! # What is implemented today
 //!
 //! The scaffold compiles and the config schema is always present so
-//! configs round-trip without the feature. What is STUBBED (documented
-//! no-ops pending production hardening):
+//! configs round-trip without the feature. What is implemented:
+//!
+//! - [`spiffe::SpiffeClient`]: the Workload API client is implemented
+//!   behind a transport abstraction ([`spiffe::WorkloadApiTransport`]).
+//!   The production gRPC transport ([`spiffe::grpc::GrpcWorkloadApi`])
+//!   uses tonic over a Unix domain socket (ent-gated); a test fake
+//!   ([`spiffe::FakeWorkloadApi`]) is provided for deterministic tests.
+//!   The client fetches X.509 SVIDs and the trust bundle, and exposes
+//!   the refresh-result metric seam. The SVID material (cert chain,
+//!   private key, expiry) and the trust bundle (CA certs) are the
+//!   integration point for `security::tls`.
+//!
+//! What is STUBBED (documented no-ops pending production hardening):
 //!
 //! - [`sidecar::SidecarController`]: the inbound/outbound listener
 //!   configuration and the iptables/TPROXY redirect bootstrap are
@@ -31,13 +42,12 @@
 //!   documents the redirect setup, but does NOT install iptables rules
 //!   or open sockets (that wiring lands when the sidecar bootstrap is
 //!   production-ready).
-//! - [`spiffe::SpiffeClient`]: the Workload API connection and SVID
-//!   fetch are scaffolded. The client records the configured socket
-//!   path and refresh interval and exposes the integration point (the
-//!   mTLS TLS config would use the SVID cert/key and the trust bundle
-//!   for peer verification), but does NOT open the Unix socket or fetch
-//!   real SVIDs (the `spiffe` crate would be added when
-//!   production-ready).
+//! - The full gRPC client wiring in [`spiffe::grpc::GrpcWorkloadApi`]:
+//!   the transport abstraction and the trait-based seam are landed; the
+//!   full gRPC call (proto-generated client, codec, path) is the
+//!   remaining wiring. The `connect()` method establishes the tonic
+//!   channel over the Unix socket; the fetch methods return a clear
+//!   "not yet connected" error until the proto client is wired.
 //!
 //! # Feature gate
 //!
@@ -62,4 +72,7 @@ pub mod sidecar;
 pub mod spiffe;
 
 pub use sidecar::{SidecarConfig, SidecarController, SidecarMode, SidecarRedirectMode};
-pub use spiffe::{SpiffeClient, SpiffeConfig, SpiffeIdentity, SpiffeSvid, SpiffeTrustBundle};
+pub use spiffe::{
+    FakeWorkloadApi, SpiffeClient, SpiffeConfig, SpiffeError, SpiffeIdentity, SpiffeSvid,
+    SpiffeTrustBundle, SvidRefreshResult, WorkloadApiTransport,
+};

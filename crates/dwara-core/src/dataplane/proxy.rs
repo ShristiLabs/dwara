@@ -796,6 +796,19 @@ pub struct DataPlane {
     /// the new engine, it does not re-establish).
     #[cfg(feature = "ent")]
     redis_conn: std::sync::RwLock<Option<redis::aio::ConnectionManager>>,
+    /// DW-155: the Redis-backed quota checker (ent feature only). Set
+    /// once at startup by dwara-bin when the config carries a
+    /// `redis_quotas` block AND the license grants the `redis_quotas`
+    /// feature claim. When set, the quota check path uses Redis-backed
+    /// shared counters instead of the local SQLite counters, so a fleet
+    /// of N instances enforces the CONFIGURED cap (not N x cap). When
+    /// None, the local SQLite checker is used. The checker persists
+    /// across reloads (a reload re-reads the config but the checker's
+    /// connection persists; fail_open/key_prefix are startup-time
+    /// properties).
+    #[cfg(feature = "ent")]
+    redis_quota_checker:
+        std::sync::RwLock<Option<Arc<crate::extensions::redis_quotas::RedisQuotaChecker>>>,
     /// DW-054: the config convergence coordinator (ent feature only).
     /// Set once at startup by dwara-bin when the config carries a
     /// `config_convergence` block AND the license grants the
@@ -1047,6 +1060,8 @@ impl DataPlane {
             #[cfg(feature = "ent")]
             redis_conn: std::sync::RwLock::new(None),
             #[cfg(feature = "ent")]
+            redis_quota_checker: std::sync::RwLock::new(None),
+            #[cfg(feature = "ent")]
             convergence: std::sync::RwLock::new(None),
             quota_near_limit_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
             locality_ctx: std::sync::RwLock::new(crate::config::LocalityContext::from_env()),
@@ -1138,6 +1153,36 @@ impl DataPlane {
         self.redis_conn
             .read()
             .expect("redis conn lock poisoned")
+            .clone()
+    }
+
+    /// Attach the Redis-backed quota checker (DW-155, ent feature only).
+    /// Set once at startup by dwara-bin when the config carries a
+    /// `redis_quotas` block AND the license grants the `redis_quotas`
+    /// feature claim. After storing the checker, the quota check path
+    /// uses Redis-backed shared counters instead of the local SQLite
+    /// counters. The checker persists across reloads.
+    #[cfg(feature = "ent")]
+    pub fn set_redis_quota_checker(
+        &self,
+        checker: Arc<crate::extensions::redis_quotas::RedisQuotaChecker>,
+    ) {
+        *self
+            .redis_quota_checker
+            .write()
+            .expect("redis quota checker lock poisoned") = Some(checker);
+    }
+
+    /// The Redis-backed quota checker, if attached (DW-155, ent feature
+    /// only). When Some, the quota check path uses it instead of the
+    /// local SQLite checker.
+    #[cfg(feature = "ent")]
+    fn redis_quota_checker(
+        &self,
+    ) -> Option<Arc<crate::extensions::redis_quotas::RedisQuotaChecker>> {
+        self.redis_quota_checker
+            .read()
+            .expect("redis quota checker lock poisoned")
             .clone()
     }
 
@@ -3729,9 +3774,34 @@ where
                 }
                 Ok(None) => warn_quota_consumer_unsynced(consumer_name),
                 Ok(Some(record)) => {
-                    let _quota_phase = tracing::info_span!("quota").entered();
                     let now_epoch_s = unix_now_secs();
-                    match crate::state::quotas::check(&store, record.id, quotas, now_epoch_s) {
+                    // DW-155: when the Redis-backed quota checker is
+                    // attached (ent feature + redis_quotas config +
+                    // license claim), use it instead of the local
+                    // SQLite checker so a fleet of N instances shares
+                    // one counter per (consumer, budget, window).
+                    // The quota phase span (DW-021) is entered only
+                    // around the synchronous local check; the async
+                    // Redis check is instrumented separately because
+                    // an EnteredSpan guard is not Send and cannot be
+                    // held across an .await point.
+                    #[cfg(feature = "ent")]
+                    let outcome = if let Some(checker) = dp.redis_quota_checker() {
+                        let _quota_phase = tracing::info_span!("quota");
+                        checker
+                            .check(record.id, quotas, now_epoch_s)
+                            .instrument(_quota_phase)
+                            .await
+                    } else {
+                        let _quota_phase = tracing::info_span!("quota").entered();
+                        crate::state::quotas::check(&store, record.id, quotas, now_epoch_s)
+                    };
+                    #[cfg(not(feature = "ent"))]
+                    let outcome = {
+                        let _quota_phase = tracing::info_span!("quota").entered();
+                        crate::state::quotas::check(&store, record.id, quotas, now_epoch_s)
+                    };
+                    match outcome {
                         crate::state::quotas::QuotaOutcome::Denied {
                             limit,
                             remaining,

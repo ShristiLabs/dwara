@@ -85,6 +85,12 @@ pub const PUBLIC_KEY_ENV_VAR: &str = "DWARA_LICENSE_PUBLIC_KEY";
 /// License claim string for the Redis rate-limiter backend (DW-031).
 pub const FEATURE_REDIS_RATE_LIMITER: &str = "redis_rate_limiter";
 
+/// License claim string for the Redis distributed quota backend
+/// (DW-155). A license that carries this claim enables the Redis-backed
+/// quota checker so a fleet of N instances shares one counter per
+/// (consumer, budget, window) and enforces the CONFIGURED cap.
+pub const FEATURE_REDIS_QUOTAS: &str = "redis_quotas";
+
 /// License claim string for config convergence (DW-054).
 pub const FEATURE_CONFIG_CONVERGENCE: &str = "config_convergence";
 

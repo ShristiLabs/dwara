@@ -404,3 +404,57 @@ async fn targeted_update() {
         task_b.abort();
     }
 }
+
+// ---------------------------------------------------------------------------
+// #150: ack round-trip must not report edge_ack_failed "Missing response
+// message" — the empty PbAckResponse {} must decode to the default
+// instance, not "no message".
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ack_returns_ok_not_missing_response_message() {
+    let state = Arc::new(ControllerState::new());
+    state.become_leader();
+    let (_handle, addr, server) = spawn_controller(Arc::clone(&state)).await;
+
+    let endpoint = format!("http://{addr}");
+    let edge_state = Arc::new(EdgeState::new("edge-ack-test", "0.1.0"));
+    let client = EdgeClient::connect(&endpoint).await.unwrap();
+    let registration = edge_state.registration();
+    let mut stream = client.stream_config_updates(registration).await.unwrap();
+
+    let es = Arc::clone(&edge_state);
+    let cl = client.clone();
+    let task = tokio::spawn(async move {
+        while let Some(result) = stream.next().await {
+            if let Ok(pb_update) = result {
+                if let Ok(update) = ConfigUpdate::try_from(pb_update) {
+                    if es.receive_update(update).is_ok() {
+                        let ack = es.ack_current(true, None);
+                        // This is the call that used to return
+                        // Status::internal("Missing response message.")
+                        // because the empty PbAckResponse {} decoded to
+                        // Ok(None). It must now return Ok(()).
+                        let result = cl.ack(ack).await;
+                        assert!(result.is_ok(), "ack must succeed, got: {result:?}");
+                    }
+                }
+            }
+        }
+    });
+
+    wait_for(Duration::from_secs(5), || async { state.edge_count() == 1 }).await;
+
+    server.publish_update(make_update(1, vec![]));
+
+    wait_for(Duration::from_secs(5), || async {
+        state.unacked_edges(1).is_empty()
+    })
+    .await;
+    assert!(state.unacked_edges(1).is_empty(), "ack should be recorded");
+
+    let ack = state.get_ack("edge-ack-test", 1).expect("ack recorded");
+    assert!(ack.applied);
+
+    task.abort();
+}

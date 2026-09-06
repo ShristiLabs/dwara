@@ -530,7 +530,7 @@ fn sidecar_controller_exposes_listeners() {
         outbound_port: 15001,
         redirect_mode: "tproxy".to_string(),
     };
-    let resolved = SidecarConfig::from_config(&cfg);
+    let resolved = SidecarConfig::from_config(&cfg, true);
     let controller = SidecarController::new(resolved);
     let (mode, port, redirect) = controller.inbound_listener();
     assert_eq!(mode, SidecarMode::Inbound);
@@ -544,23 +544,38 @@ fn sidecar_controller_exposes_listeners() {
 }
 
 #[cfg(feature = "mesh")]
-#[test]
-fn spiffe_client_fetch_svid_is_stubbed() {
-    use dwara_core::mesh::{SpiffeClient, SpiffeConfig, SpiffeError};
+#[tokio::test]
+async fn spiffe_client_fetch_svid_via_fake_transport() {
+    use dwara_core::mesh::{
+        FakeWorkloadApi, SpiffeClient, SpiffeConfig, SpiffeIdentity, SpiffeSvid, SpiffeTrustBundle,
+    };
+    use std::sync::Arc;
     let cfg = MeshSpiffeConfig {
         trust_domain: "example.org".to_string(),
         workload_api_socket: "/tmp/spire-agent/public/api.sock".to_string(),
         svid_refresh_interval_secs: 300,
     };
     let resolved = SpiffeConfig::from_config(&cfg);
-    let client = SpiffeClient::new(resolved);
-    let err = client.fetch_svid().expect_err("stubbed fetch errors");
-    assert_eq!(err, SpiffeError::WorkloadApiStubbed);
-    // The trust bundle fetch is also stubbed.
-    let err = client
+    let svid = SpiffeSvid {
+        spiffe_id: SpiffeIdentity::new("example.org", "/ns/default/sa/svc"),
+        x509_cert: vec![vec![0u8; 10]],
+        private_key: vec![0u8; 32],
+        expires_at: 9999,
+    };
+    let bundle = SpiffeTrustBundle {
+        trust_domain: "example.org".to_string(),
+        x509_certs: vec![vec![0u8; 10]],
+    };
+    let transport = Arc::new(FakeWorkloadApi::new(vec![svid.clone()], bundle));
+    let client = SpiffeClient::new(resolved, transport);
+    let fetched = client.fetch_svid().await.expect("fake fetch succeeds");
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[0].spiffe_id, svid.spiffe_id);
+    let bundle = client
         .fetch_trust_bundle()
-        .expect_err("stubbed fetch errors");
-    assert_eq!(err, SpiffeError::WorkloadApiStubbed);
+        .await
+        .expect("fake fetch succeeds");
+    assert_eq!(bundle.trust_domain, "example.org");
     // The workload identity is built from the trust domain + path.
     let id = client.workload_identity("/ns/default/sa/svc");
     assert_eq!(id.trust_domain, "example.org");
@@ -568,10 +583,36 @@ fn spiffe_client_fetch_svid_is_stubbed() {
 }
 
 #[cfg(feature = "mesh")]
+#[tokio::test]
+async fn spiffe_client_fetch_svid_propagates_error() {
+    use dwara_core::mesh::{
+        FakeWorkloadApi, SpiffeClient, SpiffeConfig, SpiffeError, SpiffeTrustBundle,
+    };
+    use std::sync::Arc;
+    let cfg = MeshSpiffeConfig {
+        trust_domain: "example.org".to_string(),
+        workload_api_socket: "/tmp/spire-agent/public/api.sock".to_string(),
+        svid_refresh_interval_secs: 300,
+    };
+    let resolved = SpiffeConfig::from_config(&cfg);
+    let bundle = SpiffeTrustBundle {
+        trust_domain: "example.org".to_string(),
+        x509_certs: vec![],
+    };
+    let transport = Arc::new(FakeWorkloadApi::new(vec![], bundle).with_svid_error(
+        SpiffeError::WorkloadApiUnreachable("connection refused".into()),
+    ));
+    let client = SpiffeClient::new(resolved, transport);
+    let err = client.fetch_svid().await.expect_err("error propagates");
+    assert!(matches!(err, SpiffeError::WorkloadApiUnreachable(_)));
+}
+
+#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_svid_seconds_until_expiry_clamps() {
-    use dwara_core::mesh::SpiffeSvid;
+    use dwara_core::mesh::{SpiffeIdentity, SpiffeSvid};
     let svid = SpiffeSvid {
+        spiffe_id: SpiffeIdentity::new("example.org", "/x"),
         x509_cert: vec![vec![0u8; 10]],
         private_key: vec![0u8; 32],
         expires_at: 1000,

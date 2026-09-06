@@ -420,3 +420,102 @@ fn edge_registration_serialization() {
     let deserialized: EdgeRegistration = serde_json::from_str(&json).unwrap();
     assert_eq!(reg, deserialized);
 }
+
+// ---------------------------------------------------------------------------
+// #151: controller restart must not break convergence (generation seeding)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn controller_seeds_generation_from_edge_registration() {
+    // Simulate a controller restart: the controller is fresh (counter =
+    // None), but an edge reconnects with a cached generation of 8.
+    let state = ControllerState::new();
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-1".to_string(),
+        current_generation: 8,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+
+    // The next publish must produce generation 9 (8 + 1), not 1.
+    let gen = state.publish_generation("config".to_string(), "hash".to_string());
+    assert_eq!(
+        gen.generation, 9,
+        "controller must seed from edge's cached generation"
+    );
+}
+
+#[test]
+fn controller_seeds_generation_from_max_across_edges() {
+    let state = ControllerState::new();
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-1".to_string(),
+        current_generation: 3,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-2".to_string(),
+        current_generation: 8,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+
+    let gen = state.publish_generation("config".to_string(), "hash".to_string());
+    assert_eq!(gen.generation, 9, "must seed from the max edge generation");
+}
+
+#[test]
+fn controller_does_not_go_backwards_from_edge_registration() {
+    // Controller already at generation 10; an edge registers with a stale
+    // cached generation of 5. The controller must NOT lower its counter.
+    let state = ControllerState::new();
+    let gen0 = state.publish_generation("c0".to_string(), "h0".to_string());
+    assert_eq!(gen0.generation, 1);
+
+    // Publish up to generation 10.
+    for i in 2..=10 {
+        let g = state.publish_generation(format!("c{i}"), format!("h{i}"));
+        assert_eq!(g.generation, i);
+    }
+
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-late".to_string(),
+        current_generation: 5,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+
+    let gen = state.publish_generation("config".to_string(), "hash".to_string());
+    assert_eq!(
+        gen.generation, 11,
+        "must not go backwards from a stale edge"
+    );
+}
+
+#[test]
+fn controller_seeds_then_converges_after_restart() {
+    // Full outage scenario: edges were at generation 8, controller
+    // restarts, edges reconnect, then a config change is published.
+    let state = ControllerState::new();
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-1".to_string(),
+        current_generation: 8,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+    state.register_edge(EdgeRegistration {
+        edge_id: "edge-2".to_string(),
+        current_generation: 8,
+        version: "0.1.0".to_string(),
+        labels: HashMap::new(),
+    });
+
+    // The first config change after the outage produces generation 9.
+    let gen = state.publish_generation("new-config".to_string(), "new-hash".to_string());
+    assert_eq!(gen.generation, 9);
+
+    // A second config change produces generation 10.
+    let gen2 = state.publish_generation("newer-config".to_string(), "newer-hash".to_string());
+    assert_eq!(gen2.generation, 10);
+}

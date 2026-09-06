@@ -337,7 +337,7 @@ pub fn check(
 /// `Retry-After` seconds: whole seconds until `reset_epoch_s`, rounded
 /// up, minimum 1 (a denied request inside the last partial second must
 /// still advertise a wait, never 0).
-fn retry_after(reset_epoch_s: i64, now_epoch_s: i64) -> u32 {
+pub fn retry_after(reset_epoch_s: i64, now_epoch_s: i64) -> u32 {
     u32::try_from((reset_epoch_s - now_epoch_s).max(1)).unwrap_or(1)
 }
 

@@ -1,17 +1,20 @@
-//! Integration tests for the A2A (agent-to-agent) scaffold (DW-114).
+//! Integration tests for the A2A (agent-to-agent) protocol support
+//! (DW-114).
 //!
 //! Covers Agent Card parsing, the A2AAdapter translation (canonical
-//! <-> A2A JSON), the stubbed task lifecycle, config validation, and
-//! the feature-gate behavior (the block is accepted but inert without
-//! the `a2a` cargo feature). The task lifecycle is STUBBED pending
-//! spec freeze -- every task-state transition returns an A2AStub
-//! error, which these tests assert.
+//! <-> A2A JSON), the task lifecycle state machine (legal and illegal
+//! transitions), config validation, and the feature-gate behavior
+//! (the block is accepted but inert without the `a2a` cargo feature).
+//! The task lifecycle state machine is implemented against the A2A
+//! Protocol Specification draft; the network call (handle_a2a_request)
+//! remains a documented stub (the adapter does not own an HTTP
+//! client; the transport is the agent's upstream).
 
 #![cfg(feature = "a2a")]
 
 use dwara_core::ai::a2a::{
     handle_a2a_request, A2AAdapter, A2ASession, AgentCardParser, CompiledA2a, CompiledA2aAgent,
-    TaskLifecycle,
+    TaskLifecycle, TaskStateMachine,
 };
 use dwara_core::ai::adapter::ProviderAdapter;
 use dwara_core::ai::types::{ChatMessage, ChatRequest, ChatRole};
@@ -286,38 +289,96 @@ fn adapter_parse_stream_event_usage() {
     ));
 }
 
-// --- A2A stub: task lifecycle returns stub error -------------------------
+// --- A2A task lifecycle state machine (DW-114) ---------------------------
 
 #[test]
-fn task_lifecycle_transitions_return_stub() {
-    let states = [
-        TaskLifecycle::Submitted,
-        TaskLifecycle::Working,
-        TaskLifecycle::Completed,
-        TaskLifecycle::Failed,
-        TaskLifecycle::Canceled,
-    ];
-    for s in &states {
-        let err = s.submit().unwrap_err();
-        assert_eq!(err.transition, "submit");
-        assert!(err.reason.contains("not yet frozen"));
-        let err = s.get_status().unwrap_err();
-        assert_eq!(err.transition, "get_status");
-        let err = s.cancel().unwrap_err();
-        assert_eq!(err.transition, "cancel");
-    }
+fn task_lifecycle_state_machine_happy_path() {
+    let mut sm = TaskStateMachine::new();
+    assert_eq!(sm.state(), TaskLifecycle::Submitted);
+    sm.start_work().expect("submitted -> working");
+    assert_eq!(sm.state(), TaskLifecycle::Working);
+    sm.complete().expect("working -> completed");
+    assert_eq!(sm.state(), TaskLifecycle::Completed);
+    assert!(sm.is_terminal());
 }
 
 #[test]
-fn session_task_methods_return_stub() {
-    let session = A2ASession::new("my-agent", 3600, 1000);
+fn task_lifecycle_state_machine_fail_and_cancel() {
+    let mut sm = TaskStateMachine::new();
+    sm.fail().expect("submitted -> failed");
+    assert_eq!(sm.state(), TaskLifecycle::Failed);
+    assert!(sm.is_terminal());
+
+    let mut sm = TaskStateMachine::new();
+    sm.start_work().expect("submitted -> working");
+    sm.cancel().expect("working -> canceled");
+    assert_eq!(sm.state(), TaskLifecycle::Canceled);
+    assert!(sm.is_terminal());
+}
+
+#[test]
+fn task_lifecycle_state_machine_rejects_illegal_transitions() {
+    let mut sm = TaskStateMachine::new();
+    // Submitted -> Completed is illegal (must go through Working).
+    assert!(sm.complete().is_err());
+    assert_eq!(sm.state(), TaskLifecycle::Submitted);
+
+    sm.start_work().expect("submitted -> working");
+    sm.complete().expect("working -> completed");
+    // Completed is terminal.
+    assert!(sm.start_work().is_err());
+    assert!(sm.fail().is_err());
+    assert!(sm.cancel().is_err());
+    assert_eq!(sm.state(), TaskLifecycle::Completed);
+}
+
+#[test]
+fn task_lifecycle_can_transition_to_table() {
+    use TaskLifecycle::*;
+    assert!(Submitted.can_transition_to(Working));
+    assert!(Submitted.can_transition_to(Failed));
+    assert!(Submitted.can_transition_to(Canceled));
+    assert!(Working.can_transition_to(Completed));
+    assert!(Working.can_transition_to(Failed));
+    assert!(Working.can_transition_to(Canceled));
+    // Illegal.
+    assert!(!Submitted.can_transition_to(Completed));
+    assert!(!Working.can_transition_to(Submitted));
+    assert!(!Completed.can_transition_to(Working));
+    assert!(!Failed.can_transition_to(Working));
+    assert!(!Canceled.can_transition_to(Working));
+}
+
+#[test]
+fn session_task_lifecycle_works() {
+    let mut session = A2ASession::new("my-agent", 3600, 1000);
     assert!(session.id().starts_with("a2a-"));
-    let err = session.submit_task().unwrap_err();
-    assert_eq!(err.transition, "submit_task");
-    let err = session.get_task_status().unwrap_err();
-    assert_eq!(err.transition, "get_task_status");
-    let err = session.cancel_task().unwrap_err();
-    assert_eq!(err.transition, "cancel_task");
+    assert_eq!(session.task_state(), TaskLifecycle::Submitted);
+
+    session.start_work().expect("submitted -> working");
+    assert_eq!(session.task_state(), TaskLifecycle::Working);
+
+    session.complete().expect("working -> completed");
+    assert_eq!(session.task_state(), TaskLifecycle::Completed);
+}
+
+#[test]
+fn session_cancel_and_fail() {
+    let mut session = A2ASession::new("my-agent", 3600, 1000);
+    session.cancel().expect("submitted -> canceled");
+    assert_eq!(session.task_state(), TaskLifecycle::Canceled);
+
+    let mut session = A2ASession::new("my-agent", 3600, 1000);
+    session.start_work().expect("submitted -> working");
+    session.fail().expect("working -> failed");
+    assert_eq!(session.task_state(), TaskLifecycle::Failed);
+}
+
+#[test]
+fn session_rejects_illegal_transition() {
+    let mut session = A2ASession::new("my-agent", 3600, 1000);
+    assert!(session.complete().is_err());
+    assert_eq!(session.task_state(), TaskLifecycle::Submitted);
 }
 
 #[test]

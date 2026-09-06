@@ -625,6 +625,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         license: None,
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
+        redis_quotas: None,
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,

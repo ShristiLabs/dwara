@@ -33,3 +33,11 @@ docs-internal
 docs-site/node_modules/
 docs-site/.vitepress/cache/
 docs-site/.vitepress/dist/
+
+.commandcode
+
+# Excluded scaffold crates maintain their own standalone Cargo.lock
+# (separate workspaces, not part of the main workspace). Do not track
+# them; each build regenerates them.
+crates/dwara-ebpf/Cargo.lock
+crates/dwara-uring/Cargo.lock
