@@ -1,7 +1,7 @@
 //! Distributed Redis-backed consumer request quotas (DW-155, ent feature).
 //!
 //! The same budget semantics as the local
-//! [`state::quotas`](crate::state::quotas) module (daily/monthly
+//! [`state::quotas`](crate::config::quotas) module (daily/monthly
 //! calendar windows, decide-and-reserve, stop-at-first-denial, max-wait
 //! peeking), but the per-consumer per-window counters live in Redis and
 //! are incremented atomically via a Lua script in a SINGLE round-trip
@@ -64,8 +64,8 @@ use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::Script;
 
+use crate::config::quotas::{retry_after, Budget, QuotaOutcome};
 use crate::config::ConsumerQuotas;
-use crate::state::quotas::{retry_after, Budget, QuotaOutcome};
 
 /// The atomic quota check-and-reserve Lua script (see the module docs).
 ///
@@ -100,7 +100,7 @@ const MONTHLY_TTL_S: u64 = 31 * 86_400 + 3_600; // 31d + 1h margin
 /// Distributed Redis-backed quota checker (DW-155, ent feature).
 ///
 /// Implements the same budget semantics as
-/// [`state::quotas::check`](crate::state::quotas::check), but the
+/// [`state::quotas::check`](crate::config::quotas::check), but the
 /// per-consumer per-window counters live in Redis and are updated
 /// atomically via a Lua script. See the module docs for the algorithm,
 /// key format, and fail-open/fail-closed semantics.
@@ -133,7 +133,7 @@ impl std::fmt::Debug for RedisQuotaChecker {
 pub trait QuotaChecker: Send + Sync + 'static {
     /// Check-and-reserve one request against every configured budget of
     /// `quotas` for consumer `consumer_id`. See
-    /// [`state::quotas::check`](crate::state::quotas::check) for the
+    /// [`state::quotas::check`](crate::config::quotas::check) for the
     /// evaluation order, the stacking consumption trade, and the
     /// failure model.
     async fn check(
@@ -166,7 +166,7 @@ impl RedisQuotaChecker {
     /// Check-and-reserve one request against every configured budget
     /// (see the module docs for the evaluation semantics). Returns a
     /// [`QuotaOutcome`] (the same type the local
-    /// [`state::quotas::check`](crate::state::quotas::check) returns)
+    /// [`state::quotas::check`](crate::config::quotas::check) returns)
     /// so the request path answers identically regardless of backend.
     pub async fn check(
         &self,

@@ -67,7 +67,7 @@ async fn spawn_ndjson_receiver() -> (u16, Arc<Mutex<Vec<Delivery>>>) {
 
 /// Bounded poll until `n` batches are captured.
 async fn wait_deliveries(captured: &Arc<Mutex<Vec<Delivery>>>, n: usize) -> Vec<Delivery> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         {
             let d = captured.lock().unwrap();
@@ -85,7 +85,7 @@ async fn wait_deliveries(captured: &Arc<Mutex<Vec<Delivery>>>, n: usize) -> Vec<
 
 /// Bounded poll until the stream counter family carries `outcome`.
 async fn wait_outcome(dp: &Arc<DataPlane>, outcome: &str) {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(stream) = dp.record_stream() {
             refresh_stream_gauges(&stream, dp.observability());

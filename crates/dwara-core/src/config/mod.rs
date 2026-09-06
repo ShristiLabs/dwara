@@ -34,6 +34,7 @@ pub mod credentials;
 pub mod limits;
 pub mod mesh;
 pub mod net;
+pub mod quotas;
 pub mod transforms;
 pub mod versioning;
 
