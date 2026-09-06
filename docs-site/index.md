@@ -105,3 +105,89 @@ aggregation) are compile-time feature packs, and fleet-scale features
 (CP/DP split, Redis-backed rate limiting and convergence, Vault/KMS
 secrets, workspaces) make up the enterprise edition. The
 [editions guide](/guide/editions) has the full comparison matrix.
+
+## Feature flags
+
+Every optional capability is a cargo feature flag, **default-OFF**. The
+default `cargo build` produces the complete OSS gateway with no optional
+packs -- each pack adds binary size or a heavy dependency, so you opt in
+per build. See the [feature reference](/guide/feature-reference) for
+build commands, dependency chains, license claims, and maturity status.
+
+### Protocol and transport
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `h3` | HTTP/3 (QUIC) ingress listener and upstream transport | [HTTP/3](/guide/http3) |
+| `grpc_web` | gRPC-Web framing and JSON-to-gRPC transcoding | [gRPC-Web](/guide/grpc-web) |
+| `protocol_translation` | General protocol translation (REST, gRPC, GraphQL); implies `grpc_web` | [Protocol translation](/guide/protocol-translation) |
+| `soap` | SOAP/XML envelope translation; implies `protocol_translation` | [Protocol translation](/guide/protocol-translation) |
+| `l4` | L4 TCP/UDP proxying with SNI routing reuse | [L4 proxying](/guide/l4-proxying) |
+| `pq` | Post-quantum TLS hybrid key exchange (X25519 + ML-KEM); experimental | [Post-quantum TLS](/guide/post-quantum-tls) |
+
+### Extensibility
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `wasm` | proxy-wasm host runtime (community Kong/Envoy filters run unmodified) | [proxy-wasm plugins](/guide/proxy-wasm-plugins) |
+| `nano_services` | WASM route handlers -- a route action that runs a WASM module to generate the response (implies `wasm`) | [Nano-services](/guide/nano-services) |
+| `plugins` | Native Rust filter trait and unified dispatch chain alongside proxy-wasm | [Native plugins](/guide/native-plugins) |
+| `cel` | CEL (Common Expression Language) expression evaluation in policies | [CEL expressions](/guide/cel-expressions) |
+| `extism` | Extism PDK plugin runtime alongside native and WASM plugins | [Extism PDK](/guide/extism-pdk) |
+
+### Authorization and security
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `cedar` | Cedar policy engine and OPA HTTP callout for fine-grained authorization | [Cedar/OPA authz](/guide/cedar-opa-authz) |
+| `openapi_validation` | Upstream response validation against OpenAPI schemas; also used by AI guardrails | [OpenAPI response validation](/guide/openapi-response-validation) |
+| `cert_pinning` | Upstream TLS certificate pinning by SPKI hash | [Feature reference](/guide/feature-reference) |
+| `signed_url` | Signed URL request authentication (HMAC-SHA256 over canonical request) | [Feature reference](/guide/feature-reference) |
+| `fips` | FIPS 140-3 mode (Enterprise): aws-lc-rs FIPS provider, self-test, restricted cipher suites | [FIPS mode](/guide/fips-mode) |
+| `mesh` | Service mesh mode (Enterprise): sidecar controller, SPIFFE/SPIRE mTLS identity | [Service mesh](/guide/service-mesh) |
+
+### API management
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `k8s` | Kubernetes Gateway API / Ingress resource translation and controller | [Kubernetes Gateway API](/guide/kubernetes-gateway-api) |
+| `aggregation` | Multi-upstream response composition (KrakenD-style) with JSONPath fragment shaping | [API aggregation](/guide/api-aggregation) |
+| `graphql` | GraphQL awareness: query depth/complexity limits, persisted-query enforcement | [GraphQL](/guide/graphql) |
+| `api_lifecycle` | API lifecycle management: developer portal, environment profiles, journey recorder | [API lifecycle](/guide/api-lifecycle) |
+
+### AI gateway
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `semantic_cache` | Embedding-similarity cache for AI prompts (HNSW ANN, external embedding service) | [Semantic caching](/guide/ai-semantic-caching) |
+| `mcp` | Agent-operable administration via MCP server with RBAC-scoped tools | [Agent-operable admin](/guide/agent-operable-admin) |
+| `a2a` | A2A (agent-to-agent) protocol support with Agent Card parsing | [A2A protocol](/guide/a2a-protocol) |
+
+### Observability and diagnostics
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `otlp` | OTLP trace and metrics export to a collector (build with `-p dwara-bin`) | [OTel metrics export](/guide/otel-metrics-export) |
+| `console` | tokio-console diagnostics server for async task inspection (build with `-p dwara-bin`) | [Feature reference](/guide/feature-reference) |
+
+### Enterprise edition
+
+| Flag | What it adds | Guide |
+|---|---|---|
+| `ent` | Enterprise edition: license verification, Redis distributed rate limiter/cache/convergence, CP/DP split over gRPC, workspaces with RBAC and audit, Vault/KMS secrets, federated analytics, AI provider credential pools | [Enterprise](/guide/enterprise) |
+
+### Test-only
+
+| Flag | What it adds |
+|---|---|
+| `loom` | Concurrency model checking -- swaps synchronization primitives for loom's model-checked equivalents (never in production builds) |
+
+### Feature maturity at a glance
+
+| Status | Features |
+|---|---|
+| Wired end to end | `ent`, `otlp`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache` |
+| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `mcp`, `a2a`, `mesh` |
+| Config-accepted, runtime stubbed | `soap`, `extism`, `cert_pinning`, `signed_url`, `nano_services` |
+
+The published OSS binaries and images are built with no packs enabled.
