@@ -15,7 +15,7 @@
 //! connection and:
 //!
 //! 1. If `sni_routing` is true, peeks the TLS ClientHello SNI (reusing
-//!    [`crate::tls::handle_passthrough`]'s peek + `sni_from_client_hello`
+//!    `security::tls::handle_passthrough`'s peek + `sni_from_client_hello`
 //!    extraction -- the same bounded reassembly, the same 64 KiB budget,
 //!    the same 10s peek timeout). The SNI is matched against the
 //!    listener's `tls.sni_routes` to select the upstream; the configured
@@ -59,7 +59,7 @@ use tokio::net::TcpStream;
 
 use crate::config::{Gateway, L4Config, SniRoute};
 use crate::dataplane::proxy::DataPlane;
-use crate::tls::{self, EndpointPicker, PassthroughAction};
+use crate::security::tls::{self, EndpointPicker, PassthroughAction};
 
 /// L4 proxying error. Kept simple: the dispatcher logs and closes on
 /// any error -- there is no client-facing HTTP envelope at L4.

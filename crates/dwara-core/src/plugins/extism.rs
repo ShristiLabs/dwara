@@ -76,7 +76,7 @@ pub struct ExtismPlugin {
 /// instances (DW-109).
 ///
 /// The host is the Extism equivalent of the proxy-wasm
-/// [`crate::wasm::host::WasmEngine`]. It loads Extism plugins at
+/// `wasm::host::WasmEngine`. It loads Extism plugins at
 /// startup and creates per-request instances for each route that
 /// references them. The instances are dispatched via the
 /// [`ExtismDispatch`] trait, which the unified plugin chain

@@ -2455,8 +2455,8 @@ impl Observability {
     /// negotiated), `fallback` (the client did not support the hybrid
     /// group and a classical group was negotiated), or `disabled` (PQ
     /// was off or the experimental API was inert). Use
-    /// [`crate::security::pq::pq_handshake_metric`] to derive the label
-    /// from a [`crate::security::pq::PqHandshakeResult`].
+    /// `security::pq::pq_handshake_metric` to derive the label
+    /// from a `security::pq::PqHandshakeResult`.
     pub fn record_tls_pq_handshake(&self, result: &str) {
         self.tls_pq_handshakes_total
             .with_label_values(&[result])

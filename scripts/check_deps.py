@@ -55,11 +55,17 @@ ALLOWED = {
     "extensions": {"config"},
     "observability": set(),
     "events": {"config", "observability"},
-    "snapshot": {"config", "events"},
+    # DW-105/DW-093: snapshot validation checks FIPS/PQ mode flags
+    # (security::fips::FipsMode, security::pq::PqMode) to validate
+    # listener/upstream TLS config, so snapshot may depend on security.
+    "snapshot": {"config", "events", "security"},
     "state": {"config"},
     "analytics": {"config", "observability", "extensions"},
-    "security": {"config", "state", "observability"},
-    "resilience": {"config", "snapshot", "extensions", "observability", "events"},
+    # DW-107: service mesh/SPIFFE. The mesh domain owns the sidecar
+    # controller and SPIFFE client; security::tls imports mesh types
+    # for SVID-based TLS, so security may depend on mesh.
+    "mesh": {"config"},
+    "security": {"config", "state", "observability", "mesh"},
     # DW-119: native filter trait + unified dispatch chain. Depends on
     # config only; the wasm domain bridges its instances in via a
     # generic adapter so plugins never imports wasm (downward only).

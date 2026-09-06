@@ -8,7 +8,7 @@
 //! but inert (validation warns). Ent-only: validation warns when mesh
 //! is configured without the `ent` feature.
 //!
-//! See the `mesh` domain module (`crate::mesh`) for the sidecar
+//! See the `mesh` domain module for the sidecar
 //! controller and SPIFFE client scaffolds.
 
 use schemars::JsonSchema;
