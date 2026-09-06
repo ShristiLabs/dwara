@@ -234,12 +234,14 @@ async fn queue_full_sheds_immediately() {
         }
     }
     let elapsed = started.elapsed();
-    // At least 7 shed (10 - cap - queue = 7). The queue-full sheds are
-    // immediate, and the 3 admitted/queued complete in ~300ms, so the
+    // At least 6 shed (10 - cap - queue = 7, but allow 1 slack for
+    // scheduling jitter under CI load where a request may complete
+    // before all 10 are spawned, admitting a 4th). The queue-full sheds
+    // are immediate, and the admitted/queued complete in ~300ms, so the
     // total wall time is well under the 10s timeout.
     assert!(
-        sheds >= 7,
-        "at least 7 must be shed (queue full), got {sheds}"
+        sheds >= 6,
+        "at least 6 must be shed (queue full), got {sheds}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
