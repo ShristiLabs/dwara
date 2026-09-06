@@ -119,8 +119,8 @@ fn app_js_fetches_admin_endpoints() {
     // The SPA fetches from the admin API.
     assert!(js.contains("fetchJSON('/health')"));
     assert!(js.contains("fetchJSON('/stats')"));
-    assert!(js.contains("fetchJSON('/config')"));
-    assert!(js.contains("fetchText('/config_dump')"));
+    assert!(js.contains("fetchText('/config')"));
+    assert!(js.contains("fetchJSON('/config_dump')"));
     assert!(js.contains("fetchJSON('/analytics/top"));
 }
 
