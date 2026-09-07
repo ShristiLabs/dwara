@@ -435,7 +435,45 @@ export default withMermaid(
           "/architecture/": [
             {
               text: "Architecture",
-              items: [{ text: "Overview", link: "/architecture/overview" }],
+              items: [
+                { text: "Overview", link: "/architecture/overview" },
+                {
+                  text: "Request pipeline",
+                  link: "/architecture/request-pipeline",
+                },
+                {
+                  text: "Connection and TLS",
+                  link: "/architecture/connection-and-tls",
+                },
+                {
+                  text: "Config, state, and extensions",
+                  link: "/architecture/config-and-state",
+                },
+                {
+                  text: "Error handling",
+                  link: "/architecture/error-handling",
+                },
+                {
+                  text: "Resilience",
+                  link: "/architecture/resilience",
+                },
+                {
+                  text: "Security",
+                  link: "/architecture/security",
+                },
+                {
+                  text: "AI gateway",
+                  link: "/architecture/ai-gateway",
+                },
+                {
+                  text: "Plugins and extensibility",
+                  link: "/architecture/plugins-and-extensibility",
+                },
+                {
+                  text: "Observability",
+                  link: "/architecture/observability",
+                },
+              ],
             },
           ],
           "/reference/": [

@@ -37,7 +37,7 @@ data plane, admin surface, and state all live in one binary.
 
 ```mermaid
 flowchart LR
-    Client -->|HTTP/1.1, h2, h2c,\nTLS terminate or passthrough| Listener
+    Client -->|HTTP/1.1, h2, h2c, h3,\nTLS terminate or passthrough| Listener
     subgraph Gateway [dwara process]
         Listener --> Dataplane[Dataplane\nrouting, policy, proxy]
         Dataplane <--> Snapshot[(Snapshot\nArcSwap)]
@@ -53,7 +53,7 @@ flowchart LR
 | Component | What it is | Notes |
 |---|---|---|
 | `dwara` | The gateway binary | Listeners, dataplane, snapshot, admin listener in one process |
-| Listeners | Connection acceptors | TLS terminate (per-SNI certificates) or SNI-passthrough splice |
+| Listeners | Connection acceptors | TLS terminate (per-SNI certificates), SNI passthrough splice, or L4 TCP/UDP splice; PROXY protocol v1/v2 optional |
 | Dataplane | The proxy engine | Route resolution, policy chain, streaming proxy — buffers nothing by default |
 | Snapshot | Immutable config state | Routes, upstream pools, TLS material, and auth state swap atomically behind an `ArcSwap` |
 | Admin listener | mTLS-only management surface | Optional; `GET`/`PATCH /config`, `/health`, `/stats` |
@@ -105,131 +105,61 @@ the admin API, or the controller's stream.
 
 Both editions keep heavy optional features behind cargo feature flags
 (default OFF) so the base binary stays small. These are OSS — no
-license involved:
+license involved. See the
+[feature reference](../guide/feature-reference) for the complete list
+of all 29 flags with build commands, dependency chains, and maturity
+status.
 
-| Flag | Adds |
-|---|---|
-| `wasm` | proxy-wasm host (run community Kong/Envoy filters unmodified) |
-| `plugins` | native Rust filter chain (compile-in extensions) |
-| `cel` | CEL expression evaluation in policies |
-| `cedar` | Cedar policy + OPA callout authorization |
-| `openapi_validation` | upstream response validation against OpenAPI schemas |
-| `k8s` | Kubernetes Gateway API / Ingress translation and controller |
-| `aggregation` | multi-upstream response composition (KrakenD-style) |
-| `mcp` | agent-operable administration via MCP |
+## Architecture in detail
 
-See [Editions: OSS vs Enterprise](../guide/editions) for the full
-matrix, including which optional packs belong to which edition and how
-each is gated.
+The overview above is the 30-second map. The following pages go into
+each area in depth:
 
-## Request pipeline
-
-Every request that reaches a data-plane listener passes through a fixed
-order of stages. This order is intentional and does not change based on
-configuration:
-
-```mermaid
-flowchart TD
-    A[Request arrives] --> B{Reserved path?\n/healthz /readyz /metrics}
-    B -->|yes| R[Reserved handler\nanswers directly]
-    B -->|no| C[Route resolution]
-    C -->|no match| N[404\nerror envelope]
-    C -->|match| RL[Route limits\nbody / header caps]
-    RL -->|over limit| EL[413 / 431]
-    RL --> PF{CORS preflight?}
-    PF -->|yes| PFR[204 answered by gateway\nnever proxied]
-    PF -->|no| D[Authentication]
-    D -->|fails| U[401]
-    D --> E[Authorization / IP ACL]
-    E -->|fails| F[403]
-    E --> G[Rate limiting]
-    G -->|denied| L[429]
-    G --> H[Gateway cap admission\npriority-aware]
-    H -->|over cap| S[503 shed]
-    H --> I[Circuit breaker]
-    I -->|open| O[502/503]
-    I --> J[Endpoint pick\nload balancing]
-    J --> K[Pending-request cap]
-    K --> P[Connect + proxy\nstreaming, no buffering]
-    P --> RC[Response edge\ntransforms + compression\n+ CORS + security headers]
-```
-
-A few consequences worth knowing as an operator:
-
-- **Unrouted traffic still gets rate-limited.** Listener- and
-  global-attached rate limits run *before* route resolution decides
-  there's no match, so a flood of garbage paths is still capped before
-  it turns into a wall of 404s.
-- **Authentication and authorization never run for unrouted traffic** —
-  they're per-route/service/listener concerns, so they only make sense
-  once a route has matched.
-- **Route limits and CORS preflights run between routing and auth.**
-  A matched request is first checked against the route's `limits`
-  (413/431), and on a route with a `cors` block a browser preflight is
-  answered 204 by the gateway itself — before authentication, never
-  forwarded upstream. On the way out, a response can gain compression
-  and CORS headers. See
-  [CORS, compression, and request limits](../guide/edge-policies).
-- **Policy precedence is deny-anywhere-wins**, evaluated most-specific
-  first: consumer > route > service > listener > global.
-
-## Hot reload
-
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant FS as Config file / SIGHUP
-    participant GW as Gateway
-    participant Snap as Snapshot (ArcSwap)
-
-    Op->>FS: edit config, or systemctl reload
-    FS->>GW: change event / signal
-    GW->>GW: parse -> validate -> compile
-    alt success
-        GW->>Snap: atomic publish (new generation)
-        Note over Snap: in-flight requests keep\ntheir original generation
-    else failure
-        GW->>Op: log every issue
-        Note over Snap: previous generation\nkeeps serving unchanged
-    end
-```
-
-Config, TLS certificate material, and the upstream connection pools all
-swap together in the same atomic publish — a new route table is never
-paired with stale upstream pools. See [Operations](../guide/operations)
-for the full mechanics (debouncing, `SIGHUP`, certificate rotation,
-listener-bind-set limitations).
-
-In the enterprise topology the same pipeline runs on the controller,
-and a successful publish becomes a generation pushed to every edge; an
-edge that fails to compile a generation keeps serving its cached one
-and reports the failure back.
-
-## TLS: terminate vs. passthrough
-
-```mermaid
-flowchart LR
-    subgraph Terminate
-        C1[Client] -->|TLS| L1[Listener\ndecrypts]
-        L1 -->|plaintext or\nre-encrypted upstream TLS| U1[Upstream]
-    end
-    subgraph Passthrough
-        C2[Client] -->|TLS, unmodified| L2[Listener\nreads SNI only]
-        L2 -->|raw byte splice| U2[Upstream\nterminates TLS itself]
-    end
-```
-
-Terminate mode supports multiple certificates keyed by SNI on one
-listener. Passthrough mode never decrypts the connection — Dwara peeks
-the ClientHello's SNI (reassembling it across fragmented TLS records if
-needed) to pick an upstream, then splices bytes; the upstream sees the
-original, untouched TLS session.
+- **[Request pipeline](./request-pipeline)** — the fixed order of
+  stages every request passes through, split into routing/policy and
+  proxy/response phases, with two detailed flow diagrams and the
+  operator-facing consequences of the ordering.
+- **[Connection and TLS](./connection-and-tls)** — how listeners
+  accept connections, the six listener modes (terminate, passthrough,
+  cleartext, H3/QUIC, L4 TCP, L4 UDP), PROXY protocol, and upstream
+  TLS options.
+- **[Config, state, and extensions](./config-and-state)** — the
+  four-stage config pipeline (parse -> validate -> compile -> publish),
+  hot reload, the three kinds of durable state, and the five
+  swappable extension-point traits.
+- **[Error handling](./error-handling)** — the unified JSON error
+  envelope, the complete status-to-code mapping, and upstream error
+  classification.
+- **[Resilience](./resilience)** — the layered state machines
+  (endpoint health, circuit breaker, retry budget, adaptive rate
+  limiting) and how they compose to keep traffic flowing when
+  upstreams degrade.
+- **[Security](./security)** — the authentication dispatch order,
+  the authorization evaluation model, secret resolution, and how
+  they fit into the request pipeline.
+- **[AI gateway](./ai-gateway)** — the AI request flow, the adapter
+  translation model, alias resolution, and the policy-scoped
+  governance, guardrails, and budgets.
+- **[Plugins and extensibility](./plugins-and-extensibility)** — the
+  shared phase model, the dispatch chain, and the lifecycle of a
+  plugin instance across the three runtimes (native, Proxy-Wasm,
+  Extism).
+- **[Observability](./observability)** — the request ID, access log,
+  metric families, trace spans, and how they correlate across the
+  request path.
 
 ## Where to go next
 
+- [Concepts and taxonomy](../guide/concepts) — the vocabulary of
+  Dwara: listeners, routes, services, upstreams, consumers, policies,
+  and how they relate.
 - [Editions: OSS vs Enterprise](../guide/editions) — which features
   ship in which edition and how the license gate works.
 - [Getting started](../guide/getting-started) — run a gateway locally.
-- [Configuration](../guide/configuration) — the YAML shape and concepts.
-- [Operations](../guide/operations) — reload, shutdown, health, hardening.
+- [Configuration](../guide/configuration) — the YAML shape and the
+  config pipeline.
+- [Operations](../guide/operations) — reload, shutdown, health,
+  hardening.
 - [Observability](../guide/observability) — logs, metrics, tracing.
+- [Feature reference](../guide/feature-reference) — all 29 feature
+  flags with build commands and maturity status.
