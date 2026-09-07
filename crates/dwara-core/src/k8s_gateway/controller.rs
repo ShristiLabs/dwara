@@ -276,6 +276,7 @@ impl Reconciler {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         };
 
         for gw in &self.gateways {

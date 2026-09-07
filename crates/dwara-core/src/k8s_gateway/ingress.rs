@@ -342,6 +342,8 @@ pub fn translate_ingress(
                         locality: None,
                         pq: false,
                         peak_ewma: None,
+                        cert_pinning: None,
+                        mtls: None,
                     };
                     upstreams.push(upstream);
 
@@ -403,6 +405,7 @@ pub fn translate_ingress(
                     graphql: None,
                     grpc_web: None,
                     translation: None,
+                    oidc_login: None,
                 };
                 dwara_routes.push(dwara_route);
             }
@@ -449,6 +452,7 @@ pub fn translate_ingress(
             client_ca_file: None,
             zero_rtt: ZeroRttPolicy::Reject,
             pq: false,
+            acme: None,
         };
 
         listeners.push(DwaraListener {
@@ -498,6 +502,7 @@ pub fn translate_ingress(
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
 
     Ok(TranslationResult {
