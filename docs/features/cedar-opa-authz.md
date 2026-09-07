@@ -134,6 +134,26 @@ The OPA endpoint should return a JSON response with a `result` field:
 {"result": true}
 ```
 
+### SSRF egress filter (SEC-13, #160)
+
+The OPA HTTP callout is subject to the same
+[SSRF](https://en.wikipedia.org/wiki/Server-side_request_forgery)
+(Server-Side Request Forgery — an attack where the server is tricked
+into making requests to internal/private addresses) egress filter as
+webhook deliveries. When the `gateway.ssrf_filter` block is present,
+the OPA client resolves the endpoint hostname at connection time and
+rejects connections to private, loopback, link-local, and cloud-
+metadata IP ranges before opening the TCP connection.
+
+This is particularly important for OPA because the endpoint URL is
+operator configuration that may point to an internal policy server —
+the filter's `allow` list can exempt intentional internal destinations
+(e.g., `10.0.1.0/24` for an internal OPA subnet) while still blocking
+unintended private addresses.
+
+See [alerting](./alerting.md#ssrf-egress-filter-sec13-160) for the
+full filter design, configuration, and fail-closed behavior.
+
 ## Design (section 6-Extensibility)
 
 Cedar is Rust-native (AWS), so authz becomes fine-grained data

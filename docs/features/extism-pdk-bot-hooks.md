@@ -107,35 +107,101 @@ routes:
     action: { type: proxy }
 ```
 
-## Upstream TLS certificate pinning
+## Upstream TLS certificate pinning (SEC-04, #157)
 
 When enabled, the gateway pins upstream TLS certificates by their
-SubjectPublicKeyInfo (SPKI) hash. During the TLS handshake, the
+[SubjectPublicKeyInfo](https://en.wikipedia.org/wiki/X.509#Structure_of_a_certificate)
+(SPKI — the part of an X.509 certificate that carries the public key
+and its algorithm) SHA-256 hash. During the TLS handshake, the
 verifier extracts the upstream cert's SPKI, computes its SHA-256, and
 compares it against the configured pins. A mismatch rejects the
 connection (fail-closed: no fallback to CA-based verification). Pinning
 the SPKI (rather than the full certificate) allows leaf rotation as
-long as the key pair is unchanged.
+long as the key pair is unchanged — a renewed certificate with the
+same key still matches the pin.
 
-This is a scaffold behind the `cert_pinning` cargo feature. `CertPin`
-holds the SHA-256 hash of the SPKI (lowercase hex, 64 chars).
-`CertPinVerifier` holds the allowed SPKI hashes; `from_upstream`
-returns `None` when the upstream has no `cert_pinning` block (normal
-CA-based verification). `verify` is a documented no-op: it accepts
-everything when there are no pins and rejects everything when there
-are pins (fail-closed). The SPKI extraction + SHA-256 + the rustls
-custom verifier wiring would land here when production-ready.
+M5 (SEC-04, #157) advanced the DW-109 scaffold: the SPKI extraction,
+SHA-256 hashing, and rustls custom verifier wiring are now
+implemented for `https` and `http2` upstreams (not `h3`). The
+verifier:
+
+1. Extracts the peer certificate's SPKI from the DER-encoded
+   SubjectPublicKeyInfo.
+2. Computes SHA-256 of the SPKI.
+3. Compares the hash against the configured raw 32-byte pins.
+4. Any matching pin succeeds; no match fails.
+5. Malformed certificates, extraction failures, and mismatches are all
+   rejected — there is no CA fallback.
+6. Pinning replaces CA trust entirely via a custom rustls
+   `ServerCertVerifier`: the normal CA verification path is not
+   consulted when pinning is active.
+
+```mermaid
+flowchart TD
+    Handshake[TLS handshake with upstream] --> Cert[Peer certificate received]
+    Cert --> Extract[Extract SPKI from DER]
+    Extract --> Hash[SHA-256 of SPKI bytes]
+    Hash --> Compare{Matches any pin?}
+    Compare -->|yes| OK[handshake proceeds - no CA verification]
+    Compare -->|no| Reject[handshake rejected - fail-closed]
+    Extract -->|extraction failure| Reject
+```
+
+The implementation is feature-gated behind the `cert_pinning` cargo
+feature (default OFF). `CertPin` holds the SHA-256 hash of the SPKI
+(lowercase hex, 64 chars). `CertPinVerifier` holds the allowed SPKI
+hashes; `from_upstream` returns `None` when the upstream has no
+`cert_pinning` block (normal CA-based verification). When the feature
+is OFF, the config block is accepted but inert; validation warns.
 
 ```yaml
 upstreams:
   - name: api
+    protocol: https
     cert_pinning:
       pins:
         - spki_sha256: "abcdef0123456789..."
 ```
 
-The `cert_pinning` config block is always present in the schema; when
-off the block is accepted but inert (validation warns).
+### Why SPKI pinning
+
+SPKI pinning is preferred over full-certificate pinning because:
+
+1. **SPKI is stable across certificate renewals** — the same key pair
+   produces the same SPKI hash, so a renewed certificate with the same
+   key still matches the pin.
+2. **SPKI is smaller** (32 bytes hashed vs. full DER cert) — less
+   config, less comparison surface.
+3. **SPKI is the industry standard** — RFC 7858 (TLS for SMTP) and
+   Chromium's historical HPKP both use SPKI pinning.
+
+### Fail-closed with no CA fallback
+
+When pinning is configured and the `cert_pinning` feature is ON,
+verification is fail-closed: if no pin matches, the connection is
+rejected. There is no fallback to CA-based verification. This is the
+secure default — if an operator has explicitly chosen to pin a key,
+falling back to CA verification would defeat the purpose of pinning
+(a compromised CA or a substituted certificate would be accepted).
+
+### Interaction with upstream mTLS
+
+When both `cert_pinning` and `mtls` (SEC-03) are configured on the same
+upstream, pinning takes precedence in the current implementation: the
+custom pinning verifier is used and the client certificate is not
+presented. This is a known limitation; a future change will combine
+the custom pinning verifier with client auth. See
+[oauth2-mtls](./oauth2-mtls.md#upstream-mtls-client-certificates-sec-03-156).
+
+### Tradeoffs
+
+- Pinning requires manual pin updates when the upstream rotates its key
+  pair. Configure multiple pins (old + new) during rotation.
+- Fail-closed means a pin mismatch takes the upstream offline. Monitor
+  pin validation failures.
+- SPKI pinning does not protect against key compromise (the attacker
+  has the private key). Use short certificate lifetimes and key
+  rotation alongside pinning.
 
 ## Feature gates
 
@@ -144,6 +210,6 @@ off the block is accepted but inert (validation warns).
 | Extism PDK plugins | `extism` | OFF | `plugins` (shared DW-119) |
 | Bot detection hooks | (none, inert stub) | always compiled | (not yet wired) |
 | Signed URL verification | `signed_url` | OFF | `routes[].signed_url` |
-| Certificate pinning | `cert_pinning` | OFF | `upstreams[].cert_pinning` |
+| Certificate pinning | `cert_pinning` | OFF | `upstreams[].cert_pinning` (verifier wired for https/http2, not h3; SEC-04) |
 
 The [native plugins](./native-plugins.md) page covers the dispatch chain (DW-119); [proxy-wasm](./proxy-wasm.md) and [authn-authz](./authn-authz.md) cover the WASM host and signed URL.

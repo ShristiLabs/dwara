@@ -179,7 +179,7 @@ The extension traits are OSS in both editions — enterprise backends
 These optional packs are OSS (no license) but default OFF because each
 adds binary size or a heavy dependency. Enable them per build. See
 [Feature reference](./feature-reference) for the complete list of all
-28 feature flags with build commands, dependency chains, and maturity
+29 feature flags with build commands, dependency chains, and maturity
 status.
 
 | Flag | What it adds | Why default OFF |
@@ -202,10 +202,10 @@ status.
 | `soap` | SOAP/XML translation; implies `protocol_translation` | opt-in legacy protocol support |
 | `pq` | post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | experimental; incompatible with `fips` |
 | `l4` | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
-| `a2a` | A2A (agent-to-agent) protocol support | opt-in; task lifecycle currently stubbed |
+| `a2a` | A2A (agent-to-agent) protocol support | opt-in; task lifecycle implemented, network call stubbed |
 | `api_lifecycle` | API lifecycle: dev portal, environment profiles, journey recorder | opt-in; config-accepted, partially wired |
 | `extism` | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
-| `cert_pinning` | upstream TLS certificate pinning by SPKI hash | opt-in; scaffolded |
+| `cert_pinning` | upstream TLS certificate pinning by SPKI hash | opt-in; verifier wired for https/http2 (not h3) |
 | `signed_url` | signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
 | `console` | tokio-console diagnostics server (build with `-p dwara-bin`) | console-subscriber adds binary size |
 
@@ -213,15 +213,12 @@ Enterprise builds can enable any of these packs alongside `ent` -- for
 example `--features ent,wasm` for an enterprise fleet running
 proxy-wasm filters.
 
-Packs ship iteratively. `otlp`, `k8s`, and `ent` are wired end to
-end — when the feature is on, the export path, controller binaries,
-CLI subcommands, and config surfaces work. The remaining packs
-currently ship as library-complete components in `dwara-core` —
-engines, registries, and protocol types, test-covered — with their
-gateway wiring (config keys, proxy dispatch, transports) still
-landing; each pack's guide page carries a status note saying exactly
-what is wired today. The published OSS binaries and images are built
-with no packs enabled.
+Packs ship iteratively. See the [feature reference](./feature-reference#feature-maturity)
+for the current maturity matrix — which packs are wired end to end,
+which are config-accepted with runtime partially wired, and which are
+config-accepted with runtime stubbed. Each pack's guide page carries
+a status note saying exactly what is wired today. The published OSS
+binaries and images are built with no packs enabled.
 
 ## How gating works
 

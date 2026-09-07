@@ -1,6 +1,7 @@
 # TLS
 
-Source: `crates/dwara-core/src/security/tls.rs` (DW-007). Tests:
+Source: `crates/dwara-core/src/security/tls.rs` (DW-007),
+`crates/dwara-core/src/security/acme.rs` (SEC-02, #155). Tests:
 `tls_validation`, `trusted_ca` (dwara-core), `tls_listener`, `tls_edges`
 (dwara-bin).
 
@@ -17,6 +18,10 @@ One module owns everything TLS-shaped in the gateway:
   PEM-bundle root store,
 - the minimal ClientHello SNI parser and byte-splice that back TLS
   passthrough.
+- ACME certificate automation (SEC-02, #155) — automated issuance and
+  renewal from [ACME](https://en.wikipedia.org/wiki/Automated_Certificate_Management_Environment)-compatible certificate authorities like
+  [Let's Encrypt](https://letsencrypt.org/), feature-gated behind the
+  `acme` cargo feature.
 
 ## Terminate: multi-SNI
 
@@ -121,6 +126,119 @@ public web").
 - Bundle files are **not** file-watched (only the main config file and
   listener terminate cert/key files are) — rotating a trust bundle
   needs a `SIGHUP` or a config change to take effect.
+
+## ACME certificate automation (SEC-02, #155)
+
+[ACME](https://en.wikipedia.org/wiki/Automated_Certificate_Management_Environment)
+(Automated Certificate Management Environment) is the protocol that
+[Let's Encrypt](https://letsencrypt.org/) and other certificate
+authorities use to issue TLS certificates automatically. Instead of an
+operator manually generating a CSR, submitting it to a CA, verifying
+domain ownership, and installing the certificate, the gateway
+negotiates all of that directly with the CA over HTTPS — and renews
+the certificate before it expires, with no human intervention.
+
+The implementation lives in `crates/dwara-core/src/security/acme.rs`
+and is feature-gated behind the `acme` cargo feature (default OFF). The
+config block (`listeners[].tls.acme`) is always accepted by the parser;
+when the feature is OFF, validation warns that the block is inert.
+
+> **Implementation status:** The `acme` feature is **config-accepted,
+> runtime stubbed**. The config schema (`AcmeConfig`) parses and
+> validates, and validation warns when the feature is off, but the ACME
+> client itself is not yet implemented. No account registration,
+> challenge completion, certificate issuance, or renewal task is wired
+> into the listener startup path. A future change will add an ACME
+> client dependency (rustls-acme or instant-acme, license-checked
+> against `deny.toml`) and connect `build_acme_state` to the TLS
+> listener. Until then, use an external ACME client (certbot, lego,
+> cert-manager) and point the gateway at the resulting certificate
+> files. The sections below describe the intended design.
+
+### Architecture (intended design)
+
+The following describes the intended architecture once the ACME client
+is implemented. None of this is wired today (see the status note
+above).
+
+```mermaid
+sequenceDiagram
+    participant G as Gateway (ACME client)
+    participant CA as ACME directory (Let's Encrypt)
+    participant SNI as SNI resolver
+
+    G->>CA: GET directory
+    G->>CA: POST account registration (contact email)
+    CA-->>G: account key + URL
+
+    loop each domain
+        G->>CA: POST order for domain
+        CA-->>G: order URL + challenges
+        G->>G: solve TLS-ALPN-01 challenge\n(special cert on port 443)
+        G->>CA: POST challenge ready
+        CA-->>G: challenge verified
+        G->>CA: POST finalize (CSR)
+        CA-->>G: certificate issued
+        G->>SNI: install cert into SNI resolver
+    end
+
+    Note over G: schedule renewal at 2/3 of validity
+    G->>G: on renewal timer, repeat order
+```
+
+### Challenge types
+
+- **`tls-alpn-01`** (default): the TLS terminator handles the challenge
+  during the TLS handshake on port 443 by presenting a special
+  challenge certificate with an ACME-specific extension. No separate
+  HTTP listener is needed. This is the recommended default because it
+  works behind most load balancers and in containerized environments
+  where port 80 is not available.
+- **`http-01`**: requires a separate HTTP listener on port 80 (or port
+  forwarding from a load balancer). Use this only when TLS-ALPN-01 is
+  not viable.
+
+### State management
+
+The ACME client persists its account key and issued certificates to a
+configurable `state_dir` (default `./acme-state`). This survives
+restarts: the account key is created once and reused; certificates are
+loaded from disk on startup and renewed only when they approach
+expiry.
+
+### Renewal
+
+Renewal is scheduled at 2/3 of the certificate's validity period (e.g.,
+for a 90-day Let's Encrypt certificate, renewal starts at day 60). On
+failure, the client logs the error and retries with exponential
+backoff. Existing certificates continue to serve during renewal
+failures — the gateway never drops TLS because a renewal attempt
+failed.
+
+### Staging
+
+Set `staging: true` to use the Let's Encrypt staging directory.
+Staging certificates are not trusted by browsers but are not subject
+to the production rate limits (50 certificates per domain per week).
+Test the ACME configuration with staging first, then switch to
+production.
+
+### Alternatives and tradeoffs
+
+- **External ACME client** (certbot, lego, acme.sh): run an external
+  client and place certificates in the gateway's cert paths. No
+  gateway-integrated automation, but avoids adding an ACME client
+  dependency to the gateway binary.
+- **cert-manager (Kubernetes):** use cert-manager to obtain
+  certificates and mount them as secrets. Decouples certificate
+  management from the gateway entirely.
+- The `acme` feature adds an ACME client dependency (rustls-acme or
+  instant-acme, license-checked against `deny.toml`). The config types
+  and state management are always available; the full client (account
+  registration, challenge completion, certificate issuance) requires
+  enabling the feature.
+
+Operator docs: [docs-site ACME guide](../../docs-site/guide/acme.md).
 
 ## Testing notes
 

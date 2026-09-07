@@ -5,6 +5,19 @@ Dwara can automate TLS certificate issuance and renewal from
 authorities like [Let's Encrypt](https://letsencrypt.org/), so
 operators do not need to manually provision and rotate certificates.
 
+::: warning Implementation status
+The `acme` feature is **config-accepted, runtime stubbed**. The config
+schema (`AcmeConfig`) parses and validates, and validation warns when
+the feature is off, but the ACME client itself is not yet implemented.
+No account registration, challenge completion, certificate issuance,
+or renewal task is wired into the listener startup path. A future
+change will add an ACME client dependency (rustls-acme or instant-acme,
+license-checked against `deny.toml`) and connect `build_acme_state` to
+the TLS listener. Until then, use an external ACME client (certbot,
+lego, cert-manager) and point the gateway at the resulting certificate
+files. See the alternatives section below.
+:::
+
 ## When to use this
 
 Use ACME when you want the gateway to obtain and renew its own TLS
@@ -72,7 +85,11 @@ production rate limits. Test your ACME configuration with staging
 first, then switch to `staging: false` (or remove the field) for
 production.
 
-## Runtime behavior
+## Runtime behavior (intended design)
+
+The following describes the intended runtime behavior once the ACME
+client is implemented. None of this is wired today (see the status
+note at the top of this page).
 
 1. The ACME client loads or creates an account key (persisted to
    `state_dir`).
@@ -102,8 +119,9 @@ production.
   `staging: true` for testing.
 - TLS-ALPN-01 requires port 443 to be directly reachable by the CA's
   validation servers.
-- The ACME client adds a dependency to the gateway binary (gated behind
-  the `acme` feature).
+- The ACME client will add a dependency to the gateway binary (gated
+  behind the `acme` feature) once implemented; today the feature is
+  flag-only with no dependency.
 
 ## See also
 

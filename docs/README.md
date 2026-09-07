@@ -15,7 +15,7 @@ AGENTS.md's index-level summaries.
 
 ## Status of this directory
 
-Feature areas written up so far (M1-M4 complete):
+Feature areas written up so far (M1-M5 complete):
 
 - [Architecture](./architecture.md) — bounded-context layout, the
   config pipeline, dependency direction, and the request/reload
@@ -30,7 +30,8 @@ Feature areas written up so far (M1-M4 complete):
   policies, DW-086 prompt experimentation, DW-087 MCP gateway,
   DW-113 agent principals.
 - [TLS](./features/tls.md) — termination (multi-SNI), passthrough, hot
-  reload, outbound trust.
+  reload, outbound trust. Now also covers ACME certificate automation
+  (SEC-02, #155).
 - [Dataplane and proxy](./features/dataplane-proxy.md) — routing,
   matching precedence, rewrites, streaming proxy semantics. Now also
   covers DW-088 HTTP/3 ingress and DW-089 adaptive + origin-driven
@@ -64,7 +65,8 @@ Feature areas written up so far (M1-M4 complete):
   metering surfaces: admin usage query, metrics, analytics,
   near-limit events (DW-033).
 - [Route edge policies](./features/edge-policies.md) — CORS,
-  response compression, per-route request limits (DW-027).
+  response compression, per-route request limits (DW-027). Now also
+  covers request body JSON Schema validation (SEC-14, #161).
 - [Request/response transforms and security
   headers](./features/transforms.md) — header/query manipulation,
   size-capped JSON-pointer body transforms (the one buffering
@@ -80,10 +82,12 @@ Feature areas written up so far (M1-M4 complete):
 - [Maintenance mode and policy dry-run](./features/maintenance-dry-run.md)
   — the per-route 503 + Retry-After availability short-circuit and
   the per-attachment monitor flags on every rejecting policy phase,
-  with the metric/log report (DW-041).
+  with the metric/log report (DW-041). Now also covers the M5
+  expansion to all policy phases (CFG-14, #163).
 - [Alert and event webhooks](./features/alerting.md) — the in-process
   event bus, the emission sites (breaker/health/config publish), and
-  the budget-bounded webhook deliverer (DW-044).
+  the budget-bounded webhook deliverer (DW-044). Now also covers the
+  SSRF egress filter (SEC-13, #160).
 - [Usage reports and exports](./features/usage-reports.md) — scheduled
   per-consumer usage statements off the analytics store as
   deterministic CSV/JSON files: the reconcile-with-the-query-API
@@ -115,14 +119,16 @@ Feature areas written up so far (M1-M4 complete):
   signing), the authz precedence chain, IP ACLs.
 - [Secrets](./features/secrets.md) — `${...}` secret references in
   config, compile-time resolution, typed redaction of config echoes
-  (DW-045).
+  (DW-045). Now also covers pepper rotation and production secret
+  sources (SEC-10, #159).
 - [State store](./features/state-store.md) — SQLite store, migrations,
   cache coherence model.
 - [Observability](./features/observability.md) — spans, logs, metrics,
   the OTLP feature gate, redaction. Now also covers DW-097
   tokio-console integration.
 - [Admin API](./features/admin-api.md) — mTLS-only auth, the
-  `PATCH /config` pipeline, why a separate crate.
+  `PATCH /config` pipeline, why a separate crate. Now also covers
+  RBAC, API tokens, and audit logging (SEC-01, #154).
 - [CLI](./features/cli.md) — the library-shaped subcommands, exit-code
   contract, the load generator rig.
 - [Protocol hardening](./features/protocol-hardening.md) — parser
@@ -138,7 +144,8 @@ Feature areas written up so far (M1-M4 complete):
   client's Authorization), gateway-level mTLS certificate-to-consumer
   mapping by fingerprint or subject CN (independent of the per-consumer
   mtls credential), and X-Client-Cert-* identity-forwarding headers
-  with inbound spoofing prevention (DW-035).
+  with inbound spoofing prevention (DW-035). Now also covers upstream
+  mTLS client certificates (SEC-03, #156).
 - [Enterprise licensing gate](./features/licensing.md) — the
   `LicenseGate` runtime value that holds an optional verified license
   and gates enterprise features behind feature-claim flags; the `ent`
@@ -147,8 +154,9 @@ Feature areas written up so far (M1-M4 complete):
 - [CP/DP split](./features/cp-dp-split.md) — the control-plane /
   data-plane split architecture: controller-to-edge gRPC config
   distribution, HA controller, edge-survives-outage caching (DW-066).
-  Now also covers DW-094 global load balancing + data residency and
-  DW-098 fleet operations.
+  Now also covers DW-094 global load balancing + data residency,
+  DW-098 fleet operations, and mTLS on the CP-DP transport
+  (CFG-13, #162).
 - [Web Console](./features/web-console-v1.md) — the static SPA served
   from the mTLS admin listener: read-only diagnostic views (DW-117)
   and the v2 full-CRUD + fleet/workspace views (DW-118).
@@ -187,13 +195,22 @@ Feature areas written up so far (M1-M4 complete):
 - [Extism PDK, bot hooks, signed-URL, cert pinning](./features/extism-pdk-bot-hooks.md)
   — Extism PDK scaffold for plugin development, bot detection hooks,
   signed-URL verification, and upstream TLS certificate pinning by
-  SPKI hash (DW-109).
+  SPKI hash (DW-109). Now also covers the cert-pinning verifier
+  wiring for https/http2 upstreams (SEC-04, #157).
 - [API lifecycle](./features/api-lifecycle.md) — developer portal
   scaffold, environment profiles (dev/staging/prod), and the journey
   recorder for request tracing (DW-110).
 - [FIPS 140-3 mode](./features/fips-mode.md) — aws-lc-rs FIPS
   provider, self-test attestation, primitive allowlist, and
   validation rules that reject non-approved primitives (DW-111).
+- [OIDC: discovery, introspection, revocation, token exchange,
+  auth-code+PKCE](./features/oidc.md) — the OIDC client, introspection
+  cache, fail-open vs fail-closed, and the authorization-code + PKCE
+  flow (DW-034). Now also covers per-route browser login
+  (SEC-05, #158).
+- [Cedar + OPA authorization](./features/cedar-opa-authz.md) —
+  Cedar and OPA as external policy engines, the OPA decision cache,
+  and the SSRF egress filter for OPA callouts (DW-060, SEC-13, #160).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

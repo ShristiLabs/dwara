@@ -247,3 +247,85 @@ The [authn-authz](./authn-authz.md) page covers the five credential
 families and their precedence; the [dataplane and proxy](./dataplane-proxy.md)
 page covers the forward path where the token injection and header
 forwarding run.
+
+## Upstream mTLS client certificates (SEC-03, #156)
+
+M5 adds the ability for the gateway to present a client certificate
+when connecting to upstream TLS servers that require client
+authentication ([mTLS](https://en.wikipedia.org/wiki/Mutual_authentication) — mutual TLS, where both sides present certificates).
+This is distinct from the OAuth2 mTLS flow above (which authenticates
+to a token endpoint): this is the gateway presenting its identity to
+the upstream during the TLS handshake itself.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as Gateway
+    participant U as Upstream (requires client cert)
+
+    C->>G: Request
+    G->>G: resolve upstream, check mtls block
+    G->>U: TLS ClientHello
+    U->>G: TLS ServerHello + CertificateRequest
+    G->>U: Client certificate (from mtls.client_cert_file)
+    U->>U: verify client cert against upstream CA
+    U->>G: TLS handshake complete
+    G->>U: HTTP request
+    U-->>G: HTTP response
+    G-->>C: HTTP response
+```
+
+The `mtls` block on an upstream configures the client certificate
+chain and private key:
+
+```yaml
+upstreams:
+  - name: secure-backend
+    protocol: https
+    mtls:
+      client_cert_file: /path/to/client.crt
+      client_key_file: /path/to/client.key
+    endpoints:
+      - address: 10.0.0.1
+        port: 8443
+```
+
+### Implementation
+
+The cert and key files are loaded at config compile time using rustls
+`with_client_auth_cert`, producing a `ClientConfig` that presents the
+client certificate during the TLS handshake. If the files cannot be
+loaded, the gateway logs an error and the upstream's TLS handshake
+will fail (the upstream rejects the connection if it requires mTLS) —
+there is no silent fallback to no-client-auth.
+
+### Protocol restriction
+
+mTLS is only valid for `https` and `http2` upstreams. Validation
+rejects `mtls` on `http1` upstreams (no TLS is negotiated, so a client
+certificate has no handshake to be presented in). The cert and key
+files must exist and be readable at compile time; validation names the
+offending field if not.
+
+### Interaction with certificate pinning
+
+When both `mtls` and `cert_pinning` (SEC-04) are configured on the same
+upstream, pinning takes precedence in the current implementation: the
+custom pinning verifier is used and the client certificate is not
+presented. This is a known limitation documented in
+[extism-pdk-bot-hooks](./extism-pdk-bot-hooks.md#upstream-tls-certificate-pinning-sec-04-157);
+a future change will combine the custom pinning verifier with client
+auth so both can be active simultaneously.
+
+### Alternatives
+
+- **OAuth2 client credentials:** if the upstream accepts a Bearer token
+  instead of a client certificate, use `oauth2_client_credentials`
+  (above) instead of mTLS.
+- **Service mesh (Istio, Linkerd):** delegate mTLS to the service mesh
+  sidecar. The gateway connects plaintext to the sidecar, which handles
+  mTLS transparently.
+- **SPIFFE/SPIRE:** use [SPIFFE](https://spiffe.io/) SVIDs (SPIFFE
+  Verifiable Identity Documents) instead of static client certificates
+  for automatic rotation and workload identity. More infrastructure;
+  better for service-to-service mTLS at scale.

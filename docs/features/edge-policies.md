@@ -242,6 +242,100 @@ request proceeds — with the streaming `LimitedBody` guard left
 unarmed (the one blind spot). See
 [maintenance mode and policy dry-run](./maintenance-dry-run.md).
 
+## Request body JSON Schema validation (SEC-14, #161)
+
+M5 adds optional request-body validation against a minimal
+[JSON Schema](https://json-schema.org/) (a vocabulary for describing
+the shape of JSON documents — what fields are required, what types
+they have, what ranges numbers fall in) subset. The validator runs
+after route limits and before authn, so a malformed body is rejected
+with zero upstream contact and zero authn work.
+
+```mermaid
+flowchart TD
+    Req[Request with body] --> Limits[route limits 413/431]
+    Limits --> Schema{route.request_validation?}
+    Schema -->|no| Authn[authn -> authz -> ...]
+    Schema -->|yes| Buffer[buffer body up to max_body_bytes]
+    Buffer --> Validate[validate against JSON Schema subset]
+    Validate --> Valid{valid?}
+    Valid -->|yes| Authn
+    Valid -->|no, enforce| Reject400[400 Bad Request + detail]
+    Valid -->|no, dry_run| LogDry[log + count, proceed]
+```
+
+### Supported schema keywords
+
+The validator implements a minimal subset of JSON Schema draft 2020-12:
+
+- `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`)
+- `required` (array of property names; only meaningful with `type: object`)
+- `properties` (object mapping property names to subschemas)
+- `items` (subschema applied to every array element)
+- `minLength`, `maxLength` (string length bounds)
+- `minimum`, `maximum` (numeric bounds)
+- `minItems`, `maxItems` (array length bounds)
+- `enum` (closed set of allowed values)
+- `additionalProperties: false` (reject unknown properties)
+
+Unsupported keywords are ignored (not errors). The validator is
+deliberately minimal: it covers the common cases (request shape
+contracts) without pulling in a full JSON Schema engine. For complex
+validation, use a plugin (DW-119 native filter or proxy-wasm).
+
+### Configuration
+
+```yaml
+routes:
+  - name: create-user
+    match: { path: { type: exact, value: /users } }
+    methods: [POST]
+    request_validation:
+      schema:
+        type: object
+        required: [name, email]
+        properties:
+          name: { type: string, minLength: 1, maxLength: 100 }
+          email: { type: string, maxLength: 254 }
+          age: { type: integer, minimum: 0, maximum: 150 }
+        additionalProperties: false
+      max_body_bytes: 65536    # buffer cap; defaults to route's max_body_bytes
+      dry_run: false           # default; log + count, do not reject
+```
+
+### Why buffer-and-validate, not stream-and-validate
+
+JSON Schema validation requires the full body (a `required` field at
+the end of the object cannot be checked until the parser reaches it).
+The validator buffers the body up to `max_body_bytes` (defaulting to
+the route's existing `max_body_bytes` cap, or 1 MiB if neither is
+set), then validates. Bodies larger than the cap are rejected 413
+before validation runs — the same `LimitedBody` wrapper that enforces
+route limits.
+
+### Dry run
+
+`request_validation.dry_run: true` logs and counts would-be
+rejections without rejecting the request. The request proceeds to
+authn and the upstream as if no validation were configured. The
+`dwara_policy_dry_run_total{phase="request_validation",route}` counter
+records would-be rejections — see
+[maintenance mode and policy dry-run](./maintenance-dry-run.md).
+
+### Alternatives
+
+- **Full JSON Schema engine** (jsonschema crate): supports the
+  complete spec but adds a non-trivial dependency. The minimal subset
+  covers the common cases; operators needing full validation should
+  use a plugin.
+- **OpenAPI-driven validation:** the OpenAPI import path (DW-047)
+  already extracts request-body schemas from OpenAPI specs. A future
+  change could wire those schemas into `request_validation`
+  automatically.
+- **Application-level validation:** let the upstream validate. No
+  gateway-level protection; the upstream still does work for invalid
+  requests.
+
 ## Config, reload, tests
 
 All three blocks are strict-schema (`deny_unknown_fields`) additive

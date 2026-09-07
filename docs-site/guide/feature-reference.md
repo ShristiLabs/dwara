@@ -56,7 +56,7 @@ them per build with `--features <name>`.
 | `mcp` | dwara-core | Agent-operable administration via MCP server/tools | opt-in attack-surface reduction |
 | `semantic_cache` | dwara-core | Embedding-similarity cache for AI prompts (HNSW ANN) | hnsw_rs adds binary size; external embedding service required |
 | `h3` | dwara-core, dwara-bin | HTTP/3 (QUIC) ingress listener + upstream transport | quinn + h3 add binary size |
-| `a2a` | dwara-core | A2A (agent-to-agent) protocol support | opt-in; task lifecycle currently stubbed |
+| `a2a` | dwara-core | A2A (agent-to-agent) protocol support | opt-in; task lifecycle state machine implemented, network call stubbed |
 | `graphql` | dwara-core | GraphQL awareness: query depth/complexity limits, persisted-query enforcement | opt-in; only relevant for GraphQL traffic |
 | `grpc_web` | dwara-core | gRPC-Web framing + JSON-to-gRPC transcoding | prost dependency; opt-in protocol support |
 | `protocol_translation` | dwara-core | General protocol translation (REST to gRPC to GraphQL); implies `grpc_web` | prost dependency; opt-in protocol support |
@@ -65,9 +65,9 @@ them per build with `--features <name>`.
 | `l4` | dwara-core, dwara-bin | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
 | `api_lifecycle` | dwara-core | API lifecycle management: dev portal, environment profiles, journey recorder | opt-in; config-accepted, runtime partially wired |
 | `extism` | dwara-core | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
-| `cert_pinning` | dwara-core | Upstream TLS certificate pinning by SPKI SHA-256 hash (fail-closed, no CA fallback) | opt-in; config-accepted, validation warns when feature is OFF |
+| `cert_pinning` | dwara-core | Upstream TLS certificate pinning by SPKI SHA-256 hash (fail-closed, no CA fallback) | opt-in; verifier wired for https/http2 upstreams (not h3); validation warns when feature is OFF |
 | `signed_url` | dwara-core | Signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
-| `acme` | dwara-core | ACME certificate automation (Let's Encrypt, TLS-ALPN-01) | opt-in; adds an ACME client dependency |
+| `acme` | dwara-core | ACME certificate automation (Let's Encrypt, TLS-ALPN-01) | opt-in; flag-only scaffold, no ACME client dependency yet (config-accepted, runtime stubbed) |
 | `otlp` | dwara-bin | OTLP trace/metrics export to a collector | opentelemetry stack adds ~405 KiB |
 | `console` | dwara-bin | tokio-console diagnostics server | console-subscriber adds binary size |
 
@@ -82,6 +82,7 @@ grace), the config is accepted but the feature is inert.
 |---|---|---|---|
 | `ent` | dwara-core, dwara-bin, dwara-cli | Enterprise edition: license verification, Redis rate limiter/cache/convergence, CP/DP gRPC, workspaces, Vault/KMS, federated analytics, AI credential pools | (enables the license gate itself) |
 | `fips` | dwara-core, dwara-bin | FIPS 140-3 mode: aws-lc-rs FIPS provider, self-test, restricted cipher suites | `fips` claim required; binary refuses to start if the claim is present but the `fips` feature is not compiled |
+| `mesh` | dwara-core | Service mesh mode: sidecar controller + SPIFFE/SPIRE mTLS identity | `mesh` claim; validation warns when `mesh` is configured without `ent` (config-accepted, runtime stubbed) |
 
 The `ent` feature pulls in these enterprise-only modules (all
 `#[cfg(feature = "ent")]`):
@@ -237,8 +238,8 @@ note saying exactly what is wired today.
 
 | Status | Features |
 |---|---|
-| Wired end to end | `ent`, `otlp`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache`, `cert_pinning`, `acme` |
-| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `mcp`, `a2a` |
-| Config-accepted, runtime stubbed | `soap`, `extism`, `signed_url`, `nano_services` |
+| Wired end to end | `ent`, `fips`, `otlp`, `console`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache`, `nano_services`, `pq` |
+| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `a2a`, `cert_pinning`, `soap` |
+| Config-accepted, runtime stubbed | `mcp`, `mesh`, `extism`, `signed_url`, `acme` |
 
 The published OSS binaries and images are built with no packs enabled.

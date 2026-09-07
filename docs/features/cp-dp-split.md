@@ -166,11 +166,57 @@ transport layer; the domain types are unchanged.
 
 ### TLS
 
-The current implementation uses plaintext gRPC (suitable for
-development and trusted-network deployments). mTLS support is a
-documented follow-up; the tonic transport layer supports it via
-`ServerTlsConfig` / `ClientTlsConfig` when the `tls` features are
-enabled.
+The CP-DP transport supports two modes:
+
+- **Plaintext** (default, suitable for development and trusted-network
+  deployments): no TLS, no client authentication. Use only on a
+  trusted network or in a development environment.
+- **mTLS** (CFG-13, #162): mutual TLS where both the controller and
+  the edge present certificates. The controller verifies edge
+  certificates against a configured CA; the edge verifies the
+  controller's certificate against a (possibly different) CA. This
+  prevents a rogue edge from receiving config and a rogue controller
+  from pushing config to legitimate edges.
+
+mTLS is opt-in via the `tls` block on both controller and edge:
+
+```yaml
+# Controller
+controller:
+  bind: 0.0.0.0:50051
+  tls:
+    server_cert_file: /certs/controller.crt
+    server_key_file: /certs/controller.key
+    client_ca_file: /certs/edge-ca.crt   # verifies edge certs
+
+# Edge
+edge:
+  controller_endpoint: https://controller:50051
+  tls:
+    server_cert_file: /certs/edge.crt    # presented to controller
+    server_key_file: /certs/edge.key
+    client_ca_file: /certs/controller-ca.crt  # verifies controller
+```
+
+```mermaid
+sequenceDiagram
+    participant E as Edge (dwara-edge)
+    participant C as Controller (dwara-controller)
+
+    E->>C: TCP connect
+    C->>E: TLS ServerHello + CertificateRequest
+    E->>C: Edge client certificate
+    C->>C: verify edge cert against client_ca_file
+    C->>E: Controller certificate
+    E->>E: verify controller cert against client_ca_file
+    C->>E: TLS handshake complete
+    E->>C: gRPC EdgeRegistration
+    C-->>E: gRPC stream ConfigUpdate
+```
+
+When the `tls` block is absent, the transport falls back to plaintext
+for backward compatibility. Validation rejects a `tls` block with
+missing or unreadable cert/key files at config compile time.
 
 ## Global load balancing and data residency (DW-094, Enterprise)
 
@@ -223,6 +269,5 @@ Code: `crates/dwara-core/src/cp_dp/mod.rs`
 ## Not yet implemented
 
 - Production leader election (Redis/etcd distributed lock or Raft)
-- mTLS for the gRPC transport
 - Additional config sources (etcd, Consul, K8s API) beyond file
   watching

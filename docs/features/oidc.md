@@ -167,15 +167,102 @@ introspection failure is logged via the `OidcError`'s `Display` text
 and surfaced to the client as 401 (fail-closed) or pass-through
 (fail-open).
 
-## Config validation
+## Per-route browser login (SEC-05, #158)
 
-`validate_oidc_providers` in `snapshot/mod.rs` checks:
+M5 adds the ability for the gateway to act as an
+[OIDC](https://en.wikipedia.org/wiki/OpenID_Connect) (OpenID Connect —
+an identity layer on top of OAuth2 that lets a client verify the
+user's identity and get basic profile information) relying party for
+browser-based login on individual routes. This is separate from
+Bearer-token introspection (above): browsers cannot easily send bearer
+tokens; they need cookies and redirects. Making it per-route opt-in
+allows mixing API and browser auth on the same gateway.
 
-- Provider names are unique.
-- `issuer` is an absolute `http(s)://` URL.
-- `introspection_cache_ttl_s` is in `1..=3600`.
-- `consumer` (when set) references a known consumer.
-- `trusted_ca_file` (when set) is a readable PEM bundle and only
-  applies to an `https://` issuer.
-- `introspection_endpoint` and `revocation_endpoint` overrides (when
-  present) are absolute `http(s)://` URLs.
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant G as Gateway (route with oidc_login)
+    participant IdP as Identity Provider
+
+    B->>G: GET /app (no session cookie)
+    G->>G: no valid session cookie
+    G-->>B: 302 redirect to IdP authorization endpoint\n(code_challenge, state, redirect_uri)
+    B->>IdP: user authenticates
+    IdP-->>B: 302 redirect to /auth/callback?code=...
+    B->>G: GET /auth/callback?code=...
+    G->>IdP: POST token exchange (code + code_verifier)
+    IdP-->>G: {access_token, id_token, refresh_token}
+    G->>G: create signed session cookie\n(HMAC with deployment pepper)
+    G-->>B: 302 redirect to /app + Set-Cookie: dwara_session=...
+    B->>G: GET /app (with session cookie)
+    G->>G: verify session cookie signature + TTL
+    G->>U: forward to upstream
+```
+
+### Configuration
+
+An `oidc_login` block on a route enables the flow:
+
+```yaml
+routes:
+  - name: web-app
+    service: web-backend
+    match:
+      path: /app
+    action:
+      proxy: {}
+    oidc_login:
+      provider: keycloak          # must exist in gateway.oidc_providers
+      redirect_uri: /auth/callback
+      session_cookie: dwara_session  # default
+      session_ttl_s: 3600            # default 1 hour
+      post_logout_url: https://app.example.com/login
+```
+
+Validation checks that the `provider` name exists in
+`gateway.oidc_providers` — a reference to an undefined provider is
+rejected at config compile time.
+
+### Session cookies
+
+Session cookies are gateway-stateless: the cookie is a signed value
+(HMAC with the deployment pepper, `DWARA_CREDENTIAL_PEPPER`) carrying
+the session expiry, not a server-side session ID. No server-side
+session store is needed. Revocation requires short TTLs or a denylist
+— there is no server-side session to invalidate.
+
+The cookie is `HttpOnly` (not accessible from JavaScript), `Secure`
+(on TLS listeners), and `SameSite=Lax` (the default; cross-site POST
+flows may need `SameSite=None` in a future change). The cookie name is
+configurable via `session_cookie` (default `dwara_session`).
+
+### PKCE
+
+[PKCE](https://www.oauth.com/oauth2-servers/pkce/) (Proof Key for Code
+Exchange — an extension to OAuth2 that prevents an attacker from
+intercepting the authorization code) is used on every authorization
+request. The gateway generates a code verifier (a random string), sends
+its SHA-256 hash (the code challenge) to the IdP, and presents the
+verifier during the token exchange. Only the party that started the
+flow can complete it.
+
+### Logout
+
+Visiting `{redirect_uri}/logout` clears the session cookie and
+redirects to `post_logout_url` (if configured) or the IdP's
+`end_session_endpoint` (discovered from the OIDC discovery document).
+The IdP's `post_logout_redirect_uri` is set to the gateway's root.
+
+### Alternatives
+
+- **External reverse proxy** (OAuth2 Proxy, Authelia, Traefik Forward
+  Auth): run a separate auth proxy in front of the gateway. Adds
+  infrastructure; duplicates routing logic.
+- **Application-level OIDC:** let each application handle OIDC itself.
+  No gateway-level session management; each app reinvents the flow.
+- **SAML:** use [SAML](https://en.wikipedia.org/wiki/Security_Assertion_Markup_Language)
+  (Security Assertion Markup Language — an XML-based SSO standard
+  older than OIDC) instead of OIDC for enterprise SSO. More complex;
+  OIDC is the modern standard.

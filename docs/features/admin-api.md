@@ -25,16 +25,61 @@ its own release cadence, so keeping it as a separate crate from day
 one means there was never a "someday we should split this out"
 migration to do.
 
-## Authentication is the TLS layer, not a token
+## Authentication: mTLS foundation, RBAC and tokens opt-in
 
 The admin listener requires a client certificate chaining to the
-configured CA; there is deliberately **no token layer** in v1 —
-possession of a valid client certificate *is* the authorization
-(decision 6). This is a stronger guarantee than an API-key header for
-an operator surface: a token can be captured from a log line, a shell
-history, or a proxy; a private key backing a client certificate
-generally can't be extracted from the TLS handshake itself. The
-tradeoff is operational, not technical — issuing and rotating client
+configured CA; this is the foundation layer and is never optional. In
+v1 (and by default), possession of a valid client certificate *is* the
+authorization (decision 6) — a stronger guarantee than an API-key header
+for an operator surface: a token can be captured from a log line, a
+shell history, or a proxy; a private key backing a client certificate
+generally can't be extracted from the TLS handshake itself.
+
+M5 (SEC-01, #154) adds three opt-in layers on top of the mTLS
+foundation, each absent by default to preserve backward compatibility:
+
+- **RBAC** (`admin.rbac`): maps client certificate fingerprints to
+  roles (`admin` or `readonly`). When present, a valid certificate
+  with no binding is denied — fail-closed, no implicit admin. The
+  fingerprint is SHA-256 of the full DER encoding, 64 lowercase hex.
+- **API tokens** (`admin.api_tokens`): accepts
+  `Authorization: Bearer <token>` as an additional identity layer. The
+  token is SHA-256 hashed and compared against configured `token_hash`
+  values (never logged). Tokens complement mTLS rather than replacing
+  it: the listener still requires a client certificate, and the token
+  provides role assignment for environments where cert-to-role mapping
+  is impractical.
+- **Audit log** (`admin.audit`): when `enabled: true`, all mutating
+  admin actions (`PATCH /config`, `POST /cache/purge`) are recorded
+  with the actor identity (cert fingerprint or token hash), the action,
+  the before/after config hash, and a timestamp. Audit entries are
+  emitted as structured log events (`dwara::admin::audit` target);
+  retention is configured at the log collector, not in the gateway.
+
+```mermaid
+flowchart TD
+    TLS[Client cert verified by CA] --> RBAC{rbac block present?}
+    RBAC -->|no| Admin1[full admin - v1 behavior]
+    RBAC -->|yes| Bind{fingerprint in bindings?}
+    Bind -->|no| Deny1[403 - fail-closed, no implicit admin]
+    Bind -->|yes| Role1[role from binding]
+    Role1 --> Token{api_tokens block present?}
+    Token -->|no| Authz1[enforce role]
+    Token -->|yes| Bearer{Authorization: Bearer present?}
+    Bearer -->|yes| Hash[SHA-256 token, compare to token_hash]
+    Hash --> Match{match found?}
+    Match -->|yes| Role2[role from token binding]
+    Match -->|no| Deny2[403]
+    Role2 --> Authz2[enforce role]
+    Bearer -->|no| Authz1
+    Authz1 --> Audit{audit enabled?}
+    Authz2 --> Audit
+    Audit -->|yes| Log[record actor, action, config hash, timestamp]
+    Audit -->|no| Done[proceed]
+    Log --> Done
+```
+
+The tradeoff is operational, not technical — issuing and rotating client
 certificates has more ceremony than rotating a token, which is exactly
 why `DWARA_ADMIN_DEV=1` (loopback-only plaintext) exists as an escape
 hatch for local development, and exactly why it must never be enabled

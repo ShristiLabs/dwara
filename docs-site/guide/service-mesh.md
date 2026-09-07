@@ -8,6 +8,19 @@ network for the services it fronts: every call between meshed services flows
 through a pair of gateways (outbound from the caller, inbound at the
 callee), each enforcing policy and presenting a verifiable identity.
 
+::: warning Implementation status
+The `mesh` feature is **config-accepted, runtime stubbed** (Enterprise
+only). The config schema (`MeshConfig`, `MeshSidecarConfig`,
+`MeshSpiffeConfig`) parses and validates, and the `SidecarController`
+and `SpiffeClient` types exist, but the runtime is scaffolded:
+`install_redirects()` is a documented no-op (no iptables/TPROXY rules),
+and the gRPC `GrpcWorkloadApi` returns `WorkloadApiUnreachable` (the
+SPIRE Workload API client is not yet wired). The `spiffe` crate will be
+added when the integration is production-ready. Until then, use the
+edge gateway for north-south traffic and an external mesh (Istio,
+Linkerd) for east-west.
+:::
+
 ## When to use this
 
 Use sidecar mode when east-west traffic between your services needs the same

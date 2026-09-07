@@ -77,6 +77,17 @@ a per-attachment flag at the place the attachment is declared:
 | rate limiting | `policies[].dry_run` (the named bundle) | 429 |
 | load shedding | `gateway.load_shed_dry_run` | 503 |
 
+M5 (CFG-14, #163) expanded dry-run to every policy phase that can
+reject a request, so an operator can preview the full policy stack
+before committing to it:
+
+| Phase | Flag | Would-be status | Added |
+| --- | --- | --- | --- |
+| request validation (SEC-14) | `routes[].request_validation.dry_run` | 400 | M5 |
+| AI governance | `ai_governance.dry_run` | 403 | M5 |
+| AI guardrails (block-level) | `ai_guardrails[].dry_run` | 403 | M5 |
+| quotas | `quotas[].dry_run` | 429 | M5 |
+
 - **Route limits**: the cheap up-front checks (header count/bytes, a
   declared `Content-Length`) are evaluated and reported; the
   streaming `max_body_bytes` guard is left UNARMED in dry run — a
@@ -128,10 +139,12 @@ No endpoint, no buffer — the metric and the log events are the
 report (§9.3; the events/webhook surface is a later milestone):
 
 - `dwara_policy_dry_run_total{phase,route}` on `/metrics`. Label
-  cardinality is config-bounded: `phase` is a four-value closed set,
-  `route` is route names (plus the literal `unrouted` for the
-  pre-404 listener/global policy pass). There is deliberately no
-  consumer label, matching every other family.
+  cardinality is config-bounded: `phase` is a closed set covering
+  every policy phase that can reject (route limits, authorization,
+  rate limiting, load shedding, request validation, AI governance,
+  AI guardrails, quotas), `route` is route names (plus the literal
+  `unrouted` for the pre-404 listener/global policy pass). There is
+  deliberately no consumer label, matching every other family.
 - One `dwara::policy` warn event per would-have-rejected request:
   `code=policy_dry_run`, `phase`, `would_be_status`, `route`,
   `consumer` (`anonymous` when unknown), `request_id`, and the

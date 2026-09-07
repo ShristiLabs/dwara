@@ -137,9 +137,58 @@ shape): `TcpStream`, optional `tokio-rustls` with the public webpki
 roots and HTTP/1.1 ALPN, one written request, a status-line + headers
 read capped at 8 KiB, `Connection: close`. No new dependencies; no
 `trusted_ca_file` for webhook targets in v1 (documented scope: the
-alerting fan-out is public SaaS). Egress posture: webhook URLs are
-operator configuration, exactly like upstream endpoints — there is no
-private-address filter to enforce against the config author.
+alerting fan-out is public SaaS).
+
+### SSRF egress filter (SEC-13, #160)
+
+[SSRF](https://en.wikipedia.org/wiki/Server-side_request_forgery)
+(Server-Side Request Forgery — an attack where the server is tricked
+into making requests to internal/private addresses it should not
+reach) egress filtering was added in M5. By default, there is no
+private-address filter (an internal alerting listener on `127.0.0.1`
+or `10/8` is a normal shape). When the `gateway.ssrf_filter` block is
+present, the gateway resolves the hostname at connection time and
+rejects connections to private, loopback, link-local, and cloud-
+metadata IP ranges.
+
+```mermaid
+flowchart TD
+    URL[Webhook/OPA URL from config] --> Resolve[DNS resolve hostname]
+    Resolve --> Check{For each resolved IP}
+    Check --> Deny{In deny list?}
+    Deny -->|yes| Allow{In allow list?}
+    Allow -->|yes| Connect[open TCP connection]
+    Allow -->|no| Reject[reject - fail closed]
+    Deny -->|no| Connect
+    Resolve -->|DNS failure| RejectDNS[reject - fail closed on DNS error]
+```
+
+The filter:
+
+- Resolves the hostname at connection time (not at config validation)
+  to mitigate [DNS rebinding](https://en.wikipedia.org/wiki/DNS_rebinding)
+  (an attack where the DNS response changes between validation and
+  connection, pointing the same hostname at a different — potentially
+  private — IP).
+- Checks every resolved IP address against the `deny` CIDR list.
+- Applies the `allow` list after `deny`; an IP in both is allowed
+  (exemptions for intentional internal destinations like an internal
+  OPA server).
+- Fails closed on DNS resolution errors or filter failures — the
+  webhook/OPA delivery is aborted rather than allowed through.
+- Runs before the TCP connection is opened, so header secrets are
+  never disclosed to a rejected destination.
+
+The filter is compiled per generation and passed into the webhook and
+OPA runtime state. The same filter applies to OPA callouts (see
+[cedar-opa-authz](./cedar-opa-authz.md)). The `ssrf_filter` config
+block is always accepted by the parser; no feature gate is needed.
+
+Egress posture without the filter: webhook URLs are operator
+configuration, exactly like upstream endpoints — the gateway dials
+exactly what the config names. The filter is a security hardening step
+for deployments where webhook or OPA endpoints may be influenced by
+untrusted input.
 
 Outcomes land in `dwara_webhook_events_total{kind,outcome}` with
 `outcome` exactly `delivered` / `failed` / `dropped` (dropped = never

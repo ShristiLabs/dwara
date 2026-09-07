@@ -46,7 +46,7 @@ routes:
 | --- | --- | --- |
 | `rest` | `grpc` | REST path/query/body mapped to a gRPC request via the mapping file; response protobuf trans-coded to JSON. |
 | `rest` | `graphql` | REST parameters become GraphQL variables; the gateway issues a fixed query from the mapping file and returns the selection as JSON. |
-| `soap` | `rest` | SOAP/XML envelope parsed into JSON fields; REST response re-wrapped into a SOAP envelope for the client. |
+| `soap` | `rest` | SOAP/XML envelope parsed into JSON fields; REST response re-wrapped into a SOAP envelope for the client. **(Partially wired: the `SoapTranslator` is implemented but not yet dispatched from the proxy path; the `soap` feature compiles the translator but the proxy does not call it today.)** |
 
 The `mapping` file is the contract between the two protocols. For REST-to-gRPC
 it follows the gRPC HTTP/JSON transcoding convention driven by

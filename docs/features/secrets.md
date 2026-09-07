@@ -178,6 +178,70 @@ rules (`read_secret_file` in `config::credentials` is called by both),
 so the seam and the grammar cannot drift apart. See
 [Extension points](./extension-points.md#secretsource).
 
+## Pepper rotation (SEC-10, #159)
+
+The `DWARA_CREDENTIAL_PEPPER` environment variable peppers stored
+credential hashes (`hmac-sha256:<hex>`). M5 (SEC-10, #159) adds
+zero-downtime pepper rotation via a second environment variable,
+`DWARA_CREDENTIAL_PEPPER_PREVIOUS`:
+
+```mermaid
+flowchart LR
+    subgraph "Before rotation"
+        P1[pepper = old] --> H1[existing hashes use old pepper]
+    end
+    subgraph "During rotation window"
+        P2[pepper = new] --> H2[new writes use new pepper]
+        P3[pepper_previous = old] --> H3[verification tries new, then old]
+    end
+    subgraph "After rotation complete"
+        P4[pepper = new] --> H4[all hashes use new pepper]
+        P5[pepper_previous = unset] --> H5[remove old pepper]
+    end
+```
+
+The gateway resolves both at startup through the `SecretSource`
+extension seam (the OSS `EnvSecretSource`; no feature gate). New
+credential writes always use the current pepper
+(`DWARA_CREDENTIAL_PEPPER`). Verification tries the current pepper
+first, then the previous pepper, so existing hashes remain valid
+throughout the rotation window. Once all stored hashes have been
+re-hashed with the new pepper (e.g., after all consumers have rotated
+their credentials), the operator removes
+`DWARA_CREDENTIAL_PEPPER_PREVIOUS` and restarts.
+
+### Why environment variables, not config YAML
+
+The pepper is a deployment-wide secret that must be available before
+any config is parsed (it is used during the state-store seeding that
+runs at startup, before the first config generation is built). Putting
+it in config YAML would create a chicken-and-egg problem: the pepper
+is needed to seed credentials, but the credentials are in the config
+that needs the pepper. Environment variables are resolved before
+config parsing, breaking the cycle.
+
+### Operational notes
+
+- Pepper rotation requires a restart to pick up the new environment
+  variables (the pepper is resolved at startup and held in memory).
+- The previous pepper is kept in memory for the process lifetime and
+  zeroized on shutdown — it is never written to disk or logged.
+- The rotation window's length is determined by how quickly consumers
+  rotate their credentials. There is no automatic re-hashing; the
+  operator must drive credential rotation to complete the pepper
+  rotation.
+
+### Production secret sources
+
+M5 also added the `VaultSecretSource` (Enterprise, `ent` feature) for
+resolving secrets from [HashiCorp Vault](https://www.vaultproject.io/)
+(a secret management tool that centralizes secrets, encrypts them at
+rest, and controls access via policies) KV v2 API. The Vault HTTP
+client is hand-rolled (raw TCP/TLS, hand-rolled HTTP/1.1, the same
+approach as the webhook deliverer) to avoid adding a hyper client
+dependency. See [vault-kms-secrets](./vault-kms-secrets.md) for the
+implementation details.
+
 ## Where to look next
 
 - [Authentication and authorization](./authn-authz.md) — what the

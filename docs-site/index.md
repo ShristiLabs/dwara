@@ -186,8 +186,8 @@ build commands, dependency chains, license claims, and maturity status.
 
 | Status | Features |
 |---|---|
-| Wired end to end | `ent`, `otlp`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache` |
-| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `mcp`, `a2a`, `mesh` |
-| Config-accepted, runtime stubbed | `soap`, `extism`, `cert_pinning`, `signed_url`, `nano_services` |
+| Wired end to end | `ent`, `fips`, `otlp`, `console`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache`, `nano_services`, `pq` |
+| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `a2a`, `cert_pinning`, `soap` |
+| Config-accepted, runtime stubbed | `mcp`, `mesh`, `extism`, `signed_url`, `acme` |
 
 The published OSS binaries and images are built with no packs enabled.
