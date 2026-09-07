@@ -81,6 +81,7 @@ fn bench_gateway() -> Gateway {
                 graphql: None,
                 grpc_web: None,
                 translation: None,
+                oidc_login: None,
             });
         }
     }
@@ -124,6 +125,8 @@ fn bench_gateway() -> Gateway {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         })
         .collect();
     Gateway {
@@ -159,6 +162,7 @@ fn bench_gateway() -> Gateway {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     }
 }
 

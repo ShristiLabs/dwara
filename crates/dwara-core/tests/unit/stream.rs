@@ -271,8 +271,11 @@ fn record_ids_are_unique_and_instance_prefixed() {
 #[test]
 fn the_webhook_sink_compiles_through_the_shared_endpoint_grammar() {
     let obs = Arc::new(Observability::new());
-    let targets =
-        compile_stream_targets(Some(&webhook_sink_cfg("http://127.0.0.1:9/ingest")), &obs);
+    let targets = compile_stream_targets(
+        Some(&webhook_sink_cfg("http://127.0.0.1:9/ingest")),
+        &obs,
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    );
     assert_eq!(targets.sinks.len(), 1);
     assert_eq!(
         targets.flush_ms,
@@ -284,7 +287,7 @@ fn the_webhook_sink_compiles_through_the_shared_endpoint_grammar() {
     );
 
     // No block: the disabled state.
-    let empty = compile_stream_targets(None, &obs);
+    let empty = compile_stream_targets(None, &obs, dwara_core::config::ssrf::SsrfFilter::default());
     assert!(empty.sinks.is_empty());
 }
 
@@ -292,7 +295,11 @@ fn the_webhook_sink_compiles_through_the_shared_endpoint_grammar() {
 fn an_uncompilable_sink_fails_closed_to_the_disabled_state() {
     let obs = Arc::new(Observability::new());
     let bad = webhook_sink_cfg("not-a-url");
-    let targets = compile_stream_targets(Some(&bad), &obs);
+    let targets = compile_stream_targets(
+        Some(&bad),
+        &obs,
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    );
     assert!(
         targets.sinks.is_empty(),
         "a broken sink leaves the stream disabled, not half-armed"
@@ -593,8 +600,12 @@ async fn the_webhook_sink_retries_transient_failures_and_counts_records() {
         backoff_base_ms: 20,
         backoff_cap_ms: 100,
     };
-    let sink = dwara_core::events::stream::WebhookRecordSink::compile(&cfg, Arc::clone(&obs))
-        .expect("well-formed sink compiles");
+    let sink = dwara_core::events::stream::WebhookRecordSink::compile(
+        &cfg,
+        Arc::clone(&obs),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
+    .expect("well-formed sink compiles");
     // One batch of three lines.
     let mut body = String::new();
     for i in 0..3 {
@@ -632,8 +643,12 @@ async fn a_non_transient_answer_fails_the_batch_once_without_retry() {
         backoff_base_ms: 20,
         backoff_cap_ms: 100,
     };
-    let sink =
-        dwara_core::events::stream::WebhookRecordSink::compile(&cfg, Arc::clone(&obs)).unwrap();
+    let sink = dwara_core::events::stream::WebhookRecordSink::compile(
+        &cfg,
+        Arc::clone(&obs),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
+    .unwrap();
     let accepted = sink.deliver_batch(Bytes::from("x\n"), 1).await;
     assert!(!accepted);
     assert_eq!(attempts(&conns), 1, "a 4xx answer is this delivery's fault");
@@ -663,8 +678,12 @@ async fn secret_reference_headers_resolve_onto_the_wire() {
         backoff_base_ms: 10,
         backoff_cap_ms: 10,
     };
-    let sink =
-        dwara_core::events::stream::WebhookRecordSink::compile(&cfg, Arc::clone(&obs)).unwrap();
+    let sink = dwara_core::events::stream::WebhookRecordSink::compile(
+        &cfg,
+        Arc::clone(&obs),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
+    .unwrap();
     assert!(sink.deliver_batch(Bytes::from("x\n"), 1).await);
     let heads = heads.lock().unwrap().clone();
     let lower = heads[0].to_lowercase();

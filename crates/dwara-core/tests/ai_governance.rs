@@ -646,6 +646,7 @@ fn governance_engine_deny_when_model_not_in_allowlist() {
         governance: Some(AiGovernance {
             team_allowlists: allowlists,
             audit: false,
+            dry_run: false,
         }),
         logging: None,
         guardrails: None,
@@ -704,6 +705,7 @@ fn governance_engine_deny_wins_across_multiple_policies() {
         governance: Some(AiGovernance {
             team_allowlists: allowlists,
             audit: false,
+            dry_run: false,
         }),
         logging: None,
         guardrails: None,

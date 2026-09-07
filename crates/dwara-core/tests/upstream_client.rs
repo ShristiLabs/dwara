@@ -70,6 +70,7 @@ fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Sna
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -114,6 +115,8 @@ fn upstream(
         peak_ewma: None,
         locality: None,
         pq: false,
+        cert_pinning: None,
+        mtls: None,
     }
 }
 
@@ -726,6 +729,8 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -756,6 +761,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         });
         let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
         assert_eq!(fields, vec![field], "exactly {field} flagged");
@@ -799,6 +805,8 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -829,6 +837,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     });
     assert!(issues.is_empty(), "positive values valid: {issues:?}");
 }

@@ -1419,41 +1419,167 @@ fn build_handle(
     // `root_store` is the trust for THIS upstream (#121): the configured
     // trusted_ca_file bundle when set, else webpki (+ any programmatic
     // extras). Kept on the handle so probes share it (tls_roots).
-    let (scheme, tls, http2_only, tls_roots): (&'static str, Option<_>, bool, Option<_>) =
-        match u.protocol {
-            UpstreamProtocol::Http1 => ("http", None, false, None),
-            UpstreamProtocol::Https => (
-                "https",
-                Some(Arc::new(crate::security::tls::https_h1_client_config_pq(
-                    root_store.clone(),
-                    u.pq,
-                ))),
-                false,
-                Some(root_store),
-            ),
-            UpstreamProtocol::Http2 => {
-                // Same roots as https, but ALPN h2 and a client locked to
-                // HTTP/2 (see module docs). DW-105: when the upstream opts
-                // in to PQ hybrid key exchange (`pq: true`), prepend the
-                // hybrid kx group before building the config (experimental
-                // no-op when the rustls PQ API is not reachable).
+    let (scheme, tls, http2_only, tls_roots): (&'static str, Option<_>, bool, Option<_>) = match u
+        .protocol
+    {
+        UpstreamProtocol::Http1 => ("http", None, false, None),
+        UpstreamProtocol::Https => {
+            // SEC-04 / DW-109: when cert_pinning is configured AND
+            // the `cert_pinning` cargo feature is ON, install the
+            // SPKI pin verifier (fail-closed, no CA fallback).
+            // Otherwise use the normal CA-based config.
+            #[cfg(feature = "cert_pinning")]
+            if let Some(verifier) = crate::security::cert_pinning::CertPinVerifier::from_upstream(u)
+            {
+                let cfg = crate::security::cert_pinning::client_config_with_pinning(
+                    Arc::new(verifier),
+                    b"http/1.1",
+                );
+                ("https", Some(Arc::new(cfg)), false, Some(root_store))
+            } else {
+                // SEC-03: mTLS client cert when configured.
+                let cfg = match &u.mtls {
+                        Some(mtls) => crate::security::tls::https_h1_client_config_with_auth(
+                            root_store.clone(),
+                            &mtls.client_cert_file,
+                            &mtls.client_key_file,
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                code = "upstream_mtls_load_failed",
+                                upstream = %u.name,
+                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
+                            );
+                            crate::security::tls::https_h1_client_config_pq(
+                                root_store.clone(),
+                                u.pq,
+                            )
+                        }),
+                        None => crate::security::tls::https_h1_client_config_pq(
+                            root_store.clone(),
+                            u.pq,
+                        ),
+                    };
+                ("https", Some(Arc::new(cfg)), false, Some(root_store))
+            }
+            #[cfg(not(feature = "cert_pinning"))]
+            {
+                // SEC-03: mTLS client cert when configured.
+                let cfg = match &u.mtls {
+                        Some(mtls) => crate::security::tls::https_h1_client_config_with_auth(
+                            root_store.clone(),
+                            &mtls.client_cert_file,
+                            &mtls.client_key_file,
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                code = "upstream_mtls_load_failed",
+                                upstream = %u.name,
+                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
+                            );
+                            crate::security::tls::https_h1_client_config_pq(
+                                root_store.clone(),
+                                u.pq,
+                            )
+                        }),
+                        None => crate::security::tls::https_h1_client_config_pq(
+                            root_store.clone(),
+                            u.pq,
+                        ),
+                    };
+                ("https", Some(Arc::new(cfg)), false, Some(root_store))
+            }
+        }
+        UpstreamProtocol::Http2 => {
+            // Same roots as https, but ALPN h2 and a client locked to
+            // HTTP/2 (see module docs). DW-105: when the upstream opts
+            // in to PQ hybrid key exchange (`pq: true`), prepend the
+            // hybrid kx group before building the config (experimental
+            // no-op when the rustls PQ API is not reachable).
+            #[cfg(feature = "cert_pinning")]
+            if let Some(verifier) = crate::security::cert_pinning::CertPinVerifier::from_upstream(u)
+            {
+                let cfg = crate::security::cert_pinning::client_config_with_pinning(
+                    Arc::new(verifier),
+                    b"h2",
+                );
+                ("https", Some(Arc::new(cfg)), true, Some(root_store))
+            } else {
                 if u.pq {
                     let _ = crate::security::pq::install_pq_kx_group();
                 }
-                let mut cfg = rustls::ClientConfig::builder()
-                    .with_root_certificates(root_store.clone())
-                    .with_no_client_auth();
-                cfg.alpn_protocols = vec![b"h2".to_vec()];
+                // SEC-03: mTLS client cert when configured.
+                let cfg = match &u.mtls {
+                        Some(mtls) => crate::security::tls::https_h2_client_config_with_auth(
+                            root_store.clone(),
+                            &mtls.client_cert_file,
+                            &mtls.client_key_file,
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                code = "upstream_mtls_load_failed",
+                                upstream = %u.name,
+                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
+                            );
+                            let mut c = rustls::ClientConfig::builder()
+                                .with_root_certificates(root_store.clone())
+                                .with_no_client_auth();
+                            c.alpn_protocols = vec![b"h2".to_vec()];
+                            c
+                        }),
+                        None => {
+                            let mut c = rustls::ClientConfig::builder()
+                                .with_root_certificates(root_store.clone())
+                                .with_no_client_auth();
+                            c.alpn_protocols = vec![b"h2".to_vec()];
+                            c
+                        }
+                    };
                 ("https", Some(Arc::new(cfg)), true, Some(root_store))
             }
-            // DW-108: H3 dials QUIC, not the TCP/TLS pooled client. The
-            // legacy `client` below is built but never used for an H3
-            // upstream (send_inner dispatches to the `h3` handle). scheme
-            // is "https" so URI/authority construction is shared; the
-            // trust roots are kept so the QUIC active health probe shares
-            // trust with the H3 connector (#121).
-            UpstreamProtocol::H3 => ("https", None, false, Some(root_store)),
-        };
+            #[cfg(not(feature = "cert_pinning"))]
+            {
+                if u.pq {
+                    let _ = crate::security::pq::install_pq_kx_group();
+                }
+                // SEC-03: mTLS client cert when configured.
+                let cfg = match &u.mtls {
+                        Some(mtls) => crate::security::tls::https_h2_client_config_with_auth(
+                            root_store.clone(),
+                            &mtls.client_cert_file,
+                            &mtls.client_key_file,
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                code = "upstream_mtls_load_failed",
+                                upstream = %u.name,
+                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
+                            );
+                            let mut c = rustls::ClientConfig::builder()
+                                .with_root_certificates(root_store.clone())
+                                .with_no_client_auth();
+                            c.alpn_protocols = vec![b"h2".to_vec()];
+                            c
+                        }),
+                        None => {
+                            let mut c = rustls::ClientConfig::builder()
+                                .with_root_certificates(root_store.clone())
+                                .with_no_client_auth();
+                            c.alpn_protocols = vec![b"h2".to_vec()];
+                            c
+                        }
+                    };
+                ("https", Some(Arc::new(cfg)), true, Some(root_store))
+            }
+        }
+        // DW-108: H3 dials QUIC, not the TCP/TLS pooled client. The
+        // legacy `client` below is built but never used for an H3
+        // upstream (send_inner dispatches to the `h3` handle). scheme
+        // is "https" so URI/authority construction is shared; the
+        // trust roots are kept so the QUIC active health probe shares
+        // trust with the H3 connector (#121).
+        UpstreamProtocol::H3 => ("https", None, false, Some(root_store)),
+    };
 
     // DW-108: build the H3/QUIC transport for an `h3` upstream (feature
     // on). A build failure (the quinn client endpoint cannot bind an
@@ -1880,6 +2006,8 @@ mod tests {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

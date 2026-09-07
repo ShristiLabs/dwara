@@ -64,6 +64,7 @@ fn good_gateway() -> Gateway {
                 graphql: None,
                 grpc_web: None,
                 translation: None,
+                oidc_login: None,
             },
             Route {
                 name: "static".into(),
@@ -106,6 +107,7 @@ fn good_gateway() -> Gateway {
                 graphql: None,
                 grpc_web: None,
                 translation: None,
+                oidc_login: None,
             },
             Route {
                 name: "legacy".into(),
@@ -148,6 +150,7 @@ fn good_gateway() -> Gateway {
                 graphql: None,
                 grpc_web: None,
                 translation: None,
+                oidc_login: None,
             },
         ],
         services: vec![Service {
@@ -185,6 +188,8 @@ fn good_gateway() -> Gateway {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -213,6 +218,7 @@ fn good_gateway() -> Gateway {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     }
 }
 
@@ -567,6 +573,7 @@ fn validate_rejects_proxy_protocol_with_tls_passthrough() {
         client_ca_file: None,
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     });
     gw.listeners[0].proxy_protocol = true;
     let issues = validate(&gw);

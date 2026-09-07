@@ -43,6 +43,9 @@ pub struct OpaClient {
     cache: Arc<Mutex<HashMap<CacheKey, CachedDecision>>>,
     cache_ttl: Duration,
     http_timeout: Duration,
+    /// SEC-13: SSRF egress filter. Checked at connect time against the
+    /// resolved IP. Disabled (accepts all) when not configured.
+    ssrf_filter: crate::config::ssrf::SsrfFilter,
 }
 
 /// An OPA authorization request.
@@ -95,7 +98,17 @@ impl OpaClient {
             cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl,
             http_timeout,
+            ssrf_filter: crate::config::ssrf::SsrfFilter::disabled(),
         }
+    }
+
+    /// SEC-13: set the SSRF egress filter for this OPA client. Called
+    /// at config compile time when the gateway has an SSRF filter
+    /// configured. The filter is checked at connect time against the
+    /// resolved IP of the OPA endpoint.
+    pub fn with_ssrf_filter(mut self, filter: crate::config::ssrf::SsrfFilter) -> Self {
+        self.ssrf_filter = filter;
+        self
     }
 
     /// Check if the request is allowed by OPA.
@@ -164,7 +177,7 @@ impl OpaClient {
         //
         // For the test, we use a mock. For production, the caller
         // should wrap this in spawn_blocking.
-        let response = blocking_post(url, &body_str, self.http_timeout)?;
+        let response = blocking_post(url, &body_str, self.http_timeout, &self.ssrf_filter)?;
 
         // Parse the response: { "result": true/false }
         let result: serde_json::Value = serde_json::from_str(&response)
@@ -210,11 +223,31 @@ impl OpaClient {
 /// In production, this is called from `tokio::task::spawn_blocking`.
 /// The implementation uses `std::net::TcpStream` with a read/write
 /// timeout to avoid pulling in a blocking HTTP client dependency.
-fn blocking_post(url: &str, body: &str, timeout: Duration) -> Result<String, OpaError> {
+fn blocking_post(
+    url: &str,
+    body: &str,
+    timeout: Duration,
+    ssrf_filter: &crate::config::ssrf::SsrfFilter,
+) -> Result<String, OpaError> {
     // Parse the URL manually (avoid pulling in the `url` crate as a
     // direct dependency — it's only a transitive dep via hyper).
     // Expected format: http://host:port/path
     let (host, port, path) = parse_url(url)?;
+
+    // SEC-13: SSRF egress filter. Resolve the host and check every
+    // resolved IP against the deny set BEFORE connecting. DNS
+    // rebinding mitigation: the check runs at connect time.
+    if ssrf_filter.is_enabled() {
+        let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+            .map_err(|e| OpaError::Http(format!("DNS resolution failed: {e}")))?;
+        for addr in addrs {
+            if let Err(reason) = ssrf_filter.check(addr.ip()) {
+                return Err(OpaError::Http(format!(
+                    "SSRF egress filter rejected OPA target: {reason}"
+                )));
+            }
+        }
+    }
 
     // Connect.
     let addr = format!("{host}:{port}");

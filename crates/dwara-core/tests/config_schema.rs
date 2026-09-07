@@ -227,6 +227,7 @@ fn empty_document_is_valid() {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         }
     );
 }

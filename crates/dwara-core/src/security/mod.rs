@@ -46,3 +46,9 @@ pub mod signed_url;
 // compares against the configured pin.
 #[cfg(feature = "cert_pinning")]
 pub mod cert_pinning;
+
+// SEC-02: ACME / Let's Encrypt automation. The config block is always
+// accepted by the parser (additive-only); the runtime client is behind
+// the `acme` cargo feature (default OFF). When the feature is OFF the
+// block is inert (validation warns).
+pub mod acme;

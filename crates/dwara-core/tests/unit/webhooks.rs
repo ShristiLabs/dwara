@@ -282,10 +282,13 @@ fn the_instance_label_identifies_the_process() {
 
 #[tokio::test]
 async fn targets_decompose_urls_and_filter_kinds() {
-    let compiled = WebhookTarget::compile(&target(
-        "https://hooks.example.com:8443/alerts?id=1",
-        &["breaker_opened", "config_published"],
-    ))
+    let compiled = WebhookTarget::compile(
+        &target(
+            "https://hooks.example.com:8443/alerts?id=1",
+            &["breaker_opened", "config_published"],
+        ),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
     .unwrap();
     assert!(compiled.wants(EventKind::BreakerOpened));
     assert!(compiled.wants(EventKind::ConfigPublished));
@@ -294,16 +297,35 @@ async fn targets_decompose_urls_and_filter_kinds() {
     assert_eq!(compiled.url(), "https://hooks.example.com:8443/alerts?id=1");
 
     // Defaults: scheme-implied port, no port suffix in the Host header.
-    let plain =
-        WebhookTarget::compile(&target("http://127.0.0.1/hook", &["breaker_opened"])).unwrap();
+    let plain = WebhookTarget::compile(
+        &target("http://127.0.0.1/hook", &["breaker_opened"]),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
+    .unwrap();
     assert!(!plain.wants(EventKind::ConfigPublished));
 
     // Bad URLs and unknown kinds fail compilation with pointed errors.
-    assert!(WebhookTarget::compile(&target("ftp://x/y", &["breaker_opened"])).is_err());
-    assert!(WebhookTarget::compile(&target("http://", &["breaker_opened"])).is_err());
-    assert!(WebhookTarget::compile(&target("http://x/y", &["nope"])).is_err());
+    assert!(WebhookTarget::compile(
+        &target("ftp://x/y", &["breaker_opened"]),
+        dwara_core::config::ssrf::SsrfFilter::default()
+    )
+    .is_err());
+    assert!(WebhookTarget::compile(
+        &target("http://", &["breaker_opened"]),
+        dwara_core::config::ssrf::SsrfFilter::default()
+    )
+    .is_err());
+    assert!(WebhookTarget::compile(
+        &target("http://x/y", &["nope"]),
+        dwara_core::config::ssrf::SsrfFilter::default()
+    )
+    .is_err());
     // The quota kind is emitted since DW-033: it compiles and is wanted.
-    let quota = WebhookTarget::compile(&target("http://x/y", &["quota_near_limit"])).unwrap();
+    let quota = WebhookTarget::compile(
+        &target("http://x/y", &["quota_near_limit"]),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
+    .unwrap();
     assert!(quota.wants(EventKind::QuotaNearLimit));
     assert!(!quota.wants(EventKind::BreakerOpened));
 }
@@ -320,7 +342,8 @@ async fn secret_reference_headers_resolve_at_compile_time() {
     );
     cfg.headers
         .insert("X-Static".to_string(), "literal".to_string());
-    let compiled = WebhookTarget::compile(&cfg).unwrap();
+    let compiled =
+        WebhookTarget::compile(&cfg, dwara_core::config::ssrf::SsrfFilter::default()).unwrap();
     // The Debug output names header NAMES only — a resolved secret must
     // never render.
     let debug = format!("{compiled:?}");
@@ -336,7 +359,8 @@ async fn secret_reference_headers_resolve_at_compile_time() {
         "X-Hook-Token".to_string(),
         "${file:/nonexistent/token}".to_string(),
     );
-    let error = WebhookTarget::compile(&broken).unwrap_err();
+    let error = WebhookTarget::compile(&broken, dwara_core::config::ssrf::SsrfFilter::default())
+        .unwrap_err();
     assert!(error.contains("/nonexistent/token"), "{error}");
     assert!(!error.contains("sekrit"), "{error}");
 }
@@ -347,10 +371,13 @@ async fn secret_reference_headers_resolve_at_compile_time() {
 async fn a_transient_503_is_retried_within_the_budget_until_accepted() {
     let (port, conns) = scripted_sink(&[SERVICE_UNAVAILABLE, OK]).await;
     let obs = Arc::new(Observability::new());
-    let target = WebhookTarget::compile(&target(
-        &format!("http://127.0.0.1:{port}/hook"),
-        &["breaker_opened"],
-    ))
+    let target = WebhookTarget::compile(
+        &target(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &["breaker_opened"],
+        ),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
     .unwrap();
     deliver(
         target,
@@ -368,10 +395,13 @@ async fn a_transient_503_is_retried_within_the_budget_until_accepted() {
 async fn a_non_transient_404_is_not_retried() {
     let (port, conns) = scripted_sink(&[NOT_FOUND, OK]).await;
     let obs = Arc::new(Observability::new());
-    let target = WebhookTarget::compile(&target(
-        &format!("http://127.0.0.1:{port}/hook"),
-        &["breaker_opened"],
-    ))
+    let target = WebhookTarget::compile(
+        &target(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &["breaker_opened"],
+        ),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
     .unwrap();
     deliver(
         target,
@@ -394,10 +424,13 @@ async fn a_dead_target_exhausts_bounded_attempts_and_fails_fast() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let obs = Arc::new(Observability::new());
-    let target = WebhookTarget::compile(&target(
-        &format!("http://127.0.0.1:{port}/hook"),
-        &["config_rejected"],
-    ))
+    let target = WebhookTarget::compile(
+        &target(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &["config_rejected"],
+        ),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
     .unwrap();
     let started = Instant::now();
     deliver(
@@ -423,10 +456,13 @@ async fn retry_after_seconds_gate_the_retry() {
         b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n";
     let (port, _conns) = scripted_sink(&[too_many_with_wait, OK]).await;
     let obs = Arc::new(Observability::new());
-    let target = WebhookTarget::compile(&target(
-        &format!("http://127.0.0.1:{port}/hook"),
-        &["breaker_opened"],
-    ))
+    let target = WebhookTarget::compile(
+        &target(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &["breaker_opened"],
+        ),
+        dwara_core::config::ssrf::SsrfFilter::default(),
+    )
     .unwrap();
     let started = Instant::now();
     deliver(
@@ -467,7 +503,8 @@ async fn a_hung_target_is_cut_off_by_the_total_budget() {
         &["breaker_opened"],
     );
     cfg.timeout_ms = 300;
-    let target = WebhookTarget::compile(&cfg).unwrap();
+    let target =
+        WebhookTarget::compile(&cfg, dwara_core::config::ssrf::SsrfFilter::default()).unwrap();
     let started = Instant::now();
     deliver(
         target,

@@ -608,6 +608,8 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -638,6 +640,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -816,6 +819,8 @@ fn upstream_cfg(
         peak_ewma: None,
         locality: None,
         pq: false,
+        cert_pinning: None,
+        mtls: None,
     }
 }
 
@@ -853,6 +858,7 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
     let state = ConfigState::new();
     state.compile_and_publish(&gw).expect("publish");
@@ -1106,6 +1112,8 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -1136,6 +1144,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     }
 }
 

@@ -4641,6 +4641,40 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                     ));
                                 }
                             }
+                            // SEC-02: ACME validation. Terminate mode
+                            // only (passthrough does not terminate TLS).
+                            if let Some(acme) = &t.acme {
+                                if acme.domains.is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        "tls.acme.domains",
+                                        "acme domains list must not be empty",
+                                    ));
+                                }
+                                if !acme.staging && acme.contact.is_empty() {
+                                    issues.push(issue(
+                                        "listener",
+                                        &l.name,
+                                        "tls.acme.contact",
+                                        "acme contact email is required for production issuance \
+                                         (Let's Encrypt requires at least one contact email)",
+                                    ));
+                                }
+                                #[cfg(not(feature = "acme"))]
+                                {
+                                    if !acme.domains.is_empty() {
+                                        issues.push(issue(
+                                            "listener",
+                                            &l.name,
+                                            "tls.acme",
+                                            "acme is configured but the acme cargo feature is OFF; \
+                                             the block is inert (no certificates will be obtained). \
+                                             Build with --features acme to enable.",
+                                        ));
+                                    }
+                                }
+                            }
                         }
                         TlsMode::Passthrough => {
                             if t.cert_file.is_some() || t.key_file.is_some() {
@@ -4682,6 +4716,15 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                 "tls mode passthrough does not terminate TLS; client certificates \
                                  cannot be verified (use mode terminate)",
                             ));
+                            }
+                            if t.acme.is_some() {
+                                issues.push(issue(
+                                    "listener",
+                                    &l.name,
+                                    "tls.acme",
+                                    "tls mode passthrough does not terminate TLS; acme certificate \
+                                     automation does not apply (use mode terminate)",
+                                ));
                             }
                             let mut seen_names = std::collections::BTreeSet::new();
                             for (i, r) in t.sni_routes.iter().enumerate() {
@@ -6062,6 +6105,49 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // SEC-05: OIDC browser login validation. The provider must
+        // exist in gateway.oidc_providers; the redirect_uri must be a
+        // non-empty path starting with `/`.
+        if let Some(oidc_login) = &r.oidc_login {
+            if oidc_login.provider.is_empty() {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "oidc_login.provider",
+                    "oidc_login provider must not be empty",
+                ));
+            } else if !gateway
+                .oidc_providers
+                .iter()
+                .any(|p| p.name == oidc_login.provider)
+            {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "oidc_login.provider",
+                    format!(
+                        "oidc_login provider '{}' not found in gateway.oidc_providers",
+                        oidc_login.provider
+                    ),
+                ));
+            }
+            if !oidc_login.redirect_uri.starts_with('/') {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "oidc_login.redirect_uri",
+                    "oidc_login redirect_uri must be a path starting with '/'",
+                ));
+            }
+            if oidc_login.session_ttl_s == 0 {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "oidc_login.session_ttl_s",
+                    "oidc_login session_ttl_s must be > 0",
+                ));
+            }
+        }
     }
 
     for u in &gateway.upstreams {
@@ -6131,6 +6217,106 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "trusted_ca_file only applies to TLS upstreams (protocol https or http2); no \
                      TLS is negotiated toward an http1 upstream",
                 ));
+            }
+        }
+        // SEC-04 / DW-109: cert_pinning validation. The block is always
+        // accepted by the parser (additive-only); validation enforces:
+        // (1) only on TLS upstreams, (2) non-empty pin list, (3) each
+        // pin is 64 lowercase hex chars, (4) a warning when the
+        // `cert_pinning` cargo feature is OFF (the block is inert).
+        if let Some(cp) = &u.cert_pinning {
+            let tls = matches!(
+                u.protocol,
+                crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
+            );
+            if !tls {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "cert_pinning",
+                    "cert_pinning only applies to TLS upstreams (protocol https or http2); no \
+                     TLS is negotiated toward an http1 upstream",
+                ));
+            }
+            if cp.pins.is_empty() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "cert_pinning.pins",
+                    "cert_pinning pins list must not be empty (a pin-less pinning block is an \
+                     authoring mistake, not 'pin nothing')",
+                ));
+            }
+            for (i, pin) in cp.pins.iter().enumerate() {
+                let h = &pin.spki_sha256;
+                if h.len() != 64
+                    || !h
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        &format!("cert_pinning.pins[{i}].spki_sha256"),
+                        "spki_sha256 must be 64 lowercase hex chars (SHA-256)",
+                    ));
+                }
+            }
+            #[cfg(not(feature = "cert_pinning"))]
+            {
+                if tls && !cp.pins.is_empty() {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "cert_pinning",
+                        "cert_pinning is configured but the cert_pinning cargo feature is OFF; \
+                         the block is inert (pinning will not be enforced). Build with \
+                         --features cert_pinning to enable.",
+                    ));
+                }
+            }
+        }
+        // SEC-03: upstream mTLS client cert validation. The block is
+        // always accepted by the parser (additive-only); validation
+        // enforces: (1) only on TLS upstreams, (2) cert/key files exist
+        // and are readable at compile time.
+        if let Some(mtls) = &u.mtls {
+            let tls = matches!(
+                u.protocol,
+                crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
+            );
+            if !tls {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "mtls",
+                    "mtls only applies to TLS upstreams (protocol https or http2); no \
+                     TLS is negotiated toward an http1 upstream",
+                ));
+            } else {
+                // Check that the cert and key files are readable.
+                if let Err(e) = std::fs::read_to_string(&mtls.client_cert_file) {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "mtls.client_cert_file",
+                        format!(
+                            "client_cert_file '{}' cannot be read: {e}",
+                            mtls.client_cert_file
+                        ),
+                    ));
+                }
+                if let Err(e) = std::fs::read_to_string(&mtls.client_key_file) {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "mtls.client_key_file",
+                        format!(
+                            "client_key_file '{}' cannot be read: {e}",
+                            mtls.client_key_file
+                        ),
+                    ));
+                }
             }
         }
         let mut seen_targets = std::collections::BTreeSet::new();
@@ -7972,6 +8158,7 @@ impl Snapshot {
                 fleet: None,
                 mesh: None,
                 lifecycle: None,
+                ssrf_filter: None,
             }),
             routes: Arc::new(RouteTable::empty()),
         }

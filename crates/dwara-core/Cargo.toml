@@ -361,6 +361,16 @@ extism = []
 # is off the block is accepted but inert (validation warns). Default
 # OFF. Build with `cargo build --features cert_pinning`.
 cert_pinning = []
+# SEC-02: ACME / Let's Encrypt automation. Flag-only feature (no new
+# dependencies in the scaffold): the AcmeConfig/AcmeState types and the
+# `acme` config block on listener TLS are hand-rolled. The actual ACME
+# client (account registration, challenge completion, certificate
+# issuance) is scaffolded; a future change will add an ACME client
+# dependency (rustls-acme or instant-acme, license-checked against
+# deny.toml). The config schema is always present so configs round-trip
+# without the feature; when the feature is off the block is accepted
+# but inert (validation warns). Default OFF.
+acme = []
 # DW-109: Signed URL request authentication. Flag-only feature (no new
 # dependencies): the SignedUrlConfig/SignedUrlVerifier types and the
 # `signed_url` config block on routes are hand-rolled. The verifier

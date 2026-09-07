@@ -80,7 +80,6 @@ impl VaultSecretSource {
     }
 
     /// Store a secret in the cache.
-    #[cfg(test)]
     fn store_cached(&self, name: &str, secret: Secret) {
         let mut cache = self.cache.write().unwrap();
         cache.insert(name.to_string(), (secret, Instant::now()));
@@ -124,22 +123,151 @@ impl SecretSource for VaultSecretSource {
             return Ok(Some(cached));
         }
 
-        // In a real implementation, this would make an HTTP GET to
-        // Vault's KV v2 API:
+        // SEC-10: Make the actual HTTP GET to Vault's KV v2 API.
         //   GET {url}/v1/{name}
         //   X-Vault-Token: {token}
-        // and parse the response's `data.data` field.
-        //
-        // For now, we return an error indicating the HTTP client is
-        // not yet wired up. The cache + TTL logic is fully
-        // implemented and tested; the HTTP call is the remaining
-        // piece (it requires a hyper client setup that is
-        // environment-specific).
-        Err(ExtensionsError::Backend(format!(
-            "vault secret source: HTTP client not yet wired up (would call GET {} with X-Vault-Token)",
-            self.api_url(name),
-        )))
+        // The response JSON has the shape:
+        //   { "data": { "data": { <key>: <value> }, "metadata": {...} } }
+        // We extract the first string value from `data.data` (the
+        // secret value). For multi-key secrets, the caller names the
+        // key as `<mount>/<path>#<key>` and we extract that key.
+        let url = self.api_url(name);
+        let parsed: hyper::Uri = url
+            .parse()
+            .map_err(|e| ExtensionsError::Backend(format!("vault url parse: {e}")))?;
+        let host = parsed
+            .host()
+            .ok_or_else(|| ExtensionsError::Backend("vault url has no host".to_string()))?;
+        let port = parsed
+            .port_u16()
+            .unwrap_or(if parsed.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            });
+        let path = parsed
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "/".to_string());
+
+        // Build a simple HTTP/1.1 request. We use a raw TCP connection
+        // to avoid pulling in a hyper client dependency (the vault
+        // source is ent-gated and the HTTP call is simple enough to
+        // hand-roll, matching the webhook deliverer's approach).
+        let addr = format!("{host}:{port}");
+        let use_tls = parsed.scheme_str() == Some("https");
+
+        // Connect and read the response in a blocking fashion (this
+        // is called from an async context; for simplicity we use
+        // spawn_blocking internally via tokio's TCP. A future change
+        // may use a pooled hyper client).
+        let token = self.token.clone();
+        let request_body = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Vault-Token: {token}\r\nConnection: close\r\n\r\n"
+        );
+
+        // Use tokio's TCP + TLS for the connection.
+        let response = fetch_vault_secret(&addr, use_tls, &request_body, host)
+            .await
+            .map_err(|e| ExtensionsError::Backend(format!("vault fetch: {e}")))?;
+
+        // Parse the JSON response.
+        let body_start = response
+            .find("\r\n\r\n")
+            .ok_or_else(|| ExtensionsError::Backend("vault response has no body".to_string()))?;
+        let body = &response[body_start + 4..];
+
+        let json: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| ExtensionsError::Backend(format!("vault response parse: {e}")))?;
+
+        // Navigate to data.data and extract the first string value.
+        let data = json
+            .get("data")
+            .and_then(|d| d.get("data"))
+            .ok_or_else(|| {
+                ExtensionsError::Backend("vault response missing data.data".to_string())
+            })?;
+
+        // If the name has a #key suffix, extract that key; otherwise
+        // take the first string value.
+        let value = if let Some((_, key)) = name.rsplit_once('#') {
+            data.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
+                ExtensionsError::Backend(format!("vault secret has no key '{key}'"))
+            })?
+        } else {
+            data.as_object()
+                .and_then(|obj| obj.values().find_map(|v| v.as_str()))
+                .ok_or_else(|| {
+                    ExtensionsError::Backend("vault secret has no string value".to_string())
+                })?
+        };
+
+        let secret = Secret::new(value.to_string());
+        self.store_cached(name, secret.clone());
+        Ok(Some(secret))
     }
+}
+
+/// SEC-10: Fetch a secret from Vault over a raw TCP/TLS connection.
+/// Hand-rolled HTTP/1.1 (same approach as the webhook deliverer) to
+/// avoid pulling in a hyper client dependency. Returns the full
+/// response string (headers + body).
+async fn fetch_vault_secret(
+    addr: &str,
+    use_tls: bool,
+    request: &str,
+    host: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+
+    let mut io: Box<dyn tokio::io::AsyncRead + AsyncWrite + Unpin + Send> = if use_tls {
+        // Use the same rustls config as the webhook deliverer (webpki
+        // roots, no client auth). A future change may support a
+        // custom CA for private Vault deployments.
+        let name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| format!("server name: {e}"))?;
+        let connector = tokio_rustls::TlsConnector::from(vault_tls_config());
+        let tls = connector
+            .connect(name, stream)
+            .await
+            .map_err(|e| format!("tls handshake: {e}"))?;
+        Box::new(tls)
+    } else {
+        Box::new(stream)
+    };
+
+    io.write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("write: {e}"))?;
+
+    let mut response = Vec::new();
+    io.read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
+
+    String::from_utf8_lossy(&response).to_string()
+}
+
+/// Build a rustls client config for Vault HTTPS (webpki roots, no
+/// client auth). Reuses the same pattern as the webhook TLS config.
+fn vault_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    use std::sync::OnceLock;
+    static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let mut cfg = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+            std::sync::Arc::new(cfg)
+        })
+        .clone()
 }
 
 /// A KMS (Key Management Service) secret source.

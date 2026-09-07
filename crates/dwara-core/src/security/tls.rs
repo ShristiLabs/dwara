@@ -211,6 +211,59 @@ pub fn https_h1_client_config(roots: rustls::RootCertStore) -> rustls::ClientCon
     cfg
 }
 
+/// SEC-03: HTTP/1.1-ALPN rustls client config WITH client auth (mTLS
+/// to the upstream). Loads the client cert chain and private key from
+/// PEM files and installs them via `with_client_auth_cert`. Used when
+/// an upstream configures `mtls.client_cert_file` + `mtls.client_key_file`.
+/// Fails with [`TlsError::Io`] when the files cannot be read or parsed.
+pub fn https_h1_client_config_with_auth(
+    roots: rustls::RootCertStore,
+    client_cert_file: &str,
+    client_key_file: &str,
+) -> Result<rustls::ClientConfig, TlsError> {
+    let certs = load_cert_chain(client_cert_file)?;
+    let key = load_private_key_der(client_key_file)?;
+    let mut cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(TlsError::Rustls)?;
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(cfg)
+}
+
+/// SEC-03: HTTP/2-ALPN rustls client config WITH client auth (mTLS to
+/// the upstream). Same as [`https_h1_client_config_with_auth`] but with
+/// `h2` ALPN and a client locked to HTTP/2.
+pub fn https_h2_client_config_with_auth(
+    roots: rustls::RootCertStore,
+    client_cert_file: &str,
+    client_key_file: &str,
+) -> Result<rustls::ClientConfig, TlsError> {
+    let certs = load_cert_chain(client_cert_file)?;
+    let key = load_private_key_der(client_key_file)?;
+    let mut cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(TlsError::Rustls)?;
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(cfg)
+}
+
+/// SEC-03: Load a PEM private key as `PrivateKeyDer` (the form
+/// `with_client_auth_cert` expects). Mirrors the OAuth2 mTLS key loader.
+fn load_private_key_der(path: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
+    let ppath = PathBuf::from(path);
+    let pem = Zeroizing::new(std::fs::read(&ppath)?);
+    let key = PrivateKeyDer::pem_slice_iter(&pem)
+        .next()
+        .ok_or_else(|| TlsError::EmptyPem {
+            path: ppath,
+            what: "private key",
+        })?
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(key)
+}
+
 /// DW-105: HTTP/1.1-ALPN rustls client config with post-quantum hybrid
 /// key exchange opt-in. When `pq` is `true` AND the `pq` cargo feature
 /// is ON, [`crate::security::pq::install_pq_kx_group`] is called to
@@ -621,7 +674,7 @@ pub fn fingerprint_colon_hex(cert: &CertificateDer<'_>) -> String {
 /// SEQUENCE header (the same encoding `SigningKey::public_key` yields) or
 /// None on any structural shortcoming (treated as a mismatch by the
 /// caller, which rejects).
-fn spki_of_leaf(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
+pub fn spki_of_leaf(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
     // Certificate SEQUENCE -> TBSCertificate SEQUENCE.
     let (tag, cert_content, _) = der_elem(cert.as_ref())?;
     if tag != 0x30 {

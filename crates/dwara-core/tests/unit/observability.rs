@@ -117,6 +117,8 @@ fn render_contains_families() {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -147,6 +149,7 @@ fn render_contains_families() {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         })
         .expect("publish");
     let registry =

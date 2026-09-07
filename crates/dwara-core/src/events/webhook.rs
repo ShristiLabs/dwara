@@ -96,6 +96,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::credentials::resolve_configured_secret;
+use crate::config::ssrf::SsrfFilter;
 use crate::config::Webhook;
 use crate::observability::Observability;
 
@@ -138,6 +139,9 @@ pub struct WebhookTarget {
     attempts: u32,
     backoff_base: Duration,
     backoff_cap: Duration,
+    /// SEC-13: SSRF egress filter. Checked at connect time against the
+    /// resolved IP. Disabled (accepts all) when not configured.
+    ssrf_filter: SsrfFilter,
 }
 
 impl std::fmt::Debug for WebhookTarget {
@@ -173,7 +177,7 @@ impl WebhookTarget {
     /// this is the compile-time re-resolution whose failure skips the
     /// target loudly (the microsecond-race backstop, same as the
     /// authenticator's credential resolution).
-    pub fn compile(cfg: &Webhook) -> Result<Self, String> {
+    pub fn compile(cfg: &Webhook, ssrf_filter: SsrfFilter) -> Result<Self, String> {
         let mut target = Self::compile_endpoint(
             &cfg.url,
             &cfg.headers,
@@ -181,6 +185,7 @@ impl WebhookTarget {
             cfg.max_attempts,
             cfg.backoff_base_ms,
             cfg.backoff_cap_ms,
+            ssrf_filter,
         )?;
         let mut events = Vec::with_capacity(cfg.events.len());
         for e in &cfg.events {
@@ -212,6 +217,7 @@ impl WebhookTarget {
         max_attempts: u32,
         backoff_base_ms: u64,
         backoff_cap_ms: u64,
+        ssrf_filter: SsrfFilter,
     ) -> Result<Self, String> {
         let uri: hyper::Uri = url
             .parse()
@@ -276,6 +282,7 @@ impl WebhookTarget {
             attempts: max_attempts,
             backoff_base: Duration::from_millis(backoff_base_ms),
             backoff_cap: Duration::from_millis(backoff_cap_ms),
+            ssrf_filter,
         })
     }
 
@@ -417,6 +424,31 @@ async fn post_once(
     };
     let attempt =
         async {
+            // SEC-13: SSRF egress filter. Resolve the host and check
+            // every resolved IP against the deny set BEFORE connecting.
+            // DNS rebinding mitigation: the check runs at connect time,
+            // not at config compile time. A host that resolves to a
+            // denied IP is rejected (fail-closed).
+            if target.ssrf_filter.is_enabled() {
+                let addrs =
+                    match tokio::net::lookup_host((target.dial_host.as_str(), target.port)).await {
+                        Ok(addrs) => addrs.collect::<Vec<_>>(),
+                        Err(e) => {
+                            return Err(format!(
+                                "webhook {} DNS resolution failed: {e}",
+                                target.host_header
+                            ));
+                        }
+                    };
+                for addr in &addrs {
+                    if let Err(reason) = target.ssrf_filter.check(addr.ip()) {
+                        return Err(format!(
+                            "webhook {} SSRF egress filter rejected target: {reason}",
+                            target.host_header
+                        ));
+                    }
+                }
+            }
             let stream = tokio::net::TcpStream::connect((target.dial_host.as_str(), target.port))
                 .await
                 .map_err(|e| format!("webhook {} connect failed: {e}", target.host_header))?;

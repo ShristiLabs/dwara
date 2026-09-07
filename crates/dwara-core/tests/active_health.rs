@@ -97,6 +97,8 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             peak_ewma: None,
             locality: None,
             pq: false,
+            cert_pinning: None,
+            mtls: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -127,6 +129,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     }
 }
 
@@ -504,6 +507,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         })
         .unwrap();
     let resp = proxy::handle(&dp, peer(), get("/readyz")).await;
@@ -564,6 +568,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     graphql: None,
                     grpc_web: None,
                     translation: None,
+                    oidc_login: None,
                 },
                 Route {
                     name: "catch".into(),
@@ -610,6 +615,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     graphql: None,
                     grpc_web: None,
                     translation: None,
+                    oidc_login: None,
                 },
             ],
             services: vec![Service {
@@ -647,6 +653,8 @@ async fn reserved_paths_shadow_configured_routes() {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -675,6 +683,7 @@ async fn reserved_paths_shadow_configured_routes() {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         })
         .unwrap();
     let dp = DataPlane::new(Arc::clone(&state));

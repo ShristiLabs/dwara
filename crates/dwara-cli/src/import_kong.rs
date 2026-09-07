@@ -212,6 +212,8 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             },
         );
     }
@@ -247,6 +249,8 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         peak_ewma: None,
                         locality: None,
                         pq: false,
+                        cert_pinning: None,
+                        mtls: None,
                     },
                 );
             } else {
@@ -322,6 +326,8 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         peak_ewma: None,
                         locality: None,
                         pq: false,
+                        cert_pinning: None,
+                        mtls: None,
                     },
                 );
             }
@@ -394,6 +400,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                 mirror: None,
                 fault_injection: None,
                 plugins: Vec::new(),
+                oidc_login: None,
             });
         }
 
@@ -490,6 +497,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
 
     (gateway, warnings)

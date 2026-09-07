@@ -424,6 +424,8 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             },
         );
 
@@ -495,6 +497,8 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                         peak_ewma: None,
                         locality: None,
                         pq: false,
+                        cert_pinning: None,
+                        mtls: None,
                     },
                 );
                 services.insert(
@@ -558,6 +562,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 mirror: None,
                 fault_injection: None,
                 plugins: Vec::new(),
+                oidc_login: None,
             });
 
             warnings.extend(loc.warnings.iter().cloned());
@@ -600,6 +605,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
 
     (gateway, warnings)

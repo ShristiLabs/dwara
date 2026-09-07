@@ -690,7 +690,10 @@ mod tests {
             pricing: Default::default(),
             governance: None,
             logging: None,
-            guardrails: Some(AiGuardrails { rules }),
+            guardrails: Some(AiGuardrails {
+                rules,
+                dry_run: false,
+            }),
             semantic_cache: None,
             routing_policies: Default::default(),
             experiments: None,

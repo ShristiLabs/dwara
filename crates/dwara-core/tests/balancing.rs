@@ -463,6 +463,7 @@ async fn passthrough_sni_resolution_alternates_endpoints_via_registry() {
         }],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     };
     let hosts: Vec<String> = {
         // The dataplane's resolver: pick through the registry's balancers

@@ -293,6 +293,8 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             },
         );
         // Each cluster gets a service with the same name.
@@ -409,6 +411,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                                         mirror: None,
                                         fault_injection: None,
                                         plugins: Vec::new(),
+                                        oidc_login: None,
                                     });
                                 }
                             }
@@ -458,6 +461,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     };
 
     (gateway, warnings)

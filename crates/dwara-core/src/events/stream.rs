@@ -287,7 +287,11 @@ impl WebhookRecordSink {
     /// Fails with a log-safe message (the caller skips the sink
     /// loudly, fail closed — the same compile-time backstop as alert
     /// webhook targets).
-    pub fn compile(cfg: &AnalyticsStreamWebhook, obs: Arc<Observability>) -> Result<Self, String> {
+    pub fn compile(
+        cfg: &AnalyticsStreamWebhook,
+        obs: Arc<Observability>,
+        ssrf_filter: crate::config::ssrf::SsrfFilter,
+    ) -> Result<Self, String> {
         let target = WebhookTarget::compile_endpoint(
             &cfg.url,
             &cfg.headers,
@@ -295,6 +299,7 @@ impl WebhookRecordSink {
             cfg.max_attempts,
             cfg.backoff_base_ms,
             cfg.backoff_cap_ms,
+            ssrf_filter,
         )?;
         Ok(WebhookRecordSink { target, obs })
     }
@@ -380,19 +385,22 @@ impl StreamTargets {
 pub fn compile_stream_targets(
     cfg: Option<&AnalyticsStreamConfig>,
     obs: &Arc<Observability>,
+    ssrf_filter: crate::config::ssrf::SsrfFilter,
 ) -> StreamTargets {
     let Some(cfg) = cfg else {
         return StreamTargets::empty();
     };
     let mut sinks = Vec::new();
     match &cfg.sink {
-        AnalyticsStreamSink::Webhook(wh) => match WebhookRecordSink::compile(wh, Arc::clone(obs)) {
-            Ok(sink) => sinks.push(Arc::new(sink) as Arc<dyn RecordSink>),
-            Err(error) => tracing::error!(
-                code = "record_stream_sink_unusable",
-                "analytics_stream sink skipped for this generation (fail closed): {error}"
-            ),
-        },
+        AnalyticsStreamSink::Webhook(wh) => {
+            match WebhookRecordSink::compile(wh, Arc::clone(obs), ssrf_filter) {
+                Ok(sink) => sinks.push(Arc::new(sink) as Arc<dyn RecordSink>),
+                Err(error) => tracing::error!(
+                    code = "record_stream_sink_unusable",
+                    "analytics_stream sink skipped for this generation (fail closed): {error}"
+                ),
+            }
+        }
     }
     StreamTargets {
         flush_ms: cfg

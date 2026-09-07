@@ -121,6 +121,8 @@ fn inject_default_services(gateway: &mut Gateway) {
         peak_ewma: None,
         locality: None,
         pq: false,
+        cert_pinning: None,
+        mtls: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

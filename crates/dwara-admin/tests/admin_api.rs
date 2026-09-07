@@ -106,6 +106,9 @@ async fn start_mtls(pki: &Pki) -> Server {
             key_file: key.display().to_string(),
             client_ca_file: pki.ca_path().display().to_string(),
         },
+        rbac: None,
+        api_tokens: None,
+        audit: None,
     };
     let mode = ListenMode::mtls(&admin_cfg).expect("mtls mode builds");
     start(mode, dir).await
@@ -606,6 +609,9 @@ async fn dev_mode_serves_plaintext_on_loopback_only() {
             key_file: "y".into(),
             client_ca_file: "z".into(),
         },
+        rbac: None,
+        api_tokens: None,
+        audit: None,
     }) {
         Err(e) => e,
         Ok(_) => panic!("dev must refuse non-loopback"),

@@ -271,6 +271,17 @@
         "$ref": "#/$defs/Service"
       }
     },
+    "ssrf_filter": {
+      "description": "SSRF egress filter (SEC-13): when enabled, outbound connections\nfrom webhook deliveries and OPA callouts are checked against a\ndeny set of private/loopback/link-local/metadata IP ranges.\nAn optional allowlist exempts specific CIDRs. Default disabled\n(the v1 posture trusts operator-configured endpoints). See\n[`ssrf::SsrfFilterConfig`] and [`ssrf::SsrfFilter`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SsrfFilterConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "trusted_proxies": {
       "description": "IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims\nare trusted (gateway-level; the direct connection peer must be in\nthis list for an inbound XFF chain to be preserved and extended).\nEach entry must be an IP address (e.g. `10.1.2.3`) or a CIDR\n(e.g. `10.0.0.0/8`); anything else fails validation. Empty (the\ndefault) trusts nobody: every proxied request carries an XFF of\nexactly the direct peer, and inbound XFF values are discarded.",
       "type": "array",
@@ -401,6 +412,61 @@
       },
       "additionalProperties": false
     },
+    "AcmeChallenge": {
+      "description": "ACME challenge type.",
+      "oneOf": [
+        {
+          "description": "HTTP-01 challenge: serves a token over HTTP on port 80. Requires\na separate HTTP listener bound to port 80 (or port forwarding).",
+          "type": "string",
+          "const": "http01"
+        },
+        {
+          "description": "TLS-ALPN-01 challenge: serves a challenge certificate over TLS\nwith the `acme-tls/1` ALPN protocol on port 443. No separate\nlistener needed (the default). Default.",
+          "type": "string",
+          "const": "tls-alpn01"
+        }
+      ]
+    },
+    "AcmeConfig": {
+      "description": "SEC-02: ACME (Let's Encrypt) certificate automation configuration.\nThe gateway acts as an ACME client: orders certificates for the\nconfigured domains, completes the challenge (HTTP-01 or TLS-ALPN-01),\nand installs the issued certificates into the hot-reloadable TLS\ntermination/SNI resolver. Renewal runs automatically before expiry.",
+      "type": "object",
+      "properties": {
+        "challenge": {
+          "description": "Challenge type: `http-01` (serves a token over HTTP on port 80)\nor `tls-alpn-01` (serves a challenge cert over TLS-ALPN on port\n443). Default `tls-alpn-01` (no separate HTTP listener needed).",
+          "$ref": "#/$defs/AcmeChallenge"
+        },
+        "contact": {
+          "description": "Contact email addresses registered with the ACME account. Let's\nEncrypt requires at least one for production issuance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "directory_url": {
+          "description": "The ACME directory URL. Defaults to Let's Encrypt production\n(`https://acme-v02.api.letsencrypt.org/directory`). Set to the\nstaging directory (`https://acme-staging-v02.api.letsencrypt.org/directory`)\nfor testing to avoid rate limits.",
+          "type": "string"
+        },
+        "domains": {
+          "description": "The domains to obtain certificates for. At least one must be\npresent (validation rejects an empty list).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "staging": {
+          "description": "Use the staging directory instead of production. When true,\n`directory_url` is overridden to the Let's Encrypt staging\nendpoint. Staging certs are NOT trusted by browsers — use for\ntesting only. Default false.",
+          "type": "boolean"
+        },
+        "state_dir": {
+          "description": "Path to the directory where ACME state is persisted (account\nkey, issued certificates). The gateway must have read/write\naccess. Defaults to `./acme-state`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "domains"
+      ]
+    },
     "ActiveHealth": {
       "description": "Active health check knobs (DW-013). A block with no keys enables HTTP\nprobes with the defaults.\n\nProbe semantics (frozen):\n- `http` probes issue `GET {path}` over HTTP/1.1 DIRECTLY to the\n  endpoint (bypassing load balancing and the pooled client); success is\n  a 2xx status. Redirects (3xx) are NOT followed — a health endpoint\n  answering 3xx is treated as a failure (a load balancer must not chase\n  redirects to decide health).\n- `tcp` probes succeed when a TCP connection completes within\n  `timeout_ms`.\n- Full jitter: each loop sleeps `interval_ms` plus a uniform random\n  `0..jitter_ms` before the next probe.",
       "type": "object",
@@ -516,14 +582,91 @@
         }
       ]
     },
+    "AdminApiToken": {
+      "description": "One hashed API token with a role.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "description": "The role assigned to this token.",
+          "$ref": "#/$defs/AdminRole"
+        },
+        "token_hash": {
+          "description": "SHA-256 hash of the plaintext token (lowercase hex, 64 chars).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token_hash",
+        "role"
+      ]
+    },
+    "AdminApiTokensConfig": {
+      "description": "SEC-01: API token authentication for the admin API. Tokens are\nhashed (SHA-256) at rest; the config lists token hashes, not\nplaintext tokens. A client presents a token via\n`Authorization: Bearer <token>`.",
+      "type": "object",
+      "properties": {
+        "tokens": {
+          "description": "The hashed API tokens (SHA-256 of the plaintext token, as\nlowercase hex, 64 chars). A request with a matching bearer\ntoken is authenticated as the token's role.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdminApiToken"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AdminAuditConfig": {
+      "description": "SEC-01: Admin audit log configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the audit log is enabled. Default true (when the block\nis present, the audit log is on).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "AdminConfig": {
       "description": "Admin listener configuration (DW-022).",
       "type": "object",
       "properties": {
+        "api_tokens": {
+          "description": "SEC-01: API token authentication. When present, the admin API\naccepts an `Authorization: Bearer <token>` header in addition\nto mTLS. Tokens are hashed (SHA-256) at rest; the config lists\ntoken hashes, not plaintext tokens. When absent (the default),\nonly mTLS is accepted (the v1 behavior).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminApiTokensConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "audit": {
+          "description": "SEC-01: Admin audit log. When present, all mutating admin\nactions (PATCH /config, purge) are recorded in an append-only\naudit table in the state store. Each entry includes the actor\n(cert fingerprint or token hash), the action, the before/after\nconfig hash, and a timestamp. When absent (the default), no\naudit log is kept.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminAuditConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "bind": {
           "description": "Bind address of the admin listener. Default `127.0.0.1:2019`\n(loopback-only; frozen decision 6) — override only to place the\nadmin API on a dedicated management interface, and rely on mTLS\nfor access control: there is no token layer in v1 (the client\ncertificate IS the auth).",
           "type": "string",
           "default": "127.0.0.1:2019"
+        },
+        "rbac": {
+          "description": "SEC-01: RBAC bindings for mTLS-authenticated admin clients.\nMaps client certificate fingerprints (SHA-256 of the cert\nDER) to roles. When present, a valid client certificate with\nNO binding is denied (fail-closed: no implicit admin). When\nabsent (the default), any CA-valid client certificate is\ntreated as full admin (the v1 behavior — backward compatible).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminRbacConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "tls": {
           "description": "mTLS material for the admin listener; all three files are\nrequired.",
@@ -533,6 +676,54 @@
       "additionalProperties": false,
       "required": [
         "tls"
+      ]
+    },
+    "AdminRbacBinding": {
+      "description": "One certificate-fingerprint-to-role binding.",
+      "type": "object",
+      "properties": {
+        "cert_fingerprint": {
+          "description": "SHA-256 fingerprint of the client certificate (lowercase hex,\n64 chars). Computed over the full DER encoding of the cert.",
+          "type": "string"
+        },
+        "role": {
+          "description": "The role assigned to this certificate: `admin` (full access)\nor `readonly` (GET only; PATCH/purge denied).",
+          "$ref": "#/$defs/AdminRole"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cert_fingerprint",
+        "role"
+      ]
+    },
+    "AdminRbacConfig": {
+      "description": "SEC-01: Admin RBAC configuration. Maps client certificate\nfingerprints to roles. A valid certificate with no binding is\ndenied (fail-closed).",
+      "type": "object",
+      "properties": {
+        "bindings": {
+          "description": "Certificate-fingerprint-to-role bindings. Each entry maps one\nSHA-256 fingerprint (lowercase hex, 64 chars) to a role.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdminRbacBinding"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AdminRole": {
+      "description": "Admin roles.",
+      "oneOf": [
+        {
+          "description": "Full admin access: all admin API endpoints.",
+          "type": "string",
+          "const": "admin"
+        },
+        {
+          "description": "Read-only access: GET endpoints only. PATCH /config and purge\nare denied (403).",
+          "type": "string",
+          "const": "readonly"
+        }
       ]
     },
     "AdminTlsConfig": {
@@ -920,6 +1111,10 @@
           "description": "When true, record model usage for shadow audit: BOTH allowed\ncalls and denied attempts land in the `ai_governance_events`\nanalytics table (the admin `/analytics/governance-audit`\nendpoint reads it). When false (the default), only the\ndenial metric fires — no per-event audit rows are written.",
           "type": "boolean"
         },
+        "dry_run": {
+          "description": "SEC-14 / CFG-14: dry-run mode. When true, the governance engine\nevaluates the team allowlist and records would-be denials\n(`dwara_policy_dry_run_total{phase=\"ai_governance\"}` + a\nstructured log) but does NOT reject the request — the call\nproceeds to the model. Useful for rolling out a new allowlist\nwithout breaking existing callers. Default false (reject on\nmismatch).",
+          "type": "boolean"
+        },
         "team_allowlists": {
           "description": "Per-policy (team) model allowlists. The key is the POLICY name\n(the team), the value is the list of allowed client-facing\nmodel aliases. A consumer attaching a policy listed here may\nonly call the aliases in its allowlist; a consumer attaching\nno listed policy is unrestricted. Validation rejects an\nallowlist entry that names an alias absent from `ai.models`\n(an authoring error, not a runtime 404).",
           "type": "object",
@@ -1048,6 +1243,10 @@
       "description": "Guardrails (DW-082 `ai.guardrails`): a list of rules that inspect\nprompts and responses for prompt-injection, PII, banned content,\nand output schema conformance. Each rule is one check applied at\nthe prompt phase (before the provider call) and/or the response\nphase (after). Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies to\nall. See [`AiGuardrailRule`] for the per-rule shape.",
       "type": "object",
       "properties": {
+        "dry_run": {
+          "description": "SEC-14 / CFG-14: dry-run mode. When true, guardrail rules are\nevaluated and would-be blocks are recorded\n(`dwara_policy_dry_run_total{phase=\"ai_guardrails\"}` + a\nstructured log) but the request/response is NOT blocked — the\ncall proceeds. Useful for tuning guardrail patterns before\nenforcing. Default false (block on match).",
+          "type": "boolean"
+        },
         "rules": {
           "description": "Guardrail rules. Each rule is one check applied to prompts\nand/or responses, in declaration order. Rule names must be\nunique (validation rejects duplicates).",
           "type": "array",
@@ -2366,6 +2565,37 @@
         "threshold"
       ]
     },
+    "CertPin": {
+      "description": "A single certificate pin: the SHA-256 hash of the upstream\ncertificate's SubjectPublicKeyInfo (SPKI), as lowercase hex (64\nchars). Pinning the SPKI (rather than the full certificate) allows\nrotation of the leaf certificate as long as the key pair is\nunchanged.",
+      "type": "object",
+      "properties": {
+        "spki_sha256": {
+          "description": "The SHA-256 hash of the SPKI, as lowercase hex (64 chars).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "spki_sha256"
+      ]
+    },
+    "CertPinningConfig": {
+      "description": "DW-109 / SEC-04: certificate pinning configuration for an upstream.\nHolds a list of allowed SPKI SHA-256 hashes (lowercase hex, 64\nchars). A peer cert whose SPKI hash matches ANY entry is accepted;\notherwise the connection is rejected (fail-closed).",
+      "type": "object",
+      "properties": {
+        "pins": {
+          "description": "The allowed SPKI SHA-256 hashes (lowercase hex, 64 chars each).\nMust be non-empty (validation rejects an empty pin list — a\npin-less pinning block is an authoring mistake, not \"pin\nnothing\").",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CertPin"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pins"
+      ]
+    },
     "Compression": {
       "description": "Route-scoped response compression policy (DW-027, feature analysis\n4.13).\n\nSemantics (frozen; negotiation and encoding live in\n`dataplane::compression`):\n\n- `algorithms` is the PREFERENCE order: the first entry the request's\n  `Accept-Encoding` accepts wins. `q=0` entries in `Accept-Encoding`\n  are treated as refusal.\n- `level` is clamped per algorithm at encode time (gzip 0-9, brotli\n  0-11, zstd 0-22; validation bounds the field to 0-22). Absent: the\n  algorithm's library default.\n- `min_size` skips compression of responses whose size is known and\n  below it — a declared `Content-Length` or the exact size of the\n  gateway's own respond/redirect bodies. Responses of UNKNOWN length\n  (streaming) are always candidates.\n- `content_types` (when non-empty) restricts compression to responses\n  whose `Content-Type` starts with one of the entries; entries are\n  lowercase prefix matches (e.g. `text/`). `excluded_content_types`\n  is checked after the include list and wins (the way to express\n  \"compress everything text/ except `text/event-stream`\").\n- Responses carrying an existing `Content-Encoding`, 1xx/204/304\n  statuses, zero-length bodies, and 101 upgrade responses are never\n  compressed. `Vary: Accept-Encoding` is merged into every response\n  on a compression-configured route that is not already encoded —\n  compressed or not — so caches key correctly.\n- The compressed body streams chunk-by-chunk with a flush per chunk\n  (streaming/SSE-friendly, at a small compression-ratio cost); the\n  gateway never buffers the whole body to compress it. The frame\n  codec's internal buffer is bounded by the chunk size.",
       "type": "object",
@@ -2576,6 +2806,10 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "dry_run": {
+          "description": "SEC-14 / CFG-14: dry-run mode. When true, quota counters are\nevaluated and would-be rejections are recorded\n(`dwara_policy_dry_run_total{phase=\"quota\"}` + a structured\nlog) but the request is NOT rejected — it proceeds even when\nthe quota is exceeded. Useful for calibrating quota limits\nbefore enforcing. Default false (reject on quota exceeded).",
+          "type": "boolean"
         },
         "monthly_requests": {
           "description": "Maximum requests per UTC calendar month.",
@@ -3760,6 +3994,17 @@
       "description": "TLS handling for a listener: terminate at the edge or pass through.",
       "type": "object",
       "properties": {
+        "acme": {
+          "description": "SEC-02: ACME / Let's Encrypt automation. When present, the\ngateway automatically obtains and renews certificates for the\nconfigured domains from the ACME directory. Terminates mode\nonly (passthrough does not terminate TLS). When `acme` is\npresent, `cert_file`/`key_file`/`certificates` are optional\n(ACME-managed certs serve as the fallback); manual certs still\ntake precedence for their SNI names. See [`AcmeConfig`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcmeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cert_file": {
           "description": "Path to the PEM certificate chain (termination mode only). Serves as\nthe default/fallback certificate when `certificates` is also set.",
           "type": [
@@ -4173,6 +4418,42 @@
       "required": [
         "client_cert",
         "client_key"
+      ]
+    },
+    "OidcLoginConfig": {
+      "description": "SEC-05: OIDC browser login flow configuration for a route. The\ngateway redirects unauthenticated browser requests to the IdP,\nexchanges the authorization code for tokens, sets a session cookie,\nand validates the cookie on subsequent requests.",
+      "type": "object",
+      "properties": {
+        "post_logout_url": {
+          "description": "The post-logout redirect URL. When the user visits the logout\npath (the redirect URI with `/logout` appended, e.g.\n`/auth/callback/logout`), the session cookie is cleared and the\nuser is redirected to this URL. Default: the IdP's\n`end_session_endpoint` (from discovery) with\n`post_logout_redirect_uri` set to the gateway's root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "The OIDC provider name (must match an entry in\n`gateway.oidc_providers`).",
+          "type": "string"
+        },
+        "redirect_uri": {
+          "description": "The redirect URI the IdP sends the authorization code to. This\nmust be a path on the gateway (e.g. `/auth/callback`) and must\nbe registered with the IdP. The gateway handles the callback\nautomatically when this route is matched.",
+          "type": "string"
+        },
+        "session_cookie": {
+          "description": "The session cookie name. Default `dwara_session`. The cookie is\n`HttpOnly`, `Secure` (when the listener is TLS), `SameSite=Lax`,\nand carries a signed session ID.",
+          "type": "string"
+        },
+        "session_ttl_s": {
+          "description": "Session lifetime in seconds (default 3600 = 1 hour). After this\nduration the cookie expires and the user must re-authenticate.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "redirect_uri"
       ]
     },
     "OidcProvider": {
@@ -4979,6 +5260,10 @@
         "body_schema": {
           "description": "The JSON Schema the request body must satisfy. A minimal subset\nof JSON Schema Draft 2020-12 is supported: `type`, `required`,\n`properties`, `items`, `enum`, `minimum`, `maximum`,\n`minLength`, `maxLength`, and `additionalProperties` (bool or a\nschema). `$ref` is NOT supported (inline your schemas). An\ninvalid schema fails config validation at publish time.",
           "$ref": "#/$defs/BodySchema"
+        },
+        "dry_run": {
+          "description": "SEC-14: dry-run mode. When true, the gateway evaluates the\nschema and records violations (log + metric) but does NOT reject\nthe request — the body is forwarded to the upstream even when it\nfails validation. Useful for rolling out a new schema without\nbreaking existing callers. Default false (reject on mismatch).",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -5246,6 +5531,17 @@
         },
         "name": {
           "type": "string"
+        },
+        "oidc_login": {
+          "description": "SEC-05: OIDC browser login flow as a route auth mode. When\npresent, the gateway acts as an OIDC relying party: unauthenticated\nbrowser requests are redirected to the IdP's authorization\nendpoint, and the callback (`redirect_uri`) exchanges the\nauthorization code for tokens, sets a session cookie, and\nredirects the user back to the original URL. Subsequent requests\ncarry the session cookie (validated by the gateway). Absent (the\ndefault): no browser login flow (the route uses its normal auth\nmode). See [`OidcLoginConfig`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OidcLoginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "openapi": {
           "description": "OpenAPI import metadata (DW-047): when this route was generated\nby `dwara import openapi`, this block records the source\noperation's `operationId`, `summary`, and `tags` for\ntraceability. It has no runtime effect — the gateway ignores it\n— but it survives round-trips so the operator can audit which\nspec operation a route came from. Absent for hand-authored\nroutes.",
@@ -6100,6 +6396,24 @@
         "upstream"
       ]
     },
+    "SsrfFilterConfig": {
+      "description": "SSRF egress filter configuration. When `enabled` is true, outbound\nconnections from webhook deliveries and OPA callouts are checked\nagainst the deny set; an IP in the deny set that is NOT in the\nallowlist is rejected. When `enabled` is false (the default), no\nfiltering is applied (the v1 behavior — operator config is trusted).",
+      "type": "object",
+      "properties": {
+        "allowlist": {
+          "description": "Additional CIDR ranges to EXEMPT from the deny set (allowlist).\nEntries are IP or CIDR strings (e.g. `10.0.0.0/8` to allow all\nof 10/8). An IP that matches any allowlist entry is accepted\neven when it falls inside the default deny set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Whether the SSRF egress filter is enabled. Default false: the\nv1 posture trusts operator-configured endpoints (an internal\nalerting listener on 127.0.0.1 is a normal shape). Enable when\nthe gateway processes externally-sourced URLs (e.g. webhook\ntargets from a control-plane API).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "StickyAffinity": {
       "description": "Cookie affinity for a service (DW-040, `services[].sticky`).",
       "type": "object",
@@ -6357,6 +6671,17 @@
             }
           ]
         },
+        "cert_pinning": {
+          "description": "DW-109 / SEC-04: upstream TLS certificate pinning by SPKI\nSHA-256 hash. When present, the gateway's outbound TLS client\ninstalls a custom certificate verifier that extracts the peer\ncert's SubjectPublicKeyInfo, computes its SHA-256, and compares\nagainst the configured pins. A mismatch rejects the connection\n(fail-closed: no fallback to CA-based verification). The\n`cert_pinning` config block is always accepted by the parser\n(additive-only, strict serde preserved); when the\n`cert_pinning` cargo feature is OFF it is INERT (validation\nemits a warning). Only meaningful for the TLS protocols\n(`https`, `http2`); validation rejects it on an `http1`\nupstream.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CertPinningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "connection_cap": {
           "description": "Maximum number of concurrent outbound connections to this upstream\n(active plus pooled idle). Defaults to 64 when absent. Enforced by\nthe upstream client (DW-008); excess connection attempts wait for a\nslot rather than fail.",
           "type": [
@@ -6419,6 +6744,17 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "mtls": {
+          "description": "SEC-03: upstream mTLS client certificates. When present, the\ngateway presents this client certificate to the upstream during\nthe TLS handshake (in addition to verifying the upstream's\nserver cert against `trusted_ca_file` or the public roots).\nRequired for upstreams that demand client authentication\n(banking/payment APIs, mesh-internal services). Only meaningful\nfor the TLS protocols (`https`, `http2`); validation rejects it\non an `http1` upstream.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamMtls"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "name": {
           "type": "string"
@@ -6527,6 +6863,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "UpstreamMtls": {
+      "description": "SEC-03: upstream mTLS client certificate configuration. Reuses the\ntwo-path shape (cert file + key file) proven by the OAuth2 mTLS\nconfig (`OAuth2Mtls`).",
+      "type": "object",
+      "properties": {
+        "client_cert_file": {
+          "description": "Path to the PEM client certificate chain to present to the\nupstream during the TLS handshake.",
+          "type": "string"
+        },
+        "client_key_file": {
+          "description": "Path to the PEM private key for `client_cert_file`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "client_cert_file",
+        "client_key_file"
+      ]
     },
     "UpstreamProtocol": {
       "oneOf": [

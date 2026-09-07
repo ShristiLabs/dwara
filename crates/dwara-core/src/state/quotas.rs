@@ -340,6 +340,7 @@ mod tests {
         ConsumerQuotas {
             daily_requests: daily,
             monthly_requests: monthly,
+            dry_run: false,
         }
     }
 

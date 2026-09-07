@@ -76,6 +76,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         graphql: None,
         grpc_web: None,
         translation: None,
+        oidc_login: None,
     }
 }
 
@@ -118,6 +119,8 @@ fn upstream(name: &str) -> Upstream {
         peak_ewma: None,
         locality: None,
         pq: false,
+        cert_pinning: None,
+        mtls: None,
     }
 }
 
@@ -157,6 +160,7 @@ fn base_gateway() -> Gateway {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     }
 }
 
@@ -943,6 +947,7 @@ fn validation_rejects_terminate_without_cert_file() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.cert_file");
 }
@@ -958,6 +963,7 @@ fn validation_rejects_terminate_without_key_file() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     }));
     assert_single_issue(&gw, "listener", "l", "tls.key_file");
 }
@@ -973,6 +979,7 @@ fn validation_accepts_terminate_with_cert_and_key() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1083,6 +1090,7 @@ fn validation_accepts_passthrough_without_cert_or_key() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     }));
     assert!(validate(&gw).is_empty());
 }
@@ -1098,6 +1106,7 @@ fn validation_rejects_passthrough_with_cert_and_key() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     }));
     assert_single_issue(&gw, "listener", "l", "tls");
 }
@@ -1114,6 +1123,7 @@ fn validation_rejects_http_listener_with_tls_block() {
         sni_routes: vec![],
         zero_rtt: ZeroRttPolicy::Reject,
         pq: false,
+        acme: None,
     });
     assert_single_issue(&gw, "listener", "l", "tls");
 }

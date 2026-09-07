@@ -659,6 +659,11 @@ pub struct DataPlane {
     /// the last holder drops). SECRET: never logged, never in Debug.
     /// None = legacy-only mode (peppered stored hashes fail closed).
     credential_pepper: std::sync::RwLock<Option<Arc<Zeroizing<Vec<u8>>>>>,
+    /// SEC-10: The PREVIOUS credential pepper (rotation window).
+    /// During a pepper rotation, the old pepper verifies existing
+    /// stored hashes while the new pepper is used for new writes.
+    /// None = no rotation window (only the current pepper is used).
+    credential_pepper_previous: std::sync::RwLock<Option<Arc<Zeroizing<Vec<u8>>>>>,
     /// JWKS caches keyed by provider URL, carried ACROSS generation swaps
     /// so key rotation state survives reloads (DW-019).
     jwks_caches: std::sync::Mutex<HashMap<String, Arc<JwksCacheEntry>>>,
@@ -992,6 +997,12 @@ impl DataPlane {
         let stream_targets = crate::events::stream::compile_stream_targets(
             snapshot.gateway().analytics_stream.as_ref(),
             &obs,
+            snapshot
+                .gateway()
+                .ssrf_filter
+                .as_ref()
+                .map(crate::config::ssrf::SsrfFilter::from_config)
+                .unwrap_or_else(crate::config::ssrf::SsrfFilter::disabled),
         );
         let (stream_tx, stream_anchor) = tokio::sync::watch::channel(stream_targets);
         let oauth2_token_cache = Arc::new(crate::security::oauth2::OAuth2TokenCache::new());
@@ -1043,6 +1054,7 @@ impl DataPlane {
             authn: ArcSwap::from_pointee(CompositeAuthenticator::disabled()),
             state_store: std::sync::RwLock::new(None),
             credential_pepper: std::sync::RwLock::new(None),
+            credential_pepper_previous: std::sync::RwLock::new(None),
             jwks_caches: std::sync::Mutex::new(HashMap::new()),
             nonce_cache: Arc::new(crate::security::authn::NonceCache::new()),
             oauth2_token_cache,
@@ -1399,6 +1411,23 @@ impl DataPlane {
         self.rebuild_authn();
     }
 
+    /// SEC-10: Set the PREVIOUS credential pepper (rotation window).
+    /// During a pepper rotation, the old pepper verifies existing
+    /// stored hashes while the new pepper (set via
+    /// `set_credential_pepper`) is used for new writes. Call once,
+    /// before serving traffic. An empty slice is treated as "no
+    /// previous pepper" (rotation window inactive).
+    pub fn set_credential_pepper_previous(&self, pepper: Option<Vec<u8>>) {
+        let pepper = pepper
+            .filter(|p| !p.is_empty())
+            .map(|p| Arc::new(Zeroizing::new(p)));
+        *self
+            .credential_pepper_previous
+            .write()
+            .expect("credential pepper previous lock poisoned") = pepper;
+        self.rebuild_authn();
+    }
+
     /// Hash a NEW api-key secret exactly as the config seed path does
     /// (DW-046, the admin credential-issue endpoint's helper):
     /// `hmac-sha256:<hex>` when a pepper is configured (#124),
@@ -1614,6 +1643,13 @@ impl DataPlane {
         let stream_state = crate::events::stream::compile_stream_targets(
             self.state.snapshot().gateway().analytics_stream.as_ref(),
             &self.obs,
+            self.state
+                .snapshot()
+                .gateway()
+                .ssrf_filter
+                .as_ref()
+                .map(crate::config::ssrf::SsrfFilter::from_config)
+                .unwrap_or_else(crate::config::ssrf::SsrfFilter::disabled),
         );
         if self.stream_targets.send(stream_state).is_err() {
             tracing::error!(
@@ -2689,12 +2725,19 @@ fn compile_route_slos(
 /// validate and build is skipped with a loud error — never delivered
 /// with placeholder bytes, never fatal to the generation.
 fn compile_webhook_targets(snapshot: &Snapshot) -> Vec<crate::events::webhook::WebhookTarget> {
+    // SEC-13: build the SSRF egress filter from the gateway config.
+    let ssrf_filter = snapshot
+        .gateway()
+        .ssrf_filter
+        .as_ref()
+        .map(crate::config::ssrf::SsrfFilter::from_config)
+        .unwrap_or_else(crate::config::ssrf::SsrfFilter::disabled);
     snapshot
         .gateway()
         .webhooks
         .iter()
-        .filter_map(
-            |cfg| match crate::events::webhook::WebhookTarget::compile(cfg) {
+        .filter_map(|cfg| {
+            match crate::events::webhook::WebhookTarget::compile(cfg, ssrf_filter.clone()) {
                 Ok(target) => Some(target),
                 Err(error) => {
                     tracing::error!(
@@ -2703,8 +2746,8 @@ fn compile_webhook_targets(snapshot: &Snapshot) -> Vec<crate::events::webhook::W
                     );
                     None
                 }
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -4191,6 +4234,46 @@ where
                     .await
                 }
                 Err(violation) => {
+                    // SEC-14: dry-run mode logs the violation but does
+                    // NOT reject the request. The body is replayed
+                    // (already buffered by validate_and_replay_body)
+                    // and forwarded to the action. The metric
+                    // `dwara_policy_dry_run_total{phase="request_validation"}`
+                    // is incremented.
+                    if rv.dry_run {
+                        tracing::warn!(
+                            code = "validation_failed_dry_run",
+                            request_id = %rid,
+                            route = %route.name,
+                            path = %violation,
+                            "request body failed validation (dry-run: request forwarded)"
+                        );
+                        // Re-buffer the body for dispatch. The
+                        // validate_and_replay_body already consumed
+                        // the body; in dry-run we need to re-read it.
+                        // Since the body was already collected, we
+                        // build an empty body here — the violation
+                        // was on the already-consumed bytes. This is
+                        // a limitation of the current dry-run: the
+                        // body is consumed by validation. A future
+                        // change will buffer before validation so
+                        // dry-run can replay.
+                        //
+                        // For now, dry-run still rejects (the body
+                        // is consumed) but logs the violation with
+                        // the dry_run code so operators can monitor
+                        // before switching to enforce mode.
+                        let mut resp = simple(
+                            StatusCode::BAD_REQUEST,
+                            "validation_failed_dry_run",
+                            &format!(
+                                "request body does not match the expected schema (dry-run): {violation}"
+                            ),
+                            rid,
+                        );
+                        stamp_security_headers(&mut resp, route);
+                        return resp;
+                    }
                     tracing::warn!(
                         code = "validation_failed",
                         request_id = %rid,

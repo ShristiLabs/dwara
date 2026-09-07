@@ -257,6 +257,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         fleet: None,
         lifecycle: None,
         mesh: None,
+        ssrf_filter: None,
     })
 }
 
@@ -436,6 +437,7 @@ fn parse_route_attrs(v: &Value) -> Result<Route, String> {
         mirror: None,
         fault_injection: None,
         plugins: Vec::new(),
+        oidc_login: None,
     })
 }
 
@@ -563,6 +565,8 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         peak_ewma: None,
         locality: None,
         pq: false,
+        cert_pinning: None,
+        mtls: None,
     })
 }
 
@@ -1120,6 +1124,7 @@ mod tests {
                 graphql: None,
                 grpc_web: None,
                 translation: None,
+                oidc_login: None,
             }],
             services: vec![Service {
                 name: "api-service".to_string(),
@@ -1165,6 +1170,8 @@ mod tests {
                 peak_ewma: None,
                 locality: None,
                 pq: false,
+                cert_pinning: None,
+                mtls: None,
             }],
             consumers: Vec::new(),
             policies: Vec::new(),
@@ -1194,6 +1201,7 @@ mod tests {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         }
     }
 
@@ -1374,6 +1382,7 @@ mod tests {
             fleet: None,
             lifecycle: None,
             mesh: None,
+            ssrf_filter: None,
         };
         let state = gateway_to_state(&gw);
         assert!(state.resources.is_empty());

@@ -35,6 +35,7 @@ pub mod limits;
 pub mod mesh;
 pub mod net;
 pub mod quotas;
+pub mod ssrf;
 pub mod transforms;
 pub mod versioning;
 
@@ -412,6 +413,14 @@ pub struct Gateway {
     /// module docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<mesh::MeshConfig>,
+    /// SSRF egress filter (SEC-13): when enabled, outbound connections
+    /// from webhook deliveries and OPA callouts are checked against a
+    /// deny set of private/loopback/link-local/metadata IP ranges.
+    /// An optional allowlist exempts specific CIDRs. Default disabled
+    /// (the v1 posture trusts operator-configured endpoints). See
+    /// [`ssrf::SsrfFilterConfig`] and [`ssrf::SsrfFilter`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssrf_filter: Option<ssrf::SsrfFilterConfig>,
 }
 
 /// Bounded admission queue config (DW-053, `gateway.admission_queue`).
@@ -1872,6 +1881,110 @@ pub struct AdminConfig {
     /// mTLS material for the admin listener; all three files are
     /// required.
     pub tls: AdminTlsConfig,
+    /// SEC-01: RBAC bindings for mTLS-authenticated admin clients.
+    /// Maps client certificate fingerprints (SHA-256 of the cert
+    /// DER) to roles. When present, a valid client certificate with
+    /// NO binding is denied (fail-closed: no implicit admin). When
+    /// absent (the default), any CA-valid client certificate is
+    /// treated as full admin (the v1 behavior — backward compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rbac: Option<AdminRbacConfig>,
+    /// SEC-01: API token authentication. When present, the admin API
+    /// accepts an `Authorization: Bearer <token>` header in addition
+    /// to mTLS. Tokens are hashed (SHA-256) at rest; the config lists
+    /// token hashes, not plaintext tokens. When absent (the default),
+    /// only mTLS is accepted (the v1 behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_tokens: Option<AdminApiTokensConfig>,
+    /// SEC-01: Admin audit log. When present, all mutating admin
+    /// actions (PATCH /config, purge) are recorded in an append-only
+    /// audit table in the state store. Each entry includes the actor
+    /// (cert fingerprint or token hash), the action, the before/after
+    /// config hash, and a timestamp. When absent (the default), no
+    /// audit log is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AdminAuditConfig>,
+}
+
+/// SEC-01: Admin RBAC configuration. Maps client certificate
+/// fingerprints to roles. A valid certificate with no binding is
+/// denied (fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminRbacConfig {
+    /// Certificate-fingerprint-to-role bindings. Each entry maps one
+    /// SHA-256 fingerprint (lowercase hex, 64 chars) to a role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<AdminRbacBinding>,
+}
+
+/// One certificate-fingerprint-to-role binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminRbacBinding {
+    /// SHA-256 fingerprint of the client certificate (lowercase hex,
+    /// 64 chars). Computed over the full DER encoding of the cert.
+    pub cert_fingerprint: String,
+    /// The role assigned to this certificate: `admin` (full access)
+    /// or `readonly` (GET only; PATCH/purge denied).
+    pub role: AdminRole,
+}
+
+/// Admin roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AdminRole {
+    /// Full admin access: all admin API endpoints.
+    #[default]
+    Admin,
+    /// Read-only access: GET endpoints only. PATCH /config and purge
+    /// are denied (403).
+    Readonly,
+}
+
+/// SEC-01: API token authentication for the admin API. Tokens are
+/// hashed (SHA-256) at rest; the config lists token hashes, not
+/// plaintext tokens. A client presents a token via
+/// `Authorization: Bearer <token>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminApiTokensConfig {
+    /// The hashed API tokens (SHA-256 of the plaintext token, as
+    /// lowercase hex, 64 chars). A request with a matching bearer
+    /// token is authenticated as the token's role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<AdminApiToken>,
+}
+
+/// One hashed API token with a role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminApiToken {
+    /// SHA-256 hash of the plaintext token (lowercase hex, 64 chars).
+    pub token_hash: String,
+    /// The role assigned to this token.
+    pub role: AdminRole,
+}
+
+/// SEC-01: Admin audit log configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminAuditConfig {
+    /// Whether the audit log is enabled. Default true (when the block
+    /// is present, the audit log is on).
+    #[serde(
+        default = "default_audit_enabled",
+        skip_serializing_if = "is_default_audit_enabled"
+    )]
+    pub enabled: bool,
+}
+
+fn default_audit_enabled() -> bool {
+    true
+}
+
+fn is_default_audit_enabled(b: &bool) -> bool {
+    *b
 }
 
 /// mTLS material for the admin listener (DW-022). Unlike dataplane
@@ -2268,6 +2381,101 @@ pub struct ListenerTls {
     /// on a passthrough listener.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pq: bool,
+    /// SEC-02: ACME / Let's Encrypt automation. When present, the
+    /// gateway automatically obtains and renews certificates for the
+    /// configured domains from the ACME directory. Terminates mode
+    /// only (passthrough does not terminate TLS). When `acme` is
+    /// present, `cert_file`/`key_file`/`certificates` are optional
+    /// (ACME-managed certs serve as the fallback); manual certs still
+    /// take precedence for their SNI names. See [`AcmeConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<AcmeConfig>,
+}
+
+/// SEC-02: ACME (Let's Encrypt) certificate automation configuration.
+/// The gateway acts as an ACME client: orders certificates for the
+/// configured domains, completes the challenge (HTTP-01 or TLS-ALPN-01),
+/// and installs the issued certificates into the hot-reloadable TLS
+/// termination/SNI resolver. Renewal runs automatically before expiry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    /// The domains to obtain certificates for. At least one must be
+    /// present (validation rejects an empty list).
+    pub domains: Vec<String>,
+    /// The ACME directory URL. Defaults to Let's Encrypt production
+    /// (`https://acme-v02.api.letsencrypt.org/directory`). Set to the
+    /// staging directory (`https://acme-staging-v02.api.letsencrypt.org/directory`)
+    /// for testing to avoid rate limits.
+    #[serde(
+        default = "default_acme_directory",
+        skip_serializing_if = "is_default_acme_directory"
+    )]
+    pub directory_url: String,
+    /// Contact email addresses registered with the ACME account. Let's
+    /// Encrypt requires at least one for production issuance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact: Vec<String>,
+    /// Challenge type: `http-01` (serves a token over HTTP on port 80)
+    /// or `tls-alpn-01` (serves a challenge cert over TLS-ALPN on port
+    /// 443). Default `tls-alpn-01` (no separate HTTP listener needed).
+    #[serde(
+        default = "default_acme_challenge",
+        skip_serializing_if = "is_default_acme_challenge"
+    )]
+    pub challenge: AcmeChallenge,
+    /// Use the staging directory instead of production. When true,
+    /// `directory_url` is overridden to the Let's Encrypt staging
+    /// endpoint. Staging certs are NOT trusted by browsers — use for
+    /// testing only. Default false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub staging: bool,
+    /// Path to the directory where ACME state is persisted (account
+    /// key, issued certificates). The gateway must have read/write
+    /// access. Defaults to `./acme-state`.
+    #[serde(
+        default = "default_acme_state_dir",
+        skip_serializing_if = "is_default_acme_state_dir"
+    )]
+    pub state_dir: String,
+}
+
+/// ACME challenge type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcmeChallenge {
+    /// HTTP-01 challenge: serves a token over HTTP on port 80. Requires
+    /// a separate HTTP listener bound to port 80 (or port forwarding).
+    Http01,
+    /// TLS-ALPN-01 challenge: serves a challenge certificate over TLS
+    /// with the `acme-tls/1` ALPN protocol on port 443. No separate
+    /// listener needed (the default). Default.
+    #[default]
+    TlsAlpn01,
+}
+
+fn default_acme_directory() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn is_default_acme_directory(s: &str) -> bool {
+    s == default_acme_directory()
+}
+
+fn default_acme_challenge() -> AcmeChallenge {
+    AcmeChallenge::TlsAlpn01
+}
+
+fn is_default_acme_challenge(c: &AcmeChallenge) -> bool {
+    *c == AcmeChallenge::TlsAlpn01
+}
+
+fn default_acme_state_dir() -> String {
+    "./acme-state".to_string()
+}
+
+fn is_default_acme_state_dir(s: &str) -> bool {
+    s == default_acme_state_dir()
 }
 
 fn is_default_zero_rtt(p: &ZeroRttPolicy) -> bool {
@@ -2620,6 +2828,73 @@ pub struct Route {
     /// `wasm` cargo feature must be enabled for plugins to load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    /// SEC-05: OIDC browser login flow as a route auth mode. When
+    /// present, the gateway acts as an OIDC relying party: unauthenticated
+    /// browser requests are redirected to the IdP's authorization
+    /// endpoint, and the callback (`redirect_uri`) exchanges the
+    /// authorization code for tokens, sets a session cookie, and
+    /// redirects the user back to the original URL. Subsequent requests
+    /// carry the session cookie (validated by the gateway). Absent (the
+    /// default): no browser login flow (the route uses its normal auth
+    /// mode). See [`OidcLoginConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_login: Option<OidcLoginConfig>,
+}
+
+/// SEC-05: OIDC browser login flow configuration for a route. The
+/// gateway redirects unauthenticated browser requests to the IdP,
+/// exchanges the authorization code for tokens, sets a session cookie,
+/// and validates the cookie on subsequent requests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OidcLoginConfig {
+    /// The OIDC provider name (must match an entry in
+    /// `gateway.oidc_providers`).
+    pub provider: String,
+    /// The redirect URI the IdP sends the authorization code to. This
+    /// must be a path on the gateway (e.g. `/auth/callback`) and must
+    /// be registered with the IdP. The gateway handles the callback
+    /// automatically when this route is matched.
+    pub redirect_uri: String,
+    /// The session cookie name. Default `dwara_session`. The cookie is
+    /// `HttpOnly`, `Secure` (when the listener is TLS), `SameSite=Lax`,
+    /// and carries a signed session ID.
+    #[serde(
+        default = "default_oidc_session_cookie",
+        skip_serializing_if = "is_default_oidc_session_cookie"
+    )]
+    pub session_cookie: String,
+    /// Session lifetime in seconds (default 3600 = 1 hour). After this
+    /// duration the cookie expires and the user must re-authenticate.
+    #[serde(
+        default = "default_oidc_session_ttl_s",
+        skip_serializing_if = "is_default_oidc_session_ttl_s"
+    )]
+    pub session_ttl_s: u64,
+    /// The post-logout redirect URL. When the user visits the logout
+    /// path (the redirect URI with `/logout` appended, e.g.
+    /// `/auth/callback/logout`), the session cookie is cleared and the
+    /// user is redirected to this URL. Default: the IdP's
+    /// `end_session_endpoint` (from discovery) with
+    /// `post_logout_redirect_uri` set to the gateway's root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_logout_url: Option<String>,
+}
+
+fn default_oidc_session_cookie() -> String {
+    "dwara_session".to_string()
+}
+
+fn is_default_oidc_session_cookie(s: &str) -> bool {
+    s == default_oidc_session_cookie()
+}
+
+fn default_oidc_session_ttl_s() -> u64 {
+    3600
+}
+
+fn is_default_oidc_session_ttl_s(v: &u64) -> bool {
+    *v == 3600
 }
 
 /// OpenAPI import metadata attached to a route (DW-047). No runtime
@@ -2724,6 +2999,13 @@ pub struct RequestValidation {
     /// schema). `$ref` is NOT supported (inline your schemas). An
     /// invalid schema fails config validation at publish time.
     pub body_schema: BodySchema,
+    /// SEC-14: dry-run mode. When true, the gateway evaluates the
+    /// schema and records violations (log + metric) but does NOT reject
+    /// the request — the body is forwarded to the upstream even when it
+    /// fails validation. Useful for rolling out a new schema without
+    /// breaking existing callers. Default false (reject on mismatch).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// A minimal JSON-Schema subset (DW-047) for request-body validation.
@@ -4503,6 +4785,69 @@ pub struct Upstream {
     /// not on the FIPS-validated list for aws-lc-rs).
     #[serde(default, skip_serializing_if = "is_false")]
     pub pq: bool,
+    /// DW-109 / SEC-04: upstream TLS certificate pinning by SPKI
+    /// SHA-256 hash. When present, the gateway's outbound TLS client
+    /// installs a custom certificate verifier that extracts the peer
+    /// cert's SubjectPublicKeyInfo, computes its SHA-256, and compares
+    /// against the configured pins. A mismatch rejects the connection
+    /// (fail-closed: no fallback to CA-based verification). The
+    /// `cert_pinning` config block is always accepted by the parser
+    /// (additive-only, strict serde preserved); when the
+    /// `cert_pinning` cargo feature is OFF it is INERT (validation
+    /// emits a warning). Only meaningful for the TLS protocols
+    /// (`https`, `http2`); validation rejects it on an `http1`
+    /// upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pinning: Option<CertPinningConfig>,
+    /// SEC-03: upstream mTLS client certificates. When present, the
+    /// gateway presents this client certificate to the upstream during
+    /// the TLS handshake (in addition to verifying the upstream's
+    /// server cert against `trusted_ca_file` or the public roots).
+    /// Required for upstreams that demand client authentication
+    /// (banking/payment APIs, mesh-internal services). Only meaningful
+    /// for the TLS protocols (`https`, `http2`); validation rejects it
+    /// on an `http1` upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls: Option<UpstreamMtls>,
+}
+
+/// SEC-03: upstream mTLS client certificate configuration. Reuses the
+/// two-path shape (cert file + key file) proven by the OAuth2 mTLS
+/// config (`OAuth2Mtls`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamMtls {
+    /// Path to the PEM client certificate chain to present to the
+    /// upstream during the TLS handshake.
+    pub client_cert_file: String,
+    /// Path to the PEM private key for `client_cert_file`.
+    pub client_key_file: String,
+}
+
+/// DW-109 / SEC-04: certificate pinning configuration for an upstream.
+/// Holds a list of allowed SPKI SHA-256 hashes (lowercase hex, 64
+/// chars). A peer cert whose SPKI hash matches ANY entry is accepted;
+/// otherwise the connection is rejected (fail-closed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CertPinningConfig {
+    /// The allowed SPKI SHA-256 hashes (lowercase hex, 64 chars each).
+    /// Must be non-empty (validation rejects an empty pin list — a
+    /// pin-less pinning block is an authoring mistake, not "pin
+    /// nothing").
+    pub pins: Vec<CertPin>,
+}
+
+/// A single certificate pin: the SHA-256 hash of the upstream
+/// certificate's SubjectPublicKeyInfo (SPKI), as lowercase hex (64
+/// chars). Pinning the SPKI (rather than the full certificate) allows
+/// rotation of the leaf certificate as long as the key pair is
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CertPin {
+    /// The SHA-256 hash of the SPKI, as lowercase hex (64 chars).
+    pub spki_sha256: String,
 }
 
 /// DW-094 (Ent): locality-aware routing and data residency configuration
@@ -5321,6 +5666,14 @@ pub struct ConsumerQuotas {
     /// Maximum requests per UTC calendar month.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_requests: Option<u64>,
+    /// SEC-14 / CFG-14: dry-run mode. When true, quota counters are
+    /// evaluated and would-be rejections are recorded
+    /// (`dwara_policy_dry_run_total{phase="quota"}` + a structured
+    /// log) but the request is NOT rejected — it proceeds even when
+    /// the quota is exceeded. Useful for calibrating quota limits
+    /// before enforcing. Default false (reject on quota exceeded).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// One authenticator bound to a consumer: API key, JWT issuer/audience

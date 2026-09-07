@@ -177,6 +177,15 @@ pub struct AiGovernance {
     /// denial metric fires — no per-event audit rows are written.
     #[serde(default, skip_serializing_if = "is_false")]
     pub audit: bool,
+    /// SEC-14 / CFG-14: dry-run mode. When true, the governance engine
+    /// evaluates the team allowlist and records would-be denials
+    /// (`dwara_policy_dry_run_total{phase="ai_governance"}` + a
+    /// structured log) but does NOT reject the request — the call
+    /// proceeds to the model. Useful for rolling out a new allowlist
+    /// without breaking existing callers. Default false (reject on
+    /// mismatch).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// One AI provider (DW-075 `ai.providers[]`).
@@ -512,6 +521,14 @@ pub struct AiGuardrails {
     /// unique (validation rejects duplicates).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<AiGuardrailRule>,
+    /// SEC-14 / CFG-14: dry-run mode. When true, guardrail rules are
+    /// evaluated and would-be blocks are recorded
+    /// (`dwara_policy_dry_run_total{phase="ai_guardrails"}` + a
+    /// structured log) but the request/response is NOT blocked — the
+    /// call proceeds. Useful for tuning guardrail patterns before
+    /// enforcing. Default false (block on match).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 /// One guardrail rule (DW-082 `ai.guardrails.rules[]`). A rule

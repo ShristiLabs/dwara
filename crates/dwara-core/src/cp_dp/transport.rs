@@ -43,7 +43,8 @@ use tokio_stream::Stream;
 use tonic::body::BoxBody;
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::server::{NamedService, UnaryService};
-use tonic::transport::Channel;
+use tonic::transport::Identity as TonicIdentity;
+use tonic::transport::{Channel, ClientTlsConfig, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tower_service::Service as TowerService;
 
@@ -735,11 +736,44 @@ pub struct EdgeClient {
     channel: Channel,
 }
 
+/// SEC-13 / CFG-13: TLS configuration for the CP-DP gRPC transport.
+/// The controller presents a server cert; edges present client certs.
+/// Both sides verify against the configured CA. When `None`, the
+/// transport is plaintext (the v1 behavior — only acceptable on a
+/// trusted network, never the public internet).
+#[derive(Debug, Clone)]
+pub struct CpDpTlsConfig {
+    /// PEM-encoded server certificate (controller side) or client
+    /// certificate (edge side).
+    pub cert_pem: String,
+    /// PEM-encoded private key for `cert_pem`.
+    pub key_pem: String,
+    /// PEM-encoded CA bundle the peer's certificate must chain to.
+    pub ca_pem: String,
+}
+
 impl EdgeClient {
     /// Connect to the controller at the given endpoint (plaintext gRPC;
-    /// mTLS is a documented follow-up).
+    /// for mTLS use [`EdgeClient::connect_tls`]).
     pub async fn connect(endpoint: &str) -> Result<Self, EdgeClientError> {
         let channel = Channel::from_shared(endpoint.to_string())
+            .map_err(|e| EdgeClientError::Transport(e.to_string()))?
+            .connect()
+            .await
+            .map_err(|e| EdgeClientError::Transport(e.to_string()))?;
+        Ok(Self { channel })
+    }
+
+    /// SEC-13 / CFG-13: Connect to the controller with mutual TLS.
+    /// The edge presents its client cert and verifies the controller's
+    /// server cert against the configured CA.
+    pub async fn connect_tls(endpoint: &str, tls: &CpDpTlsConfig) -> Result<Self, EdgeClientError> {
+        let identity = TonicIdentity::from_pem(&tls.cert_pem, &tls.key_pem);
+        let ca = tonic::transport::Certificate::from_pem(&tls.ca_pem);
+        let tls_config = ClientTlsConfig::new().identity(identity).ca_certificate(ca);
+        let channel = Channel::from_shared(endpoint.to_string())
+            .map_err(|e| EdgeClientError::Transport(e.to_string()))?
+            .tls_config(tls_config)
             .map_err(|e| EdgeClientError::Transport(e.to_string()))?
             .connect()
             .await
@@ -834,7 +868,8 @@ impl EdgeClient {
 // ---------------------------------------------------------------------------
 
 /// Start the controller gRPC server on the given address. Returns a
-/// future that runs until the server is shut down.
+/// future that runs until the server is shut down. Plaintext (for mTLS
+/// use [`serve_controller_tls`]).
 pub async fn serve_controller(
     server: ControllerServer,
     addr: SocketAddr,
@@ -845,10 +880,31 @@ pub async fn serve_controller(
         .await
 }
 
+/// SEC-13 / CFG-13: Start the controller gRPC server with mutual TLS.
+/// The controller presents its server cert and requires client certs
+/// chaining to the configured CA.
+pub async fn serve_controller_tls(
+    server: ControllerServer,
+    addr: SocketAddr,
+    tls: &CpDpTlsConfig,
+) -> Result<(), tonic::transport::Error> {
+    let identity = TonicIdentity::from_pem(&tls.cert_pem, &tls.key_pem);
+    let ca = tonic::transport::Certificate::from_pem(&tls.ca_pem);
+    let tls_config = ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(ca)
+        .client_auth_optional(false);
+    tonic::transport::Server::builder()
+        .tls_config(tls_config)?
+        .add_service(server)
+        .serve(addr)
+        .await
+}
+
 /// Start the controller gRPC server with a provided incoming stream
 /// (for testing: bind a `TcpListener` to port 0, wrap in
 /// `TcpListenerStream`, and pass here). Returns a future that runs
-/// until the incoming stream is exhausted.
+/// until the incoming stream is exhausted. Plaintext.
 pub async fn serve_controller_with_incoming<I, IO, IE>(
     server: ControllerServer,
     incoming: I,

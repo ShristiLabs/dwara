@@ -337,6 +337,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
+    // SEC-10: Pepper rotation. During a pepper rotation, the OLD
+    // pepper is kept in DWARA_CREDENTIAL_PEPPER_PREVIOUS so existing
+    // stored hashes (hmac-sha256:<hex> computed with the old pepper)
+    // keep verifying. New credential writes use the NEW pepper
+    // (DWARA_CREDENTIAL_PEPPER). Once all stored hashes have been
+    // re-hashed with the new pepper (via the state store's
+    // rehash-credential transition hook), the old pepper is removed.
+    // An empty previous pepper is treated as "no previous pepper"
+    // (same as unset).
+    const PEPPER_PREVIOUS_SECRET_NAME: &str = "DWARA_CREDENTIAL_PEPPER_PREVIOUS";
+    let credential_pepper_previous: Option<Vec<u8>> =
+        match EnvSecretSource.resolve(PEPPER_PREVIOUS_SECRET_NAME).await {
+            Ok(Some(secret)) => {
+                let value = secret.expose();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value.as_bytes().to_vec())
+                }
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    code = "credential_pepper_previous_unreadable",
+                    "secret {PEPPER_PREVIOUS_SECRET_NAME} could not be read: {err}; \
+                 proceeding without a previous pepper (rotation window inactive)"
+                );
+                None
+            }
+        };
+    if credential_pepper_previous.is_some() {
+        tracing::info!(
+            code = "credential_pepper_rotation_window",
+            "credential pepper rotation window active; old pepper (DWARA_CREDENTIAL_PEPPER_PREVIOUS) \
+             verifies existing hashes, new pepper (DWARA_CREDENTIAL_PEPPER) is used for new writes. \
+             Rehash all credentials with the new pepper, then remove the previous pepper."
+        );
+    }
+
     // Optional SQLite state store (DW-018): opened and seeded from the
     // config when DWARA_STATE_DB is set. Held alive for the process
     // lifetime and handed to the dataplane's authenticator (DW-019):
@@ -568,6 +607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // the same way — bytes resolved above, threaded down to the
     // authenticator.
     dp.set_credential_pepper(credential_pepper);
+    dp.set_credential_pepper_previous(credential_pepper_previous);
     if let Some(store) = &state_store {
         dp.set_state_store(Arc::clone(store));
     }

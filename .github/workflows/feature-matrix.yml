@@ -4,8 +4,8 @@ name: feature-matrix
 # with cargo feature flags. Two modes:
 #
 # 1. full-matrix (default, also runs on push to main): builds every
-#    feature individually (28 entries) plus key combinations (default,
-#    all-oss, enterprise, all-with-fips, all-with-pq) -- 32 jobs total.
+#    feature individually (29 entries) plus key combinations (default,
+#    all-oss, enterprise, all-with-fips, all-with-pq) -- 33 jobs total.
 #
 # 2. custom (workflow_dispatch only): builds one OSS variant and one
 #    enterprise variant with user-specified features. The operator
@@ -164,10 +164,13 @@ jobs:
           - name: signed_url
             features: "dwara-core/signed_url"
             cli_features: ""
+          - name: acme
+            features: "dwara-core/acme"
+            cli_features: ""
           # --- Combinations ---
           # All OSS packs (no ent, no fips, no pq incompatibility)
           - name: all-oss
-            features: "otlp,h3,l4,console,pq,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            features: "otlp,h3,l4,console,pq,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
             cli_features: "k8s"
           # Enterprise core (ent + fips + mesh)
           - name: enterprise
@@ -175,11 +178,11 @@ jobs:
             cli_features: "ent"
           # Everything with fips (excludes pq -- fips+pq incompatible)
           - name: all-with-fips
-            features: "ent,fips,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            features: "ent,fips,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
             cli_features: "ent,k8s"
           # Everything with pq (excludes fips -- fips+pq incompatible)
           - name: all-with-pq
-            features: "ent,pq,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url"
+            features: "ent,pq,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
             cli_features: "ent,k8s"
 
     steps:
