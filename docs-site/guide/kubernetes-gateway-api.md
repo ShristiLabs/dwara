@@ -32,7 +32,7 @@ The deployment runs two containers in a pod:
 - **controller**: the `dwara-k8s-controller` binary that watches K8s
   resources and writes the generated config to a shared volume.
 - **gateway**: the `dwara` gateway binary that hot-reloads the generated
-  config via file-watch (DW-054).
+  config via file-watch.
 
 ## Configuration
 

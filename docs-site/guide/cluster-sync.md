@@ -8,7 +8,7 @@ partitions, slow members, and rollbacks.
 
 ## When to use this
 
-Use cluster sync when you are running the CP/DP split (DW-066) and
+Use cluster sync when you are running the CP/DP split and
 need production-grade convergence guarantees:
 
 - Multiple controllers may publish conflicting generations.
@@ -88,7 +88,7 @@ controller:
    or exact mismatch).
 4. The edge continues serving traffic with its cached generation.
 
-### Fleet operations (DW-098, Enterprise)
+### Fleet operations (Enterprise)
 
 Fleet operations extend the cluster sync layer with fleet-wide status
 APIs and rolling upgrade orchestration. This is an enterprise feature
@@ -185,9 +185,9 @@ converge for the GA gate to pass.
 
 ## Lineage
 
-- **DW-054** (M2): shipped a lighter-weight, non-CP/DP-split
-  convergence (generation watch + drift report over etcd/Consul).
-- **DW-066** (M3): replaced DW-054 with a real control plane
+- **M2**: shipped a lighter-weight, non-CP/DP-split convergence
+  (generation watch + drift report over etcd/Consul).
+- **M3**: replaced the M2 design with a real control plane
   (`dwara-controller`/`dwara-edge`, gRPC watch).
-- **DW-074** (this): GA hardening pass on DW-066's control plane --
+- **M4** (this): GA hardening pass on the M3 control plane --
   conflict resolution, split-brain guards, version skew tolerance.

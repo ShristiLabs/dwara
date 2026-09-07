@@ -140,7 +140,7 @@ empty at boot; the shipped dashboard's "SLO burn rate" panel draws both
 the 6x and 14.4x thresholds. Routes without an `slo` block export
 nothing.
 
-## tokio-console (DW-097)
+## tokio-console
 
 For development and debugging, dwara can expose
 [tokio-console](https://github.com/tokio-rs/console) diagnostics for its

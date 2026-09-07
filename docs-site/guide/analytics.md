@@ -181,7 +181,7 @@ past that horizon — only a manual trigger can, still flagged. Windows
 with no traffic are not loss: counts are exact whenever `partial` is
 false.
 
-## Live sketches (DW-092)
+## Live sketches
 
 The durable store answers "what happened"; live sketches answer "what
 is happening right now" with sub-second freshness. An opt-in
@@ -211,7 +211,7 @@ error count, error rate, p50/p95/p99 latency, and the window's time
 bounds. When the block is absent, the endpoint answers 404
 (`analytics_not_configured`).
 
-## ML insights (DW-092)
+## ML insights
 
 An opt-in `insights` block adds hand-rolled ML traffic insights over
 the live sketch window rotations — no ML crates, no external services:
@@ -250,7 +250,7 @@ seasonal baseline. Requires `anomaly_baseline: true`.
 Both endpoints answer 404 (`analytics_not_configured`) when the
 `insights` block is absent or the relevant capability is disabled.
 
-### Business metrics dimensions (DW-093)
+### Business metrics dimensions
 
 In addition to the header-derived custom dimensions described in
 [Custom dimensions](#custom-dimensions), routes can attach arbitrary
@@ -275,7 +275,7 @@ query results and are accepted in `group_by` by the
 `consumer`. The same additive-rollup model applies: any time range at
 any granularity merges exactly.
 
-### Federated analytics (DW-095, Enterprise)
+### Federated analytics (Enterprise)
 
 In a CP/DP split (see [CP/DP split](./cp-dp-split)), each edge records
 analytics locally just as a single-instance gateway does. The

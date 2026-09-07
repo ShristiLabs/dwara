@@ -479,36 +479,36 @@ Metric families exported on `/metrics`:
   micro-USD, attributed to the serving provider and provider model.
   No consumer label (cardinality stays config-bounded).
 - `dwara_ai_governance_denied_total{reason}` -- model-governance
-  denials (DW-084). `reason` is the denial reason string
+  denials. `reason` is the denial reason string
   (config-bounded).
 - `dwara_ai_guardrail_blocked_total{rule,kind}` -- AI guardrail
-  blocks (DW-082). `rule` is the rule name; `kind` is the phase/kind
+  blocks. `rule` is the rule name; `kind` is the phase/kind
   label (`prompt`, `response`, `schema`, or `banned` for mid-stream
   banned-content cutoffs). Both labels are config-bounded.
-- `dwara_ai_semantic_cache_hits_total{model}` -- semantic cache hits
-  (DW-083). `model` is the model alias (config-bounded).
+- `dwara_ai_semantic_cache_hits_total{model}` -- semantic cache hits.
+  `model` is the model alias (config-bounded).
 - `dwara_ai_semantic_cache_misses_total{model}` -- semantic cache
-  misses (DW-083). `model` is the model alias (config-bounded).
+  misses. `model` is the model alias (config-bounded).
 - `dwara_ai_routing_policy_escalations_total{policy}` -- FallbackChain
-  policy escalations (DW-085). `policy` is the policy name
+  policy escalations. `policy` is the policy name
   (config-bounded).
 - `dwara_ai_routing_policy_cheap_total{policy}` -- FallbackChain
-  cheap-model selections (DW-085).
+  cheap-model selections.
 - `dwara_ai_routing_policy_latency_cost_selections_total{policy}` --
-  LatencyCost policy selections (DW-085).
+  LatencyCost policy selections.
 - `dwara_ai_experiment_variant_selections_total{experiment,variant}` --
-  A/B test variant selections (DW-086). `experiment` is the A/B test
+  A/B test variant selections. `experiment` is the A/B test
   name; `variant` is the selected variant name. Both labels are
   config-bounded. No consumer label (cardinality rule).
 - `dwara_mcp_sessions_total{state}` -- MCP session lifecycle
-  transitions (DW-087). `state` is `initialized`, `closed`, or
+  transitions. `state` is `initialized`, `closed`, or
   `expired`.
-- `dwara_mcp_tool_calls_total{tool,status}` -- MCP tool calls
-  (DW-087). `tool` is the config-declared tool name (config-bounded);
+- `dwara_mcp_tool_calls_total{tool,status}` -- MCP tool calls.
+  `tool` is the config-declared tool name (config-bounded);
   `status` is `success`, `error`, or `denied`. No consumer label
   (cardinality rule).
-- `dwara_mcp_tool_duration_seconds{tool}` -- MCP tool call duration
-  (DW-087), by tool (config-bounded label).
+- `dwara_mcp_tool_duration_seconds{tool}` -- MCP tool call duration,
+  by tool (config-bounded label).
 
 ## Validation and secrets
 
