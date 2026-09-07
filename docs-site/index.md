@@ -68,7 +68,7 @@ features:
     link: /guide/operations
     linkText: Operations
   - title: Kubernetes Gateway API
-    details: "Translate Gateway, HTTPRoute, and Ingress resources into dwara config and run the controller beside your cluster (a compile-time feature pack)."
+    details: "Translate Gateway, HTTPRoute, and Ingress resources into Dwara config and run the controller beside your cluster (a compile-time feature pack)."
     link: /guide/kubernetes-gateway-api
     linkText: Kubernetes
 ---

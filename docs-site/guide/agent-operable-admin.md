@@ -13,7 +13,7 @@ in the published OSS binaries. It is currently a library surface in
 `dwara-core`: the server, protocol types, standard tools, and RBAC
 checks are complete and test-covered, but no transport is mounted yet
 -- there is no `/mcp` endpoint on the admin listener and no stdio
-bridge. An embedding (or a future dwara release) constructs the
+bridge. An embedding (or a future Dwara release) constructs the
 `McpServer`, connects it to a transport, and supplies a `ToolHandler`
 that performs the actual operations. Until a transport ships, this
 page documents the tool surface such an integration exposes.

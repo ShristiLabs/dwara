@@ -1,6 +1,6 @@
 # Config Import
 
-dwara can import external gateway configs from NGINX, Kong, Envoy, and
+Dwara can import external gateway configs from NGINX, Kong, Envoy, and
 OpenAPI specs to scaffold your gateway config. This is a switching-cost
 lever for teams migrating to Dwara.
 

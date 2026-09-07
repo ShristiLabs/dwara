@@ -11,7 +11,7 @@ yet available.
 
 You would use eBPF hooks when they exist to get traffic observability,
 L4 redirect, and policy enforcement for workloads that do not run a
-dwara sidecar -- the ambient mesh model. Today there is nothing to use:
+Dwara sidecar -- the ambient mesh model. Today there is nothing to use:
 the work is a research spike, not a shipped feature. This page exists to
 set expectations and document the decision.
 

@@ -1,6 +1,6 @@
 # WAF-lite filtering
 
-dwara includes a lightweight web application filter (WAF-lite) that
+Dwara includes a lightweight web application filter (WAF-lite) that
 inspects incoming requests for common attack signatures: SQL injection,
 XSS, and path traversal. It is a heuristic pattern-matching filter, not
 a full [WAF](https://en.wikipedia.org/wiki/Web_application_firewall) (Web Application Firewall) — it catches obvious attack payloads before they reach your

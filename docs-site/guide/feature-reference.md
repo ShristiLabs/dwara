@@ -1,6 +1,6 @@
 # Feature reference
 
-Every optional capability in dwara is a cargo feature flag that is
+Every optional capability in Dwara is a cargo feature flag that is
 **default-OFF**. The default `cargo build` produces the OSS edition with
 no optional packs. This page is the complete reference for all 29
 feature flags, their edition gating, build commands, and what each

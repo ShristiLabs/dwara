@@ -1,9 +1,9 @@
 # Kubernetes Gateway API
 
-dwara implements a Kubernetes Gateway API controller that reconciles
+Dwara implements a Kubernetes Gateway API controller that reconciles
 Gateway API v1 resources (Gateway, HTTPRoute, GatewayClass) and standard
 Ingress resources into its config model. The controller watches the
-Kubernetes API server, translates the watched resources into a dwara
+Kubernetes API server, translates the watched resources into a Dwara
 config YAML, and publishes it to a file the gateway hot-reloads.
 
 ## Enabling

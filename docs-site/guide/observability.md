@@ -142,7 +142,7 @@ nothing.
 
 ## tokio-console
 
-For development and debugging, dwara can expose
+For development and debugging, Dwara can expose
 [tokio-console](https://github.com/tokio-rs/console) diagnostics for its
 async task runtime. tokio-console is an optional async task inspector --
 connect with the `tokio-console` TUI to see live task polls, waker

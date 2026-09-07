@@ -2,7 +2,7 @@
 
 ## Overview
 
-dwara Enterprise supports a control plane / data plane split
+Dwara Enterprise supports a control plane / data plane split
 architecture: `dwara-controller` (the control plane) manages config
 distribution to a fleet of `dwara-edge` (data planes) via a gRPC
 config watch (xDS-inspired). The embedded mode (single-process) stays

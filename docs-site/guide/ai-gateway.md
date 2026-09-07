@@ -1,7 +1,7 @@
 # AI gateway
 
 The AI gateway lets clients send one request shape -- the OpenAI
-chat-completions format -- to dwara, and dwara translates the call to
+chat-completions format -- to Dwara, and Dwara translates the call to
 whichever provider actually serves it: OpenAI, Anthropic, or Google
 Gemini. Responses (and errors) are translated back to the OpenAI
 shape, so any OpenAI-compatible client or SDK works unchanged.
@@ -159,7 +159,7 @@ quarantined flag, cumulative quarantine count) -- never secret values.
 
 The `models` map is the alias table your clients see. The key is the
 `model` value clients put in their request body; `provider` names an
-`ai.providers` entry; `provider_model` is what dwara sends to that
+`ai.providers` entry; `provider_model` is what Dwara sends to that
 provider instead of the alias.
 
 Changing an alias (or adding one) is a config reload -- the next
@@ -365,7 +365,7 @@ full configuration, enforcement behavior, and audit queries.
 
 ## MCP gateway
 
-The MCP gateway turns dwara into an MCP (Model Context Protocol)
+The MCP gateway turns Dwara into an MCP (Model Context Protocol)
 server and router. Configured tools are exposed over JSON-RPC 2.0 on
 a reserved HTTP path; the gateway authenticates every request,
 authorizes per-tool access, proxies tool calls to upstream HTTP

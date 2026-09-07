@@ -1,6 +1,6 @@
 # MCP gateway
 
-The MCP gateway turns dwara into an MCP (Model Context Protocol) server
+The MCP gateway turns Dwara into an MCP (Model Context Protocol) server
 and router. Configured tools are exposed over JSON-RPC 2.0 on a
 reserved HTTP path (default `/mcp`); the gateway authenticates every
 request, authorizes per-tool access, proxies tool calls to upstream
