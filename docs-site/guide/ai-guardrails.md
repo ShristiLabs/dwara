@@ -11,6 +11,10 @@ each rule is compiled once at dataplane refresh and swapped atomically
 on reload -- a guardrail change applies to the next request with no
 restart.
 
+A `dry_run` field on the guardrails block evaluates all rules and logs
+would-be blocks without rejecting requests -- see
+[Dry-run mode](#dry-run-mode) below.
+
 ## Configuration
 
 ```yaml
@@ -101,6 +105,37 @@ Operators should tune the pattern sets per deployment and use the `log`
 action to measure the false-positive rate on benign traffic before
 switching to `block`. See the `ai::guardrails` module docs for the
 false-positive profile of each kind and recommended thresholds.
+
+## Dry-run mode
+
+Set `dry_run: true` on the `ai.guardrails` block to evaluate all rules
+and log would-be blocks without rejecting requests:
+
+```yaml
+ai:
+  guardrails:
+    dry_run: true
+    rules:
+      - name: block-injection
+        kind: injection
+        action: block
+        phase: prompt
+```
+
+In dry-run mode, would-be blocks are:
+- Counted in `dwara_policy_dry_run_total{phase="ai_guardrails",route}`.
+- Logged with `code = "policy_dry_run"` and the rule that would have
+  blocked.
+- NOT returned to the client -- the request proceeds to the provider
+  (prompt phase) or the response proceeds to the client (response
+  phase).
+
+This is separate from the per-rule `action: log` (which is a per-rule
+dry-run). The block-level `dry_run` overrides all rules: even rules
+with `action: block` are logged-only when the block-level dry-run is
+on. Use the block-level dry-run to test the entire guardrails
+configuration; use per-rule `action: log` to dry-run individual rules
+while others enforce.
 
 ## See also
 

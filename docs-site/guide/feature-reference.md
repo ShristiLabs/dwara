@@ -2,7 +2,7 @@
 
 Every optional capability in dwara is a cargo feature flag that is
 **default-OFF**. The default `cargo build` produces the OSS edition with
-no optional packs. This page is the complete reference for all 28
+no optional packs. This page is the complete reference for all 29
 feature flags, their edition gating, build commands, and what each
 enables.
 
@@ -65,8 +65,9 @@ them per build with `--features <name>`.
 | `l4` | dwara-core, dwara-bin | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
 | `api_lifecycle` | dwara-core | API lifecycle management: dev portal, environment profiles, journey recorder | opt-in; config-accepted, runtime partially wired |
 | `extism` | dwara-core | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
-| `cert_pinning` | dwara-core | Upstream TLS certificate pinning by SPKI hash | opt-in; scaffolded |
+| `cert_pinning` | dwara-core | Upstream TLS certificate pinning by SPKI SHA-256 hash (fail-closed, no CA fallback) | opt-in; config-accepted, validation warns when feature is OFF |
 | `signed_url` | dwara-core | Signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
+| `acme` | dwara-core | ACME certificate automation (Let's Encrypt, TLS-ALPN-01) | opt-in; adds an ACME client dependency |
 | `otlp` | dwara-bin | OTLP trace/metrics export to a collector | opentelemetry stack adds ~405 KiB |
 | `console` | dwara-bin | tokio-console diagnostics server | console-subscriber adds binary size |
 
@@ -236,8 +237,8 @@ note saying exactly what is wired today.
 
 | Status | Features |
 |---|---|
-| Wired end to end | `ent`, `otlp`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache` |
+| Wired end to end | `ent`, `otlp`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache`, `cert_pinning`, `acme` |
 | Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `mcp`, `a2a` |
-| Config-accepted, runtime stubbed | `soap`, `extism`, `cert_pinning`, `signed_url`, `nano_services` |
+| Config-accepted, runtime stubbed | `soap`, `extism`, `signed_url`, `nano_services` |
 
 The published OSS binaries and images are built with no packs enabled.

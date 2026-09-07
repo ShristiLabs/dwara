@@ -17,12 +17,19 @@ your config files entirely.
 - [HMAC request signing](./hmac-signing) - a credential family for
   machine-to-machine request integrity instead of a static shared key.
 - [OAuth2 and mTLS](./oauth2-mtls) - the gateway as an OAuth2
-  client-credentials client to an upstream, and mTLS certificate-to-
-  consumer mapping.
+  client-credentials client to an upstream, mTLS consumer mapping, and
+  upstream mTLS client certificates.
 - [OpenID Connect](./oidc) - Bearer-token introspection (RFC 7662), the
-  authorization-code + PKCE relying-party flow, and token exchange.
+  authorization-code + PKCE relying-party flow, token exchange, and
+  per-route browser login.
 - [Authorization rules](./authorization) - the built-in allow/deny
   model: consumers, groups, JWT scopes and claims, IP ACLs, and GeoIP
   gates at five precedence levels.
 - [Cedar and OPA authorization](./cedar-opa-authz) - delegating
   authorization decisions to external policy engines.
+- [ACME certificate automation](./acme) - automated TLS certificate
+  issuance and renewal from Let's Encrypt and other ACME-compatible
+  certificate authorities.
+- [Post-quantum TLS](./post-quantum-tls) - hybrid key exchange for
+  forward secrecy against future quantum attacks.
+- [FIPS mode](./fips-mode) - FIPS 140-3 validated cryptography.

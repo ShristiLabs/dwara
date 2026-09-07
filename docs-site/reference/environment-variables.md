@@ -9,6 +9,7 @@ policy is YAML config (see [Configuration](../guide/configuration)).
 | `DWARA_BIND` | unset | Overrides all configured listeners with a single cleartext HTTP listener on this address. Dev/test escape hatch — the synthetic listener cannot receive listener-level policies or authorization. |
 | `DWARA_STATE_DB` | unset | Path to a SQLite state store. Unset = no store. See the state store section in the repository README. |
 | `DWARA_CREDENTIAL_PEPPER` | unset | Per-deployment secret that peppers stored credential hashes (`hmac-sha256:<hex>`). Unset = legacy-only mode (`sha256:` entries keep verifying). Never logged. |
+| `DWARA_CREDENTIAL_PEPPER_PREVIOUS` | unset | Previous pepper value for zero-downtime rotation. When set, verification tries the current pepper first, then this one. New writes always use `DWARA_CREDENTIAL_PEPPER`. Remove once all stored hashes use the current pepper. Never logged. |
 | `DWARA_ADMIN_DEV` | unset | `1` = serve the admin API as plaintext on a loopback bind. Dev only — see [Admin API](../guide/admin-api#dev-fallback-never-in-production). |
 | `DWARA_LOG` | `dwara=info` | Log filter, `RUST_LOG` syntax. |
 | `DWARA_ACCESS_LOG_SAMPLE` | `1.0` | Fraction (0.0-1.0) of non-error access-log lines emitted; errors (5xx) always log. |

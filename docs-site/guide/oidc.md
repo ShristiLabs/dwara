@@ -163,3 +163,64 @@ For an IdP behind a private CA, set `trusted_ca_file` to a PEM bundle
 of the CA certificates. This replaces the webpki public roots for this
 provider only (the same trust model as `jwt_providers[].trusted_ca_file`).
 The field is only meaningful for an `https://` issuer.
+
+## Per-route browser login (OIDC relying party)
+
+The gateway can act as an OIDC relying party for browser-based login
+on individual routes. This is separate from Bearer-token introspection:
+browsers cannot easily send bearer tokens; they need cookies and
+redirects. Making it per-route opt-in allows mixing API and browser
+auth on the same gateway.
+
+Add an `oidc_login` block to a route:
+
+```yaml
+routes:
+  - name: web-app
+    service: web-backend
+    match:
+      path: "/app"
+    action:
+      proxy: {}
+    oidc_login:
+      provider: keycloak
+      redirect_uri: /auth/callback
+      session_cookie: dwara_session
+      session_ttl_s: 3600
+      post_logout_url: https://app.example.com/login
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `provider` | (required) | Name of a configured `oidc_providers` entry. Validation rejects a name that does not exist. |
+| `redirect_uri` | (required) | The callback path on the gateway where the IdP redirects after login. |
+| `session_cookie` | `dwara_session` | Name of the session cookie. HttpOnly, Secure (on TLS listeners), SameSite=Lax. |
+| `session_ttl_s` | `3600` | Session lifetime in seconds (1 hour default). |
+| `post_logout_url` | IdP end_session_endpoint | URL the gateway redirects to after logout. |
+
+### Login flow
+
+1. An unauthenticated browser request arrives at the route.
+2. The gateway redirects (302) to the IdP's authorization endpoint with
+   PKCE, scopes, and the redirect URI.
+3. The IdP authenticates the user and redirects back to `redirect_uri`
+   with an authorization code.
+4. The gateway exchanges the code for tokens (using the existing
+   `OidcClient::exchange_authorization_code`), sets a signed session
+   cookie, and redirects the user back to the original URL.
+5. Subsequent requests carry the session cookie; the gateway validates
+   it and forwards the request.
+6. Logout: visiting `{redirect_uri}/logout` clears the cookie and
+   redirects to `post_logout_url` (or the IdP's
+   `end_session_endpoint`).
+
+### Session cookies
+
+Session cookies are gateway-stateless (signed with the deployment
+pepper); no server-side session store is needed. Revocation requires
+short TTLs or a denylist. The cookie is SameSite=Lax by default;
+cross-site POST flows may need SameSite=None (configurable via cookie
+attributes in a future change).
+
+The gateway must be reachable at the `redirect_uri` path; ensure the
+IdP allows this redirect URI in its configuration.

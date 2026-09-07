@@ -144,6 +144,85 @@ route-level limits on top of the process-wide parser bounds — see
 [protocol hardening](./operations#protocol-hardening), which applies
 to every listener regardless of routes.
 
+## Request body JSON Schema validation
+
+Per-route validation of request bodies against a minimal JSON Schema
+subset, enforced after the route matches and before the route action
+runs. This rejects malformed requests with `400 validation_failed`
+before any upstream resource is spent.
+
+```yaml
+routes:
+  - name: create-user
+    service: user-backend
+    match:
+      path: /users
+      methods: [POST]
+    action:
+      type: proxy
+    request_validation:
+      body_schema:
+        type: object
+        required: [name, email]
+        properties:
+          name:
+            type: string
+            minLength: 1
+            maxLength: 100
+          email:
+            type: string
+            maxLength: 255
+          age:
+            type: integer
+            minimum: 0
+            maximum: 150
+        additionalProperties: false
+      dry_run: false
+```
+
+### Supported schema subset
+
+The validator implements a minimal subset of JSON Schema:
+
+| Keyword | Description |
+|---|---|
+| `type` | `object`, `array`, `string`, `integer`, `number`, `boolean`, `null` |
+| `required` | List of required property names (objects only). |
+| `properties` | Per-property schemas (objects only). |
+| `items` | Schema for array elements. |
+| `enum` | List of allowed values. |
+| `minimum` / `maximum` | Numeric bounds (inclusive). |
+| `minLength` / `maxLength` | String length bounds. |
+| `additionalProperties` | `false` rejects unknown properties; `true` (default) allows them. |
+
+`$ref`, `oneOf`/`anyOf`/`allOf`, and `format` are NOT supported. Use
+inline schemas for complex cases.
+
+### Dry-run mode
+
+Set `dry_run: true` to evaluate the schema and log violations without
+rejecting requests. Violations are recorded with the
+`validation_failed_dry_run` code and counted in the
+`dwara_policy_dry_run_total{phase="request_validation",route}` metric.
+This lets you measure the impact of a new schema against production
+traffic before switching to enforce mode.
+
+### Runtime behavior
+
+1. The body is buffered up to the route's `limits.max_body_bytes` (or
+   1 MiB default).
+2. Parsed as JSON (non-JSON bodies are rejected with
+   `validation_failed`).
+3. Walked against the schema.
+4. On mismatch: `400 validation_failed` with the offending instance
+   paths in the JSON error envelope.
+5. On match: the buffered bytes are replayed to the route action.
+
+Body buffering adds latency and memory pressure for large bodies.
+Configure `limits.max_body_bytes` to bound it. For routes with
+streaming bodies (e.g., Server-Sent Events), avoid request validation
+or use a generous body cap.
+
 ## Ordering and reload
 
 For a matched request the stages run in a fixed order: route limits,

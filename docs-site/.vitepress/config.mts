@@ -86,6 +86,10 @@ export default withMermaid(
               items: [
                 { text: "Getting started", link: "/guide/getting-started" },
                 { text: "Installation", link: "/guide/installation" },
+                {
+                  text: "Concepts and taxonomy",
+                  link: "/guide/concepts",
+                },
                 { text: "Configuration", link: "/guide/configuration" },
               ],
             },
@@ -194,6 +198,14 @@ export default withMermaid(
                   text: "L4 TCP/UDP proxying",
                   link: "/guide/l4-proxying",
                 },
+                {
+                  text: "H3/QUIC upstream transport",
+                  link: "/guide/h3-quic-upstream",
+                },
+                {
+                  text: "API lifecycle and dev portal",
+                  link: "/guide/api-lifecycle",
+                },
               ],
             },
             {
@@ -282,6 +294,10 @@ export default withMermaid(
                   link: "/guide/cedar-opa-authz",
                 },
                 {
+                  text: "ACME certificate automation",
+                  link: "/guide/acme",
+                },
+                {
                   text: "Post-quantum TLS",
                   link: "/guide/post-quantum-tls",
                 },
@@ -349,7 +365,7 @@ export default withMermaid(
               ],
             },
             {
-              text: "Enterprise features",
+              text: "Enterprise",
               link: "/guide/enterprise",
               collapsed: false,
               items: [
@@ -371,12 +387,12 @@ export default withMermaid(
                   link: "/guide/redis-rate-limiter",
                 },
                 {
-                  text: "Config convergence",
-                  link: "/guide/config-convergence",
-                },
-                {
                   text: "Distributed cache",
                   link: "/guide/distributed-cache",
+                },
+                {
+                  text: "Config convergence",
+                  link: "/guide/config-convergence",
                 },
                 {
                   text: "Vault and KMS secrets",
@@ -387,36 +403,28 @@ export default withMermaid(
                   link: "/guide/workspaces-rbac-audit",
                 },
                 {
-                  text: "Cluster sync (GA)",
-                  link: "/guide/cluster-sync",
-                },
-                {
                   text: "CP/DP split",
                   link: "/guide/cp-dp-split",
                 },
-              ],
-            },
-            {
-              text: "Enterprise platform",
-              link: "/guide/h3-quic-upstream",
-              collapsed: false,
-              items: [
                 {
-                  text: "H3/QUIC upstream transport",
-                  link: "/guide/h3-quic-upstream",
-                },
-                {
-                  text: "Service mesh mode",
-                  link: "/guide/service-mesh",
-                },
-                {
-                  text: "API lifecycle and dev portal",
-                  link: "/guide/api-lifecycle",
+                  text: "Cluster sync (GA)",
+                  link: "/guide/cluster-sync",
                 },
                 {
                   text: "Ent controller persistence",
                   link: "/guide/ent-controller-persistence",
                 },
+                {
+                  text: "Service mesh mode",
+                  link: "/guide/service-mesh",
+                },
+              ],
+            },
+            {
+              text: "Research and roadmap",
+              link: "/guide/ebpf-hooks",
+              collapsed: true,
+              items: [
                 {
                   text: "eBPF hooks (research spike)",
                   link: "/guide/ebpf-hooks",

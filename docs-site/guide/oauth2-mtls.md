@@ -166,3 +166,58 @@ upstream — the upstream always sees the gateway's computed values.
 - mTLS consumer mapping is per-instance: the certificate-to-consumer
   table is config-declared and identical across instances, but the
   mapping is only as current as the config reload.
+
+## Upstream mTLS client certificates
+
+The gateway can present a client certificate when connecting to
+upstream TLS servers that require client authentication. This is
+separate from the OAuth2 mTLS flow above: it applies to the upstream
+TLS handshake itself, not to a token endpoint.
+
+Add an `mtls` block to an `https` or `http2` upstream:
+
+```yaml
+upstreams:
+  - name: secure-backend
+    protocol: https
+    mtls:
+      client_cert_file: /path/to/client.crt
+      client_key_file: /path/to/client.key
+    endpoints:
+      - address: 10.0.0.1
+        port: 8443
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `client_cert_file` | yes | PEM-encoded client certificate chain. |
+| `client_key_file` | yes | PEM-encoded private key for the client certificate. |
+
+The cert and key files are loaded at config compile time using rustls
+`with_client_auth_cert`. If the files cannot be loaded, the gateway
+logs an error and the upstream's TLS handshake will fail (the upstream
+rejects the connection if it requires mTLS).
+
+mTLS is only valid for `https` and `http2` upstreams. Validation
+rejects `mtls` on `http1` upstreams (no TLS is negotiated). The cert
+and key files must exist and be readable at compile time; validation
+names the offending field if not.
+
+### Interaction with certificate pinning
+
+When both `mtls` and `cert_pinning` are configured on the same
+upstream, pinning takes precedence in the current implementation: the
+custom pinning verifier is used and the client certificate is not
+presented. This is a known limitation; a future change will combine
+the custom pinning verifier with client auth.
+
+### Alternatives
+
+- **OAuth2 client credentials:** if the upstream accepts a Bearer token
+  instead of a client certificate, use
+  `oauth2_client_credentials` (above) instead of mTLS.
+- **Service mesh (Istio, Linkerd):** delegate mTLS to the service mesh
+  sidecar. The gateway connects plaintext to the sidecar, which handles
+  mTLS.
+- **SPIFFE/SPIRE:** use SPIFFE SVIDs instead of static client
+  certificates for automatic rotation.

@@ -21,14 +21,17 @@ admin:
     client_ca_file: /etc/dwara/admin-clients.ca.pem
 ```
 
-## Authentication: mutual TLS only
+## Authentication
 
 The admin listener always terminates TLS and **requires** a client
-certificate (an X.509 certificate the operator presents to prove identity) chaining to `client_ca_file` — there is no token/password
-layer. Possession of a valid client certificate is the authorization.
-All three TLS files are mandatory; a config with an `admin` block
-missing `client_ca_file` is rejected rather than silently serving
-no-auth TLS.
+certificate (an X.509 certificate the operator presents to prove identity) chaining to `client_ca_file`. All three TLS files are
+mandatory; a config with an `admin` block missing `client_ca_file` is
+rejected rather than silently serving no-auth TLS.
+
+By default (no `rbac` or `api_tokens` blocks), possession of a valid
+client certificate is the authorization — the v1 behavior. For larger
+deployments that need finer-grained access control, RBAC and API tokens
+are opt-in additions to the mTLS foundation.
 
 A sketch of the certificate setup:
 
@@ -52,6 +55,83 @@ curl --cert operator.crt --key operator.key https://127.0.0.1:2019/config
 
 A connection without a client certificate (or one signed by the wrong
 CA) fails the TLS handshake before any HTTP is exchanged.
+
+## RBAC: role-based access control
+
+When the `rbac` block is present, the gateway maps client certificate
+fingerprints to roles. A valid certificate with no binding is denied
+(fail-closed: no implicit admin).
+
+```yaml
+admin:
+  bind: 127.0.0.1:2019
+  tls:
+    cert_file: /etc/dwara/admin.crt.pem
+    key_file: /etc/dwara/admin.key.pem
+    client_ca_file: /etc/dwara/admin-clients.ca.pem
+  rbac:
+    bindings:
+      - cert_fingerprint: "a1b2c3..."  # SHA-256 of client cert DER, 64 lowercase hex
+        role: admin
+      - cert_fingerprint: "d4e5f6..."
+        role: readonly
+```
+
+The fingerprint is the SHA-256 of the full DER encoding of the client
+certificate, as 64 lowercase hex characters. Two roles are supported:
+
+- **`admin`** — full access to all admin endpoints (read and mutate).
+- **`readonly`** — `GET` endpoints only; `PATCH /config`, `POST
+  /cache/purge`, and other mutating actions return 403.
+
+When `rbac` is absent, every CA-valid certificate is treated as `admin`
+(the v1 behavior, preserved for backward compatibility).
+
+## API tokens
+
+When the `api_tokens` block is present, the admin API also accepts
+`Authorization: Bearer <token>` as an alternative to mTLS. The token
+is SHA-256 hashed and compared against the configured `token_hash`
+values. Tokens are never logged.
+
+```yaml
+admin:
+  api_tokens:
+    tokens:
+      - token_hash: "a1b2c3..."  # SHA-256 of plaintext token, 64 lowercase hex
+        role: admin
+      - token_hash: "d4e5f6..."
+        role: readonly
+```
+
+Token authentication complements mTLS rather than replacing it: mTLS
+remains the transport requirement (the listener still requires a client
+certificate), and the token provides an additional identity layer for
+environments where certificate-to-role mapping is impractical. The
+`role` field follows the same vocabulary as RBAC (`admin` or
+`readonly`).
+
+Token rotation is manual: generate a new token, compute its SHA-256
+hash, add it to the config, reload, then remove the old token hash.
+
+## Audit log
+
+When the `audit` block is present and `enabled: true`, all mutating
+admin actions (`PATCH /config`, `POST /cache/purge`) are recorded with
+the actor identity (cert fingerprint or token hash), the action, the
+before/after config hash, and a timestamp.
+
+```yaml
+admin:
+  audit:
+    enabled: true
+```
+
+Audit entries are emitted as structured log events with the
+`dwara::admin::audit` target. Configure log retention and collection
+through your standard log pipeline (see
+[Observability](./observability)). Audit storage grows unbounded;
+configure retention at the log collector, not in the gateway.
 
 ## Endpoints
 

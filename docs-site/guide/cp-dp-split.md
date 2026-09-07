@@ -98,14 +98,43 @@ protoc/build-script dependency).
 
 ## TLS
 
-The current implementation uses plaintext gRPC (suitable for
-development and trusted-network deployments). mTLS support is a
-documented follow-up.
+The CP-DP transport supports both plaintext and mTLS modes.
+
+**Plaintext** (default, for development and trusted-network
+deployments): the existing `EdgeClient::connect` and
+`serve_controller` methods use plaintext gRPC.
+
+**mTLS** (opt-in, for deployments that need end-to-end encryption on
+the CP-DP transport): the controller presents its server certificate,
+requires client authentication, and validates peer certificates against
+a configured CA. The edge presents its client certificate and validates
+the controller's certificate against the same CA.
+
+The TLS configuration is passed programmatically to the edge/controller
+builders:
+
+```
+CpDpTlsConfig {
+    cert_pem: "/path/to/edge.crt",
+    key_pem: "/path/to/edge.key",
+    ca_pem: "/path/to/ca.crt",
+}
+```
+
+- `EdgeClient::connect_tls(endpoint, tls)`: the edge connects to the
+  controller over TLS, presenting its client certificate and validating
+  the controller's certificate against the CA.
+- `serve_controller_tls(server, addr, tls)`: the controller serves over
+  TLS, requiring client authentication and validating peer certificates
+  against the CA.
+
+The TLS-enabled methods require the tonic `tls` feature (enabled in the
+workspace dependency). The existing plaintext methods remain available
+for compatibility.
 
 ## Not yet implemented
 
 - Production leader election (Redis/etcd distributed lock or Raft)
-- mTLS for the gRPC transport
 - Additional config sources (etcd, Consul, K8s API) beyond file
   watching
 

@@ -105,11 +105,50 @@ secrets — the config file then never holds the bytes.
 ## Egress posture
 
 Webhook URLs are operator configuration, like upstream endpoints: the
-gateway dials exactly what the config names, and there is no
-private-address egress (outbound network traffic from the gateway) filter (an internal alerting listener on
-`127.0.0.1` or `10/8` is a normal shape). `https://` targets verify
+gateway dials exactly what the config names. `https://` targets verify
 against the public CA root set; private-CA webhook targets are not
 supported in this milestone.
+
+### SSRF egress filter
+
+By default, there is no private-address egress filter (an internal
+alerting listener on `127.0.0.1` or `10/8` is a normal shape). For
+deployments where webhook or OPA endpoints may be influenced by
+untrusted input, enable the SSRF (Server-Side Request Forgery) egress
+filter to reject outbound connections to private, loopback, link-local,
+and cloud-metadata IP ranges.
+
+```yaml
+gateway:
+  ssrf_filter:
+    deny:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "127.0.0.0/8"
+      - "169.254.0.0/16"        # link-local
+      - "169.254.169.254/32"    # cloud metadata
+    allow:
+      - "10.0.1.0/24"           # exempt: internal OPA subnet
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `deny` | (required when enabled) | CIDR ranges to reject. |
+| `allow` | `[]` | CIDR ranges exempted from the deny list (evaluated after deny). |
+
+When enabled, the filter:
+
+- Resolves the hostname at connection time (not at config validation)
+  to mitigate DNS rebinding.
+- Checks every resolved IP address against the deny list.
+- Applies the allow list after deny; an IP in both is allowed.
+- Fails closed on DNS resolution errors or filter failures (the
+  webhook/OPA delivery is aborted rather than allowed through).
+
+The filter applies to both webhook deliveries and OPA callouts (see
+[Cedar and OPA authorization](./cedar-opa-authz)). Header secrets are
+never disclosed: the filter runs before the connection is opened.
 
 ## Metrics
 

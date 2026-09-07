@@ -120,3 +120,26 @@ with either:
 
 The cleanest workflow is to move inline keys to references first; then
 `GET /config` output is a complete, directly PATCHable document.
+
+## Credential pepper rotation
+
+The `DWARA_CREDENTIAL_PEPPER` environment variable peppers stored
+credential hashes (`hmac-sha256:<hex>`). To rotate the pepper without
+downtime, set `DWARA_CREDENTIAL_PEPPER_PREVIOUS` to the old value
+while setting `DWARA_CREDENTIAL_PEPPER` to the new value:
+
+```sh
+export DWARA_CREDENTIAL_PEPPER="new-pepper-value"
+export DWARA_CREDENTIAL_PEPPER_PREVIOUS="old-pepper-value"
+```
+
+The gateway resolves both at startup. New credential writes always use
+the current pepper. Verification tries the current pepper first, then
+the previous pepper, so existing hashes remain valid throughout the
+rotation window. Once all stored hashes have been re-hashed with the
+new pepper (e.g., after all consumers have rotated their credentials),
+remove `DWARA_CREDENTIAL_PEPPER_PREVIOUS` and restart.
+
+Pepper rotation requires a restart to pick up the new environment
+variables (the pepper is resolved at startup). The previous pepper is
+kept in memory for the process lifetime and zeroized on shutdown.

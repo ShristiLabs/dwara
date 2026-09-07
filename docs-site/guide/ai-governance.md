@@ -97,6 +97,7 @@ must be in ALL of them (deny-win, the same principle as AuthZ).
 |---|---|---|
 | `team_allowlists` | (empty) | Map of policy name to allowed model aliases. |
 | `audit` | `false` | When true, record every model usage (allowed and denied) for shadow audit. |
+| `dry_run` | `false` | When true, log would-be denials but do not reject the request. See [Dry-run mode](#dry-run-mode) below. |
 
 ### Enforcement
 
@@ -133,6 +134,29 @@ POST /analytics/governance-audit
 ```
 
 Denials are counted in `dwara_ai_governance_denied_total{reason}`.
+
+### Dry-run mode
+
+Set `dry_run: true` to evaluate the governance allowlists and log
+would-be denials without rejecting requests. This lets you measure the
+impact of a new allowlist against production traffic before switching
+to enforce mode.
+
+```yaml
+ai:
+  governance:
+    team_allowlists:
+      team-a: [gpt-4o-mini, claude-haiku]
+    dry_run: true
+```
+
+In dry-run mode, would-be denials are:
+- Counted in `dwara_policy_dry_run_total{phase="ai_governance",route}`.
+- Logged with `code = "policy_dry_run"` and the violation details.
+- NOT returned to the client — the request proceeds to the provider.
+
+Once you are satisfied with the false-positive rate, switch to
+`dry_run: false` (or remove the field) to enforce.
 
 ## See also
 

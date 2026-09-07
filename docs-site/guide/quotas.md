@@ -47,6 +47,7 @@ consumers:
 | --- | --- | --- |
 | `daily_requests` | `u64` | Max requests per UTC calendar day (midnight to midnight). |
 | `monthly_requests` | `u64` | Max requests per UTC calendar month. |
+| `dry_run` | `bool` | When true, log would-be rejections but do not deny the request. Default: `false`. See [Dry-run mode](#dry-run-mode) below. |
 
 At least one budget must be set, and every set budget must be greater
 than zero -- a budget of 0 would deny the consumer's first request,
@@ -82,6 +83,32 @@ When a consumer's request would exceed a budget, the gateway answers
 The gateway is the source of truth for the `X-RateLimit-*` family:
 any upstream values are silently stripped, so the client always sees
 the gateway's own accounting.
+
+## Dry-run mode
+
+Set `dry_run: true` on a consumer's `quotas` block to evaluate the
+budget and log would-be rejections without denying requests:
+
+```yaml
+consumers:
+  - name: free-tier
+    credentials:
+      - type: api_key
+        key: ${FREE_TIER_KEY}
+    quotas:
+      daily_requests: 1000
+      dry_run: true
+```
+
+In dry-run mode, would-be 429s are:
+- Counted in `dwara_policy_dry_run_total{phase="quota",route}`.
+- Logged with `code = "policy_dry_run"` and the consumer and budget
+  that would have been exceeded.
+- NOT returned to the client -- the request proceeds normally.
+
+The state-store counters still increment in dry-run mode (the budget
+is evaluated against real usage). This lets you measure what the
+enforcement impact would be before switching to `dry_run: false`.
 
 ### Durability and cost
 

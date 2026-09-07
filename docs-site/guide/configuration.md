@@ -13,6 +13,10 @@ Configuration is built from a fixed, frozen set of concepts:
 plus **Consumer**, **Credential**, **Policy**, and **Workspace**. A
 published, compiled configuration is a **Snapshot** (an immutable, compiled view of the config the gateway serves from).
 
+For the full concept map — editions, feature packs, identity, policy
+scopes, resilience, the AI gateway, observability, extensibility, and
+fleet concepts — see [Concepts and taxonomy](./concepts).
+
 ## A minimal config
 
 ```yaml
@@ -136,7 +140,7 @@ each stage runs, and the [configuration schema](../reference/configuration-schem
 for the exact policy fields.
 
 Cross-origin access (CORS), response compression, per-route request
-limits, and the API deprecation-signal block are not policy
+limits, request body JSON Schema validation, and the API deprecation-signal block are not policy
 attachments — each is a single optional block on the route itself.
 The per-route `maintenance` block (answer 503 + `Retry-After` without
 touching the upstream), the `transforms` block (header, query, and
@@ -144,8 +148,8 @@ size-capped JSON-body manipulation on the route's traffic), the
 `masking` block (fail-closed redaction of response fields, per
 consumer group), the `security_headers` block ([HSTS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security), nosniff, [CSP](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP),
 [X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options) stamped on every route response), and the `dry_run`
-monitor flags — on request limits, on any `authorization` block, on a
-rate-limit policy bundle, and on load shedding — are likewise
+monitor flags — on request limits, on request body validation, on any `authorization` block, on a
+rate-limit policy bundle, on AI governance, on AI guardrails, on consumer quotas, and on load shedding — are likewise
 route/gateway-level blocks; see
 [Maintenance and dry-run](./maintenance),
 [CORS, compression, and request limits](./edge-policies),
