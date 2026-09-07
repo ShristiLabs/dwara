@@ -36,11 +36,21 @@ ai:
 | `embedding_dim` | (required) | Vector dimension; must match the embedding service's output |
 | `threshold` | `0.85` | Cosine similarity threshold (0.0 to 1.0); higher = stricter |
 | `ttl_secs` | `3600` | Entry TTL in seconds; stale entries are not returned |
-| `max_entries` | `10000` | Max cached entries; when full, the cache resets (all evicted) |
+| `max_entries` | `10000` | Max cached entries; when full, the least-recently-used entry is evicted (LRU) |
 | `embedding_timeout_ms` | `5000` | Timeout for the embedding service HTTP call |
 | `embedding_api_key` | (optional) | Sent as `Authorization: Bearer <key>`; supports `${...}` refs |
 
 ## How it works
+
+### Exact-match fast tier
+
+Before calling the embedding service, the cache checks an exact-match
+tier (prompt text hash). If the exact prompt is cached and within TTL,
+the response is returned immediately without an embedding call. This
+is the common case for repeated identical prompts and adds zero
+latency overhead beyond a hash lookup.
+
+### Semantic similarity lookup
 
 1. On a non-streaming AI request, AFTER guardrails and BEFORE the
    provider call, the gateway sends the prompt text to the configured
@@ -56,21 +66,50 @@ ai:
    in the cache (fire-and-forget -- the store never blocks the
    response path).
 
+### Streaming cache
+
+Streaming responses (`stream: true`) are also cached. The gateway
+collects streaming SSE frames up to 1 MiB in a bounded tee buffer as
+they are forwarded to the client. If the stream completes within the
+cap, the collected frames are stored in the cache. On a subsequent
+cache hit, the stored frames are replayed as `text/event-stream` --
+the client sees the same streaming experience as the original call.
+
+If the stream exceeds the 1 MiB cap, it continues to the client
+normally but is not cached. This is a graceful degradation: large
+streams are served correctly, just not cached for replay.
+
+### Eviction
+
+When the cache reaches `max_entries`, the least-recently-accessed
+entry is evicted (LRU policy). Each cache entry tracks its
+last-access timestamp; eviction scans for the oldest entry. This is
+more predictable than a wholesale reset and preserves recently-used
+entries when the cache is full.
+
+### Fail-open behavior
+
+If the embedding service is unavailable or times out, the cache fails
+open: the request proceeds to the provider as a cache miss. The
+embedding error is logged but never blocks the request path.
+
 ## Limitations
 
-- **Non-streaming only**: streaming responses cannot be cached (the
-  zero-buffer design precludes full content reassembly).
+- **Streaming cache size limit**: streaming responses exceeding 1 MiB
+  are served to the client but not cached.
 - **External dependency**: the embedding service must be reachable
-  and responsive. If the embedding call fails or times out, the cache
-  fails open (the request proceeds to the provider as a miss).
+  and responsive for semantic similarity lookups. The exact-match
+  tier works without the embedding service. If the embedding call
+  fails or times out, the cache fails open (the request proceeds to
+  the provider as a miss).
 - **Per-model**: the cache is keyed by model alias; the same prompt
   with different models does not cross-hit.
 - **No persistence**: the HNSW index and cached entries are in-memory
   only; they are lost on restart. The cache persists across config
   reloads (the index and entries survive; config updates in place).
-- **Eviction**: when the cache reaches `max_entries`, the entire
-  index is reset (all entries evicted). This is a simple full-reset
-  policy; LRU eviction is a follow-up.
+- **Chat only**: the semantic cache applies to chat-completions
+  endpoints. Non-chat endpoints (embeddings, images, audio, moderation)
+  are served via passthrough and are not cached.
 
 ## Cost savings
 

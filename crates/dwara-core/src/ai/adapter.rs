@@ -22,6 +22,8 @@ use http::HeaderName;
 use serde_json::Value;
 
 use crate::ai::adapters::anthropic::AnthropicAdapter;
+use crate::ai::adapters::azure_openai::AzureOpenAiAdapter;
+use crate::ai::adapters::bedrock::BedrockAdapter;
 use crate::ai::adapters::gemini::GeminiAdapter;
 use crate::ai::adapters::openai::OpenAiAdapter;
 // DW-114: the A2A adapter is a stateless singleton like the others.
@@ -160,6 +162,9 @@ static ANTHROPIC_ADAPTER: AnthropicAdapter = AnthropicAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
 // DW-114: the A2A adapter singleton (stateless, like the others).
 static A2A_ADAPTER: A2AAdapter = A2AAdapter;
+// AI-01: the Azure OpenAI and AWS Bedrock adapter singletons.
+static AZURE_OPENAI_ADAPTER: AzureOpenAiAdapter = AzureOpenAiAdapter;
+static BEDROCK_ADAPTER: BedrockAdapter = BedrockAdapter;
 
 /// The adapter singleton for a provider kind. Adapters are stateless —
 /// one instance per dialect serves every request.
@@ -169,5 +174,7 @@ pub fn adapter_for(kind: AiProviderKind) -> &'static dyn ProviderAdapter {
         AiProviderKind::Anthropic => &ANTHROPIC_ADAPTER,
         AiProviderKind::Gemini => &GEMINI_ADAPTER,
         AiProviderKind::A2a => &A2A_ADAPTER,
+        AiProviderKind::AzureOpenai => &AZURE_OPENAI_ADAPTER,
+        AiProviderKind::Bedrock => &BEDROCK_ADAPTER,
     }
 }

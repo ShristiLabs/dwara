@@ -441,6 +441,7 @@ fn runtime_route_plans_chains_and_canaries() {
         experiments: None,
         mcp: None,
         a2a: None,
+        unknown_model_policy: None,
     };
     let gw: dwara_core::config::Gateway = serde_yaml_ng::from_str("ai: ~\n").unwrap();
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg), &gw).unwrap();

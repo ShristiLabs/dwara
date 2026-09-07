@@ -15,7 +15,7 @@ AGENTS.md's index-level summaries.
 
 ## Status of this directory
 
-Feature areas written up so far (M1-M5 complete):
+Feature areas written up so far (M1-M6 complete):
 
 - [Architecture](./architecture.md) — bounded-context layout, the
   config pipeline, dependency direction, and the request/reload
@@ -211,6 +211,12 @@ Feature areas written up so far (M1-M5 complete):
 - [Cedar + OPA authorization](./features/cedar-opa-authz.md) —
   Cedar and OPA as external policy engines, the OPA decision cache,
   and the SSRF egress filter for OPA callouts (DW-060, SEC-13, #160).
+- [M6: AI Gateway Expansion](./m6-ai-gateway-expansion.md) — additional
+  provider adapters (Azure OpenAI, AWS Bedrock), endpoint breadth
+  beyond chat (embeddings, images, audio, moderation passthrough),
+  pricing fidelity and fail-open cost guard, OTel GenAI semantic
+  conventions and AI metric families, local token estimation for
+  budget pre-checks, and streaming semantic cache (#164-#169).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

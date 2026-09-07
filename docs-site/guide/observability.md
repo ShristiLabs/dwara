@@ -66,6 +66,16 @@ and cleartext listener just like `/healthz` (see
 | `dwara_adaptive_origin_signal_total` | counter | `policy`, `signal` |
 | `dwara_adaptive_tightened_total` | counter | `policy` |
 | `dwara_adaptive_relaxed_total` | counter | `policy` |
+| `dwara_ai_requests_total` | counter | `provider`, `route`, `outcome`, `version` |
+| `dwara_ai_tokens_total` | counter | `provider`, `kind`, `version` |
+| `dwara_ai_request_duration_seconds` | histogram | `provider`, `route` |
+| `dwara_ai_tokens_per_request` | histogram | `provider`, `model`, `kind` |
+| `dwara_ai_first_token_seconds` | histogram | `provider` |
+| `dwara_ai_stream_chunks_total` | counter | `provider` |
+| `dwara_ai_stream_duration_seconds` | histogram | `provider` |
+| `dwara_ai_budget_denied_total` | counter | `kind` |
+| `dwara_ai_semantic_cache_hits_total` | counter | `model` |
+| `dwara_ai_semantic_cache_misses_total` | counter | `model` |
 
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are
@@ -112,6 +122,27 @@ Point it at a collector with `DWARA_OTLP_ENDPOINT` (e.g.
 `.../v1/traces` URL is accepted as-is). In a default build, this
 environment variable is reserved but inert — setting it has no effect
 unless the binary was built with the feature.
+
+### AI traces: GenAI semantic conventions
+
+AI route requests carry [OpenTelemetry GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+attributes on their span, so AI traffic is observable in standard
+OTel tooling (Jaeger, Tempo, Grafana, Datadog) without custom
+configuration. The attributes include:
+
+- `gen_ai.system` — the provider system (`openai`, `anthropic`,
+  `gemini`, `azure_openai`, `bedrock`).
+- `gen_ai.request.model` — the client-facing model alias.
+- `gen_ai.request.max_tokens`, `gen_ai.request.temperature`,
+  `gen_ai.request.top_p` — request parameters, when present.
+- `gen_ai.response.model` — the provider model that served.
+- `gen_ai.usage.prompt_tokens`, `gen_ai.usage.completion_tokens`,
+  `gen_ai.usage.total_tokens` — provider-reported token counts.
+- `gen_ai.response.finish_reasons` — the finish reasons.
+- `gen_ai.response.id` — the provider response ID.
+
+These attributes appear on the AI request span (a child of the
+request root span) in any OTel-compatible trace viewer.
 
 ## SLOs and error budgets
 

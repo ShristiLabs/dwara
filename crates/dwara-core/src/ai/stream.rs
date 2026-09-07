@@ -221,6 +221,13 @@ impl StreamTranslator {
     pub fn usage(&self) -> Usage {
         self.usage
     }
+
+    /// The response id stamped on every client chunk (AI-07: the
+    /// `gen_ai.response.id` value for streaming, where the gateway
+    /// synthesizes the id the provider does not send as one frame).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 /// Serialize one JSON value as an SSE `data:` frame (event streams to

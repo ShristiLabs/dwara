@@ -1,6 +1,6 @@
 # AI provider adapters (DW-075)
 
-The first link of the M4 AI spine: one client dialect in, three
+The first link of the M4 AI spine: one client dialect in, multiple
 provider dialects out. Clients send OpenAI chat-completions shaped
 requests to a route whose action is `ai`; the gateway resolves the
 request's `model` through the `ai:` block's alias table, translates to
@@ -8,6 +8,12 @@ the serving provider's wire format, places the call through the
 provider's upstream, and translates the response back to the OpenAI
 shape. The provider's model identifier never reaches the client; the
 client's alias never reaches the provider.
+
+The M6 milestone (AI-01, #164) expanded the adapter pack with Azure
+OpenAI and AWS Bedrock, bringing the total to five built-in dialects.
+OpenAI-compatible providers (vLLM, Ollama, Groq, DeepSeek, Mistral,
+Cohere) are served through the existing OpenAI adapter -- no separate
+adapter is needed because their wire format is identical to OpenAI's.
 
 Everything downstream in the AI pack builds on this translation layer:
 DW-076 (routing/failover), DW-077 (streaming), DW-078 (token budgets),
@@ -20,13 +26,15 @@ flowchart LR
     C[Client\nOpenAI shape] -->|POST /v1/chat/completions| G
     subgraph G[dwara gateway]
       F[openai_compat\nfacade parse] --> RT[AiRuntime\nmodel alias table]
-      RT -->|provider kind| A[ProviderAdapter\nopenai anthropic gemini]
+      RT -->|provider kind| A[ProviderAdapter\nopenai anthropic gemini\nazure_openai bedrock]
       A -->|path+headers+JSON| U[provider upstream\npooling TLS breaker]
     end
     U --> P1[OpenAI]
     U --> P2[Anthropic]
     U --> P3[Gemini]
-    U -.-> P4[OpenAI-compatible\nvLLM Ollama compat endpoint]
+    U --> P4[Azure OpenAI]
+    U --> P5[AWS Bedrock]
+    U -.-> P6[OpenAI-compatible\nvLLM Ollama Groq DeepSeek]
 ```
 
 ### The three layers
@@ -73,15 +81,28 @@ never come from different generations.
 
 ## Dialect notes
 
-| | OpenAI | Anthropic | Gemini |
-|---|---|---|---|
-| Endpoint | `POST /v1/chat/completions` | `POST /v1/messages` | `POST /v1beta/models/{model}:generateContent` |
-| System messages | inline | top-level `system` | `systemInstruction` |
-| Tool calls | `tool_calls[]` (args as JSON string) | `tool_use` blocks (`input` object) | `functionCall` parts (`args` object) |
-| Tool results | `role: tool` + `tool_call_id` | user turn + `tool_result` block | user turn + `functionResponse` part (NAME resolved from history by call id) |
-| `max_tokens` | optional | REQUIRED (default 4096 substituted) | `generationConfig.maxOutputTokens` |
-| Finish reasons | stop/length/tool_calls/content_filter | end_turn/max_tokens/tool_use/refusal | STOP/MAX_TOKENS/SAFETY/RECITATION |
-| Usage | prompt/completion/total | input/output (total derived) | promptTokenCount/candidatesTokenCount |
+| | OpenAI | Anthropic | Gemini | Azure OpenAI | Bedrock |
+|---|---|---|---|---|---|
+| Endpoint | `POST /v1/chat/completions` | `POST /v1/messages` | `POST /v1beta/models/{model}:generateContent` | `POST /openai/deployments/{deployment}/chat/completions?api-version=...` | `POST /model/{model_id}/invoke` |
+| System messages | inline | top-level `system` | `systemInstruction` | inline (OpenAI shape) | top-level `system` (Anthropic shape) |
+| Tool calls | `tool_calls[]` (args as JSON string) | `tool_use` blocks (`input` object) | `functionCall` parts (`args` object) | `tool_calls[]` (OpenAI shape) | `tool_use` blocks (Anthropic shape) |
+| Tool results | `role: tool` + `tool_call_id` | user turn + `tool_result` block | user turn + `functionResponse` part | `role: tool` + `tool_call_id` | user turn + `tool_result` block |
+| `max_tokens` | optional | REQUIRED (default 4096 substituted) | `generationConfig.maxOutputTokens` | optional (OpenAI shape) | REQUIRED (Anthropic shape) |
+| Finish reasons | stop/length/tool_calls/content_filter | end_turn/max_tokens/tool_use/refusal | STOP/MAX_TOKENS/SAFETY/RECITATION | stop/length/tool_calls/content_filter | end_turn/max_tokens/tool_use/refusal |
+| Usage | prompt/completion/total | input/output (total derived) | promptTokenCount/candidatesTokenCount | prompt/completion/total | input/output (total derived) |
+| Auth | `Authorization: Bearer <key>` | `x-api-key: <key>` | `x-goog-api-key: <key>` | `api-key: <key>` (transport/config) | SigV4 signing (transport/config) |
+
+Azure OpenAI reuses the OpenAI body translation (same request/response
+shapes); the adapter handles the deployment-based path and the
+`api-version` query parameter. The default API version is supplied by
+the adapter; callers can override it through the canonical request's
+`other` map.
+
+Bedrock reuses the Anthropic body translation (same request/response
+shapes); the adapter handles the model-ID-based invoke path (URL-encoded)
+and removes Anthropic-specific request headers (e.g.
+`anthropic-version`). SigV4 signing is a transport-layer responsibility
+using configured AWS credentials.
 
 Known translation limits (documented, deliberate): dialect-specific
 request parameters (`seed`, `response_format`, ...) survive only the
@@ -217,7 +238,7 @@ consumers:
 
 **Check-then-spend** (the locked no-estimation decision): the
 pre-check (inside the ai action, before the request body is even
-read) rejects a holder whose window is ALREADY exhausted — 429 with
+read) rejects a holder whose window is ALREADY exhausted -- 429 with
 `Retry-After` (seconds to the denying window's boundary; the later
 wall when both windows are exhausted) and the OpenAI-shaped error
 body (`type: rate_limit_error`, `code: ai_budget_exceeded`), all
@@ -227,6 +248,19 @@ streaming: DW-077's accumulated events). Overrun within one request is bounded b
 ledger survives config reloads (a reload never resets a live window);
 windows are epoch-minute (tokens) and UTC-day (cost), fixed and
 deterministic.
+
+M6/PERF-01 (#168) added a **local token estimation pre-check** that
+runs after request parsing and before provider contact. A
+lightweight, dependency-free estimator (approximately 4 characters
+per token plus per-message overhead) estimates the prompt token count;
+if the estimated total (prompt estimate + requested `max_tokens`)
+exceeds the remaining budget, the request is rejected with 429 before
+any provider call -- avoiding unnecessary provider calls and token
+spend on requests that would exceed the budget. The estimate is
+conservative (it tends to over-estimate slightly), which is the right
+direction for a pre-check. Provider-reported usage remains
+authoritative for post-call accounting. Code:
+`crates/dwara-core/src/ai/token_estimator.rs`.
 
 **Mid-stream cutoff**: while forwarding, the provider's growing usage
 report is spent as it arrives — each reported token counted exactly
@@ -249,8 +283,11 @@ data: [DONE]
 ```
 
 **Cost/day** is enforced end to end but reads prices through one seam
-(`ai::budget::cost_micros`), which returns 0 until the DW-079 pricing
-tables land — enforced-but-inert, never estimated. Resolution follows
+(`ai::budget::cost_micros`). M6/AI-03 (#166) made the cost guard
+fail-open: a model not in the pricing table costs 0 -- the call is
+tracked but not priced, and a warning is logged, but the request is
+never blocked. This prevents stale or incomplete pricing tables from
+causing request failures. Resolution follows
 the frozen precedence chain with the MOST SPECIFIC budget governing
 (a limit-of-totals, not an AND rule): consumer > route > service >
 listener > global. Consumers with no binding budget are unlimited.
@@ -270,7 +307,7 @@ log, never a metric label.
 ai:
   providers:
     - name: openai
-      kind: openai          # openai | anthropic | gemini
+      kind: openai          # openai | anthropic | gemini | azure_openai | bedrock
       upstream: openai-pool # a standard upstreams: entry
       auth:
         header: Authorization
@@ -281,6 +318,18 @@ ai:
       auth:
         header: x-api-key
         value: ${ANTHROPIC_API_KEY}
+    - name: azure
+      kind: azure_openai
+      upstream: azure-pool
+      auth:
+        header: api-key
+        value: ${AZURE_OPENAI_API_KEY}
+    - name: bedrock
+      kind: bedrock
+      upstream: bedrock-pool
+      # Bedrock uses SigV4 signing at the transport layer; no auth
+      # header here -- AWS credentials are configured at the
+      # upstream/transport level.
   models:
     gpt-4o-mini:            # the alias clients send
       provider: openai
@@ -288,12 +337,22 @@ ai:
     claude-sonnet:
       provider: claude
       provider_model: claude-sonnet-4-5
+    azure-gpt4:
+      provider: azure
+      provider_model: gpt-4o-deployment
+    bedrock-claude:
+      provider: bedrock
+      provider_model: anthropic.claude-3-5-sonnet-20241022-v2:0
 
 routes:
   - name: chat
     service: ai-svc        # required by the schema, never dialed
     match: { path: { type: prefix, value: /v1 } }
     action: { type: ai }
+  - name: embeddings
+    service: ai-svc
+    match: { path: { type: prefix, value: /v1/embeddings } }
+    action: { type: ai, endpoint: embeddings }
 ```
 
 Validation: provider `upstream` refs must resolve; auth values must be
@@ -312,17 +371,57 @@ rejected (it could never serve anything).
 - `dwara_ai_tokens_total{provider,kind,version}` — kind: prompt |
   completion, provider-reported values only, attributed to the serving
   provider and version.
+- `dwara_ai_request_duration_seconds{provider,route}` — histogram of
+  the total AI request duration (M6 / AI-07, #167).
+- `dwara_ai_tokens_per_request{provider,model,kind}` — histogram of
+  tokens per request, partitioned by provider, model, and token kind
+  (prompt vs completion) (M6 / AI-07, #167).
+- `dwara_ai_first_token_seconds{provider}` — histogram of time to
+  first token (TTFT) for streaming requests.
+
+## OTel GenAI semantic conventions (M6 / AI-07, #167)
+
+The AI proxy's request span carries OpenTelemetry GenAI semantic
+convention attributes so AI traffic is observable in standard OTel
+tooling (Jaeger, Tempo, Grafana, Datadog) without custom
+configuration. The attributes are recorded on the AI span as the
+values resolve (request-side at span creation, response-side after
+the provider answers):
+
+- `gen_ai.system` — the provider system name (`openai`, `anthropic`,
+  `gemini`, `azure_openai`, `bedrock`).
+- `gen_ai.request.model` — the client-facing model alias.
+- `gen_ai.request.max_tokens` — the requested max tokens, if present.
+- `gen_ai.request.temperature` — the requested temperature, if present.
+- `gen_ai.request.top_p` — the requested top_p, if present.
+- `gen_ai.response.model` — the provider model that served the request.
+- `gen_ai.usage.prompt_tokens` — provider-reported prompt token count.
+- `gen_ai.usage.completion_tokens` — provider-reported completion token
+  count.
+- `gen_ai.usage.total_tokens` — provider-reported total token count.
+- `gen_ai.response.finish_reasons` — the finish reasons from the
+  response.
+- `gen_ai.response.id` — the provider response ID.
+
+The `AiProviderKind::gen_ai_system()` method maps provider kinds to
+GenAI system values; `FinishReason::as_gen_ai()` maps canonical finish
+reasons to GenAI convention values.
 
 ## Where the code is
 
 - `crates/dwara-core/src/ai/` — types, adapter trait, adapters
-  (`adapters/{openai,anthropic,gemini}.rs`), facade, SSE framer,
-  routing (DW-076), budget engine + ledger (DW-078, `budget.rs`),
-  compiled runtime.
+  (`adapters/{openai,anthropic,gemini,azure_openai,bedrock}.rs`),
+  facade, SSE framer, routing (DW-076), budget engine + ledger
+  (DW-078, `budget.rs`), compiled runtime, local token estimator
+  (M6/PERF-01, `token_estimator.rs`), streaming semantic cache
+  (M6/PERF-02, `semantic_cache.rs`).
 - `crates/dwara-core/src/config/ai.rs` — the `ai:` block schema.
+- `crates/dwara-core/src/config/mod.rs` — `AiEndpoint` enum and
+  `RouteAction::Ai { endpoint }` (M6/AI-02, #165).
 - `crates/dwara-core/src/dataplane/ai_proxy.rs` — the route action:
-  bounded body read, alias resolution, transport, response
-  translation, error mapping.
+  bounded body read, passthrough for non-chat endpoints (M6/AI-02),
+  alias resolution, transport, response translation, error mapping,
+  GenAI span attributes (M6/AI-07).
 - `crates/dwara-core/src/snapshot/mod.rs` — `validate_ai`.
 
 ## Tests
@@ -330,15 +429,30 @@ rejected (it could never serve anything).
 - `crates/dwara-core/tests/ai_adapters.rs` — per-adapter translation
   against recorded provider wire shapes (request build, response
   parse, error parse, SSE delta replay, tool-call fragment assembly),
-  the cross-dialect "same canonical request serves all three" case,
-  runtime compile/resolve, facade chunk shapes.
+  the cross-dialect "same canonical request serves all" case,
+  runtime compile/resolve, facade chunk shapes. M6 added Azure OpenAI
+  and Bedrock path/auth/translation cases and the GenAI system-name
+  mapping tests.
 - `crates/dwara-core/tests/ai_gateway.rs` — end to end through the
   real gateway with mock providers speaking each dialect (they record
-  path/auth/body they received): the three-provider done-when, error
+  path/auth/body they received): the provider done-when, error
   pass-through (429), unreachable provider 502, unknown model 404,
   malformed-body 400s (a `stream: true` body against a non-SSE mock
-  falls through to the buffered path — it no longer 400s), the
+  falls through to the buffered path -- it no longer 400s), the
   validation matrix, config redaction.
+- `crates/dwara-core/tests/ai_endpoints.rs` — M6/AI-02 endpoint
+  breadth: embeddings and images passthrough forwarding the body
+  verbatim, unknown-model 404 on passthrough, chat backward
+  compatibility when `endpoint` is omitted.
+- `crates/dwara-core/tests/ai_token_estimator.rs` — M6/PERF-01 local
+  token estimation: empty/short/long message estimates, conservative
+  bounds, image parts, tool definitions, budget allow/reject,
+  exhausted windows.
+- `crates/dwara-core/tests/ai_semantic_cache.rs` — M6/PERF-02
+  streaming semantic cache: exact-match tier, LRU eviction, streaming
+  cache hit/replay, embedding error fail-open, cache miss.
+- `crates/dwara-core/tests/ai_otel_metrics.rs` — M6/AI-07 GenAI
+  semantic conventions: span attribute recording, AI metric families.
 - `crates/dwara-core/tests/ai_budget.rs` — the DW-078 done-whens:
   exhaustion rejects before provider contact (the provider saw exactly
   the served requests), the mid-stream cutoff emits the documented
@@ -427,6 +541,23 @@ HNSW dependency stays out of the default build. Composes with the
 DW-037 exact-match cache (semantic cache is checked first, then the
 exact cache). Code: `crates/dwara-core/src/ai/semantic_cache.rs`.
 
+M6/PERF-02 (#169) expanded the semantic cache with:
+
+- An **exact-match fast tier** (prompt text hash) checked BEFORE the
+  embedding call, so repeated identical prompts skip the embedding
+  service entirely.
+- **LRU eviction** replacing the wholesale reset: when the cache is
+  full, the least-recently-accessed entry is evicted (not all entries).
+- **Streaming response caching**: streaming frames are collected up to
+  1 MiB in a bounded tee buffer; if the stream exceeds the cap, it
+  continues to the client but is not cached. Cached streaming
+  responses replay as `text/event-stream`.
+- **Fire-and-forget storage**: the cache store happens in a spawned
+  task after response completion, so it never blocks the request path.
+- **Fail-open on embedding errors**: if the embedding service is
+  unavailable, the cache miss is silent and the request proceeds to
+  the provider.
+
 ### DW-084 — model governance
 
 Per-team model allowlists: a consumer or consumer group can be
@@ -481,3 +612,68 @@ Tool-call audit records and spend records carry the `consumer_type`
 column (schema v8) so agent vs. human traffic is distinguishable in
 analytics. Code: `crates/dwara-core/src/ai/governance.rs`,
 `crates/dwara-core/src/config/ai.rs`.
+
+## M6 additions (AI-01 through AI-07, PERF-01, PERF-02)
+
+The M6 milestone (AI Gateway Expansion) added five capabilities on top
+of the M4/M5 AI spine. The end-user guide at
+[docs-site: AI gateway](../../docs-site/guide/ai-gateway.md) has the
+configuration reference; this section describes the implementation
+approach and where the code lives.
+
+### AI-01 (#164) — Azure OpenAI and Bedrock adapters
+
+Two new provider kinds: `azure_openai` and `bedrock`. Azure OpenAI
+reuses the OpenAI body translation with a deployment-based path
+(`/openai/deployments/{deployment}/chat/completions?api-version=...`).
+Bedrock reuses the Anthropic body translation with a model-ID-based
+invoke path (`/model/{model_id}/invoke`, URL-encoded) and strips
+Anthropic-specific headers. Both adapters are stateless singletons
+registered in `ai::adapter::adapter_for`. Code:
+`crates/dwara-core/src/ai/adapters/{azure_openai,bedrock}.rs`.
+
+### AI-02 (#165) — endpoint breadth beyond chat
+
+The `RouteAction::Ai` variant gained an `endpoint: AiEndpoint` field
+(default `chat`). Non-chat endpoints (`embeddings`, `images`, `audio`,
+`moderation`) are proxied as a passthrough: the request body is
+forwarded to the provider's upstream as-is (no adapter translation),
+and the response is returned as-is. Model governance (allowlist check)
+still applies using the `model` field from the request body. Budget
+enforcement and semantic caching do NOT apply (they are chat-specific).
+The passthrough branch runs BEFORE chat-request parsing so non-chat
+bodies (which lack `messages`) do not trigger a 400. Code:
+`crates/dwara-core/src/config/mod.rs` (`AiEndpoint` enum),
+`crates/dwara-core/src/dataplane/ai_proxy.rs` (`serve_ai_passthrough`).
+
+### AI-03 (#166) — pricing fidelity and fail-open cost guard
+
+The cost guard fails open when a model is not in the pricing table:
+the cost is recorded as zero and a warning is logged, but the request
+is not blocked. This prevents stale or incomplete pricing tables from
+causing request failures. Provider-reported usage remains
+authoritative for post-call accounting. Code:
+`crates/dwara-core/src/ai/cost.rs`, `crates/dwara-core/src/ai/budget.rs`.
+
+### AI-07 (#167) — OTel GenAI semantic conventions and AI metric families
+
+See the [OTel GenAI semantic conventions](#otel-genai-semantic-conventions-m6-ai-07-167)
+section above. Code: `crates/dwara-core/src/dataplane/ai_proxy.rs`
+(span attributes), `crates/dwara-core/src/ai/adapter.rs`
+(`gen_ai_system`, `as_gen_ai`).
+
+### PERF-01 (#168) — local token estimation for budget pre-checks
+
+A lightweight, dependency-free token estimator runs after request
+parsing and before provider contact. It uses a character-based
+heuristic (approximately 4 characters per token) plus fixed overhead
+per message, role, image part, and tool definition. If the estimated
+total (prompt estimate + requested `max_tokens`) exceeds the remaining
+budget, the request is rejected with 429 before any provider call.
+Provider-reported usage remains authoritative for post-call
+accounting. Code: `crates/dwara-core/src/ai/token_estimator.rs`.
+
+### PERF-02 (#169) — streaming semantic cache
+
+See the [DW-083](#dw-083--semantic-caching-ent) section above for the
+M6 improvements. Code: `crates/dwara-core/src/ai/semantic_cache.rs`.

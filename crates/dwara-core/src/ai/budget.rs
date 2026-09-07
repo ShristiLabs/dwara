@@ -454,6 +454,60 @@ impl BudgetGuard {
         }
     }
 
+    /// Pre-check WITH a local token estimate (PERF-01): like
+    /// [`check`](Self::check) but also rejects when the estimated
+    /// total tokens for this request would push the minute window OVER
+    /// its limit. `estimated_tokens` is the local estimate of the
+    /// request's total token cost (prompt estimate + requested
+    /// `max_tokens`); the check is `spent + estimated_tokens > limit`
+    /// (strictly greater — a request that lands exactly on the limit
+    /// is allowed, matching the original check-then-spend contract
+    /// where a holder at the limit can complete one more request).
+    ///
+    /// The estimate is CONSERVATIVE (overcounts), so a rejection here
+    /// is the honest boundary: the provider call is skipped, the
+    /// client sees 429 `ai_budget_exceeded`, and the actual spend is
+    /// never recorded (no provider contact). The cost window is NOT
+    /// estimated (cost depends on the provider's pricing table and the
+    /// actual token mix, not a pre-call estimate); only the token
+    /// window benefits from the estimate.
+    pub fn check_with_estimate(&self, now_s: u64, estimated_tokens: u64) -> BudgetVerdict {
+        let mut denial: Option<(BudgetKind, u64)> = None;
+        if let Some(limit) = self.tokens_per_min {
+            let spent = self
+                .ledger
+                .spent(&self.key, WindowKind::Minute, Self::minute_index(now_s))
+                .tokens;
+            if spent >= limit {
+                let wait = SECS_PER_MIN - (now_s % SECS_PER_MIN);
+                denial = later_wall(denial, BudgetKind::Tokens, wait);
+            } else if spent.saturating_add(estimated_tokens) > limit {
+                // The estimate would push the window over: reject
+                // before the provider call. Retry-After is the time to
+                // the next minute boundary (the window resets then).
+                let wait = SECS_PER_MIN - (now_s % SECS_PER_MIN);
+                denial = later_wall(denial, BudgetKind::Tokens, wait);
+            }
+        }
+        if let Some(limit) = self.cost_per_day_micros {
+            let spent = self
+                .ledger
+                .spent(&self.key, WindowKind::Day, Self::day_index(now_s))
+                .cost_micros;
+            if spent >= limit {
+                let wait = SECS_PER_DAY - (now_s % SECS_PER_DAY);
+                denial = later_wall(denial, BudgetKind::Cost, wait);
+            }
+        }
+        match denial {
+            Some((kind, retry_after_s)) => BudgetVerdict::Denied {
+                kind,
+                retry_after_s,
+            },
+            None => BudgetVerdict::Allowed,
+        }
+    }
+
     /// Record the provider-reported usage after the call. Returns
     /// whether THIS spend crossed the token window (the mid-stream
     /// cutoff signal; the spend is recorded either way).
@@ -517,13 +571,16 @@ fn later_wall(
 
 /// The DW-079 pricing seam: micro-USD for one provider-model call
 /// with this usage. Reads prices through a DEFAULT (empty) pricing
-/// table, so this free function always returns 0 — it exists for
-/// test/backward-compat call sites that do not have a dataplane
-/// handle. The live path uses the dataplane's compiled
+/// table, so this free function always returns 0 (the unknown-model
+/// `allow` policy) — it exists for test/backward-compat call sites
+/// that do not have a dataplane handle. The live path uses the
+/// dataplane's compiled
 /// [`PricingTable`](crate::ai::cost::PricingTable) (stored on the
 /// DataPlane as an ArcSwap, refreshed per generation).
 pub fn cost_micros(provider_model: &str, usage: Usage) -> u64 {
-    crate::ai::cost::PricingTable::default().cost_micros(provider_model, usage)
+    crate::ai::cost::PricingTable::default()
+        .cost_micros(provider_model, usage, false)
+        .unwrap_or(0)
 }
 
 /// Resolve a consumer's attached policies from the config (by name).
@@ -633,7 +690,8 @@ mod tests {
             Usage {
                 prompt_tokens: Some(100),
                 completion_tokens: None,
-                total_tokens: None
+                total_tokens: None,
+                cached_tokens: None,
             },
             0
         ));
@@ -672,6 +730,7 @@ mod tests {
                 prompt_tokens: None,
                 completion_tokens: Some(10),
                 total_tokens: None,
+                cached_tokens: None,
             },
             0,
         );
@@ -709,6 +768,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: None,
                 total_tokens: None,
+                cached_tokens: None,
             },
             0,
         );
@@ -743,6 +803,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: None,
                 total_tokens: None,
+                cached_tokens: None,
             },
             0,
         );
@@ -815,6 +876,7 @@ mod tests {
                 prompt_tokens: Some(5),
                 completion_tokens: None,
                 total_tokens: None,
+                cached_tokens: None,
             },
             0,
         );

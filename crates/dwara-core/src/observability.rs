@@ -192,6 +192,30 @@
 //! - `dwara_l4_connection_duration_seconds{listener}` histogram
 //!   (DW-103) — L4 connection duration (splice establishment through
 //!   close), by listener (config-bounded label).
+//! - `dwara_ai_request_duration_seconds{provider,route}` histogram
+//!   (AI-07) — AI request latency (request parse through response
+//!   translation), by provider and route (both config-bounded). Observed
+//!   once per completed AI request (success and provider/translation
+//!   errors alike; client-side rejections never reach a provider).
+//! - `dwara_ai_tokens_per_request{provider,model,kind}` histogram
+//!   (AI-07) — distribution of provider-reported tokens per request, by
+//!   provider (config-bounded), provider_model (config-bounded), and
+//!   kind (the closed set `prompt` | `completion`). Provider-reported
+//!   only; the gateway never estimates. No consumer label (cardinality).
+//!
+//! ## OTel GenAI semantic conventions (AI-07)
+//!
+//! AI request spans carry the OpenTelemetry GenAI semantic-convention
+//! `gen_ai.*` attributes (https://opentelemetry.io/docs/specs/semconv/
+//! gen-ai/): `gen_ai.system` (the provider kind), `gen_ai.request.model`
+//! (the client alias), `gen_ai.response.model` (the provider model that
+//! served), `gen_ai.request.{max_tokens,temperature,top_p}`, and the
+//! provider-reported `gen_ai.usage.{prompt_tokens,completion_tokens,
+//! total_tokens}`, `gen_ai.response.finish_reasons`, and
+//! `gen_ai.response.id`. The helpers [`record_gen_ai_request_attrs`] and
+//! [`record_gen_ai_response_attrs`] record them onto a span created with
+//! every `gen_ai.*` field declared `Empty` (the span lives in
+//! `dataplane::ai_proxy::serve_ai`).
 //!
 //! ## Error envelope (section 4.19)
 //!
@@ -256,6 +280,15 @@ const DURATION_BUCKETS: &[f64] = &[
 /// queue without a tail bucket that swallows real regressions.
 const FIRST_TOKEN_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.5, 5.0, 10.0, 30.0,
+];
+
+/// Histogram buckets for `dwara_ai_tokens_per_request` (AI-07): token
+/// counts span a few (tiny prompts) to hundreds of thousands (long
+/// context); an exponential-ish scale keeps both ends observable without
+/// a single bucket that swallows the long tail.
+const TOKENS_PER_REQUEST_BUCKETS: &[f64] = &[
+    1.0, 8.0, 32.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
+    131072.0,
 ];
 
 /// Prometheus status-class label ("2xx", "5xx", ...).
@@ -629,6 +662,12 @@ pub struct Observability {
     /// cardinality rule). Priced through the dataplane's compiled
     /// pricing table; 0 for unknown models.
     ai_cost_micros_total: IntCounterVec,
+    /// DW-AI-03: count of requests served by a model with no pricing
+    /// entry, by provider_model. Incremented only under the `alert`
+    /// unknown-model policy (the `allow` policy is silent; the
+    /// `fail_closed` policy rejects before recording). The model label
+    /// is the provider model identifier (config-bounded).
+    ai_unknown_pricing_total: IntCounterVec,
     /// DW-078: AI budget denials, by kind (tokens | cost). No consumer
     /// label (cardinality); the consumer is in the access log line.
     ai_budget_denied_total: IntCounterVec,
@@ -679,6 +718,18 @@ pub struct Observability {
     /// DW-077: total streaming duration (first request byte to stream
     /// end), by provider, in seconds.
     ai_stream_duration_seconds: HistogramVec,
+    /// AI-07: AI request latency (request parse through response
+    /// translation), by provider (config-bounded) and route
+    /// (config-bounded), in seconds. Observed once per completed AI
+    /// request (success and provider/translation errors alike; client-
+    /// side rejections never reach a provider and are not observed).
+    ai_request_duration_seconds: HistogramVec,
+    /// AI-07: distribution of provider-reported tokens per request, by
+    /// provider (config-bounded), provider_model (config-bounded), and
+    /// kind (the CLOSED set `prompt` | `completion`). Observed once per
+    /// request that reported usage (provider-reported only; the gateway
+    /// never estimates). No consumer label (cardinality rule).
+    ai_tokens_per_request: HistogramVec,
     /// DW-087: MCP session lifecycle transitions, by state
     /// (`initialized`, `closed`, `expired`). A CLOSED three-value label
     /// set, so the family's cardinality is three series total.
@@ -1404,6 +1455,31 @@ impl Observability {
             &["provider"],
         )
         .expect("valid metric definition");
+        let ai_request_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_ai_request_duration_seconds",
+                "AI request latency (AI-07) — request parse through response \
+                 translation — by provider (config-bounded) and route \
+                 (config-bounded), in seconds. Observed once per completed AI \
+                 request (success and provider/translation errors alike).",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
+            &["provider", "route"],
+        )
+        .expect("valid metric definition");
+        let ai_tokens_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                "dwara_ai_tokens_per_request",
+                "Distribution of provider-reported tokens per AI request \
+                 (AI-07), by provider (config-bounded), provider_model \
+                 (config-bounded), and kind (prompt | completion). \
+                 Provider-reported only; the gateway never estimates. No \
+                 consumer label (cardinality rule).",
+            )
+            .buckets(TOKENS_PER_REQUEST_BUCKETS.to_vec()),
+            &["provider", "model", "kind"],
+        )
+        .expect("valid metric definition");
         let mcp_sessions_total = IntCounterVec::new(
             Opts::new(
                 "dwara_mcp_sessions_total",
@@ -1644,6 +1720,17 @@ impl Observability {
             &["provider", "model"],
         )
         .expect("valid metric definition");
+        let ai_unknown_pricing_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_ai_unknown_pricing_total",
+                "Requests served by a model with no pricing entry (DW-AI-03), by \
+                 provider_model. Incremented only under the alert unknown-model \
+                 policy (allow is silent; fail_closed rejects before recording). \
+                 The model label is the provider model identifier (config-bounded).",
+            ),
+            &["model"],
+        )
+        .expect("valid metric definition");
         // Clones share state (every prometheus family is a shared handle),
         // so registering clones keeps the originals usable for recording.
         for m in [
@@ -1705,6 +1792,7 @@ impl Observability {
             Box::new(ai_requests_total.clone()),
             Box::new(ai_tokens_total.clone()),
             Box::new(ai_cost_micros_total.clone()),
+            Box::new(ai_unknown_pricing_total.clone()),
             Box::new(ai_stream_chunks_total.clone()),
             Box::new(ai_budget_denied_total.clone()),
             Box::new(ai_governance_denied_total.clone()),
@@ -1717,6 +1805,8 @@ impl Observability {
             Box::new(ai_experiment_variant_selections_total.clone()),
             Box::new(ai_first_token_seconds.clone()),
             Box::new(ai_stream_duration_seconds.clone()),
+            Box::new(ai_request_duration_seconds.clone()),
+            Box::new(ai_tokens_per_request.clone()),
             Box::new(mcp_sessions_total.clone()),
             Box::new(mcp_tool_calls_total.clone()),
             Box::new(mcp_tool_duration_seconds.clone()),
@@ -1802,6 +1892,7 @@ impl Observability {
             ai_requests_total,
             ai_tokens_total,
             ai_cost_micros_total,
+            ai_unknown_pricing_total,
             ai_stream_chunks_total,
             ai_budget_denied_total,
             ai_governance_denied_total,
@@ -1814,6 +1905,8 @@ impl Observability {
             ai_experiment_variant_selections_total,
             ai_first_token_seconds,
             ai_stream_duration_seconds,
+            ai_request_duration_seconds,
+            ai_tokens_per_request,
             mcp_sessions_total,
             mcp_tool_calls_total,
             mcp_tool_duration_seconds,
@@ -2375,6 +2468,43 @@ impl Observability {
             .observe(seconds);
     }
 
+    /// Record one AI request's end-to-end latency (AI-07) in
+    /// `dwara_ai_request_duration_seconds{provider,route}`. `provider`
+    /// and `route` are config-bounded labels. Call once per completed
+    /// AI request (success and provider/translation errors alike);
+    /// client-side rejections never reach a provider and are not
+    /// observed here.
+    pub fn record_ai_request_duration(&self, provider: &str, route: &str, seconds: f64) {
+        self.ai_request_duration_seconds
+            .with_label_values(&[provider, route])
+            .observe(seconds);
+    }
+
+    /// Observe the per-request token distribution (AI-07) in
+    /// `dwara_ai_tokens_per_request{provider,model,kind}`. `kind` is
+    /// the closed set `prompt` | `completion`. Call once per request
+    /// that reported usage, for each direction that has a value
+    /// (provider-reported only; the gateway never estimates). `model`
+    /// is the provider's own model identifier (config-bounded).
+    pub fn record_ai_tokens_per_request(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt: u64,
+        completion: u64,
+    ) {
+        if prompt > 0 {
+            self.ai_tokens_per_request
+                .with_label_values(&[provider, model, "prompt"])
+                .observe(prompt as f64);
+        }
+        if completion > 0 {
+            self.ai_tokens_per_request
+                .with_label_values(&[provider, model, "completion"])
+                .observe(completion as f64);
+        }
+    }
+
     /// Count one MCP session lifecycle transition (DW-087) in
     /// `dwara_mcp_sessions_total{state}`. `state` is one of the closed
     /// set `initialized` (a new session created by `initialize`),
@@ -2503,6 +2633,15 @@ impl Observability {
         self.ai_cost_micros_total
             .with_label_values(&[provider, model])
             .inc_by(cost_micros);
+    }
+
+    /// Count one request served by a model with no pricing entry
+    /// (DW-AI-03) under the `alert` unknown-model policy. The model
+    /// label is the provider model identifier (config-bounded).
+    pub fn record_ai_unknown_pricing(&self, model: &str) {
+        self.ai_unknown_pricing_total
+            .with_label_values(&[model])
+            .inc();
     }
 
     /// The current `dwara_config_convergence_drift` gauge value (DW-054):
@@ -2660,6 +2799,73 @@ impl Observability {
     /// families into OTLP protobuf for export to a collector.
     pub fn gather(&self) -> Vec<prometheus::proto::MetricFamily> {
         self.registry.gather()
+    }
+}
+
+// --- OTel GenAI semantic conventions (AI-07) -------------------------------
+
+/// Record the request-side OTel GenAI semantic-convention attributes
+/// (AI-07) onto an AI span. The span MUST have been created with every
+/// `gen_ai.*` field declared as `tracing::field::Empty` (see
+/// [`gen_ai_span_fields`]); `Span::record` only fills fields the span's
+/// metadata already declared. Request-side fields are always available
+/// once the canonical [`crate::ai::types::ChatRequest`] is parsed; the
+/// `system` is the serving provider's kind
+/// ([`crate::config::ai::AiProviderKind::gen_ai_system`]).
+pub fn record_gen_ai_request_attrs(
+    span: &tracing::Span,
+    system: &str,
+    request_model: &str,
+    max_tokens: Option<u64>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+) {
+    span.record("gen_ai.system", system);
+    span.record("gen_ai.request.model", request_model);
+    if let Some(m) = max_tokens {
+        span.record("gen_ai.request.max_tokens", m);
+    }
+    if let Some(t) = temperature {
+        span.record("gen_ai.request.temperature", t);
+    }
+    if let Some(p) = top_p {
+        span.record("gen_ai.request.top_p", p);
+    }
+}
+
+/// Record the response-side OTel GenAI semantic-convention attributes
+/// (AI-07) onto an AI span. Each argument is recorded only when present
+/// (provider-reported only; the gateway never estimates). `finish_reasons`
+/// is the per-choice finish-reason token list (one entry per choice).
+pub fn record_gen_ai_response_attrs(
+    span: &tracing::Span,
+    response_model: Option<&str>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    finish_reasons: &[&str],
+    response_id: Option<&str>,
+) {
+    if let Some(m) = response_model {
+        span.record("gen_ai.response.model", m);
+    }
+    if let Some(p) = prompt_tokens {
+        span.record("gen_ai.usage.prompt_tokens", p);
+    }
+    if let Some(c) = completion_tokens {
+        span.record("gen_ai.usage.completion_tokens", c);
+    }
+    if let Some(t) = total_tokens {
+        span.record("gen_ai.usage.total_tokens", t);
+    }
+    if !finish_reasons.is_empty() {
+        span.record(
+            "gen_ai.response.finish_reasons",
+            tracing::field::display(finish_reasons.join(",")),
+        );
+    }
+    if let Some(id) = response_id {
+        span.record("gen_ai.response.id", id);
     }
 }
 

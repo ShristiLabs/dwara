@@ -470,11 +470,11 @@ async fn ttl_expiry_evicts() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Streaming requests bypass the cache
+// 5. Streaming requests are cached and replayed (PERF-02)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn streaming_bypasses_cache() {
+async fn streaming_cache_hit_replays_frames() {
     let (provider_port, provider_calls) = openai_mock_counting();
     let (embed_port, embed_seen) = mock_embedding_service();
     let dp = dataplane_from(&semantic_cache_yaml(
@@ -484,26 +484,24 @@ async fn streaming_bypasses_cache() {
     ));
     let gw = spawn_gateway(dp.clone()).await;
 
-    // First request: non-streaming, caches the response.
-    let (s1, _v1) = ask(gw, "write a poem about stars").await;
+    // First request: streaming, same prompt. The stream is tee'd and
+    // stored in the cache (PERF-02).
+    let s1 = ask_stream(gw, "write a poem about stars").await;
     assert_eq!(s1, StatusCode::OK);
+    // Wait for the fire-and-forget store to complete (the tee store
+    // spawns a task that calls the embedding service).
     wait_for_embed_calls(&embed_seen, 1).await;
 
-    // Second request: streaming, same prompt. Streaming bypasses the
-    // cache (cannot cache a stream), so it hits the provider.
+    // Second request: streaming, same prompt. Should hit the cache
+    // (the cached frames are replayed as an SSE body).
     let s2 = ask_stream(gw, "write a poem about stars").await;
     assert_eq!(s2, StatusCode::OK);
 
-    // Third request: non-streaming, same prompt. Should hit the cache
-    // (the streaming request did not store, but the first did).
-    let (s3, _v3) = ask(gw, "write a poem about stars").await;
-    assert_eq!(s3, StatusCode::OK);
-
     let calls = *provider_calls.lock().unwrap();
-    // First (store) + streaming (bypass) = 2. The third hits the cache.
+    // First (stream + store) = 1. The second hits the cache (replay).
     assert_eq!(
-        calls, 2,
-        "streaming bypasses the cache; the third non-streaming request hits it"
+        calls, 1,
+        "streaming cache hit replays frames; provider called once"
     );
 }
 
@@ -533,14 +531,15 @@ async fn disabled_by_default() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Cache reset when full (max_entries = 1)
+// 7. Cache LRU eviction when full (max_entries = 1)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_reset_when_full() {
     let (provider_port, provider_calls) = openai_mock_counting();
     let (embed_port, embed_seen) = mock_embedding_service();
-    // max_entries = 1: the cache resets after the second store.
+    // max_entries = 1: the cache evicts the LRU entry on the second
+    // store (PERF-02: LRU, not a wholesale reset).
     let sem_cache = format!(
         "  semantic_cache:\n\
          \x20   enabled: true\n\
@@ -561,20 +560,20 @@ async fn cache_reset_when_full() {
     wait_for_embed_calls(&embed_seen, 1).await;
 
     // Second request: different prompt. The store sees the cache is
-    // full (1 entry), resets, then stores. So the first entry is gone.
+    // full (1 entry), evicts the LRU (the first entry), then stores.
     let (s2, _v2) = ask(gw, "delta epsilon zeta").await;
     assert_eq!(s2, StatusCode::OK);
     wait_for_embed_calls(&embed_seen, 2).await;
 
     // Third request: same as the first. The first entry was evicted
-    // by the reset, so this is a miss -> provider call.
+    // by LRU, so this is a miss -> provider call.
     let (s3, _v3) = ask(gw, "alpha beta gamma").await;
     assert_eq!(s3, StatusCode::OK);
 
     let calls = *provider_calls.lock().unwrap();
     assert_eq!(
         calls, 3,
-        "the first entry was evicted by the reset; the third request misses"
+        "the first entry was evicted by LRU; the third request misses"
     );
 }
 

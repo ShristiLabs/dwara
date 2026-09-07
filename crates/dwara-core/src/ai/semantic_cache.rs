@@ -10,6 +10,25 @@
 //! the module compiles to an inert placeholder that always returns
 //! None (the config is accepted but the cache is a no-op).
 //!
+//! # PERF-02 enhancements
+//!
+//! - **Exact-match fast tier**: before calling the embedding service,
+//!   a `HashMap<prompt_hash, entry_id>` checks for an exact text match.
+//!   A hit skips the embedding call entirely (the common case for
+//!   repeated identical prompts — RAG traffic, retry storms, etc.).
+//! - **LRU eviction**: when the cache reaches `max_entries`, the least
+//!   recently accessed entry is evicted (not a wholesale reset). Each
+//!   entry carries a `last_accessed_ms` timestamp; the eviction scan
+//!   is O(n) but runs once per insert, so the amortized cost is O(1).
+//! - **Streaming support**: streaming responses (SSE frame sequences)
+//!   are cached and replayed. On a cache miss, the stream is TEE'd:
+//!   frames are forwarded to the client AND collected in a bounded
+//!   buffer; on stream completion, the collected frames are stored. On
+//!   a cache hit, the cached frames are replayed as an SSE response.
+//!   The tee buffer is bounded (`stream_cache_max_bytes`, default 1
+//!   MiB): a stream exceeding the cap is not cached (the response is
+//!   still forwarded to the client unmodified).
+//!
 //! # Lifecycle
 //!
 //! The engine is constructed once at startup and stored on the
@@ -17,22 +36,18 @@
 //! the HNSW index and cached entries survive config refreshes, and a
 //! reload updates the config in place via `update_config` (so a
 //! threshold or TTL change applies to the next lookup with no cache
-//! reset). When the cache reaches `max_entries`, it is reset wholesale
-//! (a new HNSW index replaces the old, all entries evicted) — a simple
-//! bounded-memory policy.
+//! reset).
 //!
 //! # Request path
 //!
 //! The LOOKUP runs in `serve_ai` AFTER guardrails (the prompt may have
 //! been redacted) and BEFORE model routing + the provider call. A hit
-//! returns the cached response JSON with no provider call. The lookup
-//! is async (it makes an HTTP call to the embedding service) —
-//! acceptable because it runs in the already-async `serve_ai`. The
-//! STORE is fire-and-forget (a spawned task): the embedding call and
-//! the HNSW insert happen AFTER the response is sent, so they never
-//! block the response path. Non-streaming only (streaming responses
-//! cannot be cached — the zero-buffer design precludes full content
-//! reassembly).
+//! returns the cached response (JSON for non-streaming, SSE frames for
+//! streaming) with no provider call. The lookup is async (it may make
+//! an HTTP call to the embedding service) — acceptable because it runs
+//! in the already-async `serve_ai`. The STORE is fire-and-forget (a
+//! spawned task): the embedding call and the HNSW insert happen AFTER
+//! the response is sent, so they never block the response path.
 
 // -------------------------------------------------------------------------
 // Feature-gated implementation (the `semantic_cache` cargo feature).
@@ -53,11 +68,24 @@ mod enabled {
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    /// A cached response: either a complete JSON body (non-streaming)
+    /// or a sequence of SSE frames (streaming). The `frames` variant
+    /// stores the raw `data: ...\n\n` frames as collected by the tee;
+    /// replaying them is a single concatenated body (the client sees
+    /// the same SSE stream the provider emitted).
+    #[derive(Clone)]
+    enum CachedBody {
+        /// Non-streaming: the OpenAI-shaped response JSON.
+        Json(serde_json::Value),
+        /// Streaming: the collected SSE frames (each a `data: ...\n\n`
+        /// string, in order). The `[DONE]` sentinel is included.
+        Frames(Vec<String>),
+    }
+
     /// One cached response entry.
     struct CachedEntry {
-        /// The serialized OpenAI-shaped response JSON (ready to
-        /// return to the client verbatim).
-        response_json: serde_json::Value,
+        /// The cached response body (JSON or SSE frames).
+        body: CachedBody,
         /// The model alias the entry was cached for (the cache is
         /// per-model: a lookup for a different alias is a miss even
         /// at high similarity).
@@ -65,6 +93,27 @@ mod enabled {
         /// When the entry was stored (epoch millis). Entries older
         /// than `ttl_secs` are stale and not returned.
         stored_at_ms: u64,
+        /// When the entry was last accessed (epoch millis). Used for
+        /// LRU eviction (PERF-02): the entry with the smallest
+        /// `last_accessed_ms` is evicted when the cache is full.
+        last_accessed_ms: u64,
+        /// The prompt text (stored for the exact-match fast tier and
+        /// for eviction cleanup). PERF-02: the exact-match map stores
+        /// a hash, but the entry retains the full text so the exact-
+        /// match map can be rebuilt on eviction without re-hashing
+        /// the prompt.
+        prompt_text: String,
+    }
+
+    /// What a cache lookup returns (PERF-02): the cached response,
+    /// either a JSON body (non-streaming) or SSE frames (streaming).
+    #[derive(Clone)]
+    pub enum CachedResponse {
+        /// Non-streaming: the OpenAI-shaped response JSON.
+        Json(serde_json::Value),
+        /// Streaming: the collected SSE frames, ready to replay as
+        /// a single concatenated SSE body.
+        Frames(Vec<String>),
     }
 
     /// The semantic cache engine (DW-083). Constructed once at
@@ -74,12 +123,16 @@ mod enabled {
     pub struct SemanticCacheEngine {
         /// The current config (updated on refresh via RwLock).
         config: RwLock<SemanticCacheConfig>,
-        /// The HNSW ANN index (replaced wholesale when the cache is
-        /// full). `DistCosine` returns cosine DISTANCE
-        /// (1 - cosine_similarity).
+        /// The HNSW ANN index (replaced on reset). `DistCosine` returns
+        /// cosine DISTANCE (1 - cosine_similarity).
         hnsw: arc_swap::ArcSwap<Hnsw<'static, f32, DistCosine>>,
         /// Cached responses keyed by HNSW external id.
         entries: RwLock<HashMap<usize, CachedEntry>>,
+        /// PERF-02: exact-match fast tier. Maps the prompt text hash
+        /// to the HNSW external id, so an identical prompt skips the
+        /// embedding call entirely. Cleared on reset; updated on store
+        /// and evicted on LRU removal.
+        exact_match: RwLock<HashMap<u64, usize>>,
         /// Next HNSW external id (monotonic across resets — a stale
         /// id from a previous index never collides with a live one).
         next_id: AtomicUsize,
@@ -114,6 +167,7 @@ mod enabled {
                 config: RwLock::new(config),
                 hnsw: arc_swap::ArcSwap::new(hnsw),
                 entries: RwLock::new(HashMap::new()),
+                exact_match: RwLock::new(HashMap::new()),
                 next_id: AtomicUsize::new(0),
                 client,
             }
@@ -156,15 +210,38 @@ mod enabled {
         }
 
         /// Look up a cached response for `prompt_text` + `model`.
-        /// Returns the cached response JSON when a nearest neighbor
-        /// is within the cosine-similarity threshold, within TTL, and
-        /// for the same model alias. None otherwise (or when
+        /// Returns the cached response (JSON or SSE frames) when a
+        /// match is found within the similarity threshold, within TTL,
+        /// and for the same model alias. None otherwise (or when
         /// disabled, or on any embedding/search error — the cache
         /// fails open: a miss never blocks the request).
-        pub async fn lookup(&self, prompt_text: &str, model: &str) -> Option<serde_json::Value> {
+        ///
+        /// PERF-02: the exact-match fast tier checks a hash map
+        /// BEFORE calling the embedding service. An exact prompt-text
+        /// match skips the embedding call entirely (the common case
+        /// for repeated identical prompts).
+        pub async fn lookup(&self, prompt_text: &str, model: &str) -> Option<CachedResponse> {
             if !self.is_enabled() {
                 return None;
             }
+            let cfg = self.config.read().unwrap().clone();
+            let now = now_ms();
+            // PERF-02: exact-match fast tier. Check the hash map
+            // before calling the embedding service. A hit skips the
+            // embedding call entirely.
+            let prompt_hash = hash_prompt(prompt_text);
+            if let Some(id) = self.exact_match.read().unwrap().get(&prompt_hash).copied() {
+                if let Some(entry) = self.validate_entry(id, model, now, &cfg) {
+                    tracing::info!(
+                        code = "semantic_cache_hit",
+                        model = %model,
+                        match_type = "exact",
+                        "semantic cache exact-match hit; returning cached response"
+                    );
+                    return Some(entry);
+                }
+            }
+            // Semantic (embedding) lookup.
             let embedding = match self.embed(prompt_text).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -175,7 +252,6 @@ mod enabled {
                     return None;
                 }
             };
-            let cfg = self.config.read().unwrap().clone();
             let hnsw = self.hnsw.load_full();
             let neighbors = hnsw.search(&embedding, 1, 200);
             let neighbor = neighbors.first()?;
@@ -184,45 +260,83 @@ mod enabled {
             if similarity < cfg.threshold {
                 return None;
             }
-            let entries = self.entries.read().unwrap();
-            let entry = entries.get(&neighbor.d_id)?;
+            if let Some(entry) = self.validate_entry(neighbor.d_id, model, now, &cfg) {
+                tracing::info!(
+                    code = "semantic_cache_hit",
+                    model = %model,
+                    match_type = "semantic",
+                    similarity = %similarity,
+                    "semantic cache hit; returning cached response"
+                );
+                return Some(entry);
+            }
+            None
+        }
+
+        /// Validate a cached entry by id: check it exists, is within
+        /// TTL, and matches the model. On success, update the
+        /// last-accessed timestamp (LRU) and return the cached body.
+        fn validate_entry(
+            &self,
+            id: usize,
+            model: &str,
+            now: u64,
+            cfg: &SemanticCacheConfig,
+        ) -> Option<CachedResponse> {
+            let mut entries = self.entries.write().unwrap();
+            let entry = entries.get_mut(&id)?;
             // TTL check.
-            let now = now_ms();
-            if now.saturating_sub(entry.stored_at_ms) > cfg.ttl_secs * 1000 {
+            if now.saturating_sub(entry.stored_at_ms) > cfg.ttl_secs as u64 * 1000 {
                 return None;
             }
             // Model match (the cache is per-model).
             if entry.model != model {
                 return None;
             }
-            tracing::info!(
-                code = "semantic_cache_hit",
-                model = %model,
-                similarity = %similarity,
-                "semantic cache hit; returning cached response with no provider call"
-            );
-            Some(entry.response_json.clone())
+            // PERF-02: update last-accessed for LRU.
+            entry.last_accessed_ms = now;
+            match &entry.body {
+                CachedBody::Json(v) => Some(CachedResponse::Json(v.clone())),
+                CachedBody::Frames(f) => Some(CachedResponse::Frames(f.clone())),
+            }
         }
 
-        /// Store a response in the cache (fire-and-forget from the
-        /// request path). When the cache is full (`entry_count >=
-        /// max_entries`), it is reset wholesale before the insert.
-        /// Errors (embedding service down, etc.) are logged and
-        /// swallowed — a store failure never surfaces to the client
-        /// (the call is already in a spawned task).
+        /// Store a non-streaming response in the cache (fire-and-
+        /// forget from the request path). When the cache is full
+        /// (`entry_count >= max_entries`), the least recently used
+        /// entry is evicted (PERF-02 LRU, not a wholesale reset).
+        /// Errors are logged and swallowed.
         pub async fn store(
             &self,
             prompt_text: &str,
             response_json: &serde_json::Value,
             model: &str,
         ) {
+            self.store_body(prompt_text, CachedBody::Json(response_json.clone()), model)
+                .await;
+        }
+
+        /// Store a streaming response (SSE frames) in the cache
+        /// (PERF-02). The frames are the collected SSE `data: ...\n\n`
+        /// strings as tee'd by the stream body. Same LRU eviction as
+        /// the non-streaming store.
+        pub async fn store_streaming(&self, prompt_text: &str, frames: Vec<String>, model: &str) {
+            self.store_body(prompt_text, CachedBody::Frames(frames), model)
+                .await;
+        }
+
+        /// Internal store: inserts a cached body with LRU eviction.
+        async fn store_body(&self, prompt_text: &str, body: CachedBody, model: &str) {
             if !self.is_enabled() {
                 return;
             }
             let cfg = self.config.read().unwrap().clone();
-            // Reset when full (bounded memory).
+            // PERF-02: LRU eviction. When the cache is full, evict
+            // the least recently accessed entry (not a wholesale
+            // reset). The scan is O(n) but runs once per insert, so
+            // the amortized cost is O(1).
             if self.entry_count() >= cfg.max_entries {
-                self.reset();
+                self.evict_lru();
             }
             let embedding = match self.embed(prompt_text).await {
                 Ok(v) => v,
@@ -237,35 +351,73 @@ mod enabled {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let hnsw = self.hnsw.load_full();
             hnsw.insert((&embedding, id));
-            let mut entries = self.entries.write().unwrap();
-            entries.insert(
-                id,
-                CachedEntry {
-                    response_json: response_json.clone(),
-                    model: model.to_string(),
-                    stored_at_ms: now_ms(),
-                },
-            );
+            let now = now_ms();
+            let prompt_hash = hash_prompt(prompt_text);
+            {
+                let mut entries = self.entries.write().unwrap();
+                entries.insert(
+                    id,
+                    CachedEntry {
+                        body,
+                        model: model.to_string(),
+                        stored_at_ms: now,
+                        last_accessed_ms: now,
+                        prompt_text: prompt_text.to_string(),
+                    },
+                );
+            }
+            self.exact_match.write().unwrap().insert(prompt_hash, id);
             tracing::info!(
                 code = "semantic_cache_store",
                 model = %model,
-                entries = entries.len(),
+                entries = self.entry_count(),
                 "semantic cache stored a response"
             );
         }
 
+        /// PERF-02: evict the least recently used entry. Scans all
+        /// entries for the smallest `last_accessed_ms` and removes it
+        /// from the entries map, the exact-match map, and the HNSW
+        /// index (the HNSW index is not modified — a stale neighbor
+        /// is filtered by the TTL/model check in `validate_entry`).
+        fn evict_lru(&self) {
+            let mut entries = self.entries.write().unwrap();
+            if entries.is_empty() {
+                return;
+            }
+            let (evict_id, _) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_accessed_ms)
+                .map(|(id, e)| (*id, e.prompt_text.clone()))
+                .unwrap();
+            let entry = entries.remove(&evict_id);
+            drop(entries);
+            if let Some(entry) = entry {
+                let hash = hash_prompt(&entry.prompt_text);
+                self.exact_match.write().unwrap().remove(&hash);
+            }
+            tracing::info!(
+                code = "semantic_cache_evict",
+                entry_id = evict_id,
+                "semantic cache LRU eviction (max_entries reached)"
+            );
+        }
+
         /// Reset the cache: a fresh HNSW index replaces the old, and
-        /// all entries are evicted. Called when `max_entries` is
-        /// reached (bounded memory) — a simple wholesale reset.
+        /// all entries are evicted. Called on explicit reset only
+        /// (PERF-02: LRU eviction handles the bounded-memory policy
+        /// at `max_entries`; a wholesale reset is no longer the
+        /// default eviction strategy).
         pub fn reset(&self) {
             let cfg = self.config.read().unwrap();
             let max_entries = cfg.max_entries.max(1);
             let hnsw = Arc::new(Hnsw::new(16, max_entries, 8, 200, DistCosine));
             self.hnsw.store(hnsw);
             self.entries.write().unwrap().clear();
+            self.exact_match.write().unwrap().clear();
             tracing::info!(
                 code = "semantic_cache_reset",
-                "semantic cache reset (max_entries reached); all entries evicted"
+                "semantic cache reset; all entries evicted"
             );
         }
 
@@ -346,10 +498,22 @@ mod enabled {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
+
+    /// Hash a prompt text for the exact-match fast tier (PERF-02).
+    /// Uses the standard library's `DefaultHasher` (a deterministic
+    /// hash within one process — sufficient for an in-memory cache;
+    /// cross-process consistency is not required).
+    fn hash_prompt(text: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 #[cfg(feature = "semantic_cache")]
-pub use enabled::SemanticCacheEngine;
+pub use enabled::{CachedResponse, SemanticCacheEngine};
 
 // -------------------------------------------------------------------------
 // Inert stub (no `semantic_cache` feature): the config is accepted
@@ -359,6 +523,15 @@ pub use enabled::SemanticCacheEngine;
 #[cfg(not(feature = "semantic_cache"))]
 mod disabled {
     use crate::config::ai::{AiConfig, SemanticCacheConfig};
+
+    /// Inert placeholder for the cached response type (no
+    /// `semantic_cache` feature). Never constructed — `lookup` always
+    /// returns None — but present so the call site compiles.
+    #[derive(Clone)]
+    pub enum CachedResponse {
+        Json(serde_json::Value),
+        Frames(Vec<String>),
+    }
 
     /// Inert placeholder (no `semantic_cache` feature). The config
     /// is accepted but the cache is a no-op.
@@ -388,7 +561,7 @@ mod disabled {
         pub fn update_config(&self, _config: SemanticCacheConfig) {}
         /// Always None (the feature is off). Async so the call site
         /// compiles unchanged with or without the feature.
-        pub async fn lookup(&self, _prompt_text: &str, _model: &str) -> Option<serde_json::Value> {
+        pub async fn lookup(&self, _prompt_text: &str, _model: &str) -> Option<CachedResponse> {
             None
         }
         /// No-op (the feature is off). Async so the call site
@@ -400,8 +573,17 @@ mod disabled {
             _model: &str,
         ) {
         }
+        /// No-op (the feature is off). Mirrors the enabled module's
+        /// streaming store signature.
+        pub async fn store_streaming(
+            &self,
+            _prompt_text: &str,
+            _frames: Vec<String>,
+            _model: &str,
+        ) {
+        }
     }
 }
 
 #[cfg(not(feature = "semantic_cache"))]
-pub use disabled::SemanticCacheEngine;
+pub use disabled::{CachedResponse, SemanticCacheEngine};

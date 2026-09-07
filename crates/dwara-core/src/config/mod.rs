@@ -4259,7 +4259,18 @@ pub enum RouteAction {
     /// schema but never dialed. Requires an `ai:` block (validation
     /// rejects the pairing otherwise). `stream: true` requests are
     /// served via zero-buffer SSE pass-through (DW-077).
-    Ai,
+    ///
+    /// AI-02: the `endpoint` field selects which AI endpoint the route
+    /// serves. The default is `chat` (the existing behavior). Other
+    /// endpoints (`embeddings`, `images`, `audio`, `moderation`) are
+    /// proxied as a passthrough: the request body is forwarded to the
+    /// provider's upstream as-is (no adapter translation), and the
+    /// response is returned as-is. Model governance (allowlist check)
+    /// still applies using the `model` field from the request body.
+    Ai {
+        #[serde(default)]
+        endpoint: AiEndpoint,
+    },
     /// WASM route handler (nano-service, DW-106): instead of proxying
     /// to an upstream, the route action runs a WASM module that
     /// generates the response directly. The module implements a simple
@@ -4274,6 +4285,37 @@ pub enum RouteAction {
         #[serde(flatten)]
         nano: NanoServiceAction,
     },
+}
+
+/// AI-02: which AI endpoint a route serves. The `chat` endpoint (the
+/// default) uses the full adapter translation pipeline (DW-075). The
+/// other endpoints are proxied as a passthrough: the request body is
+/// forwarded to the provider's upstream as-is, and the response is
+/// returned as-is. Model governance (allowlist check) still applies
+/// using the `model` field from the request body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiEndpoint {
+    /// OpenAI chat-completions (`POST /v1/chat/completions`). The
+    /// full adapter translation pipeline applies (DW-075). This is the
+    /// default.
+    #[default]
+    Chat,
+    /// OpenAI embeddings (`POST /v1/embeddings`). Proxied as a
+    /// passthrough; the request body `{model, input}` is forwarded
+    /// as-is. Token usage from the response is recorded for budget
+    /// accounting.
+    Embeddings,
+    /// OpenAI images (`POST /v1/images/generations`). Proxied as a
+    /// passthrough; no token usage (image generation is priced per
+    /// image, not per token).
+    Images,
+    /// OpenAI audio (TTS `POST /v1/audio/speech`, transcription
+    /// `POST /v1/audio/transcriptions`). Proxied as a passthrough.
+    Audio,
+    /// OpenAI moderation (`POST /v1/moderations`). Proxied as a
+    /// passthrough.
+    Moderation,
 }
 
 /// A WASM route handler (nano-service) action (DW-106,

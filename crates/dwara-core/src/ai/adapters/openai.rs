@@ -355,11 +355,17 @@ fn parse_finish_reason(v: Option<&Value>) -> FinishReason {
     }
 }
 
-/// Parse an OpenAI usage object (provider-reported only).
+/// Parse an OpenAI usage object (provider-reported only). The
+/// `prompt_tokens_details.cached_tokens` field (DW-AI-03) carries the
+/// number of prompt tokens served from the provider's prompt cache.
 fn parse_usage(v: &Value) -> Usage {
     Usage {
         prompt_tokens: v.get("prompt_tokens").and_then(Value::as_u64),
         completion_tokens: v.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: v.get("total_tokens").and_then(Value::as_u64),
+        cached_tokens: v
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64),
     }
 }

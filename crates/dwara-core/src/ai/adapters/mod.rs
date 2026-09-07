@@ -3,5 +3,7 @@
 //! singleton; see the module docs of each for its translation notes.
 
 pub mod anthropic;
+pub mod azure_openai;
+pub mod bedrock;
 pub mod gemini;
 pub mod openai;

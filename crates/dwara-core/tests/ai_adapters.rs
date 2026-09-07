@@ -146,7 +146,8 @@ fn openai_parse_response_normalizes_text_tools_usage() {
         Some(Usage {
             prompt_tokens: Some(12),
             completion_tokens: Some(4),
-            total_tokens: Some(16)
+            total_tokens: Some(16),
+            cached_tokens: None
         })
     );
 }
@@ -195,7 +196,8 @@ fn openai_stream_translation_carries_argument_fragments() {
         StreamEvent::Usage(Usage {
             prompt_tokens: Some(3),
             completion_tokens: Some(2),
-            total_tokens: Some(5)
+            total_tokens: Some(5),
+            cached_tokens: None
         })
     )));
     // The [DONE] sentinel translated to the canonical Done marker.
@@ -305,7 +307,8 @@ fn anthropic_parse_response_maps_blocks_stop_reason_and_usage() {
         Some(Usage {
             prompt_tokens: Some(10),
             completion_tokens: Some(6),
-            total_tokens: Some(16)
+            total_tokens: Some(16),
+            cached_tokens: None
         })
     );
 }
@@ -460,7 +463,8 @@ fn gemini_parse_response_and_stream() {
         Some(Usage {
             prompt_tokens: Some(8),
             completion_tokens: Some(3),
-            total_tokens: Some(11)
+            total_tokens: Some(11),
+            cached_tokens: None
         })
     );
     // Stream chunks reuse the response grammar.
@@ -598,6 +602,7 @@ fn ai_runtime_compiles_and_resolves() {
         experiments: None,
         mcp: None,
         a2a: None,
+        unknown_model_policy: None,
     };
     let gw: dwara_core::config::Gateway = serde_yaml_ng::from_str("ai: ~\n").unwrap();
     let rt = dwara_core::ai::AiRuntime::compile(Some(&cfg), &gw).unwrap();
@@ -1045,4 +1050,161 @@ fn anthropic_image_response_block_reads_the_real_media_type() {
         })
         .expect("image part present");
     assert_eq!(image.as_deref(), Some("image/png"));
+}
+
+// ---------------------------------------------------------------------------
+// AI-01: Azure OpenAI adapter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn azure_openai_builds_deployment_url_path() {
+    let adapter = adapter_for(AiProviderKind::AzureOpenai);
+    let req = ChatRequest {
+        model: "my-deployment".to_string(),
+        messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+        tools: Vec::new(),
+        tool_choice: None,
+        temperature: Some(0.5),
+        top_p: None,
+        max_tokens: Some(100),
+        stop: None,
+        stream: false,
+        stream_options_include_usage: false,
+        other: Default::default(),
+    };
+    let pr = adapter.build_request(&req, "gpt-4o-deployment").unwrap();
+    // The path must use the Azure deployment URL format.
+    assert!(
+        pr.path
+            .starts_with("/openai/deployments/gpt-4o-deployment/chat/completions"),
+        "azure path should use deployment format, got: {}",
+        pr.path
+    );
+    assert!(
+        pr.path.contains("api-version="),
+        "azure path should include api-version query, got: {}",
+        pr.path
+    );
+    // The body should be OpenAI-compatible (model field is the
+    // deployment name).
+    assert_eq!(pr.body["model"], "gpt-4o-deployment");
+    assert_eq!(pr.body["messages"][0]["role"], "user");
+}
+
+#[test]
+fn azure_openai_api_version_override_from_other_map() {
+    let adapter = adapter_for(AiProviderKind::AzureOpenai);
+    let mut req = ChatRequest {
+        model: "x".to_string(),
+        messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+        tools: Vec::new(),
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        stop: None,
+        stream: false,
+        stream_options_include_usage: false,
+        other: Default::default(),
+    };
+    req.other
+        .insert("api_version".to_string(), json!("2024-08-01-preview"));
+    let pr = adapter.build_request(&req, "dep").unwrap();
+    assert!(
+        pr.path.contains("api-version=2024-08-01-preview"),
+        "azure path should use overridden api-version, got: {}",
+        pr.path
+    );
+}
+
+#[test]
+fn azure_openai_parses_openai_shaped_response() {
+    let adapter = adapter_for(AiProviderKind::AzureOpenai);
+    let resp = adapter
+        .parse_response(&json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+        }))
+        .unwrap();
+    assert_eq!(resp.choices.len(), 1);
+    assert_eq!(resp.usage.unwrap().prompt_tokens, Some(5));
+}
+
+#[test]
+fn azure_openai_stream_done_sentinel_matches_openai() {
+    let adapter = adapter_for(AiProviderKind::AzureOpenai);
+    assert_eq!(adapter.stream_done_sentinel(), Some("[DONE]"));
+}
+
+// ---------------------------------------------------------------------------
+// AI-01: AWS Bedrock adapter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bedrock_builds_invoke_path_with_encoded_model_id() {
+    let adapter = adapter_for(AiProviderKind::Bedrock);
+    let req = ChatRequest {
+        model: "claude".to_string(),
+        messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+        tools: Vec::new(),
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_tokens: Some(100),
+        stop: None,
+        stream: false,
+        stream_options_include_usage: false,
+        other: Default::default(),
+    };
+    let model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+    let pr = adapter.build_request(&req, model_id).unwrap();
+    // The path must use the Bedrock invoke format with the model id
+    // URL-encoded (colons become %3A).
+    assert!(
+        pr.path
+            .starts_with("/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke"),
+        "bedrock path should use invoke format with encoded model id, got: {}",
+        pr.path
+    );
+    // The body should be Anthropic-shaped (anthropic-version header
+    // should NOT be present — Bedrock does not use it).
+    assert!(
+        !pr.headers
+            .iter()
+            .any(|(name, _)| name.as_str() == "anthropic-version"),
+        "bedrock should not carry the anthropic-version header"
+    );
+    // The body should contain the Anthropic messages format.
+    assert!(pr.body.get("messages").is_some());
+    assert_eq!(pr.body["model"], model_id);
+}
+
+#[test]
+fn bedrock_parses_anthropic_shaped_response() {
+    let adapter = adapter_for(AiProviderKind::Bedrock);
+    let resp = adapter
+        .parse_response(&json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }))
+        .unwrap();
+    assert_eq!(resp.choices.len(), 1);
+    assert_eq!(resp.usage.unwrap().prompt_tokens, Some(10));
+}
+
+#[test]
+fn bedrock_gen_ai_system_is_aws_bedrock() {
+    assert_eq!(AiProviderKind::Bedrock.gen_ai_system(), "aws_bedrock");
+}
+
+#[test]
+fn azure_openai_gen_ai_system_is_azure_openai() {
+    assert_eq!(AiProviderKind::AzureOpenai.gen_ai_system(), "azure_openai");
 }

@@ -281,6 +281,7 @@ global_policies: [global-budget]
         prompt_tokens: Some(500),
         completion_tokens: Some(0),
         total_tokens: Some(500),
+        cached_tokens: None,
     };
     let crossed = guard.spend(0, usage, 0);
     assert!(!crossed, "500 tokens did not cross the 500 limit");

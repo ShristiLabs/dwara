@@ -142,6 +142,15 @@ pub struct AiConfig {
     /// (the default): no A2A surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
+    /// Unknown-model pricing policy (DW-AI-03
+    /// `ai.unknown_model_policy`): what to do when a provider model
+    /// has no entry in `ai.pricing`. Absent (the default): `allow`
+    /// (cost 0, fail-open — the original behavior). `fail_closed`
+    /// rejects the response with 403 `ai_unknown_model_pricing`;
+    /// `alert` proceeds with cost 0 but logs a WARN and increments
+    /// the `dwara_ai_unknown_pricing_total{model}` metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_model_policy: Option<UnknownModelPolicy>,
 }
 
 /// Model governance (DW-084 `ai.governance`): per-team model
@@ -230,8 +239,9 @@ pub struct AiProvider {
 pub enum AiProviderKind {
     /// OpenAI chat-completions API (`POST /v1/chat/completions`). Also
     /// the dialect spoken by OpenAI-compatible servers (vLLM, Ollama's
-    /// compatibility endpoint, and others) — point the upstream at one
-    /// of those and this adapter speaks to it unchanged.
+    /// compatibility endpoint, Groq, DeepSeek, Mistral, Cohere, and
+    /// others) — point the upstream at one of those and this adapter
+    /// speaks to it unchanged (AI-01).
     Openai,
     /// Anthropic messages API (`POST /v1/messages`).
     Anthropic,
@@ -247,6 +257,37 @@ pub enum AiProviderKind {
     /// the `a2a` cargo feature; without it the `ai.a2a` block is
     /// accepted but inert.
     A2a,
+    /// AI-01: Azure OpenAI. Uses the Azure deployment URL format
+    /// (`/openai/deployments/{deployment}/chat/completions?api-version=...`)
+    /// and `api-key` header authentication. The request/response body
+    /// is OpenAI-compatible (the adapter reuses the OpenAI body
+    /// translation and overrides the path + headers).
+    AzureOpenai,
+    /// AI-01: AWS Bedrock. Uses the Bedrock invoke API
+    /// (`/model/{model_id}/invoke`) with AWS SigV4 request signing.
+    /// The request/response body follows the Anthropic messages format
+    /// for Claude models on Bedrock (the adapter reuses the Anthropic
+    /// body translation and overrides the path + headers). SigV4
+    /// signing is applied by the transport layer using the provider's
+    /// configured AWS credentials.
+    Bedrock,
+}
+
+impl AiProviderKind {
+    /// The OTel GenAI semantic-convention `gen_ai.system` value
+    /// (AI-07): the lowercase provider kind token. Used as the
+    /// `gen_ai.system` span attribute and never a metric label by
+    /// itself (the config-bounded provider NAME is the label).
+    pub fn gen_ai_system(&self) -> &'static str {
+        match self {
+            AiProviderKind::Openai => "openai",
+            AiProviderKind::Anthropic => "anthropic",
+            AiProviderKind::Gemini => "gemini",
+            AiProviderKind::A2a => "a2a",
+            AiProviderKind::AzureOpenai => "azure_openai",
+            AiProviderKind::Bedrock => "aws_bedrock",
+        }
+    }
 }
 
 /// Verbatim authentication header for a provider (DW-075
@@ -432,6 +473,15 @@ pub struct AiCanaryVersion {
 /// for), not the client-facing alias. Spend is computed as
 /// `input_tokens * input_per_1k_micros / 1000 + output_tokens *
 /// output_per_1k_micros / 1000` (integer micro-USD, saturating).
+///
+/// The optional cached-token and batch-rate fields (DW-AI-03) extend
+/// the table for prompt-caching and batch-API discounts. When absent,
+/// the standard input/output rates apply (the fallback). Cached tokens
+/// are priced at `cached_input_per_1k_micros` when present (the
+/// discounted rate providers charge for prompt-cache hits); the
+/// non-cached portion of the prompt is priced at the standard
+/// `input_per_1k_micros`. Batch rates apply when the request is a
+/// batch-API call (`batch: true` on the cost computation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AiPricing {
@@ -439,6 +489,53 @@ pub struct AiPricing {
     pub input_per_1k_micros: u64,
     /// Micro-USD per 1 000 output (completion) tokens.
     pub output_per_1k_micros: u64,
+    /// Micro-USD per 1 000 CACHED input (prompt-cached) tokens. When
+    /// present, the `cached_tokens` portion of the prompt is priced at
+    /// this discounted rate instead of `input_per_1k_micros`. Absent
+    /// (the default): cached tokens are priced at the standard input
+    /// rate (no separate cached tier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_per_1k_micros: Option<u64>,
+    /// Micro-USD per 1 000 input tokens under the batch API. When
+    /// present and the request is a batch call, this rate replaces
+    /// `input_per_1k_micros`. Absent (the default): batch calls fall
+    /// back to the standard input rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_input_per_1k_micros: Option<u64>,
+    /// Micro-USD per 1 000 output tokens under the batch API. When
+    /// present and the request is a batch call, this rate replaces
+    /// `output_per_1k_micros`. Absent (the default): batch calls fall
+    /// back to the standard output rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_output_per_1k_micros: Option<u64>,
+}
+
+/// The unknown-model pricing policy (DW-AI-03
+/// `ai.unknown_model_policy`): what the gateway does when a provider
+/// model has no entry in the `ai.pricing` table. The default (`allow`)
+/// preserves the original fail-open behavior (cost 0, never a crash);
+/// `fail_closed` rejects the response with 403
+/// `ai_unknown_model_pricing` so an unpriced model cannot serve
+/// traffic silently; `alert` proceeds with cost 0 but logs a WARN and
+/// increments `dwara_ai_unknown_pricing_total{model}` for observability
+/// without blocking the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownModelPolicy {
+    /// Proceed with cost 0 (the original fail-open behavior). A
+    /// misconfigured price table must not 500 a request.
+    #[default]
+    Allow,
+    /// Reject the response with 403 `ai_unknown_model_pricing` when the
+    /// model has no pricing entry. The provider call has already been
+    /// made (cost is computed from the response usage), but the
+    /// response is not returned to the client — the unpriced model
+    /// cannot serve traffic silently.
+    FailClosed,
+    /// Proceed with cost 0 but log a WARN and increment the
+    /// `dwara_ai_unknown_pricing_total{model}` metric. The call
+    /// succeeds; the metric and log surface the gap for operators.
+    Alert,
 }
 
 /// Default sampling rate: capture all when enabled (1.0).

@@ -229,6 +229,14 @@ pub struct Usage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    /// The number of prompt tokens served from the provider's prompt
+    /// cache (DW-AI-03). OpenAI reports this as
+    /// `usage.prompt_tokens_details.cached_tokens`; Anthropic reports
+    /// it as `usage.cache_read_input_tokens` (the adapter normalizes
+    /// both into this field). When present, the cost computation prices
+    /// the cached portion at the model's `cached_input_per_1k_micros`
+    /// rate (when declared) instead of the standard input rate.
+    pub cached_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -238,7 +246,9 @@ impl Usage {
     /// sides are known and the provider never sent a total, the total
     /// is DERIVED (prompt + completion) — the same rule the
     /// non-streaming Anthropic parse applies, so a provider's streamed
-    /// and non-streamed totals agree.
+    /// and non-streamed totals agree. The `cached_tokens` field takes
+    /// the max of the two reports (a provider may revise the count
+    /// upward as more cache hits are reported).
     pub fn merge(&mut self, later: Usage) {
         if later.prompt_tokens.is_some() {
             self.prompt_tokens = later.prompt_tokens;
@@ -254,6 +264,10 @@ impl Usage {
                 self.total_tokens = Some(p + c);
             }
         }
+        self.cached_tokens = match (self.cached_tokens, later.cached_tokens) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
 }
 
@@ -265,6 +279,21 @@ pub enum FinishReason {
     ToolCalls,
     ContentFilter,
     Other(String),
+}
+
+impl FinishReason {
+    /// The OTel GenAI `gen_ai.response.finish_reasons` token (AI-07):
+    /// the lowercase reason string. `Other` carries a provider-specific
+    /// string verbatim (already lowercase-normalized by the adapters).
+    pub fn as_gen_ai(&self) -> &str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+            FinishReason::ToolCalls => "tool_calls",
+            FinishReason::ContentFilter => "content_filter",
+            FinishReason::Other(s) => s.as_str(),
+        }
+    }
 }
 
 /// One completion choice.

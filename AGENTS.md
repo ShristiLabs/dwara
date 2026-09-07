@@ -42,6 +42,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
 cargo doc --no-deps --workspace   # must be zero-warning
 cargo run -q -p dwara-cli --bin dwara-cli -- schema   # config reference (diff vs config-reference.json)
+python3 tools/config-studio/build.py                   # rebuild Dwara Config Studio after schema changes
 ```
 
 Extras when touching those areas: `cargo test -p dwara-core --features loom --test loom`,
@@ -68,6 +69,7 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 | `packaging/` | systemd unit + packaging notes |
 | `grafana/` | Starter dashboard for the /metrics families |
 | `scripts/` | Macro bench rig + baseline gate + dependency-direction guard |
+| `tools/config-studio/` | Dwara Config Studio: single-file, offline browser config builder (see Config studio below) |
 | `config-reference.json` | Generated JSON Schema (repo root; see freshness gate) |
 | `docs/` | Contributor-facing developer documentation (internals, rationale, diagrams) — see Documentation below |
 | `docs-site/` | Published end-user (operator) documentation site, VitePress — see Documentation below |
@@ -283,7 +285,10 @@ Rules for new code:
   true` flag is set — test configs that legitimately declare no routes
   (admin-only, SNI-passthrough-only fixtures) must carry the flag.
   After schema changes, regenerate `config-reference.json`
-  (`dwara-cli schema > config-reference.json`) — CI fails on drift.
+  (`dwara-cli schema > config-reference.json`) — CI fails on drift — and
+  rebuild the config-studio tool in the same change
+  (`python3 tools/config-studio/build.py`, commit the rebuilt
+  `index.html`), because the tool embeds the schema at build time.
 - **Ops knobs are env vars** (`DWARA_*`), topology is YAML. Do not add
   operational settings to the schema without discussion.
 - **Vocabulary is frozen:** Listener/Route/Service/Upstream/Endpoint/
@@ -548,6 +553,36 @@ comment would.
   `docs-site/**`. There is no separate per-tag deploy — a frozen
   version only appears on the published site once its snapshot is
   committed to `main`.
+
+## Config studio
+
+`tools/config-studio/` is the Dwara Config Studio: a single-file, fully
+offline browser tool for generating, visualizing, validating, and editing
+gateway YAML (loading into dwara remains `dwara validate` + run). Rules:
+
+- **`index.html` is a build artifact** — never hand-edit it. Edit
+  `src/app.template.html`, run `python3 tools/config-studio/build.py`
+  (python3 stdlib only), and commit the rebuilt artifact together with
+  the template change.
+- **Regenerate together with the schema.** Any change that regenerates
+  `config-reference.json` must rebuild the tool in the same change; the
+  build inlines the schema (see the Config schema convention above).
+- The build scrubs internal `DW-###` references from help text at build
+  time only. Never strip them from `config-reference.json` itself — it
+  must stay byte-identical to `dwara schema` output for the CI drift
+  gate.
+- `vendor/js-yaml.min.js` is vendored (js-yaml 4.1.0, MIT; license
+  header preserved). Do not modify or upgrade casually — upgrades are a
+  deliberate license-and-size review, flagged like any dependency
+  addition.
+- The tool must stay offline and dependency-free: no CDN scripts, no
+  runtime fetches, no node build step. Docs-site links are the only
+  external references.
+- Verify tool changes by rebuilding, opening `index.html` in a browser,
+  and confirming every shipped template's exported YAML passes
+  `dwara-cli validate` (browser validation is structural only). The
+  cargo verification gate does not apply to tool-only changes; the
+  schema-sync and rebuild rules above always do.
 
 ## Quickstart sanity check
 

@@ -164,3 +164,45 @@ With the feature off, the env var is inert.
 Code: `crates/dwara-bin/src/main.rs` (subscriber setup, gated on the
 feature + env var), `crates/dwara-bin/Cargo.toml` (the `tokio_console`
 feature declaration).
+
+## AI observability: GenAI semantic conventions (M6 / AI-07, #167)
+
+The AI proxy's request span carries OpenTelemetry GenAI semantic
+convention attributes so AI traffic is observable in standard OTel
+tooling without custom configuration. The span is a child of the
+request root span, opened in `dataplane::ai_proxy::serve_ai` and
+recorded as the values resolve (request-side at span creation,
+response-side after the provider answers).
+
+Attributes recorded:
+
+- `gen_ai.system` — provider system name (`openai`, `anthropic`,
+  `gemini`, `azure_openai`, `bedrock`), via
+  `AiProviderKind::gen_ai_system()`.
+- `gen_ai.request.model` — the client-facing model alias.
+- `gen_ai.request.max_tokens` — requested max tokens, if present.
+- `gen_ai.request.temperature` — requested temperature, if present.
+- `gen_ai.request.top_p` — requested top_p, if present.
+- `gen_ai.response.model` — the provider model that served.
+- `gen_ai.usage.prompt_tokens` — provider-reported prompt tokens.
+- `gen_ai.usage.completion_tokens` — provider-reported completion
+  tokens.
+- `gen_ai.usage.total_tokens` — provider-reported total tokens.
+- `gen_ai.response.finish_reasons` — finish reasons, via
+  `FinishReason::as_gen_ai()`.
+- `gen_ai.response.id` — the provider response ID.
+
+Two new Prometheus metric families were added alongside the existing
+TTFT histogram:
+
+- `dwara_ai_request_duration_seconds{provider,route}` — total AI
+  request duration histogram.
+- `dwara_ai_tokens_per_request{provider,model,kind}` — tokens per
+  request histogram, partitioned by token kind (prompt vs completion).
+
+These complement the existing `dwara_ai_requests_total`,
+`dwara_ai_tokens_total`, and `dwara_ai_first_token_seconds` families.
+
+Code: `crates/dwara-core/src/dataplane/ai_proxy.rs` (span attributes),
+`crates/dwara-core/src/ai/adapter.rs` (`gen_ai_system`,
+`as_gen_ai`). Tests: `crates/dwara-core/tests/ai_otel_metrics.rs`.

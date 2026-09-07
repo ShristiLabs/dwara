@@ -251,6 +251,7 @@ impl ProviderAdapter for GeminiAdapter {
             prompt_tokens: u.get("promptTokenCount").and_then(Value::as_u64),
             completion_tokens: u.get("candidatesTokenCount").and_then(Value::as_u64),
             total_tokens: u.get("totalTokenCount").and_then(Value::as_u64),
+            cached_tokens: u.get("cachedContentTokenCount").and_then(Value::as_u64),
         });
         Ok(ChatResponse {
             id: obj

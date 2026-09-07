@@ -254,6 +254,7 @@ impl ProviderAdapter for AnthropicAdapter {
                 (Some(i), Some(o)) => Some(i + o),
                 (i, o) => i.or(o),
             },
+            cached_tokens: u.get("cache_read_input_tokens").and_then(Value::as_u64),
         });
         let finish_reason = match obj.get("stop_reason").and_then(Value::as_str) {
             Some("end_turn") | Some("stop_sequence") | None => FinishReason::Stop,
@@ -308,12 +309,15 @@ impl ProviderAdapter for AnthropicAdapter {
         let mut out = Vec::new();
         match kind {
             "message_start" => {
-                // The opening event carries input token usage.
+                // The opening event carries input token usage,
+                // including cached prompt tokens when the provider
+                // reports them (DW-AI-03).
                 if let Some(u) = obj.get("message").and_then(|m| m.get("usage")) {
                     out.push(StreamEvent::Usage(Usage {
                         prompt_tokens: u.get("input_tokens").and_then(Value::as_u64),
                         completion_tokens: None,
                         total_tokens: None,
+                        cached_tokens: u.get("cache_read_input_tokens").and_then(Value::as_u64),
                     }));
                 }
                 // First delta carries the role, OpenAI-style.
@@ -397,6 +401,7 @@ impl ProviderAdapter for AnthropicAdapter {
                         prompt_tokens: None,
                         completion_tokens: u.get("output_tokens").and_then(Value::as_u64),
                         total_tokens: None,
+                        cached_tokens: None,
                     }));
                 }
             }

@@ -2,9 +2,10 @@
 
 The AI gateway lets clients send one request shape -- the OpenAI
 chat-completions format -- to Dwara, and Dwara translates the call to
-whichever provider actually serves it: OpenAI, Anthropic, or Google
-Gemini. Responses (and errors) are translated back to the OpenAI
-shape, so any OpenAI-compatible client or SDK works unchanged.
+whichever provider actually serves it: OpenAI, Anthropic, Google
+Gemini, Azure OpenAI, or AWS Bedrock. Responses (and errors) are
+translated back to the OpenAI shape, so any OpenAI-compatible client
+or SDK works unchanged.
 
 Your model names stay yours: clients ask for the alias you publish
 (`gpt-4o-mini`, `claude-sonnet`, or your own names like `prod-chat`),
@@ -88,7 +89,7 @@ services:
 | Field | Default | Description |
 |---|---|---|
 | `name` | (required) | Provider name, referenced by model aliases. Unique within the `ai:` block. |
-| `kind` | (required) | Wire dialect: `openai`, `anthropic`, or `gemini`. |
+| `kind` | (required) | Wire dialect: `openai`, `anthropic`, `gemini`, `azure_openai`, or `bedrock`. |
 | `upstream` | (required) | Name of the upstream that carries this provider's transport (endpoints, TLS, timeouts, connection pooling, circuit breaking). |
 | `auth.header` | (required with `auth`) | Header name the provider expects (`Authorization`, `x-api-key`, `x-goog-api-key`). |
 | `auth.value` | (required with `auth`) | Header value, verbatim. Use a `${...}` [secret reference](./secrets) (env var or file); inline values are redacted in every config echo. Omit `auth` entirely for providers that need none (for example a local OpenAI-compatible endpoint on an internal network). |
@@ -172,6 +173,27 @@ POST bodies. The request's `model` field selects the provider through
 the alias table. The route's `service` is required by the schema but
 is not dialed for `ai` routes.
 
+The optional `endpoint` field selects which AI endpoint the route
+serves. The default is `chat` (the full adapter translation pipeline).
+Other endpoints (`embeddings`, `images`, `audio`, `moderation`) are
+proxied as a passthrough: the request body is forwarded to the
+provider as-is, and the response is returned as-is. Model governance
+(allowlist check) still applies using the `model` field from the
+request body.
+
+```yaml
+routes:
+  - name: embeddings
+    service: ai-svc
+    match:
+      path:
+        type: prefix
+        value: /v1/embeddings
+    action:
+      type: ai
+      endpoint: embeddings
+```
+
 ## Pointing clients at the gateway
 
 Any OpenAI SDK works: set the base URL to the gateway route and use
@@ -230,7 +252,10 @@ What clients receive, regardless of which provider served the call:
 - `chat.completion.chunk` frames with your model alias, in order.
 - A terminal usage frame (`"choices": []` with a `usage` object) when
   the provider reported token usage. Token counts are
-  PROVIDER-REPORTED ONLY — the gateway never estimates. Usage
+  PROVIDER-REPORTED for accounting -- the gateway uses the provider's
+  numbers, not a local estimate. (A lightweight local estimate is used
+  only for the budget pre-check before the provider call; see
+  [Token budgets](./ai-token-budgets).) Usage
   reporting is requested from the provider even when the client did
   not ask, so the counts are always available for metrics.
 - A final `data: [DONE]` frame. The gateway writes this terminator

@@ -60,6 +60,7 @@ pub mod routing;
 pub mod semantic_cache;
 pub mod sse;
 pub mod stream;
+pub mod token_estimator;
 pub mod types;
 
 use crate::config::ai::{AiConfig, AiProviderKind};

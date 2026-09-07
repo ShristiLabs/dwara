@@ -257,6 +257,9 @@ fn pricing_table_computes_correct_cost() {
         AiPricing {
             input_per_1k_micros: 3_000,   // $3.00 per 1M tokens
             output_per_1k_micros: 15_000, // $15.00 per 1M tokens
+            cached_input_per_1k_micros: None,
+            batch_input_per_1k_micros: None,
+            batch_output_per_1k_micros: None,
         },
     );
     let cfg = AiConfig {
@@ -271,6 +274,7 @@ fn pricing_table_computes_correct_cost() {
         experiments: None,
         mcp: None,
         a2a: None,
+        unknown_model_policy: None,
     };
     let table = PricingTable::compile(Some(&cfg));
 
@@ -282,8 +286,9 @@ fn pricing_table_computes_correct_cost() {
         prompt_tokens: Some(1000),
         completion_tokens: Some(500),
         total_tokens: Some(1500),
+        cached_tokens: None,
     };
-    assert_eq!(table.cost_micros("claude-x", usage), 10_500);
+    assert_eq!(table.cost_micros("claude-x", usage, false), Some(10_500));
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +302,9 @@ fn unknown_model_costs_zero() {
         prompt_tokens: Some(1000),
         completion_tokens: Some(500),
         total_tokens: Some(1500),
+        cached_tokens: None,
     };
-    assert_eq!(table.cost_micros("nonexistent", usage), 0);
+    assert_eq!(table.cost_micros("nonexistent", usage, false), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -704,4 +710,314 @@ async fn spend_record_direct_insert_and_query() {
 
     // Clean shutdown: drain the channel.
     let _ = shutdown_tx.send(());
+}
+
+// ---------------------------------------------------------------------------
+// 8. Cached-token pricing (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cached_token_pricing_uses_discounted_rate() {
+    let mut pricing = BTreeMap::new();
+    pricing.insert(
+        "claude-x".to_string(),
+        AiPricing {
+            input_per_1k_micros: 3_000,
+            output_per_1k_micros: 15_000,
+            cached_input_per_1k_micros: Some(300), // 10x discount
+            batch_input_per_1k_micros: None,
+            batch_output_per_1k_micros: None,
+        },
+    );
+    let cfg = AiConfig {
+        providers: vec![],
+        models: BTreeMap::new(),
+        pricing,
+        governance: None,
+        logging: None,
+        guardrails: None,
+        semantic_cache: None,
+        routing_policies: BTreeMap::new(),
+        experiments: None,
+        mcp: None,
+        a2a: None,
+        unknown_model_policy: None,
+    };
+    let table = PricingTable::compile(Some(&cfg));
+
+    // 1000 prompt tokens, 800 cached, 500 output:
+    // non_cached = 1000 - 800 = 200
+    // non_cached_cost = 200 * 3000 / 1000 = 600
+    // cached_cost     = 800 * 300   / 1000 = 240
+    // output_cost     = 500 * 15000 / 1000 = 7500
+    // total = 600 + 240 + 7500 = 8340
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(500),
+        total_tokens: Some(1500),
+        cached_tokens: Some(800),
+    };
+    assert_eq!(table.cost_micros("claude-x", usage, false), Some(8_340));
+}
+
+#[test]
+fn cached_tokens_without_cached_rate_fall_back_to_standard() {
+    let mut pricing = BTreeMap::new();
+    pricing.insert(
+        "claude-x".to_string(),
+        AiPricing {
+            input_per_1k_micros: 3_000,
+            output_per_1k_micros: 15_000,
+            cached_input_per_1k_micros: None, // no cached tier
+            batch_input_per_1k_micros: None,
+            batch_output_per_1k_micros: None,
+        },
+    );
+    let cfg = AiConfig {
+        providers: vec![],
+        models: BTreeMap::new(),
+        pricing,
+        governance: None,
+        logging: None,
+        guardrails: None,
+        semantic_cache: None,
+        routing_policies: BTreeMap::new(),
+        experiments: None,
+        mcp: None,
+        a2a: None,
+        unknown_model_policy: None,
+    };
+    let table = PricingTable::compile(Some(&cfg));
+
+    // Without a cached rate, cached_tokens are ignored: all 1000
+    // prompt tokens priced at the standard rate.
+    // input_cost  = 1000 * 3000 / 1000 = 3000
+    // output_cost = 500  * 15000 / 1000 = 7500
+    // total = 10500
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(500),
+        total_tokens: Some(1500),
+        cached_tokens: Some(800),
+    };
+    assert_eq!(table.cost_micros("claude-x", usage, false), Some(10_500));
+}
+
+// ---------------------------------------------------------------------------
+// 9. Batch pricing (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_pricing_uses_batch_rates() {
+    let mut pricing = BTreeMap::new();
+    pricing.insert(
+        "gpt-4o".to_string(),
+        AiPricing {
+            input_per_1k_micros: 5_000,
+            output_per_1k_micros: 15_000,
+            cached_input_per_1k_micros: Some(500),
+            batch_input_per_1k_micros: Some(2_500), // 50% batch discount
+            batch_output_per_1k_micros: Some(7_500), // 50% batch discount
+        },
+    );
+    let cfg = AiConfig {
+        providers: vec![],
+        models: BTreeMap::new(),
+        pricing,
+        governance: None,
+        logging: None,
+        guardrails: None,
+        semantic_cache: None,
+        routing_policies: BTreeMap::new(),
+        experiments: None,
+        mcp: None,
+        a2a: None,
+        unknown_model_policy: None,
+    };
+    let table = PricingTable::compile(Some(&cfg));
+
+    // Batch: 1000 input + 500 output.
+    // input_cost  = 1000 * 2500 / 1000 = 2500
+    // output_cost = 500  * 7500 / 1000 = 3750
+    // total = 6250 (vs 12500 standard)
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(500),
+        total_tokens: Some(1500),
+        cached_tokens: Some(800), // ignored under batch
+    };
+    assert_eq!(table.cost_micros("gpt-4o", usage, true), Some(6_250));
+}
+
+#[test]
+fn batch_pricing_without_batch_rates_falls_back() {
+    let mut pricing = BTreeMap::new();
+    pricing.insert(
+        "gpt-4o".to_string(),
+        AiPricing {
+            input_per_1k_micros: 5_000,
+            output_per_1k_micros: 15_000,
+            cached_input_per_1k_micros: None,
+            batch_input_per_1k_micros: None,  // no batch tier
+            batch_output_per_1k_micros: None, // no batch tier
+        },
+    );
+    let cfg = AiConfig {
+        providers: vec![],
+        models: BTreeMap::new(),
+        pricing,
+        governance: None,
+        logging: None,
+        guardrails: None,
+        semantic_cache: None,
+        routing_policies: BTreeMap::new(),
+        experiments: None,
+        mcp: None,
+        a2a: None,
+        unknown_model_policy: None,
+    };
+    let table = PricingTable::compile(Some(&cfg));
+
+    // Without batch rates, batch=true falls back to standard rates.
+    // input_cost  = 1000 * 5000 / 1000 = 5000
+    // output_cost = 500  * 15000 / 1000 = 7500
+    // total = 12500
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(500),
+        total_tokens: Some(1500),
+        cached_tokens: None,
+    };
+    assert_eq!(table.cost_micros("gpt-4o", usage, true), Some(12_500));
+}
+
+// ---------------------------------------------------------------------------
+// 10. Unknown model with allow policy (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_model_allow_policy_returns_none() {
+    let table = PricingTable::default();
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(500),
+        total_tokens: Some(1500),
+        cached_tokens: None,
+    };
+    // cost_micros returns None for unknown models; the allow policy
+    // at the call site unwraps to 0.
+    assert_eq!(table.cost_micros("nonexistent", usage, false), None);
+    assert!(!table.has_pricing("nonexistent"));
+}
+
+// ---------------------------------------------------------------------------
+// 11. Unknown model with fail_closed policy (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_model_fail_closed_rejects_with_403() {
+    let (port, _seen) = anthropic_mock(100, 200);
+    // No pricing table -> claude-x is unknown. fail_closed policy.
+    let pricing = "";
+    let dp = dataplane_from(&cost_yaml_with_policy(
+        port,
+        pricing,
+        "",
+        "consumer",
+        false,
+        "fail_closed",
+    ));
+    let _analytics = attach_analytics(&dp);
+    let gw = spawn_gateway(dp.clone()).await;
+
+    let (status, body) = ask(gw, "acme-key").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "ai_unknown_model_pricing");
+}
+
+// ---------------------------------------------------------------------------
+// 12. Unknown model with alert policy (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_model_alert_proceeds_and_records_metric() {
+    let (port, _seen) = anthropic_mock(100, 200);
+    // No pricing table -> claude-x is unknown. alert policy.
+    let pricing = "";
+    let dp = dataplane_from(&cost_yaml_with_policy(
+        port, pricing, "", "consumer", false, "alert",
+    ));
+    let _analytics = attach_analytics(&dp);
+    let gw = spawn_gateway(dp.clone()).await;
+
+    // The request succeeds (alert does not block).
+    let (status, _body) = ask(gw, "acme-key").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The unknown-pricing metric was incremented. Verify via the
+    // observability registry's text export.
+    let obs = dp.observability_arc();
+    let metrics = obs.render();
+    assert!(
+        metrics.contains("dwara_ai_unknown_pricing_total"),
+        "metrics should contain the unknown-pricing counter"
+    );
+    assert!(
+        metrics.contains("claude-x"),
+        "the metric should carry the claude-x model label"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. Unknown model with allow policy (default) proceeds (DW-AI-03)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_model_allow_proceeds_silently() {
+    let (port, _seen) = anthropic_mock(100, 200);
+    // No pricing table -> claude-x is unknown. No policy -> allow
+    // (the default).
+    let pricing = "";
+    let dp = dataplane_from(&cost_yaml(port, pricing, "", "consumer", false));
+    let _analytics = attach_analytics(&dp);
+    let gw = spawn_gateway(dp.clone()).await;
+
+    let (status, _body) = ask(gw, "acme-key").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The unknown-pricing metric is NOT incremented under allow.
+    let obs = dp.observability_arc();
+    let metrics = obs.render();
+    // The metric family is declared (it appears in the export) but
+    // its value is 0 (no samples under allow).
+    if metrics.contains("dwara_ai_unknown_pricing_total") {
+        // If it appears, the count must be 0.
+        assert!(
+            !metrics.contains("dwara_ai_unknown_pricing_total{model=\"claude-x\"} 1"),
+            "allow policy must not increment the unknown-pricing metric"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for the policy tests
+// ---------------------------------------------------------------------------
+
+/// Like `cost_yaml` but with an `unknown_model_policy` field in the
+/// `ai:` block. `policy` is one of `fail_closed`, `alert`, `allow`.
+fn cost_yaml_with_policy(
+    port: u16,
+    pricing_yaml: &str,
+    budget_yaml: &str,
+    attach: &str,
+    second_consumer: bool,
+    policy: &str,
+) -> String {
+    let base = cost_yaml(port, pricing_yaml, budget_yaml, attach, second_consumer);
+    // Insert the unknown_model_policy before the closing of the ai:
+    // block. The base yaml ends with the pricing section (or the
+    // models section when pricing is empty); we append the policy
+    // field at the same indentation as `providers:`.
+    format!("{base}\n  unknown_model_policy: {policy}\n")
 }

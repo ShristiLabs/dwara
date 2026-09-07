@@ -267,11 +267,20 @@ pub fn response_to_openai(resp: &ChatResponse, model_alias: &str, request_id: &s
         })
         .collect();
     let usage = resp.usage.map(|u| {
-        json!({
-            "prompt_tokens": u.prompt_tokens.unwrap_or(0),
-            "completion_tokens": u.completion_tokens.unwrap_or(0),
-            "total_tokens": u.total_tokens.unwrap_or(0),
-        })
+        let mut obj = serde_json::Map::new();
+        obj.insert("prompt_tokens".into(), json!(u.prompt_tokens.unwrap_or(0)));
+        obj.insert(
+            "completion_tokens".into(),
+            json!(u.completion_tokens.unwrap_or(0)),
+        );
+        obj.insert("total_tokens".into(), json!(u.total_tokens.unwrap_or(0)));
+        if let Some(cached) = u.cached_tokens {
+            obj.insert(
+                "prompt_tokens_details".into(),
+                json!({"cached_tokens": cached}),
+            );
+        }
+        Value::Object(obj)
     });
     json!({
         "id": resp.id.clone().unwrap_or_else(|| format!("chatcmpl-{request_id}")),
@@ -392,18 +401,29 @@ pub fn stream_event_to_openai_chunk(
                 }]
             })
         }
-        StreamEvent::Usage(u) => json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_alias,
-            "choices": [],
-            "usage": {
-                "prompt_tokens": u.prompt_tokens.unwrap_or(0),
-                "completion_tokens": u.completion_tokens.unwrap_or(0),
-                "total_tokens": u.total_tokens.unwrap_or(0),
+        StreamEvent::Usage(u) => {
+            let mut usage_obj = serde_json::Map::new();
+            usage_obj.insert("prompt_tokens".into(), json!(u.prompt_tokens.unwrap_or(0)));
+            usage_obj.insert(
+                "completion_tokens".into(),
+                json!(u.completion_tokens.unwrap_or(0)),
+            );
+            usage_obj.insert("total_tokens".into(), json!(u.total_tokens.unwrap_or(0)));
+            if let Some(cached) = u.cached_tokens {
+                usage_obj.insert(
+                    "prompt_tokens_details".into(),
+                    json!({"cached_tokens": cached}),
+                );
             }
-        }),
+            json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_alias,
+                "choices": [],
+                "usage": Value::Object(usage_obj),
+            })
+        }
         StreamEvent::Done => json!({
             "id": id,
             "object": "chat.completion.chunk",
@@ -534,6 +554,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(5),
                 total_tokens: Some(15),
+                cached_tokens: None,
             }),
         };
         let out = response_to_openai(&resp, "alias-x", "req-1");

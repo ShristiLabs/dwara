@@ -342,7 +342,7 @@ fn route_attrs(r: &Route) -> Value {
         RouteAction::Redirect { .. } => "redirect",
         RouteAction::Respond { .. } => "respond",
         RouteAction::Mock { .. } => "mock",
-        RouteAction::Ai => "ai",
+        RouteAction::Ai { .. } => "ai",
         RouteAction::NanoService { .. } => "nano_service",
     };
     m.insert("action_type".to_string(), json!(action_type));
@@ -634,7 +634,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             RouteAction::Redirect { .. } => "redirect",
             RouteAction::Respond { .. } => "respond",
             RouteAction::Mock { .. } => "mock",
-            RouteAction::Ai => "ai",
+            RouteAction::Ai { .. } => "ai",
             RouteAction::NanoService { .. } => "nano_service",
         };
         out.push_str(&format!("  action_type = \"{}\"\n", action_type));

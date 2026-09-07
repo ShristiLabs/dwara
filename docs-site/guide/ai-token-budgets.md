@@ -58,6 +58,17 @@ empty or zero budget).
   `Retry-After` header (seconds until the window resets) and the
   OpenAI error shape, `code: ai_budget_exceeded`. No provider tokens
   are spent on a rejected request.
+- **A local estimate pre-check rejects oversized requests before the
+  provider is called.** After request parsing, the gateway estimates
+  the prompt token count using a lightweight heuristic (approximately
+  4 characters per token plus per-message overhead). If the estimated
+  total (prompt estimate + requested `max_tokens`) exceeds the
+  remaining budget, the request is rejected with `429` before any
+  provider contact -- avoiding unnecessary provider calls and token
+  spend. The estimate is conservative (it tends to over-estimate
+  slightly), so a request near the boundary may be rejected even if
+  the provider would have reported fewer tokens. Provider-reported
+  usage remains authoritative for post-call accounting.
 - **The gateway spends what the provider reports, never an
   estimate.** Usage is recorded after the provider answers, so a
   holder sitting exactly at its limit can always complete one more
@@ -125,7 +136,9 @@ cost = prompt_tokens * input_per_1k_micros / 1000
 
 All arithmetic is integer micro-USD (no floating-point money). A
 model not in the pricing table costs 0 -- the call is tracked but
-not priced (fail-open, never a crash). Pricing changes take effect on
+not priced (fail-open: the request is never blocked, a warning is
+logged). This means a new model release works immediately without
+waiting for a pricing-table update. Pricing changes take effect on
 the next request after a config reload -- no restart.
 
 | Field | Default | Description |

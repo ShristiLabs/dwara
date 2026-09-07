@@ -699,6 +699,7 @@ mod tests {
             experiments: None,
             mcp: None,
             a2a: None,
+            unknown_model_policy: None,
         };
         GuardrailEngine::compile(Some(&cfg))
     }

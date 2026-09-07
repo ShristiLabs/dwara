@@ -53,6 +53,7 @@ use crate::ai::adapter::{adapter_for, ProviderAdapter};
 use crate::ai::openai_compat;
 use crate::ai::stream::StreamTranslator;
 use crate::ai::types::{ChatRequest, Usage};
+use crate::config::ai::UnknownModelPolicy;
 use crate::dataplane::proxy::{consumer_type_str, DataPlane, Generation, ProxyBody};
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -62,6 +63,7 @@ use std::pin::pin;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tracing::Instrument as _;
 
 /// Inbound AI request body cap: 16 MiB, generous against long-context
 /// requests while bounding the translation buffer.
@@ -75,10 +77,253 @@ pub const MAX_AI_PROVIDER_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 /// Provider error body cap: 1 MiB.
 pub const MAX_AI_ERROR_BYTES: usize = 1024 * 1024;
 
+/// AI-02: the provider path for each non-chat endpoint. The passthrough
+/// forwards the request body as-is to the provider's upstream at this
+/// path (no adapter translation). The path is OpenAI-compatible (the
+/// most common target); providers with different paths can be reached
+/// via an upstream rewrite.
+fn passthrough_path(endpoint: crate::config::AiEndpoint) -> &'static str {
+    match endpoint {
+        crate::config::AiEndpoint::Embeddings => "/v1/embeddings",
+        crate::config::AiEndpoint::Images => "/v1/images/generations",
+        crate::config::AiEndpoint::Audio => "/v1/audio/speech",
+        crate::config::AiEndpoint::Moderation => "/v1/moderations",
+        crate::config::AiEndpoint::Chat => "/v1/chat/completions",
+    }
+}
+
+/// AI-02: serve a non-chat AI endpoint (embeddings, images, audio,
+/// moderation) as a passthrough. The request body is forwarded to the
+/// provider's upstream as-is (no adapter translation), and the response
+/// is returned as-is. Model governance (allowlist check) still applies
+/// using the `model` field from the request body. Budget enforcement
+/// and semantic caching do NOT apply (they are chat-specific).
+#[allow(clippy::too_many_arguments)]
+async fn serve_ai_passthrough(
+    json_body: serde_json::Value,
+    route_name: &str,
+    gen: &Arc<Generation>,
+    dp: &Arc<DataPlane>,
+    rid: &str,
+    rec: &mut crate::observability::AccessRecord,
+    identity: Option<&crate::security::authn::Identity>,
+    endpoint: crate::config::AiEndpoint,
+) -> Response<ProxyBody> {
+    // Extract the model alias from the request body for governance and
+    // routing. The `model` field is present in all OpenAI endpoint
+    // request shapes (embeddings, images, audio, moderation). When
+    // absent, the request is forwarded without governance/routing (a
+    // passthrough to the first provider's upstream).
+    let model_alias = json_body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+
+    // DW-084: model governance pre-route check (same as chat). The
+    // requested model alias is checked against the consumer's binding
+    // team allowlists BEFORE routing.
+    let gateway = gen.snapshot.gateway();
+    let governance = dp.ai_governance();
+    if !governance.is_empty() {
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, &rec.listener);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let verdict = governance.check(
+            consumer,
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            &[],
+            model_alias,
+        );
+        if let crate::ai::governance::GovernanceVerdict::Deny { reason, .. } = &verdict {
+            dp.observability_arc().record_ai_governance_denied(reason);
+            return ai_error_response(
+                StatusCode::FORBIDDEN,
+                &format!("model '{}' is denied by policy: {reason}", model_alias),
+                "invalid_request_error",
+                Some("model_denied_by_policy"),
+                rid,
+            );
+        }
+    }
+
+    // Route the model alias to find the provider (same runtime as
+    // chat). When the alias is empty or not found, return 404.
+    let Some(runtime) = gen.ai() else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no ai block configured",
+            "api_error",
+            Some("internal_error"),
+            rid,
+        );
+    };
+    let (candidates, _, _) = runtime
+        .route_with_policy_and_canary_index(model_alias, rid, "")
+        .await;
+    if candidates.is_empty() {
+        return ai_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("the model '{}' does not exist", model_alias),
+            "invalid_request_error",
+            Some("model_not_found"),
+            rid,
+        );
+    }
+
+    // Forward to the first candidate (no failover for passthrough —
+    // the response is returned as-is, so retry logic would need to
+    // buffer the entire response, which defeats the passthrough
+    // design).
+    let target = &candidates[0];
+    let version = target.version.as_deref().unwrap_or("default");
+    let Some(provider) = runtime.provider(&target.provider) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    let Some(handle) = gen.registry().get(&provider.upstream) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    rec.upstream = Some(provider.upstream.clone());
+    rec.attempts = 1;
+
+    // Build the outbound request: the passthrough path + the original
+    // body + the provider's auth headers.
+    let path = passthrough_path(endpoint);
+    let mut outbound = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(path);
+    outbound = outbound.header("content-type", "application/json");
+    let auth_pairs: Vec<(String, String)> = if let Some(pool) = &provider.credential_pool {
+        match pool.pick(rid) {
+            Some(entry) => vec![(entry.header.clone(), entry.value.clone())],
+            None => provider.auth_headers.clone(),
+        }
+    } else {
+        provider.auth_headers.clone()
+    };
+    for (name, value) in &auth_pairs {
+        if let (Ok(n), Ok(v)) = (
+            hyper::header::HeaderName::from_bytes(name.as_bytes()),
+            hyper::header::HeaderValue::from_str(value),
+        ) {
+            outbound = outbound.header(n, v);
+        }
+    }
+    let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
+    let outbound = match outbound.body(Full::new(Bytes::from(body_bytes))) {
+        Ok(r) => r,
+        Err(_) => {
+            return ai_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build provider request",
+                "api_error",
+                Some("internal_error"),
+                rid,
+            );
+        }
+    };
+
+    let obs = dp.observability_arc();
+    let started = std::time::Instant::now();
+    let upstream_resp = match handle.send(outbound).await {
+        Ok(r) => r,
+        Err(e) => {
+            obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                started.elapsed().as_secs_f64(),
+            );
+            tracing::warn!(
+                code = "ai_provider_unreachable",
+                request_id = %rid,
+                provider = %provider.name,
+                upstream = %provider.upstream,
+                "ai passthrough call failed: {e}"
+            );
+            return ai_error_response(
+                StatusCode::BAD_GATEWAY,
+                "no provider could serve the model",
+                "api_error",
+                Some("provider_unreachable"),
+                rid,
+            );
+        }
+    };
+
+    let status = upstream_resp.status();
+    let up_headers = upstream_resp.headers().clone();
+    let up_body = upstream_resp.into_body();
+    obs.record_ai_request(
+        &provider.name,
+        route_name,
+        if status.is_success() {
+            "success"
+        } else {
+            "error"
+        },
+        version,
+    );
+    obs.record_ai_request_duration(&provider.name, route_name, started.elapsed().as_secs_f64());
+
+    if !status.is_success() {
+        let err_bytes =
+            match bounded_collect(up_body, MAX_AI_ERROR_BYTES, "provider error", rid).await {
+                Ok(b) => b,
+                Err(resp) => return resp,
+            };
+        let err_json: serde_json::Value = serde_json::from_slice(&err_bytes).unwrap_or(
+            serde_json::json!({"error": {"message": String::from_utf8_lossy(&err_bytes).to_string()}}),
+        );
+        return response_with_json(status, &err_json, &up_headers);
+    }
+
+    // Success: return the response body as-is (no translation).
+    let ok_bytes =
+        match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "response", rid).await {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(ProxyBody::Full(Full::new(ok_bytes)))
+        .expect("passthrough response is valid")
+}
+
 /// Serve one `ai` route action (called from `dispatch_action` in the
 /// proxy module). `rec` is the request's access record: the provider's
 /// upstream name is attributed there so analytics and the access log
 /// see which provider served the call.
+///
+/// AI-02: the `endpoint` parameter selects which AI endpoint the route
+/// serves. `Chat` uses the full adapter translation pipeline (DW-075).
+/// The other endpoints (`Embeddings`, `Images`, `Audio`, `Moderation`)
+/// are proxied as a passthrough: the request body is forwarded to the
+/// provider's upstream as-is, and the response is returned as-is.
+/// Model governance (allowlist check) still applies using the `model`
+/// field from the request body.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_ai<B>(
     req: Request<B>,
@@ -89,6 +334,7 @@ pub(super) async fn serve_ai<B>(
     rec: &mut crate::observability::AccessRecord,
     identity: Option<&crate::security::authn::Identity>,
     listener_name: &str,
+    endpoint: crate::config::AiEndpoint,
 ) -> Response<ProxyBody>
 where
     B: Body<Data = Bytes> + Send + 'static,
@@ -226,6 +472,20 @@ where
             )
         }
     };
+
+    // AI-02: non-chat endpoints are proxied as a passthrough. The
+    // request body is forwarded to the provider's upstream as-is (no
+    // adapter translation), and the response is returned as-is. Model
+    // governance (allowlist check) still applies using the `model`
+    // field from the request body. Budget enforcement and semantic
+    // caching do NOT apply (they are chat-specific). This branch runs
+    // BEFORE chat-request parsing so non-chat bodies (which lack
+    // `messages`) do not trigger a 400.
+    if endpoint != crate::config::AiEndpoint::Chat {
+        return serve_ai_passthrough(json_body, route_name, gen, dp, rid, rec, identity, endpoint)
+            .await;
+    }
+
     let mut chat_req: ChatRequest = match openai_compat::parse_chat_request(&json_body) {
         Ok(r) => r,
         Err(e) => {
@@ -238,6 +498,95 @@ where
             )
         }
     };
+
+    // AI-07: the OTel GenAI semantic-convention span. Every gen_ai.*
+    // field is declared Empty so `Span::record` can fill it as the
+    // values resolve (request-side here, response-side after the
+    // provider answers). The span is instrumented around the provider
+    // call so it appears in the trace tree as a child of the request
+    // span; response-side fields are recorded on the handle (recording
+    // does not require the span to be current).
+    let gen_ai_span = tracing::info_span!(
+        "gen_ai.chat",
+        "gen_ai.system" = tracing::field::Empty,
+        "gen_ai.request.model" = tracing::field::Empty,
+        "gen_ai.response.model" = tracing::field::Empty,
+        "gen_ai.request.max_tokens" = tracing::field::Empty,
+        "gen_ai.request.temperature" = tracing::field::Empty,
+        "gen_ai.request.top_p" = tracing::field::Empty,
+        "gen_ai.usage.prompt_tokens" = tracing::field::Empty,
+        "gen_ai.usage.completion_tokens" = tracing::field::Empty,
+        "gen_ai.usage.total_tokens" = tracing::field::Empty,
+        "gen_ai.response.finish_reasons" = tracing::field::Empty,
+        "gen_ai.response.id" = tracing::field::Empty,
+    );
+    // Request-side attributes are known once the canonical request is
+    // parsed. `gen_ai.system` is recorded when the serving provider is
+    // selected (it depends on the candidate kind).
+    crate::observability::record_gen_ai_request_attrs(
+        &gen_ai_span,
+        "",
+        &chat_req.model,
+        chat_req.max_tokens,
+        chat_req.temperature,
+        chat_req.top_p,
+    );
+    // AI-07: end-to-end AI request latency, measured from here (request
+    // parsed) through the terminal outcome. Recorded alongside each
+    // `record_ai_request` outcome below.
+    let ai_started = std::time::Instant::now();
+
+    // PERF-01: local token estimation pre-check. The first budget
+    // check (above, before the body was read) only rejects when the
+    // window is ALREADY exhausted. This second check estimates the
+    // request's total token cost (prompt estimate + requested
+    // max_tokens) and rejects when `spent + estimated > limit` BEFORE
+    // any provider contact — so a holder near the limit cannot overrun
+    // by a large prompt. The estimate is conservative (overcounts);
+    // the actual spend is still provider-reported after the call.
+    if let Some(guard) = &budget {
+        let prompt_est = crate::ai::token_estimator::estimate_prompt_tokens(&chat_req);
+        let max_out = chat_req.max_tokens.unwrap_or(0);
+        let estimated_total = prompt_est.saturating_add(max_out);
+        if estimated_total > 0 {
+            let now_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let crate::ai::budget::BudgetVerdict::Denied {
+                kind,
+                retry_after_s,
+            } = guard.check_with_estimate(now_s, estimated_total)
+            {
+                rec.rate_limited = true;
+                dp.observability_arc()
+                    .record_ai_budget_denied(kind.as_str());
+                tracing::info!(
+                    code = "ai_budget_exceeded",
+                    request_id = %rid,
+                    route = %route_name,
+                    kind = kind.as_str(),
+                    retry_after_s,
+                    estimated_tokens = estimated_total,
+                    "AI token budget would be exceeded by estimated \
+                     tokens; rejecting before provider contact (PERF-01)"
+                );
+                let body = openai_compat::error_body(
+                    "the token budget for this window would be exceeded \
+                     by the estimated request size; retry later",
+                    "rate_limit_error",
+                    Some("ai_budget_exceeded"),
+                    rid,
+                );
+                return Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("retry-after", retry_after_s.to_string())
+                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                    .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
+                    .expect("static 429 response is valid");
+            }
+        }
+    }
 
     // DW-084: model governance pre-route check. The requested model
     // alias is checked against the consumer's binding team allowlists
@@ -418,12 +767,12 @@ where
     // have been redacted) and AFTER the stream flag is known, BEFORE
     // model routing + the provider call. A cache hit returns the
     // cached response with no provider call and no token spend.
-    // Non-streaming only (streaming responses cannot be cached — the
-    // zero-buffer design precludes full content reassembly). The
-    // lookup is async (it calls the embedding service) but runs in
-    // the already-async serve_ai; a miss or error fails open.
+    // PERF-02: streaming requests are now cached too (the stream is
+    // tee'd on a miss and replayed on a hit). The lookup is async (it
+    // may call the embedding service) but runs in the already-async
+    // serve_ai; a miss or error fails open.
     let sem_cache = dp.ai_semantic_cache();
-    let can_cache = !stream_requested && sem_cache.is_some();
+    let can_cache = sem_cache.is_some();
     if can_cache {
         if let Some(sem_cache) = &sem_cache {
             let prompt_text = chat_req
@@ -442,7 +791,22 @@ where
                     model = %chat_req.model,
                     "AI semantic cache hit; returning cached response with no provider call"
                 );
-                return response_with_json(StatusCode::OK, &cached, &HeaderMap::new());
+                return match cached {
+                    crate::ai::semantic_cache::CachedResponse::Json(v) => {
+                        response_with_json(StatusCode::OK, &v, &HeaderMap::new())
+                    }
+                    crate::ai::semantic_cache::CachedResponse::Frames(frames) => {
+                        // PERF-02: replay the cached SSE frames as a
+                        // single concatenated text/event-stream body.
+                        let body = frames.join("");
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+                            .header(hyper::header::CACHE_CONTROL, "no-cache")
+                            .body(ProxyBody::Full(Full::new(Bytes::from(body))))
+                            .expect("cached SSE replay response is valid")
+                    }
+                };
             }
             dp.observability_arc()
                 .record_ai_semantic_cache_miss(&chat_req.model);
@@ -566,9 +930,18 @@ where
                 "routed provider is not in the compiled table (validate-vs-build race)"
             );
             obs.record_ai_request(&target.provider, route_name, "transport_error", version);
+            obs.record_ai_request_duration(
+                &target.provider,
+                route_name,
+                ai_started.elapsed().as_secs_f64(),
+            );
             continue;
         };
         let adapter = adapter_for(provider.kind);
+        // AI-07: record the serving provider's kind as gen_ai.system
+        // (re-recorded per candidate so the span reflects the provider
+        // that actually served; on failover the last candidate wins).
+        gen_ai_span.record("gen_ai.system", provider.kind.gen_ai_system());
 
         // Translate for THIS provider (the provider model differs per
         // candidate). A per-dialect rejection may not exist in the
@@ -577,6 +950,11 @@ where
             Ok(r) => r,
             Err(e) => {
                 obs.record_ai_request(&provider.name, route_name, "translation_error", version);
+                obs.record_ai_request_duration(
+                    &provider.name,
+                    route_name,
+                    ai_started.elapsed().as_secs_f64(),
+                );
                 tracing::info!(
                     code = "ai_provider_translation_rejected",
                     request_id = %rid,
@@ -604,6 +982,11 @@ where
                 "ai provider's upstream is not in the registry (validate-vs-build race)"
             );
             obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                ai_started.elapsed().as_secs_f64(),
+            );
             continue;
         };
         let mut outbound = Request::builder()
@@ -648,6 +1031,11 @@ where
                         "ai credential pool exhausted (all keys quarantined)"
                     );
                     obs.record_ai_request(&provider.name, route_name, "pool_exhausted", version);
+                    obs.record_ai_request_duration(
+                        &provider.name,
+                        route_name,
+                        ai_started.elapsed().as_secs_f64(),
+                    );
                     let body = openai_compat::error_body(
                         "all provider API keys are rate-limited; retry later",
                         "pool_exhausted",
@@ -688,6 +1076,11 @@ where
             Ok(r) => r,
             Err(_) => {
                 obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+                obs.record_ai_request_duration(
+                    &provider.name,
+                    route_name,
+                    ai_started.elapsed().as_secs_f64(),
+                );
                 continue;
             }
         };
@@ -696,10 +1089,18 @@ where
         rec.upstream = Some(provider.upstream.clone());
         rec.attempts = attempts;
         let attempt_started = std::time::Instant::now();
-        let upstream_resp = match handle.send(outbound).await {
+        // AI-07: instrument the upstream send with the gen_ai span so
+        // the provider call appears under the GenAI span in the trace
+        // tree (the span's duration covers the provider round-trip).
+        let upstream_resp = match handle.send(outbound).instrument(gen_ai_span.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+                obs.record_ai_request_duration(
+                    &provider.name,
+                    route_name,
+                    ai_started.elapsed().as_secs_f64(),
+                );
                 tracing::warn!(
                     code = "ai_provider_unreachable",
                     request_id = %rid,
@@ -752,6 +1153,11 @@ where
             let value: serde_json::Value = serde_json::from_slice(&err_bytes).unwrap_or_default();
             let parsed = adapter.parse_error(&value);
             obs.record_ai_request(&provider.name, route_name, "provider_error", version);
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                ai_started.elapsed().as_secs_f64(),
+            );
             let body = openai_compat::error_body(
                 &parsed.message,
                 parsed.error_type.as_deref().unwrap_or("api_error"),
@@ -802,7 +1208,75 @@ where
         // response forwards headers (and then chunks) to the client,
         // so no later candidate can replace anything from here on.
         if stream_requested && is_event_stream(&up_parts.headers) {
+            // DW-AI-03: unknown-model pricing policy for streaming.
+            // The check runs BEFORE the stream commits (the failover
+            // commit point is the streaming response return below) so
+            // `fail_closed` can reject with 403 without first
+            // forwarding frames to the client. `alert` logs + meters
+            // here and proceeds; `allow` is silent. The provider call
+            // already happened (the 200 SSE body is open), but
+            // dropping it cancels the upstream request.
+            let pricing = dp.ai_pricing();
+            if !pricing.has_pricing(&target.provider_model) {
+                let policy = gen
+                    .snapshot
+                    .gateway()
+                    .ai
+                    .as_ref()
+                    .and_then(|c| c.unknown_model_policy)
+                    .unwrap_or_default();
+                match policy {
+                    UnknownModelPolicy::FailClosed => {
+                        obs.record_ai_request(
+                            &provider.name,
+                            route_name,
+                            "unknown_model_pricing",
+                            version,
+                        );
+                        obs.record_ai_request_duration(
+                            &provider.name,
+                            route_name,
+                            ai_started.elapsed().as_secs_f64(),
+                        );
+                        tracing::warn!(
+                            code = "ai_unknown_model_pricing",
+                            request_id = %rid,
+                            route = %route_name,
+                            provider = %provider.name,
+                            model = %target.provider_model,
+                            "rejecting stream: model has no pricing entry (fail_closed policy)"
+                        );
+                        return ai_error_response(
+                            StatusCode::FORBIDDEN,
+                            "the model has no pricing entry and the unknown-model policy is fail_closed",
+                            "invalid_request_error",
+                            Some("ai_unknown_model_pricing"),
+                            rid,
+                        );
+                    }
+                    UnknownModelPolicy::Alert => {
+                        obs.record_ai_unknown_pricing(&target.provider_model);
+                        tracing::warn!(
+                            code = "ai_unknown_model_pricing",
+                            request_id = %rid,
+                            route = %route_name,
+                            provider = %provider.name,
+                            model = %target.provider_model,
+                            "model has no pricing entry; streaming with cost 0 (alert policy)"
+                        );
+                    }
+                    UnknownModelPolicy::Allow => {}
+                }
+            }
             obs.record_ai_request(&provider.name, route_name, "success", version);
+            // AI-07: end-to-end AI request latency (streaming — measured
+            // to stream establishment, the failover commit point; the
+            // stream's own duration is dwara_ai_stream_duration_seconds).
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                ai_started.elapsed().as_secs_f64(),
+            );
             tracing::info!(
                 code = "ai_stream_started",
                 request_id = %rid,
@@ -860,6 +1334,22 @@ where
                 team,
                 prompt_log_ctx,
                 Arc::clone(&guardrails),
+                gen_ai_span.clone(),
+                // PERF-02: streaming semantic cache tee. Pass the
+                // cache and prompt text so the stream body can collect
+                // frames and store them at close.
+                if can_cache {
+                    sem_cache.as_ref().map(Arc::clone)
+                } else {
+                    None
+                },
+                chat_req
+                    .messages
+                    .iter()
+                    .map(|m| m.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                chat_req.model.clone(),
             );
             return Response::builder()
                 .status(StatusCode::OK)
@@ -880,6 +1370,11 @@ where
                     // error" cap stay FINAL — the first is a client
                     // problem, the second is already on an error path.)
                     obs.record_ai_request(&provider.name, route_name, "translation_error", version);
+                    obs.record_ai_request_duration(
+                        &provider.name,
+                        route_name,
+                        ai_started.elapsed().as_secs_f64(),
+                    );
                     tracing::warn!(
                         code = "ai_provider_body_over_cap",
                         request_id = %rid,
@@ -895,6 +1390,11 @@ where
             Ok(v) => v,
             Err(e) => {
                 obs.record_ai_request(&provider.name, route_name, "translation_error", version);
+                obs.record_ai_request_duration(
+                    &provider.name,
+                    route_name,
+                    ai_started.elapsed().as_secs_f64(),
+                );
                 tracing::warn!(
                     code = "ai_provider_body_invalid",
                     request_id = %rid,
@@ -918,6 +1418,11 @@ where
             Ok(r) => r,
             Err(e) => {
                 obs.record_ai_request(&provider.name, route_name, "translation_error", version);
+                obs.record_ai_request_duration(
+                    &provider.name,
+                    route_name,
+                    ai_started.elapsed().as_secs_f64(),
+                );
                 tracing::warn!(
                     code = "ai_provider_body_untranslatable",
                     request_id = %rid,
@@ -935,6 +1440,22 @@ where
                 continue;
             }
         };
+        // AI-07: record the response-side gen_ai.* attributes on the
+        // span (provider-reported only; None leaves the field empty).
+        let finish_reasons: Vec<&str> = chat_resp
+            .choices
+            .iter()
+            .map(|c| c.finish_reason.as_gen_ai())
+            .collect();
+        crate::observability::record_gen_ai_response_attrs(
+            &gen_ai_span,
+            chat_resp.model.as_deref(),
+            chat_resp.usage.and_then(|u| u.prompt_tokens),
+            chat_resp.usage.and_then(|u| u.completion_tokens),
+            chat_resp.usage.and_then(|u| u.total_tokens),
+            &finish_reasons,
+            chat_resp.id.as_deref(),
+        );
         if let Some(usage) = chat_resp.usage {
             // Usage attributes to the SERVING provider and canary
             // version (DW-076; the input DW-079 cost metering reads).
@@ -944,12 +1465,21 @@ where
                 usage.completion_tokens.unwrap_or(0),
                 version,
             );
+            // AI-07: per-request token distribution histogram.
+            obs.record_ai_tokens_per_request(
+                &provider.name,
+                &target.provider_model,
+                usage.prompt_tokens.unwrap_or(0),
+                usage.completion_tokens.unwrap_or(0),
+            );
             // DW-079: price the call through the dataplane's compiled
             // pricing table (swapped on reload, so a pricing change
             // applies to the next request with no restart). Unknown
-            // model -> 0 (fail-open).
+            // model -> None (the unknown-model policy is applied
+            // below, DW-AI-03).
             let pricing = dp.ai_pricing();
-            let cost = pricing.cost_micros(&target.provider_model, usage);
+            let cost_opt = pricing.cost_micros(&target.provider_model, usage, false);
+            let cost = cost_opt.unwrap_or(0);
             if cost > 0 {
                 obs.record_ai_cost(&provider.name, &target.provider_model, cost);
             }
@@ -995,7 +1525,69 @@ where
                 });
             }
         }
+        // DW-AI-03: unknown-model pricing policy. After cost
+        // computation, if the serving provider_model has no pricing
+        // entry, apply the configured policy. `fail_closed` rejects
+        // the response with 403 `ai_unknown_model_pricing` (the
+        // provider call already happened, but the unpriced model
+        // cannot serve traffic silently); `alert` logs a WARN and
+        // increments the `dwara_ai_unknown_pricing_total{model}`
+        // metric; `allow` (the default) proceeds with cost 0 as
+        // before.
+        let pricing = dp.ai_pricing();
+        if !pricing.has_pricing(&target.provider_model) {
+            let policy = gen
+                .snapshot
+                .gateway()
+                .ai
+                .as_ref()
+                .and_then(|c| c.unknown_model_policy)
+                .unwrap_or_default();
+            match policy {
+                UnknownModelPolicy::FailClosed => {
+                    obs.record_ai_request(
+                        &provider.name,
+                        route_name,
+                        "unknown_model_pricing",
+                        version,
+                    );
+                    tracing::warn!(
+                        code = "ai_unknown_model_pricing",
+                        request_id = %rid,
+                        route = %route_name,
+                        provider = %provider.name,
+                        model = %target.provider_model,
+                        "rejecting response: model has no pricing entry (fail_closed policy)"
+                    );
+                    return ai_error_response(
+                        StatusCode::FORBIDDEN,
+                        "the model has no pricing entry and the unknown-model policy is fail_closed",
+                        "invalid_request_error",
+                        Some("ai_unknown_model_pricing"),
+                        rid,
+                    );
+                }
+                UnknownModelPolicy::Alert => {
+                    obs.record_ai_unknown_pricing(&target.provider_model);
+                    tracing::warn!(
+                        code = "ai_unknown_model_pricing",
+                        request_id = %rid,
+                        route = %route_name,
+                        provider = %provider.name,
+                        model = %target.provider_model,
+                        "model has no pricing entry; proceeding with cost 0 (alert policy)"
+                    );
+                }
+                UnknownModelPolicy::Allow => {}
+            }
+        }
         obs.record_ai_request(&provider.name, route_name, "success", version);
+        // AI-07: end-to-end AI request latency (non-streaming success).
+        obs.record_ai_request_duration(
+            &provider.name,
+            route_name,
+            ai_started.elapsed().as_secs_f64(),
+        );
         // DW-082: response guardrails. AFTER the response is parsed
         // and BEFORE it is returned to the client. A `block` action
         // returns a 400 (`response_schema_violation` for schema kind,
@@ -1456,6 +2048,34 @@ pub struct AiStreamBody {
     /// DW-082: whether a banned-content cutoff has fired (the tail
     /// is the stream's remainder).
     guardrail_cut_off: bool,
+    /// AI-07: the OTel GenAI semantic-convention span. Response-side
+    /// `gen_ai.*` attributes (usage, finish reasons, response id/model)
+    /// are recorded on this handle at stream close (the values arrive
+    /// across the stream and only the terminal usage is complete).
+    gen_ai_span: tracing::Span,
+    /// PERF-02: the semantic cache for streaming tee. When present,
+    /// forwarded SSE frames are collected into `stream_tee_frames`
+    /// (bounded by `stream_tee_cap_bytes`); at stream close, the
+    /// collected frames are stored in the cache. None when the cache
+    /// is disabled or not configured.
+    stream_tee_cache: Option<std::sync::Arc<crate::ai::semantic_cache::SemanticCacheEngine>>,
+    /// PERF-02: the collected SSE frames for the streaming tee. Each
+    /// forwarded `data: ...\n\n` frame is pushed here; at stream close
+    /// the collected frames are stored in the cache.
+    stream_tee_frames: Vec<String>,
+    /// PERF-02: the byte cap for the streaming tee buffer. When the
+    /// collected frames exceed this cap, the tee is abandoned (the
+    /// stream is still forwarded to the client, but NOT cached — a
+    /// single long stream must not consume unbounded memory).
+    stream_tee_cap_bytes: usize,
+    /// PERF-02: whether the tee has been abandoned (the cap was
+    /// exceeded). When true, no store happens at stream close.
+    stream_tee_abandoned: bool,
+    /// PERF-02: the prompt text for the streaming store (the joined
+    /// message text, the same shape the lookup used).
+    stream_tee_prompt: String,
+    /// PERF-02: the model alias for the streaming store.
+    stream_tee_model: String,
 }
 
 /// DW-081: the streaming capture context carried by AiStreamBody.
@@ -1497,6 +2117,10 @@ impl AiStreamBody {
         team: String,
         prompt_log_ctx: Option<PromptLogCtx>,
         guardrails: std::sync::Arc<crate::ai::guardrails::GuardrailEngine>,
+        gen_ai_span: tracing::Span,
+        stream_tee_cache: Option<std::sync::Arc<crate::ai::semantic_cache::SemanticCacheEngine>>,
+        stream_tee_prompt: String,
+        stream_tee_model: String,
     ) -> Self {
         AiStreamBody {
             inner: Some(inner),
@@ -1527,6 +2151,13 @@ impl AiStreamBody {
             prompt_log_ctx,
             guardrails,
             guardrail_cut_off: false,
+            gen_ai_span,
+            stream_tee_cap_bytes: 1024 * 1024,
+            stream_tee_frames: Vec::new(),
+            stream_tee_abandoned: false,
+            stream_tee_cache,
+            stream_tee_prompt,
+            stream_tee_model,
         }
     }
 
@@ -1549,7 +2180,10 @@ impl AiStreamBody {
                 .saturating_add(usage.completion_tokens.unwrap_or(0))
         });
         let tokens = total.saturating_sub(self.budget_spent_tokens);
-        let cost_total = self.pricing.cost_micros(&self.provider_model, usage);
+        let cost_total = self
+            .pricing
+            .cost_micros(&self.provider_model, usage, false)
+            .unwrap_or(0);
         let cost = cost_total.saturating_sub(self.budget_spent_cost_micros);
         if tokens == 0 && cost == 0 {
             return false;
@@ -1647,6 +2281,56 @@ impl AiStreamBody {
         }
     }
 
+    /// PERF-02: collect forwarded SSE frames into the tee buffer for
+    /// streaming cache storage at close. Each frame is a `data: ...\n\n`
+    /// string. The buffer is bounded by `stream_tee_cap_bytes`: when
+    /// the total collected bytes exceed the cap, the tee is abandoned
+    /// (no store at close — the stream is still forwarded to the
+    /// client unmodified).
+    fn tee_collect(&mut self, frames: &[String]) {
+        if self.stream_tee_cache.is_none() || self.stream_tee_abandoned {
+            return;
+        }
+        let mut total: usize = self.stream_tee_frames.iter().map(|f| f.len()).sum();
+        for f in frames {
+            total += f.len();
+            if total > self.stream_tee_cap_bytes {
+                // Cap exceeded: abandon the tee. The stream is still
+                // forwarded to the client; it just is not cached.
+                self.stream_tee_abandoned = true;
+                self.stream_tee_frames.clear();
+                tracing::info!(
+                    code = "semantic_cache_stream_tee_abandoned",
+                    cap_bytes = self.stream_tee_cap_bytes,
+                    "streaming semantic cache tee abandoned (cap exceeded); stream not cached"
+                );
+                return;
+            }
+            self.stream_tee_frames.push(f.clone());
+        }
+    }
+
+    /// PERF-02: store the collected streaming frames in the semantic
+    /// cache. Called at stream close when the tee was not abandoned
+    /// and the cache is present. Fire-and-forget (spawned): the
+    /// embedding call and HNSW insert happen after the response is
+    /// fully sent.
+    fn tee_store(&self) {
+        if self.stream_tee_abandoned || self.stream_tee_frames.is_empty() {
+            return;
+        }
+        let Some(cache) = &self.stream_tee_cache else {
+            return;
+        };
+        let cache = Arc::clone(cache);
+        let prompt = self.stream_tee_prompt.clone();
+        let model = self.stream_tee_model.clone();
+        let frames = self.stream_tee_frames.clone();
+        tokio::spawn(async move {
+            cache.store_streaming(&prompt, frames, &model).await;
+        });
+    }
+
     /// Terminal metrics: exactly once per stream. Records duration and
     /// the accumulated provider-reported usage (the DW-079 input; the
     /// version label carries the canary attribution, DW-076).
@@ -1675,7 +2359,29 @@ impl AiStreamBody {
                 usage.completion_tokens.unwrap_or(0),
                 &self.gauges.version,
             );
+            // AI-07: per-request token distribution histogram.
+            self.obs.record_ai_tokens_per_request(
+                &self.gauges.provider,
+                &self.provider_model,
+                usage.prompt_tokens.unwrap_or(0),
+                usage.completion_tokens.unwrap_or(0),
+            );
         }
+        // AI-07: record the response-side gen_ai.* attributes on the
+        // span at stream close. The response model is the serving
+        // provider model (streaming providers do not echo a model in a
+        // single frame); the response id is the gateway-synthesized
+        // stream id; finish reasons are not available mid-stream
+        // without reassembling choices (left empty — "where available").
+        crate::observability::record_gen_ai_response_attrs(
+            &self.gen_ai_span,
+            Some(&self.provider_model),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+            &[],
+            Some(self.translator.id()),
+        );
         // DW-079: record the spend dimensions into the analytics
         // store (exactly once per stream). The terminal usage is the
         // accumulated provider-reported total; cost is priced through
@@ -1687,7 +2393,10 @@ impl AiStreamBody {
             let total = usage
                 .total_tokens
                 .unwrap_or_else(|| prompt.saturating_add(completion));
-            let cost = self.pricing.cost_micros(&self.provider_model, usage);
+            let cost = self
+                .pricing
+                .cost_micros(&self.provider_model, usage, false)
+                .unwrap_or(0);
             if cost > 0 {
                 self.obs
                     .record_ai_cost(&self.gauges.provider, &self.provider_model, cost);
@@ -1734,6 +2443,10 @@ impl AiStreamBody {
                 }
             }
         }
+        // PERF-02: store the collected streaming frames in the
+        // semantic cache (fire-and-forget). No-op when the tee was
+        // abandoned or the cache is absent.
+        self.tee_store();
     }
 }
 
@@ -1753,6 +2466,7 @@ impl hyper::body::Body for AiStreamBody {
                 if this.tail.is_empty() && this.translator.is_ended() {
                     // The last terminal frame: close after it is
                     // handed over. The NEXT poll returns None.
+                    this.tee_collect(std::slice::from_ref(&text));
                     this.close();
                 }
                 return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(text)))));
@@ -1798,10 +2512,12 @@ impl hyper::body::Body for AiStreamBody {
                         // (already-joined) then the tail (error +
                         // [DONE]) drains on subsequent polls. The
                         // provider body was dropped by guardrail_tick.
+                        this.tee_collect(&frames);
                         return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(
                             joined,
                         )))));
                     }
+                    this.tee_collect(&frames);
                     return Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(joined)))));
                 }
                 Poll::Ready(Some(Err(e))) => {

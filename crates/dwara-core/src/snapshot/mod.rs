@@ -5991,7 +5991,7 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 rewrite: Some(ref rw),
             } => validate_rewrite(&r.name, rw, &mut issues),
             RouteAction::Mock { ref mock } => validate_mock(&r.name, mock, &mut issues),
-            RouteAction::Ai => {
+            RouteAction::Ai { .. } => {
                 // The action needs the gateway-level alias table; a
                 // route declaring `ai` without one answers 500s for
                 // every request and is an authoring error caught here.
