@@ -29,6 +29,7 @@
 //! `dwara_core::dataplane::proxy_proto` for the frozen policy.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -42,7 +43,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 /// Runtime face of one bound listener: what to do with each accepted
 /// connection.
@@ -91,6 +92,101 @@ pub(crate) struct BoundListener {
     /// header. Hot-reloaded (read from the current snapshot at bind
     /// time; a config reload rebinds with the new value).
     pub(crate) alt_svc: Option<Arc<str>>,
+}
+
+/// In-flight passthrough and L4 splice tracker for graceful drain on
+/// shutdown (#175, REL-04). Passthrough (SNI passthrough TLS) and L4
+/// (TCP splice) connections are raw byte relays: the gateway does NOT
+/// terminate TLS, so it cannot emit a TLS `close_notify` alert (it does
+/// not hold the session keys). The drain is therefore a bounded wait:
+/// in-flight splices are tracked here, and on shutdown the process
+/// waits for them to complete naturally (the peer closes, the idle
+/// timeout fires, or the bidirectional copy returns) up to the shutdown
+/// deadline; whatever remains at the deadline is force-closed by
+/// process exit (the same posture as the HTTP graceful drain).
+///
+/// The tracker is a counter + a [`Notify`]: each spawned splice task
+/// holds a [`SpliceGuard`] that decrements the counter and wakes the
+/// drainer on drop. The counter is process-wide (one tracker shared by
+/// every listener) so the shutdown drain waits for ALL in-flight
+/// passthrough/L4 splices across every listener at once.
+pub(crate) struct SpliceDrain {
+    in_flight: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl SpliceDrain {
+    /// Construct an empty tracker.
+    pub(crate) fn new() -> Self {
+        Self {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Register one in-flight splice and return a guard that
+    /// deregisters it on drop. The guard is moved into the spawned
+    /// splice task; dropping it (task end, panic, abort) decrements the
+    /// counter and wakes a waiting drainer.
+    pub(crate) fn track(&self) -> SpliceGuard {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        SpliceGuard {
+            in_flight: Arc::clone(&self.in_flight),
+            notify: Arc::clone(&self.notify),
+        }
+    }
+
+    /// Current in-flight splice count (for logging/metrics).
+    pub(crate) fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Wait for every in-flight splice to complete, or for `deadline`
+    /// to pass. Returns `true` if all splices drained before the
+    /// deadline, `false` if the deadline expired with splices still
+    /// running (the caller force-closes by exiting the process).
+    pub(crate) async fn drain(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            // Create and enable the Notified future BEFORE checking the
+            // counter: Notify::notify_waiters() only wakes already-
+            // registered interests. If the last splice finishes between
+            // the counter load and notified() creation, the drainer
+            // would miss the wake and block until the deadline.
+            // enable() registers interest without polling; it requires
+            // the future to be pinned.
+            let notify = self.notify.notified();
+            tokio::pin!(notify);
+            notify.as_mut().enable();
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::select! {
+                _ = &mut notify => continue,
+                _ = tokio::time::sleep_until(deadline) => {
+                    return self.in_flight.load(Ordering::SeqCst) == 0;
+                }
+            }
+        }
+    }
+}
+
+/// RAII guard deregistering one in-flight splice from a [`SpliceDrain`]
+/// on drop. Created by [`SpliceDrain::track`]; moved into the spawned
+/// splice task.
+pub(crate) struct SpliceGuard {
+    in_flight: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for SpliceGuard {
+    fn drop(&mut self) {
+        if self.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.notify.notify_waiters();
+        }
+    }
 }
 
 /// Bind one configured listener into its runtime face. Fails startup on
@@ -198,6 +294,7 @@ pub(crate) async fn run_listener(
     mut shutdown: watch::Receiver<()>,
     timeout: Duration,
     hardening: Arc<HttpHardening>,
+    splice_drain: Arc<SpliceDrain>,
 ) {
     loop {
         let (mut stream, peer) = tokio::select! {
@@ -257,9 +354,14 @@ pub(crate) async fn run_listener(
             }
             ListenerMode::Passthrough => {
                 // Consult the CURRENT snapshot: SNI routes reload live.
-                // Passthrough splices are not part of hyper graceful
-                // shutdown; they run until the process exits (documented
-                // limitation: no drain signaling through a raw TLS pipe).
+                // Passthrough splices are tracked in the process-wide
+                // SpliceDrain (#175, REL-04): on shutdown the process
+                // waits for in-flight splices to complete up to the
+                // shutdown deadline before force-closing. The gateway
+                // does NOT terminate TLS, so it cannot emit a TLS
+                // close_notify alert (no session keys); the drain is a
+                // bounded wait for the peer to close or the bidirectional
+                // copy to return.
                 let snapshot = state.snapshot();
                 let tls_cfg = snapshot
                     .gateway()
@@ -269,7 +371,9 @@ pub(crate) async fn run_listener(
                     .and_then(|l| l.tls.clone());
                 let name = bound.name.clone();
                 let dp = Arc::clone(&dp);
+                let _guard = splice_drain.track();
                 tokio::spawn(async move {
+                    let _guard = _guard;
                     match tls_cfg {
                         Some(tls_cfg) => {
                             // The dataplane owns endpoint selection: the
@@ -311,17 +415,20 @@ pub(crate) async fn run_listener(
                 // snapshot for the gateway (SNI route resolution +
                 // endpoint fallback); the dispatcher picks through
                 // the CURRENT generation's balancers so L4 picks
-                // follow config reloads. L4 splices are not part of
-                // hyper graceful shutdown (same limitation as
-                // passthrough: no drain signaling through a raw byte
-                // pipe).
+                // follow config reloads. L4 splices are tracked in the
+                // process-wide SpliceDrain (#175, REL-04): on shutdown
+                // the process waits for in-flight splices to complete
+                // up to the shutdown deadline before force-closing
+                // (same bounded-wait drain as passthrough).
                 let snapshot = state.snapshot();
                 let gateway = snapshot.gateway().clone();
                 let name = bound.name.clone();
                 let dp = Arc::clone(&dp);
                 let config = Arc::clone(config);
                 let sni_routes = sni_routes.clone();
+                let _guard = splice_drain.track();
                 tokio::spawn(async move {
+                    let _guard = _guard;
                     let dispatcher =
                         dwara_core::dataplane::l4::L4Dispatcher::new((*config).clone(), sni_routes);
                     let started = std::time::Instant::now();
@@ -426,12 +533,14 @@ pub(crate) async fn run_listener(
     // Backlog flush (DW-006): connections that completed the TCP
     // handshake into the kernel backlog but were not yet accepted would
     // be reset when the listener drops. Accept what is queued and serve
-    // it; passthrough backlog connections are closed (documented
-    // limitation: shutdown-time passthrough splices are not established).
-    // The socket stays behind the shared Arc (the supervisor may respawn
-    // this loop), so instead of into_std the flush drains it with
-    // poll_accept under a no-op waker: that is a non-blocking accept
-    // with identical semantics to the old std nonblocking loop.
+    // it; passthrough backlog connections are closed (a shutdown-time
+    // passthrough splice would have no peer to relay to and no drain
+    // budget to wait in — the in-flight drain tracks only splices
+    // established before the shutdown signal, #175). The socket stays
+    // behind the shared Arc (the supervisor may respawn this loop), so
+    // instead of into_std the flush drains it with poll_accept under a
+    // no-op waker: that is a non-blocking accept with identical
+    // semantics to the old std nonblocking loop.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -450,8 +559,8 @@ pub(crate) async fn run_listener(
                         match &bound.mode {
                             ListenerMode::Passthrough => {}
                             // DW-103: L4 backlog connections are closed
-                            // (same limitation as passthrough: shutdown-
-                            // time splices are not established).
+                            // (same reason as passthrough: a shutdown-
+                            // time splice has no drain budget — #175).
                             #[cfg(feature = "l4")]
                             ListenerMode::L4 { .. } => {}
                             ListenerMode::Cleartext => {
@@ -652,6 +761,7 @@ pub(crate) async fn run_listener_supervised(
     shutdown: watch::Receiver<()>,
     timeout: Duration,
     hardening: Arc<HttpHardening>,
+    splice_drain: Arc<SpliceDrain>,
 ) {
     dwara_core::supervision::supervise_panics(
         "listener",
@@ -667,6 +777,7 @@ pub(crate) async fn run_listener_supervised(
                 shutdown.clone(),
                 timeout,
                 Arc::clone(&hardening),
+                Arc::clone(&splice_drain),
             ))
         },
     )

@@ -95,12 +95,18 @@ The spawned child is started in its own process group
 process's foreground group (e.g. Ctrl-C in a terminal) does not cascade
 to the new gateway.
 
-## What is NOT drained
+## Splice drain
 
-Passthrough splices share the same documented limitation as SIGTERM: a
-raw TLS byte splice has no drain signaling, so in-flight passthrough
-connections on the old process run until it exits. Everything else
-(HTTP/1, HTTP/2, h2c) drains via hyper graceful shutdown.
+Passthrough and L4 splices drain the same way on a zero-downtime
+upgrade as on SIGTERM (#175, REL-04): in-flight byte relays are
+tracked in the process-wide `SpliceDrain`, and the old process waits
+for them to complete up to the shutdown deadline before force-closing.
+The gateway does not terminate TLS in passthrough mode, so it cannot
+emit a TLS `close_notify` alert (no session keys); the drain is a
+bounded wait for the peer to close or the bidirectional copy to
+return. Everything else (HTTP/1, HTTP/2, h2c) drains via hyper
+graceful shutdown, concurrent with the splice drain over the same
+budget.
 
 ## Test coverage
 

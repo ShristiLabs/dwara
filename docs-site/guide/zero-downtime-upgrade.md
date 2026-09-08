@@ -102,9 +102,12 @@ to the upgrade signal.
 
 ## Limitations
 
-- **Passthrough splices** are not drained (the same documented
-  limitation as SIGTERM): a raw TLS byte splice has no drain signaling.
-  In-flight passthrough connections run until the old process exits.
+- **Passthrough and L4 splices** drain over the shutdown budget (the
+  same as SIGTERM): the old process waits for in-flight byte relays to
+  complete up to `DWARA_SHUTDOWN_TIMEOUT_SECS`. The gateway does not
+  terminate TLS in passthrough mode, so it cannot emit a TLS
+  `close_notify` alert; whatever remains at the deadline is
+  force-closed.
 - The **listener bind set** is fixed at startup (address/port). An
   upgrade inherits the same listeners; changing the bind set still
   requires a full restart.
