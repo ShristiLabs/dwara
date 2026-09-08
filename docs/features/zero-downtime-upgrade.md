@@ -127,3 +127,13 @@ budget.
 Logs are redirected to a temp FILE (not a pipe) because the upgrade
 child inherits the old process's stdout FD — a pipe would never reach
 EOF (the child holds the write end) and `read_to_end` would deadlock.
+
+## Related: in-process reload
+
+This suite covers the binary SIGUSR2 upgrade path. The in-process
+config hot-reload seam (the `compile_and_publish` + `refresh` path
+that SIGHUP / file-watch drives, with no process swap) is pinned for
+zero-dropped traffic by the chaos suite's
+`zero_dropped_across_in_process_config_reload_e2e` test — see
+[Resilience: chaos / e2e resilience suite](./resilience.md#chaos--e2e-resilience-suite)
+(#173, REL-02).

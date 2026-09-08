@@ -57,6 +57,8 @@ Feature areas written up so far (M1-M6 complete):
   analysis.
 - [Resilience](./features/resilience.md) — passive/active health,
   retries, circuit breaking, load shedding, and how the layers compose.
+  Now also covers the chaos / e2e fault-injection suite and its
+  separate scheduled CI job (#173, REL-02).
 - [Rate limiting](./features/rate-limiting.md) — GCRA, stacked
   windows, bounded key-space eviction.
 - [Quotas and metering](./features/quotas.md) — per-consumer daily
