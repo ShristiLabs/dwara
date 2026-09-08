@@ -75,9 +75,13 @@
 //! Shutdown: SIGTERM/SIGINT stop accepting on every listener, each
 //! listener flushes its kernel backlog (established connections are
 //! served), HTTP connections drain via hyper graceful shutdown, and
-//! passthrough splices are NOT drained (documented limitation: no drain
-//! signaling through a raw TLS pipe; they run until the process exits);
-//! whatever remains at the deadline is force-closed by process exit.
+//! in-flight passthrough and L4 splices drain via the process-wide
+//! SpliceDrain (#175, REL-04): the process waits for in-flight byte
+//! relays to complete up to the shutdown deadline. The gateway does NOT
+//! terminate TLS in passthrough mode, so it cannot emit a TLS
+//! close_notify alert (no session keys); the drain is a bounded wait for
+//! the peer to close or the bidirectional copy to return. Whatever
+//! remains at the deadline is force-closed by process exit.
 //! With the `otlp` feature, the exporter flush is the LAST bounded step
 //! before exit (see the DWARA_OTLP_ENDPOINT bullet).
 //!
@@ -125,7 +129,7 @@ use dwara_core::snapshot::ConfigState;
 use dwara_core::store::{sync_consumers_from_config, StateStore};
 use dwara_core::tls::{self, TlsTermination};
 use hyper_util::server::graceful::GracefulShutdown;
-use listeners::{bind_listener, run_listener_supervised, ListenerMode};
+use listeners::{bind_listener, run_listener_supervised, ListenerMode, SpliceDrain};
 use reload::{refresh_tls_states, reload, spawn_file_watcher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
@@ -583,6 +587,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let graceful = Arc::new(GracefulShutdown::new());
+    // #175 (REL-04): process-wide tracker for in-flight passthrough and
+    // L4 byte-relay splices. Each listener registers every accepted
+    // passthrough/L4 splice here; on shutdown the drain waits for them
+    // to complete up to the shutdown deadline (the HTTP graceful drain
+    // runs concurrently over the same budget).
+    let splice_drain = Arc::new(SpliceDrain::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let mut sighup = signal(SignalKind::hangup())?;
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -1158,6 +1168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let graceful = Arc::clone(&graceful);
         let rx = shutdown_rx.clone();
         let hardening = Arc::clone(&hardening);
+        let splice_drain = Arc::clone(&splice_drain);
         // #120: each accept task runs under panic supervision — a
         // panicked accept loop is respawned (bounded) on the same bound
         // socket instead of silently killing its listener.
@@ -1170,6 +1181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             rx,
             timeout,
             hardening,
+            splice_drain,
         )));
     }
 
@@ -1226,6 +1238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tracing::info!(
         live_connections = graceful.count(),
+        in_flight_splices = splice_drain.in_flight(),
         timeout_s = timeout.as_secs(),
         "graceful shutdown"
     );
@@ -1257,17 +1270,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Final drain within the shutdown budget; whatever is left when the
     // deadline passes is force-closed by process exit. The deadline is
     // measured from the shutdown signal (the accept tasks already spent
-    // part of it flushing their backlogs).
+    // part of it flushing their backlogs). The HTTP graceful drain
+    // (hyper) and the passthrough/L4 splice drain (#175, REL-04) run
+    // concurrently over the same budget: both must complete before the
+    // deadline for a clean exit; whichever is still running at the
+    // deadline is force-closed by process exit.
     let deadline = shutdown_deadline;
     let graceful =
         Arc::try_unwrap(graceful).expect("all listener tasks joined; no Arc clones remain");
-    let drain = graceful.shutdown();
-    let drained = tokio::select! {
-        _ = drain => true,
-        _ = tokio::time::sleep_until(deadline) => false,
-    };
+    let hyper_drain = graceful.shutdown();
+    let splice_drain_for_drain = Arc::clone(&splice_drain);
+    let drained = tokio::time::timeout_at(deadline, async {
+        let splice_fut = splice_drain_for_drain.drain(deadline);
+        let (_, splices_drained) = tokio::join!(hyper_drain, splice_fut);
+        splices_drained
+    })
+    .await
+    .unwrap_or_default();
     if !drained {
-        tracing::warn!("shutdown timeout with connection(s) still draining; forcing exit");
+        tracing::warn!(
+            in_flight_splices = splice_drain.in_flight(),
+            "shutdown timeout with connection(s) still draining; forcing exit"
+        );
     } else {
         tracing::info!("drained, exiting");
     }

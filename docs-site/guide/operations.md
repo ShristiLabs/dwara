@@ -66,8 +66,12 @@ listeners never serve them (they don't speak HTTP).
 `SIGTERM`/`SIGINT` (graceful-shutdown signals) stop accepting new connections, drain live
 connections (including ones still in the kernel [accept backlog](https://en.wikipedia.org/wiki/Network_socket#Listen) (the kernel's queue of not-yet-accepted connections)) within
 `DWARA_SHUTDOWN_TIMEOUT_SECS` (default 10), then exit 0. Anything still
-draining past the budget is force-closed. TLS-passthrough splices are
-not drained on shutdown — they run until the process exits.
+draining past the budget is force-closed. In-flight TLS-passthrough and
+L4 splices drain over the same budget: the process waits for the byte
+relays to complete (the peer closes or the bidirectional copy returns)
+up to the deadline. The gateway does not terminate TLS in passthrough
+mode, so it cannot emit a TLS `close_notify` alert; the drain is a
+bounded wait, and whatever remains at the deadline is force-closed.
 
 ## Accept-loop supervision
 

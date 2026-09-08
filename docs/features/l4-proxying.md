@@ -103,9 +103,11 @@ error (the binary was not built with L4 support) -- mirroring the h3
 pattern. The accept loop spawns one task per accepted connection: it
 consults the CURRENT snapshot for the gateway (SNI route resolution +
 endpoint fallback), constructs an `L4Dispatcher`, and drives
-`dispatch`. L4 splices are not part of hyper graceful shutdown (the
-same limitation as passthrough: no drain signaling through a raw byte
-pipe).
+`dispatch`. L4 splices are tracked in the process-wide `SpliceDrain`
+(#175, REL-04): on shutdown the process waits for in-flight splices to
+complete up to the shutdown deadline before force-closing (the same
+bounded-wait drain as passthrough; the gateway does not terminate TLS,
+so it cannot emit a `close_notify` alert).
 
 ## Configuration
 

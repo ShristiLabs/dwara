@@ -922,3 +922,561 @@ consumers:
     assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
     assert!(text.ends_with("hello-anon"), "resp: {text}");
 }
+
+/// Minimal TLS backend that DELAYS its response by `delay` before
+/// answering HTTP/1.1 with a fixed body. Used by the passthrough drain
+/// test (#175): the delay keeps the splice in-flight when SIGTERM
+/// arrives, so the drain must keep the relay alive long enough for the
+/// backend's response to flow back through the gateway to the client.
+async fn spawn_delayed_backend(
+    cert: CertFiles,
+    delay: Duration,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let certs = <rustls::pki_types::CertificateDer<'_> as rustls::pki_types::pem::PemObject>::pem_file_iter(&cert.cert)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key =
+        <rustls::pki_types::PrivateKeyDer<'_> as rustls::pki_types::pem::PemObject>::pem_file_iter(
+            &cert.key,
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(stream).await {
+                    // Read the request (drain the client's HTTP head).
+                    let mut buf = [0u8; 256];
+                    let _ = tokio::io::AsyncReadExt::read(&mut tls, &mut buf).await;
+                    // Hold the connection open past the SIGTERM so the
+                    // splice is in-flight when the drain begins.
+                    tokio::time::sleep(delay).await;
+                    let _ = tls.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\ndrained",
+                    )
+                    .await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
+fn read_stdout(stdout: &mut Option<std::process::ChildStdout>) -> String {
+    let mut out = String::new();
+    if let Some(mut s) = stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut s, &mut out);
+    }
+    out
+}
+
+/// #175 (REL-04): an in-flight passthrough splice must be drained (not
+/// dropped) on SIGTERM. The backend delays its response past the
+/// SIGTERM; the gateway's splice drain keeps the relay alive so the
+/// response still arrives at the client and the process exits 0.
+#[tokio::test]
+async fn passthrough_splice_drains_on_sigterm() {
+    let dir = temp_dir("drain");
+    let cert = write_cert(&dir, "back.example.com");
+    let (back_port, _backend) = spawn_delayed_backend(cert, Duration::from_millis(400)).await;
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: pass-drain
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: passthrough
+      sni_routes:
+        - server_names: [back.example.com]
+          upstream: backends
+upstreams:
+  - name: backends
+    endpoints:
+      - address: 127.0.0.1
+        port: {back_port}
+allow_empty_routes: true
+"
+        ),
+    )
+    .unwrap();
+    // Generous drain budget so the 400 ms backend delay is well inside
+    // the window; the test asserts the splice completes (not that the
+    // timeout fires). DWARA_ACCESS_LOG_SAMPLE=0 keeps the piped stdout
+    // from filling its kernel buffer mid-test (the JSON subscriber
+    // writes to stdout).
+    let (mut guard, mut stdout) = start_server_captured_with_env(
+        &config,
+        &[
+            ("DWARA_SHUTDOWN_TIMEOUT_SECS", "5"),
+            ("DWARA_ACCESS_LOG_SAMPLE", "0.0"),
+        ],
+    );
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // Establish the passthrough splice and write the request so the
+    // backend is mid-response when SIGTERM arrives.
+    let conn = tls_connector("back.example.com", &["http/1.1"]);
+    let tcp = TcpStream::connect(&addr).await.expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("back.example.com".to_string())
+        .unwrap()
+        .to_owned();
+    let mut tls = conn.connect(name, tcp).await.expect("tls handshake");
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    // SIGTERM while the splice is in-flight (the backend has not yet
+    // responded).
+    let pid = guard.0.id();
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill -TERM");
+    assert!(status.success(), "kill -TERM failed");
+
+    // The response must still arrive through the drained splice.
+    let mut resp = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(10), tls.read_to_end(&mut resp)).await;
+    assert!(
+        read.is_ok(),
+        "passthrough response did not arrive within 10s (splice was dropped, not drained)"
+    );
+    let text = String::from_utf8_lossy(&resp);
+    assert!(
+        text.ends_with("drained"),
+        "expected drained passthrough response, got: {text}"
+    );
+
+    // Close the client side so the bidirectional splice completes
+    // naturally (copy_bidirectional waits for both directions to EOF;
+    // holding the client open would keep the splice alive past the
+    // drain budget). The response already arriving proves the relay
+    // was kept alive through the SIGTERM.
+    drop(tls);
+
+    // The process must exit 0 (clean drain, not a forced exit).
+    let exit = wait_child_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(exit.success(), "expected clean exit 0, got {exit}");
+    let out = read_stdout(&mut stdout);
+    assert!(
+        out.contains("drained, exiting"),
+        "missing drain log in:\n{out}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Start dwara with piped stdout (the JSON subscriber writes to stdout)
+/// and extra env (for the drain test).
+fn start_server_captured_with_env(
+    config_path: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> (ServerGuard, Option<std::process::ChildStdout>) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dwara"));
+    cmd.env("DWARA_CONFIG", config_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn dwara");
+    let stdout = child.stdout.take();
+    (ServerGuard(child), stdout)
+}
+
+fn wait_child_exit(child: &mut std::process::Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(status) => return status,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("dwara did not exit within {:?}", timeout)
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// Minimal TLS backend that accepts the connection, drains the client's
+/// HTTP head, then HOLDS the connection open for `hold` without ever
+/// writing a response or closing. Used by the drain-timeout force-close
+/// test (#175): the splice is still in-flight when the shutdown deadline
+/// expires, so the process must force-close it and exit on time rather
+/// than waiting for the backend.
+async fn spawn_holding_backend(
+    cert: CertFiles,
+    hold: Duration,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let certs = <rustls::pki_types::CertificateDer<'_> as rustls::pki_types::pem::PemObject>::pem_file_iter(&cert.cert)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key =
+        <rustls::pki_types::PrivateKeyDer<'_> as rustls::pki_types::pem::PemObject>::pem_file_iter(
+            &cert.key,
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(stream).await {
+                    // Drain the client's HTTP head so the request is
+                    // fully delivered before the hold begins.
+                    let mut buf = [0u8; 256];
+                    let _ = tokio::io::AsyncReadExt::read(&mut tls, &mut buf).await;
+                    // Hold the connection open without responding: the
+                    // splice stays in-flight past the shutdown deadline.
+                    tokio::time::sleep(hold).await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
+/// #175 (REL-04): with NO in-flight splices, SIGTERM must drain
+/// immediately and exit 0 well inside the shutdown budget. The
+/// SpliceDrain counter is zero, so `drain` returns at once and the
+/// process exits without waiting for the deadline.
+#[tokio::test]
+async fn passthrough_shutdown_immediate_with_no_splices() {
+    let dir = temp_dir("drain-immediate");
+    let cert = write_cert(&dir, "back.example.com");
+    // The backend is never contacted (no client connects), but the
+    // config still needs a valid upstream target.
+    let (back_port, _backend) = spawn_backend(cert, "backend").await;
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: pass-immediate
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: passthrough
+      sni_routes:
+        - server_names: [back.example.com]
+          upstream: backends
+upstreams:
+  - name: backends
+    endpoints:
+      - address: 127.0.0.1
+        port: {back_port}
+allow_empty_routes: true
+"
+        ),
+    )
+    .unwrap();
+    // Generous budget so the test proves the drain does NOT wait for
+    // it: with zero in-flight splices the exit must be near-instant.
+    let (mut guard, mut stdout) = start_server_captured_with_env(
+        &config,
+        &[
+            ("DWARA_SHUTDOWN_TIMEOUT_SECS", "30"),
+            ("DWARA_ACCESS_LOG_SAMPLE", "0.0"),
+        ],
+    );
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // No connection is established: the splice tracker is empty.
+    let pid = guard.0.id();
+    let start = Instant::now();
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill -TERM");
+    assert!(status.success(), "kill -TERM failed");
+
+    // Must exit 0 quickly -- well under the 30s budget. A 5s ceiling is
+    // generous for backlog flush + drain on a loaded CI box while still
+    // proving the drain did not wait for the deadline.
+    let exit = wait_child_exit(&mut guard.0, Duration::from_secs(5));
+    assert!(exit.success(), "expected clean exit 0, got {exit}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "shutdown took {:?} with no in-flight splices (drain waited for the deadline)",
+        start.elapsed()
+    );
+    let out = read_stdout(&mut stdout);
+    assert!(
+        out.contains("drained, exiting"),
+        "missing drain log in:\n{out}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #175 (REL-04): when the shutdown deadline expires with an in-flight
+/// splice that never completes, the process must force-close it and
+/// exit on time (not hang waiting for the backend). The holding backend
+/// keeps the splice alive past the deadline; the drain budget is small
+/// so the force-close happens promptly.
+#[tokio::test]
+async fn passthrough_splice_drain_timeout_force_closes() {
+    let dir = temp_dir("drain-timeout");
+    let cert = write_cert(&dir, "back.example.com");
+    // Hold the connection far longer than the shutdown budget so the
+    // splice is provably still in-flight when the deadline expires.
+    let (back_port, _backend) = spawn_holding_backend(cert, Duration::from_secs(60)).await;
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: pass-timeout
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: passthrough
+      sni_routes:
+        - server_names: [back.example.com]
+          upstream: backends
+upstreams:
+  - name: backends
+    endpoints:
+      - address: 127.0.0.1
+        port: {back_port}
+allow_empty_routes: true
+"
+        ),
+    )
+    .unwrap();
+    // Small drain budget: the splice cannot complete in 2s (the
+    // backend holds for 60s), so the deadline must fire and force-close.
+    // stdout is not read here: the force-close log at the exact deadline
+    // is a select! race (see the assertion rationale below), so the
+    // reliable signal is exit timing + client read termination.
+    let (mut guard, _stdout) = start_server_captured_with_env(
+        &config,
+        &[
+            ("DWARA_SHUTDOWN_TIMEOUT_SECS", "2"),
+            ("DWARA_ACCESS_LOG_SAMPLE", "0.0"),
+        ],
+    );
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // Establish the passthrough splice and deliver the request so the
+    // backend is in its hold loop when SIGTERM arrives.
+    let conn = tls_connector("back.example.com", &["http/1.1"]);
+    let tcp = TcpStream::connect(&addr).await.expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("back.example.com".to_string())
+        .unwrap()
+        .to_owned();
+    let mut tls = conn.connect(name, tcp).await.expect("tls handshake");
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    // SIGTERM while the splice is in-flight (backend is holding).
+    let pid = guard.0.id();
+    let start = Instant::now();
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill -TERM");
+    assert!(status.success(), "kill -TERM failed");
+
+    // The process must exit on time (force-close at the 2s deadline,
+    // not hang for the backend's 60s hold). A 10s ceiling covers the
+    // backlog flush + 2s drain + margin on a loaded box. The reliable
+    // signal is the EXIT TIMING: the splice never completes (the
+    // backend holds for 60s), so the process must exit at the ~2s
+    // deadline, not before (which would mean the splice drained) and
+    // not after (which would mean the drain hung). The "forcing exit"
+    // vs "drained, exiting" log at the exact deadline is a select!
+    // race (both branches fire at the deadline) and is NOT a reliable
+    // assertion, so the test relies on timing + the client read
+    // terminating + no response body.
+    let exit = wait_child_exit(&mut guard.0, Duration::from_secs(10));
+    assert!(
+        exit.success(),
+        "expected exit 0 after force-close, got {exit}"
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "shutdown took {elapsed:?}; the drain deadline did not force-close the in-flight splice"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1500),
+        "shutdown took {elapsed:?}; the in-flight splice was drained before the 2s deadline (force-close path not exercised)"
+    );
+
+    // The client side of the force-closed splice must terminate: the
+    // read returns (with an error/empty) rather than blocking for the
+    // backend's 60s hold.
+    let mut resp = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut resp)).await;
+    assert!(
+        read.is_ok(),
+        "force-closed splice should terminate the client read within 5s"
+    );
+    // No response body was ever written by the holding backend.
+    assert!(
+        !String::from_utf8_lossy(&resp).contains("HTTP/1.1 200"),
+        "force-close must not deliver the held-back response: {resp:?}"
+    );
+    drop(tls);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #175 (REL-04): several concurrent in-flight passthrough splices must
+/// ALL drain within the shutdown budget. Each delayed backend responds
+/// after the SIGTERM; the process-wide SpliceDrain counter tracks every
+/// splice and the drain waits for all of them before exiting 0.
+#[tokio::test]
+async fn passthrough_multiple_splices_all_drain() {
+    let dir = temp_dir("drain-multi");
+    let cert = write_cert(&dir, "back.example.com");
+    // One shared delayed backend serves every splice; each connection
+    // is handled in its own task, so all splices are in-flight at once.
+    let (back_port, _backend) = spawn_delayed_backend(cert, Duration::from_millis(400)).await;
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let config = dir.join("dwara.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "\
+listeners:
+  - name: pass-multi
+    address: 127.0.0.1
+    port: {port}
+    protocol: https
+    tls:
+      mode: passthrough
+      sni_routes:
+        - server_names: [back.example.com]
+          upstream: backends
+upstreams:
+  - name: backends
+    endpoints:
+      - address: 127.0.0.1
+        port: {back_port}
+allow_empty_routes: true
+"
+        ),
+    )
+    .unwrap();
+    let (mut guard, mut stdout) = start_server_captured_with_env(
+        &config,
+        &[
+            ("DWARA_SHUTDOWN_TIMEOUT_SECS", "5"),
+            ("DWARA_ACCESS_LOG_SAMPLE", "0.0"),
+        ],
+    );
+    wait_tcp(&addr, Instant::now() + Duration::from_secs(30));
+
+    // Open N concurrent passthrough splices and deliver each request so
+    // all are in-flight when SIGTERM arrives.
+    const N: usize = 4;
+    let conn = tls_connector("back.example.com", &["http/1.1"]);
+    let mut streams = Vec::with_capacity(N);
+    for _ in 0..N {
+        let tcp = TcpStream::connect(&addr).await.expect("tcp connect");
+        let name = rustls::pki_types::ServerName::try_from("back.example.com".to_string())
+            .unwrap()
+            .to_owned();
+        let mut tls = conn.connect(name, tcp).await.expect("tls handshake");
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        streams.push(tls);
+    }
+
+    // SIGTERM while every splice is in-flight (backends are mid-delay).
+    let pid = guard.0.id();
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill -TERM");
+    assert!(status.success(), "kill -TERM failed");
+
+    // Every drained splice must deliver its response through the relay.
+    let mut all_ok = true;
+    for mut tls in streams {
+        let mut resp = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(10), tls.read_to_end(&mut resp)).await;
+        if read.is_err() || !String::from_utf8_lossy(&resp).ends_with("drained") {
+            all_ok = false;
+        }
+        drop(tls);
+    }
+    assert!(
+        all_ok,
+        "at least one of {N} concurrent splices was dropped, not drained"
+    );
+
+    // The process must exit 0 (all splices drained within the budget).
+    let exit = wait_child_exit(&mut guard.0, Duration::from_secs(15));
+    assert!(exit.success(), "expected clean exit 0, got {exit}");
+    let out = read_stdout(&mut stdout);
+    assert!(
+        out.contains("drained, exiting"),
+        "missing drain log in:\n{out}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

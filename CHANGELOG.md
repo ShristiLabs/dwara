@@ -2100,6 +2100,26 @@ the project follows semantic versioning once 1.0 is reached.
   `connect_ms` accounting are unchanged; active health probes keep the
   system resolver (a background, infrequent path). No new config
   fields or dependencies; the defaults are not operator-tunable.
+- Passthrough and L4 graceful drain on shutdown (#175, REL-04): on
+  `SIGTERM`/`SIGINT` (and the drain phase of a `SIGUSR2` zero-downtime
+  upgrade) the process now drains in-flight passthrough (SNI passthrough
+  TLS) and L4 (TCP splice) byte relays instead of letting them run until
+  process exit. A process-wide `SpliceDrain` tracker
+  (`crates/dwara-bin/src/listeners.rs`) counts in-flight splices via an
+  `AtomicUsize` + `Notify`; each spawned passthrough/L4 splice task
+  holds a `SpliceGuard` that decrements the counter and wakes the
+  drainer on drop. The drain runs concurrently with the hyper HTTP
+  graceful shutdown over the same `DWARA_SHUTDOWN_TIMEOUT_SECS` budget
+  (measured from the shutdown signal): both must complete before the
+  deadline for a clean exit, and whichever is still running at the
+  deadline is force-closed by process exit. The gateway does not
+  terminate TLS in passthrough mode, so it cannot emit a TLS
+  `close_notify` alert (it holds no session keys); the drain is
+  therefore a bounded wait for the peer to close or the bidirectional
+  copy to return, not a TLS-level shutdown. No new config; the budget
+  reuses the existing `DWARA_SHUTDOWN_TIMEOUT_SECS` env var. The
+  previous behavior (passthrough/L4 splices not drained, run until
+  process exit) is replaced.
 
 ### Fixed
 
