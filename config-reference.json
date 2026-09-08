@@ -5379,7 +5379,7 @@
       "additionalProperties": false
     },
     "RetryConfig": {
-      "description": "Upstream retry knobs (DW-014). All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n  (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n  may be retried; an over-cap body streams without retry. Buffering is\n  opt-in: the default (0) buffers only empty bodies, so the default\n  proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n  attempt; a response body that dies mid-stream is never retried (its\n  failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n  retry budget (`budget_percent`).",
+      "description": "Upstream retry knobs (DW-014). All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n  (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n  may be retried; an over-cap body streams without retry. Buffering is\n  opt-in: the default (0) buffers only empty bodies, so the default\n  proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n  attempt; a response body that dies mid-stream is never retried (its\n  failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n  retry budget (`budget_percent`).\n- `total_deadline_ms` (REL-01) caps the wall-clock time from the first\n  attempt to the last, INCLUDING backoff delays between attempts. Absent\n  leaves the cross-attempt budget unbounded (the v1 default, kept for\n  backwards compatibility). When set, a retry whose backoff would cross\n  the deadline is aborted and the last response/error is returned to the\n  client; the per-attempt `read_ms` timeout still bounds each individual\n  attempt. Standard in Envoy and NGINX.",
       "type": "object",
       "properties": {
         "attempts": {
@@ -5450,6 +5450,15 @@
         "retry_transport": {
           "description": "Retry on transport errors (connect timeout/refusal/reset/framing)\nand per-attempt read timeouts (default true).",
           "type": "boolean"
+        },
+        "total_deadline_ms": {
+          "description": "Cross-attempt total retry deadline in milliseconds (REL-01): caps\nthe wall-clock time from the first attempt to the last, INCLUDING\nbackoff delays between attempts. Absent leaves the cross-attempt\nbudget unbounded (the v1 default, kept for backwards\ncompatibility). When set, a retry whose backoff would cross the\ndeadline is aborted and the last response/error is returned to the\nclient; the per-attempt `read_ms` timeout still bounds each\nindividual attempt. Must be in (0, `MAX_RETRY_TOTAL_DEADLINE_MS`];\n`0` is rejected (omit the field for unbounded).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false

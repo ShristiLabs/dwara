@@ -5544,6 +5544,11 @@ where
     // (replay is available). Over-cap bodies that couldn't be buffered
     // disable hedging.
     let hedge_enabled = hedge_eligible && replay.is_some();
+    // REL-01: the cross-attempt total deadline caps wall-clock time from
+    // the first attempt to the last, INCLUDING backoff delays. Captured
+    // once before the loop so every retry decision measures from the same
+    // origin; `None` (the default) leaves the budget unbounded.
+    let retry_loop_started = std::time::Instant::now();
     loop {
         // Breaker admission (DW-015) precedes every attempt: endpoint
         // pick, dial, and any remaining retries. Checked per iteration so
@@ -5697,26 +5702,49 @@ where
                 }
                 // Retry when the upstream answered with a retryable status
                 // (headers resolved — the attempt is otherwise final).
-                if may_retry
-                    && rp.retries_status(resp.status().as_u16())
-                    && budget.try_reserve_retry(rp.budget_percent)
-                {
-                    obs.record_retry(handle.name());
-                    tracing::warn!(
-                        code = "upstream_retry",
-                        request_id = %rid,
-                        upstream = handle.name(),
-                        attempt = done_tries,
-                        status = resp.status().as_u16(),
-                        "retryable upstream status; retrying"
-                    );
-                    tokio::time::sleep(crate::resilience::retries::jitter_delay(
+                if may_retry && rp.retries_status(resp.status().as_u16()) {
+                    let delay = crate::resilience::retries::jitter_delay(
                         rp.backoff_base_ms,
                         rp.backoff_cap_ms,
                         done_tries,
-                    ))
-                    .await;
-                    continue;
+                    );
+                    // REL-01: the cross-attempt total deadline gates the
+                    // retry and clamps the backoff sleep so the loop never
+                    // sleeps past the deadline. The budget reservation is
+                    // charged only when a retry will actually run (a
+                    // deadline-aborted retry charges nothing).
+                    match crate::resilience::retries::retry_sleep_within_total(
+                        rp.total_deadline,
+                        retry_loop_started,
+                        delay,
+                    ) {
+                        Some(sleep) => {
+                            if budget.try_reserve_retry(rp.budget_percent) {
+                                obs.record_retry(handle.name());
+                                tracing::warn!(
+                                    code = "upstream_retry",
+                                    request_id = %rid,
+                                    upstream = handle.name(),
+                                    attempt = done_tries,
+                                    status = resp.status().as_u16(),
+                                    "retryable upstream status; retrying"
+                                );
+                                tokio::time::sleep(sleep).await;
+                                continue;
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                code = "retry_total_deadline_exceeded",
+                                request_id = %rid,
+                                upstream = handle.name(),
+                                attempt = done_tries,
+                                status = resp.status().as_u16(),
+                                "cross-attempt total deadline exceeded; \
+                                 not retrying"
+                            );
+                        }
+                    }
                 }
                 // DW-089: feed the final (non-retried) upstream
                 // outcome to the adaptive controller for every
@@ -5804,26 +5832,45 @@ where
                 }
                 // Retry on transport-class failures (connect/read timeout,
                 // refusal, reset, framing) when `retry_transport` is on.
-                if may_retry
-                    && rp.retry_transport
-                    && transport_retryable(&err)
-                    && budget.try_reserve_retry(rp.budget_percent)
-                {
-                    obs.record_retry(handle.name());
-                    tracing::warn!(
-                        code = "upstream_retry",
-                        request_id = %rid,
-                        upstream = handle.name(),
-                        attempt = done_tries,
-                        "upstream attempt failed: {err}; retrying"
-                    );
-                    tokio::time::sleep(crate::resilience::retries::jitter_delay(
+                if may_retry && rp.retry_transport && transport_retryable(&err) {
+                    let delay = crate::resilience::retries::jitter_delay(
                         rp.backoff_base_ms,
                         rp.backoff_cap_ms,
                         done_tries,
-                    ))
-                    .await;
-                    continue;
+                    );
+                    // REL-01: same cross-attempt total deadline gate as the
+                    // status branch — a deadline-aborted retry charges no
+                    // budget and falls through to error classification.
+                    match crate::resilience::retries::retry_sleep_within_total(
+                        rp.total_deadline,
+                        retry_loop_started,
+                        delay,
+                    ) {
+                        Some(sleep) => {
+                            if budget.try_reserve_retry(rp.budget_percent) {
+                                obs.record_retry(handle.name());
+                                tracing::warn!(
+                                    code = "upstream_retry",
+                                    request_id = %rid,
+                                    upstream = handle.name(),
+                                    attempt = done_tries,
+                                    "upstream attempt failed: {err}; retrying"
+                                );
+                                tokio::time::sleep(sleep).await;
+                                continue;
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                code = "retry_total_deadline_exceeded",
+                                request_id = %rid,
+                                upstream = handle.name(),
+                                attempt = done_tries,
+                                "cross-attempt total deadline exceeded; \
+                                 not retrying"
+                            );
+                        }
+                    }
                 }
                 // Server-side detail stays in the log (classification only
                 // reaches the client — no hyper error text leaks).

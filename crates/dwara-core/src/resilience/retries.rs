@@ -36,10 +36,16 @@
 //!
 //! # Total latency
 //!
-//! There is no cross-attempt total deadline in v1: worst case the retry
-//! loop adds up to `attempts * (read_ms + backoff_cap_ms)` of latency to a
-//! single request (each attempt pays its own read timeout plus at most the
-//! backoff cap before it).
+//! The cross-attempt total deadline (`total_deadline`, REL-01) caps the
+//! wall-clock time from the first attempt to the last, INCLUDING backoff
+//! delays between attempts. When set, a retry whose backoff would cross
+//! the deadline is aborted and the last response/error is returned to the
+//! client; the per-attempt `read_ms` timeout still bounds each individual
+//! attempt. Absent (the default) leaves the cross-attempt budget
+//! unbounded — worst case the retry loop adds up to
+//! `attempts * (read_ms + backoff_cap_ms)` of latency to a single request
+//! (each attempt pays its own read timeout plus at most the backoff cap
+//! before it). Standard in Envoy and NGINX.
 
 use std::collections::VecDeque;
 // DW-025: loom-model-checked Mutex under the `loom` dev feature.
@@ -124,6 +130,10 @@ pub struct RetryParams {
     pub buffer_max_bytes: u64,
     /// Request hedging parameters (DW-063).
     pub hedge: HedgeParams,
+    /// Cross-attempt total retry deadline (REL-01): caps the wall-clock
+    /// time from the first attempt to the last, INCLUDING backoff delays.
+    /// `None` leaves the cross-attempt budget unbounded (the default).
+    pub total_deadline: Option<Duration>,
 }
 
 impl Default for RetryParams {
@@ -138,6 +148,7 @@ impl Default for RetryParams {
             budget_percent: 10,
             buffer_max_bytes: 0,
             hedge: HedgeParams::default(),
+            total_deadline: None,
         }
     }
 }
@@ -158,6 +169,7 @@ impl RetryParams {
                 budget_percent: c.budget_percent,
                 buffer_max_bytes: c.buffer_max_bytes,
                 hedge: HedgeParams::from_config(c.hedge.as_ref()),
+                total_deadline: c.total_deadline_ms.map(Duration::from_millis),
             },
         }
     }
@@ -335,4 +347,42 @@ pub fn backoff_with_full_jitter(base_ms: u64, cap_ms: u64, retry: u32, rand: u64
 /// [`backoff_with_full_jitter`] drawing from the process-local rng.
 pub fn jitter_delay(base_ms: u64, cap_ms: u64, retry: u32) -> Duration {
     backoff_with_full_jitter(base_ms, cap_ms, retry, jitter_rng())
+}
+
+/// Returns the sleep duration to use for a retry under an optional
+/// cross-attempt total deadline (REL-01), or `None` when the deadline has
+/// been exhausted and the retry must be aborted. When the deadline is set
+/// and the full `delay` would cross it, the sleep is clamped to the
+/// remaining slice so the loop never sleeps past the deadline. Pure in
+/// `elapsed` so tests can pin the clock; the production wrapper is
+/// [`retry_sleep_within_total`].
+///
+/// - `total_deadline == None`: the full `delay` (unbounded, the v1 default).
+/// - `elapsed >= total_deadline`: `None` (abort the retry).
+/// - otherwise: `min(delay, total_deadline - elapsed)`.
+pub fn retry_sleep_under_total_deadline(
+    total_deadline: Option<Duration>,
+    elapsed: Duration,
+    delay: Duration,
+) -> Option<Duration> {
+    match total_deadline {
+        None => Some(delay),
+        Some(deadline) => {
+            if elapsed >= deadline {
+                None
+            } else {
+                Some(delay.min(deadline - elapsed))
+            }
+        }
+    }
+}
+
+/// [`retry_sleep_under_total_deadline`] reading the wall clock from
+/// `started` (the instant captured at the first attempt of the retry loop).
+pub fn retry_sleep_within_total(
+    total_deadline: Option<Duration>,
+    started: std::time::Instant,
+    delay: Duration,
+) -> Option<Duration> {
+    retry_sleep_under_total_deadline(total_deadline, started.elapsed(), delay)
 }

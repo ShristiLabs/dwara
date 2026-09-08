@@ -1265,3 +1265,484 @@ async fn failing_upstream_ejects_while_budget_caps_retries() {
         "budget exceeded under ejection pressure: {retries} retries"
     );
 }
+
+// --- 14. cross-attempt total retry deadline (REL-01) ------------------------
+//
+// `retries.total_deadline_ms` caps the wall-clock time from the first
+// attempt to the last, INCLUDING backoff delays. When the cap is hit a
+// retryable response/error is returned to the client instead of retried.
+// These integration tests exercise the cap through the real proxy retry
+// loop (both the status-based and transport-error branches); the pure
+// clamping math is pinned in tests/unit/retries.rs.
+//
+// The retry budget charges retries against the rolling window of ALL
+// proxied requests: at 100% budget a SINGLE request only earns one
+// retry (the (retries+1)*100 <= 100*totals invariant with totals=1).
+// To make `max_attempts`/`total_deadline` the binding cap (not the
+// budget), each test first drives `WARMUP` successful requests through
+// the gateway to grow the budget denominator, then sends the test
+// request whose retries are observed.
+
+const REL01_WARMUP: u64 = 12;
+
+/// A retries block with an explicit total deadline spliced in.
+fn retries_yaml_with_deadline(
+    attempts: u32,
+    budget_percent: u32,
+    backoff_base_ms: u64,
+    backoff_cap_ms: u64,
+    total_deadline_ms: u64,
+) -> String {
+    format!(
+        "  retries:\n\
+         \x20   attempts: {attempts}\n\
+         \x20   retry_post: false\n\
+         \x20   backoff_base_ms: {backoff_base_ms}\n\
+         \x20   backoff_cap_ms: {backoff_cap_ms}\n\
+         \x20   budget_percent: {budget_percent}\n\
+         \x20   buffer_max_bytes: 65536\n\
+         \x20   total_deadline_ms: {total_deadline_ms}\n"
+    )
+}
+
+/// A retries block with NO total deadline (the v1 default: unbounded).
+fn retries_yaml_no_deadline(
+    attempts: u32,
+    budget_percent: u32,
+    backoff_base_ms: u64,
+    backoff_cap_ms: u64,
+) -> String {
+    format!(
+        "  retries:\n\
+         \x20   attempts: {attempts}\n\
+         \x20   retry_post: false\n\
+         \x20   backoff_base_ms: {backoff_base_ms}\n\
+         \x20   backoff_cap_ms: {backoff_cap_ms}\n\
+         \x20   budget_percent: {budget_percent}\n\
+         \x20   buffer_max_bytes: 65536\n"
+    )
+}
+
+/// Backend that serves 200 for the first `warmup` requests (immediate)
+/// and 503 after a `fail_delay` for every request thereafter. The
+/// counter covers ALL hits so the test can subtract the warm-up count.
+async fn spawn_warmup_then_fail_backend(
+    warmup: u64,
+    fail_delay: Duration,
+) -> (u16, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let _ = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |req: Request<Incoming>| {
+                            let counter = Arc::clone(&counter);
+                            let fail_delay = fail_delay;
+                            async move {
+                                let _ = req.into_body().collect().await;
+                                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                                if n <= warmup {
+                                    return Ok::<_, Infallible>(Response::new(Full::new(
+                                        Bytes::from_static(b"ok"),
+                                    )));
+                                }
+                                tokio::time::sleep(fail_delay).await;
+                                Ok(Response::builder()
+                                    .status(503)
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap())
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    (port, count)
+}
+
+/// Backend that serves a full 200 response for the first `warmup`
+/// accepts, then accepts, drains the request head, waits `close_delay`,
+/// and drops the connection WITHOUT responding: the proxy reads EOF
+/// before headers and classifies it as a transport-class error
+/// (retryable when `retry_transport` is on). The counter covers ALL
+/// accepts so the test can subtract the warm-up count.
+async fn spawn_warmup_then_close_backend(
+    warmup: u64,
+    close_delay: Duration,
+) -> (u16, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= warmup {
+                // Full 200 response for the warm-up cohort.
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+                continue;
+            }
+            tokio::spawn(async move {
+                // Drain the request head (until end of headers), then
+                // hold for `close_delay` and drop without responding.
+                let mut buf = [0u8; 4096];
+                let mut got = Vec::new();
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            got.extend_from_slice(&buf[..n]);
+                            if got.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(close_delay).await;
+            });
+        }
+    });
+    (port, count)
+}
+
+/// Like `spawn_warmup_then_fail_backend` but also records the wall-clock
+/// arrival instant of every hit (for measuring inter-attempt gaps). The
+/// first `warmup` arrivals are 200s; the rest are 503s after `fail_delay`.
+async fn spawn_warmup_timing_backend(
+    warmup: u64,
+    fail_delay: Duration,
+) -> (u16, Arc<Mutex<Vec<Instant>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ts: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&ts);
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move {
+                let _ = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |req: Request<Incoming>| {
+                            let shared = Arc::clone(&shared);
+                            let fail_delay = fail_delay;
+                            async move {
+                                let _ = req.into_body().collect().await;
+                                let n = {
+                                    let mut seq = shared.lock().unwrap();
+                                    let len = seq.len() as u64 + 1;
+                                    seq.push(Instant::now());
+                                    len
+                                };
+                                if n <= warmup {
+                                    return Ok::<_, Infallible>(Response::new(Full::new(
+                                        Bytes::from_static(b"ok"),
+                                    )));
+                                }
+                                tokio::time::sleep(fail_delay).await;
+                                Ok(Response::builder()
+                                    .status(503)
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap())
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    (port, ts)
+}
+
+/// Drive `n` warm-up GETs through the gateway so the retry budget
+/// denominator grows and `max_attempts`/`total_deadline` (not the
+/// budget) becomes the binding retry cap.
+async fn warmup_requests(gp: u16, n: u64) {
+    let client = h1_client();
+    for _ in 0..n {
+        let resp = client
+            .request(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri(gp, "/api/x"))
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_of(resp).await.0, StatusCode::OK, "warm-up succeeds");
+    }
+}
+
+/// A deadline smaller than two attempt round-trips aborts the status
+/// retry loop before `max_attempts` is reached: the backend 503s after a
+/// 30 ms delay, so two attempts already cross the 50 ms cap and the
+/// third retry decision aborts (returns the last 503). The budget is
+/// pre-loaded with warm-ups so `attempts: 10` (not the budget) would
+/// otherwise drive 11 hits -- the deadline is the only thing that stops
+/// it at 2.
+#[tokio::test]
+async fn total_deadline_aborts_status_retries_before_max_attempts() {
+    let (port, hits) =
+        spawn_warmup_then_fail_backend(REL01_WARMUP, Duration::from_millis(30)).await;
+    let dp = dataplane_from(&gateway_yaml(
+        port,
+        &retries_yaml_with_deadline(10, 100, 500, 500, 50),
+    ));
+    let gp = spawn_gateway(Arc::clone(&dp)).await;
+    warmup_requests(gp, REL01_WARMUP).await;
+    let warmup_hits = hits.load(Ordering::SeqCst);
+    assert_eq!(warmup_hits, REL01_WARMUP, "warm-ups each hit once");
+
+    let started = Instant::now();
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri(gp, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = body_of(resp).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "last 503 returned");
+    assert!(&body[..].is_empty(), "503 body passed through");
+    // Two attempts (60 ms of backend delay) cross the 50 ms cap; the
+    // third retry decision aborts. Deterministic regardless of jitter
+    // because each attempt alone takes 30 ms.
+    let test_hits = hits.load(Ordering::SeqCst) - REL01_WARMUP;
+    assert_eq!(test_hits, 2, "deadline aborted before max_attempts (10)");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "wall-clock bounded by the deadline, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Absent `total_deadline_ms` (the v1 default) leaves the cross-attempt
+/// budget unbounded: retries proceed exactly up to `attempts` and the
+/// behavior is unchanged from the pre-REL-01 gateway. The budget is
+/// pre-loaded so `attempts` is the binding cap.
+#[tokio::test]
+async fn total_deadline_absent_retries_up_to_max_attempts() {
+    let (port, hits) = spawn_warmup_then_fail_backend(REL01_WARMUP, Duration::ZERO).await;
+    let dp = dataplane_from(&gateway_yaml(port, &retries_yaml_no_deadline(2, 100, 1, 2)));
+    let gp = spawn_gateway(Arc::clone(&dp)).await;
+    warmup_requests(gp, REL01_WARMUP).await;
+
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri(gp, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _body) = body_of(resp).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let test_hits = hits.load(Ordering::SeqCst) - REL01_WARMUP;
+    assert_eq!(
+        test_hits, 3,
+        "attempts(2) + 1 backend hits, no deadline cap"
+    );
+}
+
+/// A generous deadline never engages: `max_attempts` is the binding cap
+/// and the retry count is exactly as before REL-01 (identical to the
+/// absent-deadline baseline above).
+#[tokio::test]
+async fn total_deadline_generous_lets_max_attempts_win() {
+    let (port, hits) = spawn_warmup_then_fail_backend(REL01_WARMUP, Duration::ZERO).await;
+    let dp = dataplane_from(&gateway_yaml(
+        port,
+        &retries_yaml_with_deadline(2, 100, 1, 2, 600_000),
+    ));
+    let gp = spawn_gateway(Arc::clone(&dp)).await;
+    warmup_requests(gp, REL01_WARMUP).await;
+
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri(gp, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _body) = body_of(resp).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let test_hits = hits.load(Ordering::SeqCst) - REL01_WARMUP;
+    assert_eq!(
+        test_hits, 3,
+        "max_attempts wins when the deadline is generous"
+    );
+}
+
+/// When the configured backoff is LARGER than the remaining deadline,
+/// the sleep is clamped to the remaining slice: every inter-attempt gap
+/// stays well under the backoff cap (proving the clamp) and the loop
+/// aborts before `max_attempts`. Uses the timing backend so the gaps are
+/// observable; warm-ups pre-load the budget so multiple retries run.
+#[tokio::test]
+async fn total_deadline_clamps_backoff_sleep_to_remaining_budget() {
+    let (port, ts) = spawn_warmup_timing_backend(REL01_WARMUP, Duration::ZERO).await;
+    // backoff cap 2000 ms but total deadline 80 ms: without clamping the
+    // first retry would sleep up to 2 s; with clamping every gap is under
+    // the deadline. attempts 10 with a pre-loaded budget would otherwise
+    // drive 11 hits -- the deadline stops it well short.
+    let dp = dataplane_from(&gateway_yaml(
+        port,
+        &retries_yaml_with_deadline(10, 100, 2000, 2000, 80),
+    ));
+    let gp = spawn_gateway(Arc::clone(&dp)).await;
+    warmup_requests(gp, REL01_WARMUP).await;
+
+    let started = Instant::now();
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri(gp, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _body) = body_of(resp).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let all = ts.lock().unwrap().clone();
+    // Strip the warm-up arrivals (the first REL01_WARMUP single-hit 200s).
+    let hits = &all[REL01_WARMUP as usize..];
+    assert!(
+        hits.len() >= 2,
+        "at least one retry ran before the deadline"
+    );
+    assert!(
+        hits.len() < 11,
+        "deadline aborted before max_attempts (10): {} hits",
+        hits.len()
+    );
+    // Every inter-attempt gap is bounded by the clamped sleep (<= the
+    // 80 ms deadline) plus the fast 503 round-trip; well under the 2 s
+    // backoff cap, proving the clamp.
+    for pair in hits.chunks(2) {
+        if pair.len() == 2 {
+            let gap = pair[1].duration_since(pair[0]);
+            assert!(
+                gap < Duration::from_millis(250),
+                "inter-attempt gap {gap:?} exceeded the clamped budget \
+                 (backoff cap is 2000 ms)"
+            );
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "wall-clock bounded by the deadline, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The transport-error retry branch is gated by the same total deadline:
+/// a backend that accepts then closes (EOF before headers) is retried,
+/// but the deadline aborts the loop before `max_attempts`. Each failing
+/// attempt takes 20 ms (the close delay), so 11 attempts would take
+/// 220 ms -- well past the 50 ms cap, guaranteeing the deadline fires
+/// first. Warm-ups pre-load the budget so the deadline (not the budget)
+/// is the binding cap.
+#[tokio::test]
+async fn total_deadline_aborts_transport_retries_before_max_attempts() {
+    let (port, accepts) =
+        spawn_warmup_then_close_backend(REL01_WARMUP, Duration::from_millis(20)).await;
+    // retry_transport defaults to true; no retry_post needed for GET.
+    let dp = dataplane_from(&gateway_yaml(
+        port,
+        &retries_yaml_with_deadline(10, 100, 500, 500, 50),
+    ));
+    let gp = spawn_gateway(Arc::clone(&dp)).await;
+    warmup_requests(gp, REL01_WARMUP).await;
+    let warmup_accepts = accepts.load(Ordering::SeqCst);
+    assert_eq!(warmup_accepts, REL01_WARMUP, "warm-ups each accepted once");
+
+    let started = Instant::now();
+    let resp = h1_client()
+        .request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri(gp, "/api/x"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _body) = body_of(resp).await;
+    // Transport-class errors classify as 502 (upstream_unavailable).
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let attempts = accepts.load(Ordering::SeqCst) - REL01_WARMUP;
+    assert!(
+        attempts >= 2,
+        "at least one transport retry ran: {attempts} accepts"
+    );
+    assert!(
+        attempts < 11,
+        "deadline aborted transport retries before max_attempts (10): \
+         {attempts} accepts"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "wall-clock bounded by the deadline, took {:?}",
+        started.elapsed()
+    );
+}
+
+// --- 14b. REL-01 validation --------------------------------------------------
+
+#[test]
+fn validation_rejects_total_deadline_ms_zero() {
+    // 0 is rejected (omit the field for unbounded).
+    assert_eq!(
+        validated("  retries:\n    attempts: 1\n    total_deadline_ms: 0\n"),
+        vec!["retries.total_deadline_ms"]
+    );
+}
+
+#[test]
+fn validation_rejects_total_deadline_ms_over_ceiling() {
+    // One over the 600_000 ms ceiling is rejected.
+    assert_eq!(
+        validated("  retries:\n    attempts: 1\n    total_deadline_ms: 600001\n"),
+        vec!["retries.total_deadline_ms"]
+    );
+}
+
+#[test]
+fn validation_accepts_total_deadline_ms_at_and_below_ceiling() {
+    // The ceiling itself and a small positive value both pass clean.
+    assert!(validated("  retries:\n    attempts: 1\n    total_deadline_ms: 600000\n").is_empty());
+    assert!(validated("  retries:\n    attempts: 1\n    total_deadline_ms: 1\n").is_empty());
+}

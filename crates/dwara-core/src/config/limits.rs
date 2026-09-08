@@ -32,6 +32,15 @@ pub const MAX_HAPPY_EYEBALLS_MS: u64 = 600_000;
 /// Validation bound on `retries.attempts` (mirrored in `snapshot::validate`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 
+/// Validation ceiling on `retries.total_deadline_ms` (REL-01): the
+/// cross-attempt wall-clock cap including backoff delays. Ten minutes is
+/// the longest a single request's retry storm should extend tail latency
+/// (beyond that the per-upstream circuit breaker and timeouts are the
+/// right tool, not a wider retry deadline). Absent means unbounded (the
+/// v1 default, kept for backwards compatibility); a present `0` is
+/// rejected at validation (omit the field for unbounded).
+pub const MAX_RETRY_TOTAL_DEADLINE_MS: u64 = 600_000;
+
 /// Validation bounds on `retries.hedge.hedge_after_ms` (DW-063): the
 /// tail-latency threshold before a speculative copy is sent. Below 1 ms
 /// is pointless (the copy would race immediately); above 5 minutes the

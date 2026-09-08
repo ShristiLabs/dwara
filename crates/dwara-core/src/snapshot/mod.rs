@@ -6604,6 +6604,29 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     "budget_percent must be in (0, 100]",
                 ));
             }
+            // REL-01: cross-attempt total retry deadline (wall-clock cap
+            // including backoff). 0 is rejected (omit the field for
+            // unbounded); a present value must be within the bound.
+            if let Some(td) = r.total_deadline_ms {
+                if td == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "retries.total_deadline_ms",
+                        "total_deadline_ms must be > 0 (omit the field for unbounded)",
+                    ));
+                } else if td > crate::config::limits::MAX_RETRY_TOTAL_DEADLINE_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "retries.total_deadline_ms",
+                        format!(
+                            "total_deadline_ms must be at most {}",
+                            crate::config::limits::MAX_RETRY_TOTAL_DEADLINE_MS
+                        ),
+                    ));
+                }
+            }
             for (i, status) in r.retry_statuses.iter().enumerate() {
                 if !(400..=599).contains(status) {
                     issues.push(issue(

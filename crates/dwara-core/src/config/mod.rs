@@ -5102,6 +5102,13 @@ pub struct OAuth2Mtls {
 ///   failure is reported to passive health instead).
 /// - Every retried attempt is charged against the upstream's rolling-window
 ///   retry budget (`budget_percent`).
+/// - `total_deadline_ms` (REL-01) caps the wall-clock time from the first
+///   attempt to the last, INCLUDING backoff delays between attempts. Absent
+///   leaves the cross-attempt budget unbounded (the v1 default, kept for
+///   backwards compatibility). When set, a retry whose backoff would cross
+///   the deadline is aborted and the last response/error is returned to the
+///   client; the per-attempt `read_ms` timeout still bounds each individual
+///   attempt. Standard in Envoy and NGINX.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
@@ -5152,6 +5159,17 @@ pub struct RetryConfig {
     /// sent per request (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hedge: Option<HedgeConfig>,
+    /// Cross-attempt total retry deadline in milliseconds (REL-01): caps
+    /// the wall-clock time from the first attempt to the last, INCLUDING
+    /// backoff delays between attempts. Absent leaves the cross-attempt
+    /// budget unbounded (the v1 default, kept for backwards
+    /// compatibility). When set, a retry whose backoff would cross the
+    /// deadline is aborted and the last response/error is returned to the
+    /// client; the per-attempt `read_ms` timeout still bounds each
+    /// individual attempt. Must be in (0, `MAX_RETRY_TOTAL_DEADLINE_MS`];
+    /// `0` is rejected (omit the field for unbounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_deadline_ms: Option<u64>,
 }
 
 impl Default for RetryConfig {
@@ -5166,6 +5184,7 @@ impl Default for RetryConfig {
             budget_percent: default_retry_budget_percent(),
             buffer_max_bytes: 0,
             hedge: None,
+            total_deadline_ms: None,
         }
     }
 }
