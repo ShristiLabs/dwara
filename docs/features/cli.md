@@ -168,3 +168,63 @@ feature rot on the default-off h3 feature; h3 throughput is not in the
 nightly macro-gate (no TLS/QUIC listener rig). `scripts/bench-macro.sh`
 gains `BENCH_PROTOCOL`/`BENCH_WORKLOAD`/`BENCH_JSON` passthrough vars
 for single-workload runs.
+
+## The soak harness
+
+`scripts/soak.sh` (#174, REL-03) is the sustained-load counterpart to
+the macro regression harness: it boots the real `dwara` gateway against
+an in-process echo upstream (`dwara-loadgen --echo-only`) using the same
+spawn/readiness pattern as `scripts/bench-regression.sh` (one cleartext
+listener that speaks both HTTP/1.1 and h2c, one route to the echo
+upstream, `/healthz` readiness probe), then drives SUSTAINED load in
+fixed-width windows rather than a single timed run. After each window
+it samples the gateway's RSS (KB, via `ps -o rss=`) and records the
+window's p99 from the loadgen `JSON:` line, emitting one `SAMPLE:`
+line per window on stdout (human progress goes to stderr, keeping
+stdout a clean stream for the gate).
+
+`scripts/soak.py` is the assertion gate: it reads the `SAMPLE:` stream
+and fails (exit 1) when either ceiling is breached:
+
+- **RSS ceiling** — max sampled RSS > `SOAK_RSS_CEILING_KB` (default
+  262144 = 256MB), the memory-leak bar.
+- **p99 drift** — the late-window p99 grew beyond `SOAK_P99_DRIFT`
+  (default 0.50 = 50%) relative to the early-window baseline. Drift is
+  the fractional growth from the EARLY baseline (mean p99 of the first
+  quarter of windows) to the LATE tail (mean p99 of the last quarter);
+  the windowed mean sheds single-sample noise and the 50% default is
+  generous for shared CI runners but catches the steady growth a leak
+  causes.
+- **Errors** — a window with `errors > 0` is a hard failure regardless
+  of metrics (the soak did not run cleanly, so RSS/latency numbers are
+  not trustworthy).
+
+Absolute RSS and latency are machine- and load-dependent; the ceilings
+are operational bars, not regression baselines — the like-for-like
+comparison is the macro regression gate's job
+(`scripts/bench-regression.py`). Everything is configurable via env
+vars: `SOAK_DURATION` (total seconds, default 600), `SOAK_RATE` (target
+rps, 0 = unbounded, default 1000), `SOAK_CONNECTIONS` (default 50),
+`SOAK_SAMPLE_SECS` (per-window seconds, default 30),
+`SOAK_RSS_CEILING_KB`, `SOAK_P99_DRIFT`, plus `SOAK_GATEWAY_PORT`,
+`SOAK_ECHO_PORT`, `SOAK_PROTOCOL` (h1|h2), and `SOAK_WORKLOAD`
+(throughput|pool-reuse|streaming).
+
+### CI posture
+
+The soak runs in a SEPARATE CI job
+(`.github/workflows/soak.yml`) that is scheduled nightly (06:13 UTC)
+and manually dispatchable only — no push/pull_request triggers, because
+sustained load for several minutes is slower and noisier than the
+per-PR gate (`ci.yml`) and the macro regression gate
+(`bench-nightly.yml`): a slow memory leak or latency drift only shows
+under sustained load. The schedule is offset from `bench-nightly`
+(04:17 UTC) and `chaos` (Wed 05:11 UTC) so the three never contend for
+runners. The nightly CI duration stays short (10 min) to bound runner
+cost; the 24h soak referenced in the issue runs on DEDICATED HOSTS via
+dispatch with `SOAK_DURATION=86400` (and a raised workflow timeout and
+RSS ceiling) ahead of a release — the assertions are the same either
+way. This is the ASSERTING soak, complementary to `bench.yml`'s
+separate manual-only 24h soak (#127, which runs
+`scripts/bench-macro.sh 86400 100` with NO assertions) and distinct
+from the chaos suite (#173).
