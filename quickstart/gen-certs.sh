@@ -1,5 +1,5 @@
 #!/bin/sh
-# Quickstart TLS material (DW-026): self-signed certificate for localhost
+# Quickstart TLS material: self-signed certificate for localhost
 # plus a client CA and client certificate for the admin API's mTLS.
 # The gateway terminates TLS with the server pair; curl then trusts it
 # via --cacert. The client CA + client cert let curl authenticate to the

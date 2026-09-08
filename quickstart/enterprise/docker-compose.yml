@@ -1,4 +1,4 @@
-# Enterprise quickstart (DW-066): the CP/DP split topology on one
+# Enterprise quickstart: the CP/DP split topology on one
 # docker network -- a controller broadcasting config generations to a
 # fleet of two edges/gateways proxying the demo nginx upstream.
 #

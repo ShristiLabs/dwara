@@ -1,4 +1,4 @@
-# Enterprise quickstart: the controller's source of truth (DW-066).
+# Enterprise quickstart: the controller's source of truth.
 # The controller watches this file and, on every change, compiles it,
 # publishes a new generation, and broadcasts it to every connected edge;
 # each edge writes the received config to its local file, and its

@@ -79,166 +79,165 @@ and a brief explanation. The features are grouped by category:
 
 ### Core gateway (proxying and routing)
 
-- **TLS termination** (multi-SNI certificates) and mTLS client auth
-  (DW-019): the HTTPS listener terminates TLS with `server.{crt,key}`,
+- **TLS termination** (multi-SNI certificates) and mTLS client auth: the HTTPS listener terminates TLS with `server.{crt,key}`,
   requires client certificates chained to `client-ca.crt`, and has an
   SNI-scoped certificate pair for `api.example.com`.
 - **Plaintext HTTP listener**: a second listener on :8080 for local
   dev and health checks.
-- **Routing**: exact, prefix, and regex path matching (DW-010), plus
+- **Routing**: exact, prefix, and regex path matching, plus
   host, method, header, query, and cookie criteria.
 - **Route actions**: `proxy` (with `strip_prefix` rewrite), `redirect`
   (301), `respond` (direct 200), `mock` (synthetic response with
-  delay), and `ai` (provider translation, DW-075).
-- **Path rewrites**: `strip_prefix` (DW-010).
+  delay), and `ai` (provider translation).
+- **Path rewrites**: `strip_prefix`.
 - **PROXY protocol** support (v1/v2 header acceptance).
 
 ### Traffic policy and resilience
 
 - **Load balancing**: `round_robin`, `least_requests`, `random`,
-  `ip_hash`, and `peak_ewma` (DW-090 latency-aware, Finagle-style).
-- **Passive health checks** / outlier detection (DW-012): consecutive
+  `ip_hash`, and `peak_ewma` (latency-aware, Finagle-style).
+- **Passive health checks** / outlier detection: consecutive
   failures + failure-ratio ejection with half-open recovery.
-- **Active health checks** (DW-013): HTTP/TCP probes with jitter,
+- **Active health checks**: HTTP/TCP probes with jitter,
   failure/success thresholds.
 - **Retries** with exponential backoff, retry budgets, and retry on
-  transport errors + specific statuses (DW-014).
-- **Request hedging** (DW-063): speculative hedge copies after a
+  transport errors + specific statuses.
+- **Request hedging**: speculative hedge copies after a
   latency threshold, with body buffering for replay.
-- **Circuit breaking** (DW-015): consecutive-failure + error-ratio
+- **Circuit breaking**: consecutive-failure + error-ratio
   breaker with half-open probes.
-- **Connection caps** and max-pending (DW-015).
-- **Slow start** (DW-011): gradual endpoint ramp-up.
-- **Load shedding** with priority classes (DW-016): gateway-wide
+- **Connection caps** and max-pending.
+- **Slow start**: gradual endpoint ramp-up.
+- **Load shedding** with priority classes: gateway-wide
   concurrency cap with high-priority reserved allowance.
-- **Admission queues** with backpressure (DW-053): bounded queue with
+- **Admission queues** with backpressure: bounded queue with
   per-priority splitting and queue timeout.
-- **Load-shed dry-run** (DW-041): monitor mode for the concurrency cap.
-- **Rate limiting**: single-window GCRA (DW-017) and stacked
+- **Load-shed dry-run**: monitor mode for the concurrency cap.
+- **Rate limiting**: single-window GCRA  and stacked
   per-second/per-minute windows with burst capacity.
-- **Adaptive rate limiting** (DW-089): EWMA-driven tuning based on
+- **Adaptive rate limiting**: EWMA-driven tuning based on
   upstream error rate and latency.
-- **Anomaly scoring** (DW-090): statistical detection of abusive
+- **Anomaly scoring**: statistical detection of abusive
   request patterns (header entropy, path depth, body size, etc.).
-- **Traffic splitting** / canary (DW-040): weighted split across
-  upstreams with auto-canary analysis (DW-091).
-- **Sticky sessions** (DW-040): cookie affinity.
-- **Shadow traffic mirroring** (DW-062): fire-and-forget duplicate
+- **Traffic splitting** / canary: weighted split across
+  upstreams with auto-canary analysis.
+- **Sticky sessions**: cookie affinity.
+- **Shadow traffic mirroring**: fire-and-forget duplicate
   requests to a mirror upstream.
-- **Fault injection** (DW-062): percentage-based delays and aborts for
+- **Fault injection**: percentage-based delays and aborts for
   chaos testing.
-- **DNS-based dynamic upstream discovery** (DW-042): background DNS
+- **DNS-based dynamic upstream discovery**: background DNS
   resolution with fail-open.
 - **Happy eyeballs** (RFC 8305): inter-connection delay for dual-stack
   endpoints.
 
 ### Security and authentication
 
-- **API key** authentication (DW-019).
-- **JWT via JWKS** (DW-019): JWKS endpoint verification with
+- **API key** authentication.
+- **JWT via JWKS**: JWKS endpoint verification with
   issuer/audience validation, algorithm allowlist, key refresh, and
   retired-key grace.
-- **HMAC request signing** (DW-036): per-request signature
+- **HMAC request signing**: per-request signature
   verification with clock-skew window.
-- **mTLS client-certificate** authentication (DW-019): fingerprint
+- **mTLS client-certificate** authentication: fingerprint
   and subject-CN matching.
-- **mTLS consumer mapping** (DW-035): gateway-level certificate-to-
+- **mTLS consumer mapping**: gateway-level certificate-to-
   consumer table by subject CN.
-- **mTLS forward headers** (DW-035): `X-Client-Cert-*` headers
+- **mTLS forward headers**: `X-Client-Cert-*` headers
   forwarded to upstream (spoofing prevention).
-- **OIDC providers** (DW-034): token introspection (RFC 7662) with
+- **OIDC providers**: token introspection (RFC 7662) with
   discovery, caching, and fail-open/fail-closed posture.
-- **OAuth2 client-credentials** proxying (DW-035): the gateway
+- **OAuth2 client-credentials** proxying: the gateway
   obtains an access token and forwards it to the upstream.
-- **Authorization chain** (DW-020): consumer > route > service >
+- **Authorization chain**: consumer > route > service >
   listener > global precedence, with allowed/denied consumers and
   groups, required scopes, and IP ACL.
 - **IP ACL**: allow/deny lists with default policy.
-- **WAF-lite** heuristic filtering (DW-051): SQLi/XSS/path-traversal
+- **WAF-lite** heuristic filtering: SQLi/XSS/path-traversal
   pattern matching with custom patterns and dry-run mode.
-- **Request validation** (DW-047): JSON-schema body validation before
+- **Request validation**: JSON-schema body validation before
   the route action.
-- **Response field masking** (DW-029): fail-closed redaction of
+- **Response field masking**: fail-closed redaction of
   response fields by JSON pointer, per consumer group.
-- **Security headers** (DW-028): HSTS, nosniff, CSP, X-Frame-Options.
-- **WebSocket policy** (DW-039): origin allowlisting and frame-rate
+- **Security headers**: HSTS, nosniff, CSP, X-Frame-Options.
+- **WebSocket policy**: origin allowlisting and frame-rate
   policing.
-- **Secrets via `${...}`** references (DW-045): env, file, and
+- **Secrets via `${...}`** references: env, file, and
   redacted-placeholder grammar (inline placeholders used in the
   quickstart; production uses `${ENV_NAME}`).
-- **Agent principals** (DW-113): `agent` consumer type with tool
+- **Agent principals**: `agent` consumer type with tool
   allowlists and per-agent token budgets.
 
 ### Config management and operations
 
-- **mTLS admin API** (DW-022): `GET/PATCH /config`, `/health`,
+- **mTLS admin API**: `GET/PATCH /config`, `/health`,
   `/stats` on a dedicated mTLS-only listener.
 - **Hot reload** (file watch / SIGHUP): the gateway watches
   `dwara.yaml` and hot-reloads on change.
-- **Global policies** (#123): policies that apply to every request,
+- **Global policies**: policies that apply to every request,
   including unrouted 404s (except /healthz, /readyz, /metrics).
 - **Listener-level policies and authorization**: the second-least-
   specific link of the policy chain.
-- **Trusted proxies** (DW-008): X-Forwarded-For chain preservation
+- **Trusted proxies**: X-Forwarded-For chain preservation
   for configured proxy IPs/CIDRs.
-- **Maintenance mode** (DW-041): 503 + Retry-After (documented as a
+- **Maintenance mode**: 503 + Retry-After (documented as a
   commented-out example in the config).
 
 ### Observability and analytics
 
-- **Embedded analytics** (DW-043): SQLite store with raw access
+- **Embedded analytics**: SQLite store with raw access
   records, 1m/5m/1h/1d rollups, and per-granularity retention.
-- **Custom analytics dimensions** (DW-043/DW-093): header-sourced and
+- **Custom analytics dimensions** (/): header-sourced and
   claim-sourced tags.
-- **Live in-process sketches** (DW-092): sub-second-freshness
+- **Live in-process sketches**: sub-second-freshness
   per-route rolling windows.
-- **ML traffic insights** (DW-092): EWMA capacity forecasting and
+- **ML traffic insights**: EWMA capacity forecasting and
   seasonal-baseline anomaly detection.
-- **Scheduled usage-report exports** (DW-120): CSV/JSON dumps.
-- **Replay capture** (DW-102): time-travel debugging (documented as
+- **Scheduled usage-report exports**: CSV/JSON dumps.
+- **Replay capture**: time-travel debugging (documented as
   disabled in the config).
-- **Analytics stream** (DW-121): NDJSON firehose to a webhook sink.
-- **Alert/event webhooks** (DW-044): breaker transitions, endpoint
+- **Analytics stream**: NDJSON firehose to a webhook sink.
+- **Alert/event webhooks**: breaker transitions, endpoint
   ejection/recovery, config published/rejected.
-- **SLO** (DW-052): availability and latency objectives per route.
-- **API deprecation signals** (DW-048): Deprecation and Sunset
+- **SLO**: availability and latency objectives per route.
+- **API deprecation signals**: Deprecation and Sunset
   headers with IMF-fixdate format.
 
 ### Request/response processing
 
-- **Request/response transforms** (DW-028): header set/add/remove,
+- **Request/response transforms**: header set/add/remove,
   query manipulation.
-- **CORS** (DW-027): preflight handling and actual-response headers.
-- **Compression** (DW-027): gzip/brotli/zstd negotiation with
+- **CORS**: preflight handling and actual-response headers.
+- **Compression**: gzip/brotli/zstd negotiation with
   content-type filtering.
-- **Response caching** (DW-037): TTL + stale-while-revalidate + vary
-  + request coalescing (DW-038).
-- **Request size limits** (DW-027): body, header bytes, header count.
-- **Per-route method allowlist** (DW-030): 405 + Allow header.
+- **Response caching**: TTL + stale-while-revalidate + vary
+  + request coalescing.
+- **Request size limits**: body, header bytes, header count.
+- **Per-route method allowlist**: 405 + Allow header.
 
-### AI gateway (DW-075 through DW-087)
+### AI gateway (through)
 
-- **AI provider adapters**: OpenAI, Anthropic (DW-075).
+- **AI provider adapters**: OpenAI, Anthropic.
 - **Model alias table**: client `model` values mapped to provider +
   provider model.
-- **Failover chains** (DW-076): ordered fallback on 429/5xx.
-- **Weighted canary** (DW-076): traffic split across model versions.
-- **Routing policies** (DW-085): `fallback_chain` (cheap-first
+- **Failover chains**: ordered fallback on 429/5xx.
+- **Weighted canary**: traffic split across model versions.
+- **Routing policies**: `fallback_chain` (cheap-first
   escalation via external classifier) and `latency_cost` (static
   cost/latency selection).
-- **Pricing table** (DW-079): per-model micro-USD pricing for cost
+- **Pricing table**: per-model micro-USD pricing for cost
   attribution.
-- **Model governance** (DW-084): per-team model allowlists + shadow
+- **Model governance**: per-team model allowlists + shadow
   audit.
-- **Guardrails** (DW-082): prompt-injection, PII, banned-content
+- **Guardrails**: prompt-injection, PII, banned-content
   checks with block/redact/log actions.
-- **Prompt/response logging** (DW-081): opt-in capture with PII
+- **Prompt/response logging**: opt-in capture with PII
   redaction, sampling, and retention.
-- **Prompt experimentation** (DW-086): prompt versioning, A/B tests,
+- **Prompt experimentation**: prompt versioning, A/B tests,
   regression evals, and feedback ingestion.
-- **MCP gateway** (DW-087): MCP server routing tool calls to
+- **MCP gateway**: MCP server routing tool calls to
   upstreams with session management.
-- **Token budgets** (DW-078/DW-113): per-consumer and per-policy
+- **Token budgets** (/): per-consumer and per-policy
   token + cost caps.
 
 ### Extension traits

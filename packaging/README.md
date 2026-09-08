@@ -1,4 +1,4 @@
-# Packaging notes (DW-026)
+# Packaging notes
 
 ## Artifacts
 
@@ -16,8 +16,8 @@
 ## Binary size
 
 The <25 MB bar is met by the release profile in the workspace
-`Cargo.toml`: `lto = true` (fat LTO, since DW-001) plus `strip = true`
-(DW-026). `panic` deliberately stays `unwind` — `panic = "abort"` would
+`Cargo.toml`: `lto = true` (fat LTO) plus `strip = true`.
+`panic` deliberately stays `unwind` — `panic = "abort"` would
 shrink further but changes error semantics. `opt-level = z` was measured
 as unnecessary once stripping is on (and costs codegen speed); revisit
 only if the bar regresses. The static musl binary is larger than a gnu
@@ -25,7 +25,7 @@ build of the same code (musl's static libc + bundled SQLite + aws-lc-rs
 C code all land in the file), but it is the price of a `FROM scratch`
 runtime: the IMAGE ends up smaller than any gnu-based one.
 
-Measured (aarch64 musl, DW-026 local verification): `dwara` binary
+Measured (aarch64 musl, local verification): `dwara` binary
 11,564,624 bytes (~11.0 MB); `dwara:scratch` image 17.6 MB; the
 distroless variant is 65.2 MB (its Debian base dominates). The release
 workflow re-checks the bar per arch (build fails if the stripped musl

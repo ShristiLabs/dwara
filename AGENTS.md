@@ -28,6 +28,17 @@ features) are not yet implemented.
 4. No emoji in code, comments, docs, or commit messages.
 5. `.sdlc/` is internal pipeline state; leave it untracked unless told
    otherwise.
+6. **No issue IDs in end-user-facing content.** Internal tracking
+   references (`DW-###`, `DW-AI-###`, enhancement-catalog IDs, bare
+   `#123`, internal analysis-doc pointers) must not appear in the root
+   README, other user-facing READMEs (`quickstart/`, `packaging/`,
+   `tools/`), `docs-site/`, or operator-facing sample files (quickstart
+   configs, `deploy/`, `grafana/`) — users cannot resolve them. They
+   are fine in `CHANGELOG.md` (historical record), `docs/` (contributor
+   docs cite them by convention), commit messages, and source-code
+   comments. The config-studio build scrubs them from its embedded
+   schema help text automatically (see Config studio); hand-authored
+   files must simply not contain them.
 
 ## Commands
 

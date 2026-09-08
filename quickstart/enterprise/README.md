@@ -1,7 +1,7 @@
 # dwara enterprise quickstart
 
 The enterprise edition's flagship topology -- the control plane /
-data plane split (DW-066) -- on one docker network: a
+data plane split  -- on one docker network: a
 `dwara-controller` broadcasting config generations to a fleet of two
 `dwara-edge` data planes, each driving a gateway that proxies the demo
 nginx upstream. One config file reconfigures the whole fleet.
