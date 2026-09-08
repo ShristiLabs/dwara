@@ -88,6 +88,16 @@ curl -X DELETE --cert admin.crt --key admin.key \
 Invalidation removes entries from Redis. Local caches on other
 instances expire based on their local TTL.
 
+The tag and URL purge arms (`POST /cache/purge` with `{"tag": ...}` or
+`{"url": ...}`, see [Response caching](./caching#purging)) delete
+specific keys, so each deleted key propagates to the fleet. Note that
+the tag and URL indexes are in-memory and local to the instance that
+receives the admin request: it can only purge entries its own store
+path indexed. Entries other instances stored (and this one never saw)
+are not in its index. For a fleet-wide tag/URL purge, send the request
+to every instance, or prefer the route/all epoch arms (which every
+instance advances on the same config publish).
+
 ## Interaction with the OSS cache
 
 The distributed cache is a superset of the OSS cache. In an OSS

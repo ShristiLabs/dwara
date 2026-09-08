@@ -1101,8 +1101,10 @@ impl Observability {
         let cache_purges_total = IntCounterVec::new(
             Opts::new(
                 "dwara_cache_purges_total",
-                "Cache purge operations by scope (DW-037): route (one named \
-                 route) or all.",
+                "Cache purge operations by scope (DW-037, DP-04): route \
+                 (one named route), all (every route), tag (Cache-Tags \
+                 purge), url (exact URL purge), or url_prefix (prefix \
+                 URL purge).",
             ),
             &["scope"],
         )
@@ -2240,7 +2242,8 @@ impl Observability {
         self.cache_revalidated_total.inc();
     }
 
-    /// Count one cache purge (DW-037). `scope` is `route` or `all`.
+    /// Count one cache purge (DW-037). `scope` is `route`, `all`,
+    /// `tag`, `url`, or `url_prefix` (the DP-04 tag/url purge axes).
     pub fn record_cache_purge(&self, scope: &str) {
         self.cache_purges_total.with_label_values(&[scope]).inc();
     }

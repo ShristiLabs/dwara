@@ -39,36 +39,44 @@
 //! ## Cacheability (deterministic, closed rules)
 //!
 //! A REQUEST is cacheable when: the route has a `cache` block and a
-//! PROXY action; the method is GET (HEAD is bypassed in v1 — replaying
-//! a GET body under HEAD's no-body framing needs separate machinery);
-//! the request carries no body, no `Authorization`, no `Cookie`
-//! (credentials make per-consumer keying insufficient — two bearer
-//! tokens of one consumer would share an entry), and no `Upgrade`.
-//! Everything else is a BYPASS (stamped and counted, never stored).
+//! PROXY action; the method is GET or HEAD (DP-04: HEAD is cacheable —
+//! a HEAD response carries the same headers as GET with no body, and
+//! the method folds into the key so the two representations are
+//! distinct entries; a fresh GET entry also serves a HEAD via the
+//! GET-fallback, RFC 9111 section 4.1); the request carries no body,
+//! no `Authorization`, no `Cookie` (credentials make per-consumer
+//! keying insufficient — two bearer tokens of one consumer would share
+//! an entry), and no `Upgrade`. Everything else is a BYPASS (stamped
+//! and counted, never stored).
 //!
 //! A RESPONSE is storable when: status is exactly 200; it carries no
 //! `Set-Cookie`; its `Cache-Control` has none of `no-store` /
-//! `private` / `no-cache` (the only upstream freshness directives
-//! honored — the configured `ttl_secs` is the freshness lifetime, the
-//! operator owns it); it is not content-encoded (dwara compresses on
-//! replay; an upstream-encoded body cannot be re-negotiated); and its
-//! `Vary` is `*`-free and a subset of the route's effective vary set
-//! (see `config::cache` for the configured + policy-derived variance
-//! model — the key must be derivable from the request alone, so an
-//! unknown variance dimension forbids storage).
+//! `private` / `no-cache` (the storage vetoes; DP-04 additionally
+//! honors `s-maxage`/`max-age` as the freshness lifetime — taking
+//! precedence over the configured `ttl_secs` — and `stale-if-error`
+//! as the per-entry stale-on-error window, RFC 5861 section 4); it is
+//! not content-encoded (dwara compresses on replay; an upstream-encoded
+//! body cannot be re-negotiated); and its `Vary` is `*`-free and a
+//! subset of the route's effective vary set (see `config::cache` for
+//! the configured + policy-derived variance model — the key must be
+//! derivable from the request alone, so an unknown variance dimension
+//! forbids storage).
 //!
 //! ## Keys
 //!
-//! `sha256("dwara-rc-v1" | route | epoch | consumer | path | query |
-//! vary-name=value...)` — hex-encoded. The consumer component means
-//! masked (DW-029) and consumer-group variants can never cross
-//! consumers. Keys are never logged (paths and query strings carry
-//! tokens; the hash is opaque anyway).
+//! `sha256("dwara-rc-v1" | route | epoch | method | consumer | path |
+//! query | vary-name=value...)` — hex-encoded. The method component
+//! (DP-04) separates HEAD and GET representations of one resource.
+//! The consumer component means masked (DW-029) and consumer-group
+//! variants can never cross consumers. Keys are never logged (paths
+//! and query strings carry tokens; the hash is opaque anyway).
 //!
 //! ## Freshness, stale-while-revalidate, ETag
 //!
-//! Fresh for `ttl_secs`; within `stale_while_revalidate_secs` after
-//! expiry the entry is served stale (`x-cache: stale`) while ONE
+//! Fresh for the effective freshness lifetime — the upstream
+//! `Cache-Control: s-maxage` (then `max-age`) when present (DP-04,
+//! RFC 7234 section 5.2.2.9), else the configured `ttl_secs`; within
+//! `stale_while_revalidate_secs` after expiry the entry is served stale (`x-cache: stale`) while ONE
 //! background revalidation runs per key (a bounded in-flight set
 //! deduplicates; DW-038's request coalescing applies the same
 //! single-flight discipline to the foreground miss path). Past the
@@ -138,6 +146,15 @@
 //! unreachable by a bump are never re-read; the byte-weighed store
 //! reclaims them by eviction.
 //!
+//! DP-04 adds two targeted purge axes alongside the epoch-based route
+//! purge: purge-by-tag (every entry the upstream tagged with a given
+//! `Cache-Tags` value) and purge-by-URL (every entry for an exact or
+//! prefix-matched request URL). These delete specific keys through the
+//! `CacheStore` seam (O(keys-matching), not O(1)) using in-memory
+//! tag→keys and URL→keys indexes populated at store time; the indexes
+//! are runtime state (lost on restart) and self-clean lazily as purges
+//! drop their dead cross-references.
+//!
 //! ## Reload behavior
 //!
 //! The engine (store, epochs, in-flight set) lives on the
@@ -153,6 +170,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -182,7 +200,15 @@ pub const X_CACHE: HeaderName = HeaderName::from_static("x-cache");
 
 /// Envelope magic + schema version (see [`EntryEnvelope`]).
 const ENVELOPE_MAGIC: [u8; 4] = *b"DWRC";
-const ENVELOPE_VERSION: u8 = 1;
+/// Envelope schema version 1 (DW-037): epoch, stored-at, status,
+/// headers, body. Decoded for back-compat with entries a long-lived
+/// store may still hold across an in-place upgrade.
+const ENVELOPE_VERSION_V1: u8 = 1;
+/// Envelope schema version 2 (DP-04): adds the per-entry freshness TTL
+/// and the `stale-if-error` window (both in milliseconds, 0 = "use the
+/// configured policy"). v2 is what [`EntryEnvelope::encode`] writes;
+/// v1 entries decode with both fields zeroed (the policy applies).
+const ENVELOPE_VERSION: u8 = 2;
 
 /// Upper bound on concurrently in-flight background revalidations
 /// (DW-037): the stale-while-revalidate path serves stale immediately
@@ -234,6 +260,21 @@ pub struct ResponseCache {
     /// route epoch, so a generation change strands waiters into the
     /// fail-open path rather than serving them a dead generation.
     coalescing: Arc<Mutex<HashMap<String, Arc<CoalesceSlot>>>>,
+    /// Cache-tag -> set of store keys (DP-04 purge-by-tag). Populated
+    /// at store time from the upstream `Cache-Tags` response header.
+    /// Purge-by-tag deletes every key in the set (and cleans the
+    /// entries). In-memory: lost on restart, so a purge-by-tag after a
+    /// restart is a no-op until entries are re-stored — the cache is a
+    /// local optimization, and the epoch-based route purge remains the
+    /// durable invalidation path. Bounded lazily: dead keys (evicted or
+    /// epoch-bumped) are removed when a purge touches their tag.
+    tag_index: RwLock<HashMap<String, HashSet<String>>>,
+    /// Request URL (`path[?query]`) -> set of store keys (DP-04
+    /// purge-by-URL). One URL maps to many keys because the cache key
+    /// also folds the route epoch, the consumer, and the vary values,
+    /// all invisible to a purge caller. Same lifecycle as
+    /// [`ResponseCache::tag_index`].
+    url_index: RwLock<HashMap<String, HashSet<String>>>,
     /// Purges and epoch bumps performed (for /stats; the metrics
     /// counter lives in observability).
     purges: AtomicU64,
@@ -254,6 +295,8 @@ impl ResponseCache {
             epochs: RwLock::new(HashMap::new()),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             coalescing: Arc::new(Mutex::new(HashMap::new())),
+            tag_index: RwLock::new(HashMap::new()),
+            url_index: RwLock::new(HashMap::new()),
             purges: AtomicU64::new(0),
         }
     }
@@ -308,6 +351,134 @@ impl ResponseCache {
         }
         self.purges.fetch_add(1, Ordering::Relaxed);
         bumped
+    }
+
+    /// Purge every entry tagged with `tag` (DP-04). The tag's keys are
+    /// deleted from the store and the tag's index entry is cleared.
+    /// Returns the number of keys the tag mapped to (a tag with no
+    /// entries, or one the gateway never saw, returns 0). Unlike the
+    /// epoch-based route purge this is an O(keys-with-tag) store
+    /// deletion — the tag index is the only place the opaque
+    /// `CacheStore` seam exposes which keys carry a tag.
+    pub async fn purge_by_tag(&self, tag: &str) -> usize {
+        let keys = {
+            let mut index = self.tag_index.write().expect("cache tag index poisoned");
+            index.remove(tag).unwrap_or_default()
+        };
+        let n = keys.len();
+        for key in &keys {
+            let _ = self.store.delete(key).await;
+        }
+        // Drop the purged keys from the URL index too (lazy cleanup of
+        // any dead cross-references the purge just made).
+        if !keys.is_empty() {
+            let mut url_index = self.url_index.write().expect("cache url index poisoned");
+            for set in url_index.values_mut() {
+                set.retain(|k| !keys.contains(k));
+            }
+            url_index.retain(|_, set| !set.is_empty());
+        }
+        if n > 0 {
+            self.purges.fetch_add(1, Ordering::Relaxed);
+        }
+        n
+    }
+
+    /// Purge every entry whose request URL matches (DP-04). With
+    /// `prefix` false the URL must match exactly (`path[?query]`); with
+    /// `prefix` true every URL whose path starts with `prefix` as a path
+    /// segment is purged (e.g. `/api/users/` evicts every user entry;
+    /// `/api/users` evicts `/api/users`, `/api/users/123`, and
+    /// `/api/users?x=1` but NOT `/api/users2`). Returns the number of
+    /// keys deleted. The URL index maps one URL to many keys (the cache
+    /// key also folds the route epoch, the consumer, and the vary
+    /// values), so a single URL purge can delete several entries.
+    pub async fn purge_by_url(&self, url: &str, prefix: bool) -> usize {
+        let mut keys: HashSet<String> = HashSet::new();
+        {
+            let mut index = self.url_index.write().expect("cache url index poisoned");
+            if prefix {
+                let matching: Vec<String> = index
+                    .keys()
+                    .filter(|u| url_prefix_match(u, url))
+                    .cloned()
+                    .collect();
+                for u in matching {
+                    if let Some(set) = index.remove(&u) {
+                        keys.extend(set);
+                    }
+                }
+            } else if let Some(set) = index.remove(url) {
+                keys.extend(set);
+            }
+        }
+        let n = keys.len();
+        for key in &keys {
+            let _ = self.store.delete(key).await;
+        }
+        // Lazy cleanup of the tag index's now-dead cross-references.
+        if !keys.is_empty() {
+            let mut tag_index = self.tag_index.write().expect("cache tag index poisoned");
+            for set in tag_index.values_mut() {
+                set.retain(|k| !keys.contains(k));
+            }
+            tag_index.retain(|_, set| !set.is_empty());
+        }
+        if n > 0 {
+            self.purges.fetch_add(1, Ordering::Relaxed);
+        }
+        n
+    }
+
+    /// Record a freshly stored entry's tags and request URL in the
+    /// purge indexes (DP-04). Called from the store stage after a
+    /// successful write. Tags come from the upstream `Cache-Tags`
+    /// response header (comma-separated, whitespace-trimmed); the URL
+    /// is the request's `path[?query]`. A store that overwrites an
+    /// existing key with DIFFERENT tags/URL first removes the key from
+    /// its old tag/URL sets (reverse cleanup) so a later purge_by_tag
+    /// cannot over-evict via stale tag associations.
+    fn record_indexes(&self, key: &str, tags: &[String], url: &str) {
+        // Reverse cleanup: remove the key from any old tag/URL sets
+        // before recording the new associations. This prevents a
+        // re-store with different tags from leaving the key reachable
+        // by its old tags (which would cause over-eviction on purge).
+        let new_tag_set: HashSet<&str> = tags.iter().map(String::as_str).collect();
+        {
+            let mut tag_index = self.tag_index.write().expect("cache tag index poisoned");
+            for (tag, keys) in tag_index.iter_mut() {
+                if !new_tag_set.contains(tag.as_str()) {
+                    keys.remove(key);
+                }
+            }
+            tag_index.retain(|_, set| !set.is_empty());
+        }
+        {
+            let mut url_index = self.url_index.write().expect("cache url index poisoned");
+            for (old_url, keys) in url_index.iter_mut() {
+                if old_url != url {
+                    keys.remove(key);
+                }
+            }
+            url_index.retain(|_, set| !set.is_empty());
+        }
+        // Record the new associations.
+        if !tags.is_empty() {
+            let mut index = self.tag_index.write().expect("cache tag index poisoned");
+            for tag in tags {
+                index
+                    .entry(tag.clone())
+                    .or_default()
+                    .insert(key.to_string());
+            }
+        }
+        if !url.is_empty() {
+            let mut index = self.url_index.write().expect("cache url index poisoned");
+            index
+                .entry(url.to_string())
+                .or_default()
+                .insert(key.to_string());
+        }
     }
 
     /// Generation-change invalidation (called from
@@ -377,7 +548,13 @@ impl ResponseCache {
             obs.record_cache_lookup("bypass");
             LookupOutcome::Bypass
         };
-        if method != Method::GET {
+        // DP-04: HEAD is cacheable alongside GET. A HEAD response carries
+        // the same headers as GET with no body; the method folds into the
+        // key so a HEAD representation (no body) and a GET representation
+        // (full body) of one resource are distinct entries (RFC 9111
+        // section 4.1). Other methods remain a bypass.
+        let is_head = *method == Method::HEAD;
+        if !is_head && *method != Method::GET {
             return bypass(obs);
         }
         if req_headers.contains_key(hyper::header::AUTHORIZATION)
@@ -392,7 +569,15 @@ impl ResponseCache {
 
         let epoch = self.epoch(&route.name);
         let vary_values = capture_vary_values(&policy.vary, req_headers);
-        let key = derive_key(&route.name, epoch, identity, path, query, &vary_values);
+        let key = derive_key(
+            &route.name,
+            epoch,
+            identity,
+            method,
+            path,
+            query,
+            &vary_values,
+        );
 
         let stored = match self.store.get(&key).await {
             Ok(Some(bytes)) => match EntryEnvelope::decode(&bytes) {
@@ -414,27 +599,66 @@ impl ResponseCache {
             Err(_) => None, // store failure degrades to a miss, by contract
         };
 
+        // DP-04: HEAD GET-fallback (RFC 9111 section 4.1 allows serving a
+        // cached GET representation to a HEAD request — same headers, no
+        // body). Only a FRESH GET entry is reused this way: a stale one
+        // falls through to the normal miss path so the HEAD response is
+        // fetched and stored under its own (HEAD) key rather than
+        // overwriting the GET entry with an empty body.
+        if is_head && stored.is_none() {
+            let get_key = derive_key(
+                &route.name,
+                epoch,
+                identity,
+                &Method::GET,
+                path,
+                query,
+                &vary_values,
+            );
+            if let Ok(Some(bytes)) = self.store.get(&get_key).await {
+                if let Some(entry) = EntryEnvelope::decode(&bytes) {
+                    if entry.epoch == epoch {
+                        let age_ms = now_ms().saturating_sub(entry.stored_at_ms);
+                        let ttl_ms = effective_freshness_ttl_ms(&entry, policy);
+                        if age_ms < ttl_ms {
+                            if let Some(resp) = serve_head_from_entry(policy, &entry, age_ms, "hit")
+                            {
+                                obs.record_cache_lookup("hit");
+                                return LookupOutcome::Serve(Box::new(resp));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut injected_inm = false;
         if let Some(entry) = &stored {
             let age_ms = now_ms().saturating_sub(entry.stored_at_ms);
-            let fresh = age_ms < policy.ttl.as_millis() as u64;
+            let ttl_ms = effective_freshness_ttl_ms(entry, policy);
+            let fresh = age_ms < ttl_ms;
             let stale_ok = policy.stale_while_revalidate.as_millis() as u64 > 0
-                && age_ms < (policy.ttl + policy.stale_while_revalidate).as_millis() as u64;
+                && age_ms < ttl_ms + policy.stale_while_revalidate.as_millis() as u64;
             if fresh {
-                if let Some(resp) = serve_from_entry(
-                    policy,
-                    entry,
-                    age_ms,
-                    req_headers.get(&IF_NONE_MATCH),
-                    "hit",
-                ) {
+                let resp = if is_head {
+                    serve_head_from_entry(policy, entry, age_ms, "hit")
+                } else {
+                    serve_from_entry(
+                        policy,
+                        entry,
+                        age_ms,
+                        req_headers.get(&IF_NONE_MATCH),
+                        "hit",
+                    )
+                };
+                if let Some(resp) = resp {
                     obs.record_cache_lookup("hit");
                     return LookupOutcome::Serve(Box::new(resp));
                 }
                 // An entry that cannot be rebuilt (a header that no
                 // longer parses) is a miss, not a failure: drop it.
                 let _ = self.store.delete(&key).await;
-            } else if stale_ok {
+            } else if stale_ok && !is_head {
                 if let Some(resp) = serve_from_entry(policy, entry, age_ms, None, "stale") {
                     obs.record_cache_lookup("stale");
                     // Serve stale NOW; refresh in the background (one
@@ -459,11 +683,13 @@ impl ResponseCache {
                 // Expired past the stale window: fall through as a
                 // miss, but keep the entry — its validator makes the
                 // forwarded fetch a conditional revalidation the store
-                // stage can resolve with a 304. Only when WE inject it
-                // (the client sent none of its own, and the validator
-                // is a header-safe value — an uninjectable one simply
-                // never marks the flag, so the client can never be
-                // answered a 304 the gateway itself caused).
+                // stage can resolve with a 304, and (DP-04) it backs
+                // stale-if-error serving when the upstream errors.
+                // Only when WE inject it (the client sent none of its
+                // own, and the validator is a header-safe value — an
+                // uninjectable one simply never marks the flag, so the
+                // client can never be answered a 304 the gateway itself
+                // caused).
                 injected_inm = !req_headers.contains_key(&IF_NONE_MATCH)
                     && entry
                         .header("etag")
@@ -488,6 +714,7 @@ impl ResponseCache {
             vary_values,
             stored,
             injected_inm,
+            is_head,
         }))
     }
 
@@ -532,6 +759,9 @@ impl ResponseCache {
             // The synthetic refresh always carries the stored validator
             // (there is no client to honor conditionals for).
             injected_inm: true,
+            // Revalidation preserves the original method (a HEAD entry
+            // revalidates as HEAD; a GET as GET).
+            is_head: false,
         };
         let inflight = Arc::clone(&self.inflight);
         let key = key.to_string();
@@ -745,6 +975,40 @@ impl ResponseCache {
             return resp;
         }
 
+        // DP-04 stale-if-error (RFC 5861 section 4): an upstream 5xx —
+        // which includes the 502 the gateway synthesizes on connection
+        // failure — is served from a stale entry when one is on hand
+        // and within the entry's `stale-if-error` window. The window is
+        // per-entry (the upstream advertised it via Cache-Control at
+        // store time); an entry without one (0) does not serve stale on
+        // error, and `must-revalidate` zeroes the window at store time
+        // (the origin forbade serving stale without revalidation). The
+        // error response itself is NEVER stored (it would poison the
+        // cache); only a fresh 200 stores below.
+        if resp.status().is_server_error() {
+            if let Some(entry) = flow.stored.as_ref() {
+                let age_ms = now_ms().saturating_sub(entry.stored_at_ms);
+                let ttl_ms = effective_freshness_ttl_ms(entry, &flow.policy);
+                let sie_ms = entry.stale_if_error_ms;
+                if sie_ms > 0 && age_ms < ttl_ms + sie_ms {
+                    if let Some(mut stale) = response_from_entry(entry, &flow.policy) {
+                        stamp_age(&mut stale, age_ms);
+                        stamp(&mut stale, "stale");
+                        obs.record_cache_lookup("stale");
+                        tracing::info!(
+                            code = "cache_stale_if_error",
+                            route = %flow.route_name,
+                            status = %resp.status().as_u16(),
+                            "served stale entry on upstream error (stale-if-error)"
+                        );
+                        return stale;
+                    }
+                }
+            }
+            stamp(&mut resp, "miss");
+            return resp;
+        }
+
         // Storable rules: exactly 200, no vetoed header, within the cap.
         if resp.status() != StatusCode::OK {
             stamp(&mut resp, "miss");
@@ -768,15 +1032,47 @@ impl ResponseCache {
         let (mut parts, body) = resp.into_parts();
         match collect_capped(body, cap).await {
             Ok(bytes) => {
+                // DP-04: honor the upstream Cache-Control freshness
+                // lifetime (s-maxage over max-age, RFC 7234 section
+                // 5.2.2.9) and the stale-if-error window (RFC 5861
+                // section 4). 0 means "use the configured policy" (the
+                // v1 behavior). must-revalidate zeroes stale-if-error
+                // (the origin forbade serving stale without
+                // revalidation). Cache-Tags (comma-separated) feed the
+                // purge-by-tag index.
+                let cc = CacheControl::parse(&parts.headers);
+                let freshness_ttl_ms = cc.effective_max_age().map(|s| s * 1000).unwrap_or(0);
+                let stale_if_error_ms = if cc.must_revalidate {
+                    0
+                } else {
+                    cc.stale_if_error.map(|s| s * 1000).unwrap_or(0)
+                };
+                let tags = parse_cache_tags(&parts.headers);
                 let entry = EntryEnvelope {
                     epoch: flow.epoch,
                     stored_at_ms: now_ms(),
                     status: parts.status.as_u16(),
-                    headers: sanitize_headers(&parts.headers),
+                    freshness_ttl_ms,
+                    stale_if_error_ms,
+                    headers: sanitize_headers(&parts.headers, flow.is_head),
                     body: bytes.to_vec(),
                 };
                 if self.epoch(&flow.route_name) == flow.epoch {
-                    let ttl = flow.policy.ttl + flow.policy.stale_while_revalidate;
+                    // The backend TTL hint is the full usable lifetime
+                    // (freshness + SWR + stale-if-error) so the backend
+                    // reclaims memory only after the entry is truly
+                    // unusable; the envelope's read-side expiry is the
+                    // source of truth either way.
+                    let eff_ttl_ms = if freshness_ttl_ms > 0 {
+                        freshness_ttl_ms
+                    } else {
+                        flow.policy.ttl.as_millis() as u64
+                    };
+                    let ttl = Duration::from_millis(
+                        eff_ttl_ms
+                            + flow.policy.stale_while_revalidate.as_millis() as u64
+                            + stale_if_error_ms,
+                    );
                     let outcome = match self
                         .store
                         .set_with_ttl(flow.key.clone(), entry.encode(), ttl)
@@ -786,10 +1082,38 @@ impl ResponseCache {
                         Err(_) => "error",
                     };
                     obs.record_cache_store(outcome);
+                    if outcome == "stored" {
+                        let url = match &flow.query {
+                            Some(q) => format!("{}?{}", flow.path, q),
+                            None => flow.path.clone(),
+                        };
+                        // Note: there is a small best-effort window between
+                        // store.set_with_ttl and record_indexes where a
+                        // concurrent purge_by_tag/purge_by_url could miss
+                        // this just-stored entry (it is in the store but
+                        // not yet in the index). The entry will be caught
+                        // by the next epoch-based route purge or will
+                        // expire via the backend TTL. This is accepted as
+                        // a best-effort trade-off: inserting into the
+                        // index before the store would risk stale indexes
+                        // on store failure, which is worse.
+                        self.record_indexes(&flow.key, &tags, &url);
+                    }
                 }
                 if let Ok(v) = HeaderValue::from_str(&bytes.len().to_string()) {
                     parts.headers.insert(hyper::header::CONTENT_LENGTH, v);
                 }
+                // DP-04: strip internal cache directives from the live
+                // response before it reaches the client. The gateway is a
+                // shared cache; the upstream's Cache-Control/Expires
+                // describe the ORIGIN's freshness policy (not the
+                // gateway's), and Cache-Tags is an operator-controlled
+                // purge axis that must never leak to end users. These
+                // are already stripped from the stored entry by
+                // sanitize_headers; the live response must match.
+                parts.headers.remove("cache-tags");
+                parts.headers.remove(hyper::header::CACHE_CONTROL);
+                parts.headers.remove(hyper::header::EXPIRES);
                 let mut out = Response::from_parts(parts, ProxyBody::Full(Full::new(bytes)));
                 stamp(&mut out, "miss");
                 out
@@ -1062,6 +1386,11 @@ pub struct MissFlow {
     /// forwarded request (a 304 answer must then become a 200 for the
     /// client — RFC 9111 section 4.3.4).
     pub injected_inm: bool,
+    /// Whether this is a HEAD request (DP-04): HEAD entries preserve the
+    /// upstream Content-Length in the stored headers (the body is empty
+    /// but the entity length must be replayed correctly per RFC 9110
+    /// section 9.3.2).
+    pub is_head: bool,
 }
 
 impl MissFlow {
@@ -1120,13 +1449,17 @@ fn capture_vary_values(vary: &[String], headers: &HeaderMap) -> Vec<(String, Str
 }
 
 /// Derive the store key: a SHA-256 over the domain-tagged components
-/// (route, epoch, consumer, path, query, vary values). Hashing keeps
-/// the key length bounded and keeps raw paths/queries out of the
+/// (route, epoch, consumer, method, path, query, vary values). Hashing
+/// keeps the key length bounded and keeps raw paths/queries out of the
 /// store's memory-visible key space (they are never logged either way).
+/// The method component (DP-04) separates a HEAD representation (no
+/// body) from a GET representation (full body) of the same resource —
+/// they are distinct cache entries per RFC 9111 section 4.1.
 pub fn derive_key(
     route: &str,
     epoch: u64,
     identity: Option<&Identity>,
+    method: &Method,
     path: &str,
     query: Option<&str>,
     vary_values: &[(String, String)],
@@ -1136,6 +1469,8 @@ pub fn derive_key(
     hasher.update(route.as_bytes());
     hasher.update([0]);
     hasher.update(epoch.to_le_bytes());
+    hasher.update(method.as_str().as_bytes());
+    hasher.update([0]);
     if let Some(id) = identity {
         hasher.update(id.consumer_name.as_bytes());
     }
@@ -1179,6 +1514,16 @@ pub struct EntryEnvelope {
     /// Stored status (200 by the storable rules; carried so widening
     /// the status set later does not change the envelope).
     pub status: u16,
+    /// Per-entry freshness lifetime in milliseconds (DP-04). 0 means
+    /// "use the configured `ttl_secs`" (the v1 behavior and the
+    /// fallback when the upstream sent no `s-maxage`/`max-age`).
+    /// Non-zero is the upstream `Cache-Control` lifetime the gateway
+    /// honors as a shared cache (RFC 7234 section 5.2.2).
+    pub freshness_ttl_ms: u64,
+    /// Per-entry `stale-if-error` window in milliseconds (DP-04,
+    /// RFC 5861 section 4). 0 means "no stale-on-error serving beyond
+    /// the configured stale-while-revalidate window".
+    pub stale_if_error_ms: u64,
     /// (name, value) raw byte pairs, wire order.
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     /// Identity (never compressed) body bytes.
@@ -1209,12 +1554,14 @@ impl EntryEnvelope {
             put_u32(out, b.len() as u32);
             out.extend_from_slice(b);
         }
-        let mut out = Vec::with_capacity(64 + self.body.len());
+        let mut out = Vec::with_capacity(72 + self.body.len());
         out.extend_from_slice(&ENVELOPE_MAGIC);
         out.push(ENVELOPE_VERSION);
         put_u64(&mut out, self.epoch);
         put_u64(&mut out, self.stored_at_ms);
         put_u16(&mut out, self.status);
+        put_u64(&mut out, self.freshness_ttl_ms);
+        put_u64(&mut out, self.stale_if_error_ms);
         put_u32(&mut out, self.headers.len() as u32);
         for (name, value) in &self.headers {
             put_bytes(&mut out, name);
@@ -1253,12 +1600,19 @@ impl EntryEnvelope {
         if take(&mut cur, ENVELOPE_MAGIC.len())? != &ENVELOPE_MAGIC[..] {
             return None;
         }
-        if take(&mut cur, 1)? != [ENVELOPE_VERSION] {
-            return None;
-        }
+        let version = take(&mut cur, 1)?[0];
         let epoch = take_u64(&mut cur)?;
         let stored_at_ms = take_u64(&mut cur)?;
         let status = take_u16(&mut cur)?;
+        // DP-04: v2 carries the per-entry freshness TTL and the
+        // stale-if-error window after the status; v1 omits them and
+        // they read as 0 (the configured policy applies). A version
+        // the gateway does not know is a framing mismatch.
+        let (freshness_ttl_ms, stale_if_error_ms) = match version {
+            ENVELOPE_VERSION => (take_u64(&mut cur)?, take_u64(&mut cur)?),
+            ENVELOPE_VERSION_V1 => (0, 0),
+            _ => return None,
+        };
         let header_count = take_u32(&mut cur)? as usize;
         // A corrupt header count must not arm a monstrous allocation.
         if header_count.saturating_mul(8) > cur.len() {
@@ -1278,6 +1632,8 @@ impl EntryEnvelope {
             epoch,
             stored_at_ms,
             status,
+            freshness_ttl_ms,
+            stale_if_error_ms,
             headers,
             body,
         })
@@ -1302,6 +1658,7 @@ fn is_denied_storage_header(name: &str) -> bool {
             | "age"
             | "vary"
             | "cache-control"
+            | "cache-tags"
             | "expires"
             | "set-cookie"
             | "x-cache"
@@ -1312,19 +1669,46 @@ fn is_denied_storage_header(name: &str) -> bool {
     )
 }
 
-/// The deny-listed copy of a response's headers (store side).
-fn sanitize_headers(headers: &HeaderMap) -> Vec<(Vec<u8>, Vec<u8>)> {
+/// The deny-listed copy of a response's headers (store side). When
+/// `preserve_content_length` is true (HEAD entries, DP-04), the upstream
+/// `Content-Length` is kept — the HEAD body is empty but the entity
+/// length must be replayed correctly per RFC 9110 section 9.3.2.
+fn sanitize_headers(headers: &HeaderMap, preserve_content_length: bool) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     for (name, value) in headers.iter() {
-        if is_denied_storage_header(name.as_str()) {
-            continue;
+        let name_str = name.as_str();
+        if is_denied_storage_header(name_str) {
+            // DP-04: HEAD entries keep Content-Length (the entity length
+            // a GET would return); GET entries re-derive it from the
+            // body at replay time.
+            if !(preserve_content_length && name_str.eq_ignore_ascii_case("content-length")) {
+                continue;
+            }
         }
-        out.push((
-            name.as_str().to_string().into_bytes(),
-            value.as_bytes().to_vec(),
-        ));
+        out.push((name_str.to_string().into_bytes(), value.as_bytes().to_vec()));
     }
     out
+}
+
+/// Parse the upstream `Cache-Tags` response header (DP-04): a comma-
+/// separated list of opaque tags the operator can purge by. Whitespace
+/// around each tag is trimmed and empty tags are dropped. Multiple
+/// `Cache-Tags` headers are folded. Tags are never validated beyond
+/// being non-empty trimmed tokens — they are an operator-controlled
+/// purge axis, not a client-facing value (the header is stripped before
+/// replay by [`is_denied_storage_header`]).
+fn parse_cache_tags(headers: &HeaderMap) -> Vec<String> {
+    let mut tags = Vec::new();
+    for value in headers.get_all("cache-tags") {
+        let Ok(s) = value.to_str() else { continue };
+        for tag in s.split(',') {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    tags
 }
 
 /// Rebuild a response from a stored entry. Also re-derives what the
@@ -1337,6 +1721,16 @@ fn response_from_entry(
     policy: &CompiledRouteCache,
 ) -> Option<Response<ProxyBody>> {
     let mut builder = Response::builder().status(StatusCode::from_u16(entry.status).ok()?);
+    // DP-04: HEAD entries preserve the upstream Content-Length in the
+    // stored headers (the entity length a GET would return). If present,
+    // it is already in the header loop below; skip overwriting it with
+    // body.len() (which is 0 for HEAD entries). GET entries do not store
+    // Content-Length (sanitize_headers strips it), so body.len() is the
+    // correct replay value for them.
+    let has_stored_cl = entry
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case(b"content-length"));
     for (name, value) in &entry.headers {
         builder = builder.header(
             HeaderName::from_bytes(name).ok()?,
@@ -1344,14 +1738,55 @@ fn response_from_entry(
         );
     }
     let body = Bytes::from(entry.body.clone());
-    builder = builder.header(
-        hyper::header::CONTENT_LENGTH,
-        HeaderValue::from_str(&body.len().to_string()).ok()?,
-    );
+    if !has_stored_cl {
+        builder = builder.header(
+            hyper::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&body.len().to_string()).ok()?,
+        );
+    }
     let mut resp = builder.body(ProxyBody::Full(Full::new(body))).ok()?;
     for token in &policy.vary {
         merge_vary(resp.headers_mut(), token);
     }
+    Some(resp)
+}
+
+/// The effective freshness lifetime for one entry (DP-04): the
+/// upstream `Cache-Control` lifetime stored on the entry when present
+/// (s-maxage over max-age, RFC 7234 section 5.2.2.9), else the
+/// configured `ttl_secs` (the operator-owned default, the v1
+/// behavior). Returned in milliseconds for direct comparison with
+/// `age_ms`.
+fn effective_freshness_ttl_ms(entry: &EntryEnvelope, policy: &CompiledRouteCache) -> u64 {
+    if entry.freshness_ttl_ms > 0 {
+        entry.freshness_ttl_ms
+    } else {
+        policy.ttl.as_millis() as u64
+    }
+}
+
+/// Serve a HEAD response from a stored entry (DP-04): the entry's
+/// headers with the entity's `Content-Length` (the bytes a GET would
+/// return) but an EMPTY body — the HEAD framing (RFC 9110 section
+/// 9.3.2). Works for a HEAD entry (empty body, Content-Length 0) and
+/// for the GET-fallback (a GET entry's headers + Content-Length, no
+/// body). Carries `Age` and the `x-cache` outcome like a GET replay.
+fn serve_head_from_entry(
+    policy: &CompiledRouteCache,
+    entry: &EntryEnvelope,
+    age_ms: u64,
+    outcome: &str,
+) -> Option<Response<ProxyBody>> {
+    let mut resp = response_from_entry(entry, policy)?;
+    // The body is empty; keep the Content-Length response_from_entry
+    // stamped (it reflects the entity length, not the body bytes — the
+    // HEAD framing a client uses to learn what a GET would return).
+    *resp.body_mut() = ProxyBody::Full(Full::new(Bytes::new()));
+    for token in &policy.vary {
+        merge_vary(resp.headers_mut(), token);
+    }
+    stamp_age(&mut resp, age_ms);
+    stamp(&mut resp, outcome);
     Some(resp)
 }
 
@@ -1428,27 +1863,137 @@ pub fn validators_match(upstream: Option<&str>, stored: Option<&str>) -> bool {
     }
 }
 
+/// Parsed upstream `Cache-Control` directives (RFC 7234 + the
+/// `stale-if-error` extension, RFC 5861 section 4). Only the directives
+/// the gateway's shared cache acts on are captured; unknown directives
+/// are ignored (forward-compat). The parser is hand-rolled (no new
+/// dependency) and tolerant: a malformed `delta-seconds` argument is
+/// treated as absent rather than failing the whole header, and directive
+/// names are matched case-insensitively with optional whitespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheControl {
+    /// `no-store`: the response MUST NOT be stored (a hard storage veto).
+    pub no_store: bool,
+    /// `no-cache`: store, but revalidate before every reuse (a storage
+    /// veto in v1 — the gateway does not yet serve-then-revalidate, so
+    /// storing an entry that can never be replayed fresh is dead weight).
+    pub no_cache: bool,
+    /// `private`: a shared cache MUST NOT store the response (the
+    /// gateway's cache is shared — consumer keying does not make it
+    /// private, because the operator owns the cache, not the client).
+    pub private: bool,
+    /// `must-revalidate`: a stale response MUST NOT be served without
+    /// revalidation. Recorded but not yet enforced beyond blocking the
+    /// stale-while-revalidate serve path (see `lookup`).
+    pub must_revalidate: bool,
+    /// `s-maxage`: the freshness lifetime for SHARED caches. Takes
+    /// precedence over `max-age` for the gateway's shared cache (RFC
+    /// 7234 section 5.2.2.9). Absent = fall back to `max_age` then the
+    /// configured `ttl_secs`.
+    pub s_maxage: Option<u64>,
+    /// `max-age`: the freshness lifetime for any cache. Used when
+    /// `s-maxage` is absent.
+    pub max_age: Option<u64>,
+    /// `stale-if-error` (RFC 5861 section 4): the number of seconds PAST
+    /// expiry a stale entry may be served when the upstream returns an
+    /// error (5xx) or is unreachable. Absent/0 = no stale-on-error
+    /// serving beyond the configured stale-while-revalidate window.
+    pub stale_if_error: Option<u64>,
+}
+
+impl CacheControl {
+    /// Parse every `Cache-Control` header value (RFC 7234 section 5.2.2).
+    /// Multiple values are folded; a directive appearing more than once
+    /// uses the last occurrence's argument (matches common cache
+    /// behavior). Returns an empty `CacheControl` when the header is
+    /// absent or entirely unparseable — the caller then falls back to
+    /// the configured policy.
+    pub fn parse(headers: &HeaderMap) -> Self {
+        let mut cc = CacheControl::default();
+        for value in headers.get_all(hyper::header::CACHE_CONTROL) {
+            let Ok(s) = value.to_str() else { continue };
+            for directive in s.split(',') {
+                let directive = directive.trim();
+                if directive.is_empty() {
+                    continue;
+                }
+                let (name, arg) = directive
+                    .split_once('=')
+                    .map(|(n, v)| (n.trim(), Some(v.trim())))
+                    .unwrap_or((directive, None));
+                match name.to_ascii_lowercase().as_str() {
+                    "no-store" => cc.no_store = true,
+                    "no-cache" => cc.no_cache = true,
+                    "private" => cc.private = true,
+                    "must-revalidate" => cc.must_revalidate = true,
+                    "s-maxage" => cc.s_maxage = arg.and_then(parse_delta_seconds),
+                    "max-age" => cc.max_age = arg.and_then(parse_delta_seconds),
+                    "stale-if-error" => cc.stale_if_error = arg.and_then(parse_delta_seconds),
+                    _ => {}
+                }
+            }
+        }
+        cc
+    }
+
+    /// The effective shared-cache freshness lifetime, in seconds:
+    /// `s-maxage` wins over `max-age` (RFC 7234 section 5.2.2.9), else
+    /// None (the caller applies the configured `ttl_secs`).
+    pub fn effective_max_age(&self) -> Option<u64> {
+        self.s_maxage.or(self.max_age)
+    }
+}
+
+/// Parse an RFC 7234 `delta-seconds` argument: a non-negative integer
+/// (the spec allows values larger than 2^31-1, which a 32-bit parser
+/// would reject; u64 accepts them and they simply read as "very far in
+/// the future"). A non-numeric or empty argument yields None (the
+/// directive is treated as absent, not as a parse failure for the
+/// whole header).
+fn parse_delta_seconds(s: &str) -> Option<u64> {
+    s.trim().parse::<u64>().ok()
+}
+
+/// Path-segment-aware prefix match for URL purge (DP-04). `url` is the
+/// stored request URL (`path[?query]`), `prefix` is the purge prefix.
+/// Matches when: the stored URL equals the prefix, or the stored URL
+/// starts with the prefix AND either the prefix ends with `/` (already
+/// a full path segment) or the character after the prefix is a path
+/// separator (`/` or `?`) — preventing `/api/users` from matching
+/// `/api/users2` while allowing `/api/users/` to match `/api/users/alice`.
+fn url_prefix_match(url: &str, prefix: &str) -> bool {
+    if url == prefix {
+        return true;
+    }
+    if !url.starts_with(prefix) {
+        return false;
+    }
+    // A prefix ending with `/` is already segment-complete; any
+    // continuation matches. Otherwise the next character must be a
+    // path/query boundary so `/api/users` does not match `/api/users2`.
+    prefix.ends_with('/') || {
+        let after = &url[prefix.len()..];
+        after.starts_with('/') || after.starts_with('?')
+    }
+}
+
 /// The response-side storable rules (see the module docs). Returns the
 /// veto reason code for logging/telemetry when storage is forbidden.
 pub fn store_veto(headers: &HeaderMap, policy: &CompiledRouteCache) -> Option<&'static str> {
     if headers.contains_key(hyper::header::SET_COOKIE) {
         return Some("set_cookie");
     }
-    if let Some(cc) = headers
-        .get(hyper::header::CACHE_CONTROL)
-        .and_then(|v| v.to_str().ok())
-    {
-        if cc.split(',').any(|d| {
-            let d = d
-                .trim()
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            d == "no-store" || d == "private" || d == "no-cache"
-        }) {
-            return Some("cache_control");
-        }
+    let cc = CacheControl::parse(headers);
+    if cc.no_store || cc.private || cc.no_cache {
+        return Some("cache_control");
+    }
+    // DP-04: s-maxage=0 or max-age=0 means "immediately stale" — the
+    // origin requires revalidation on every use. This engine does not
+    // yet support revalidate-on-every-use, so a zero freshness lifetime
+    // is a storage veto (the response would be stored but never served
+    // fresh, which is pointless and wastes capacity).
+    if cc.effective_max_age() == Some(0) {
+        return Some("cache_control");
     }
     if headers.contains_key(hyper::header::CONTENT_ENCODING) {
         return Some("content_encoding");
