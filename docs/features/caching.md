@@ -13,11 +13,12 @@
 > transforms, coalescing around the miss), the admin purge endpoint
 > (`crates/dwara-admin/src/lib.rs`), and validation in
 > `src/snapshot/mod.rs` (`validate_route_cache`).
-> Tests: `crates/dwara-core/tests/caching.rs` (30, end to end through
-> the real dataplane — ten of them the DW-038 pins) and
-> `crates/dwara-core/tests/unit/response_cache.rs` (8,
-> envelope/key/validator/veto grammar), plus the three purge tests in
-> `crates/dwara-admin/tests/admin_api.rs`.
+> Tests: `crates/dwara-core/tests/caching.rs` (37, end to end through
+> the real dataplane — ten of them the DW-038 pins, eight the DP-04
+> Cache-Control/HEAD/stale-if-error/purge pins) and
+> `crates/dwara-core/tests/unit/response_cache.rs` (10,
+> envelope/key/validator/veto/Cache-Control grammar), plus the purge
+> tests in `crates/dwara-admin/tests/admin_api.rs` (route/all/tag/url).
 > Operator docs: [docs-site caching guide](../../docs-site/guide/caching.md).
 
 An optional `cache` block on a proxy Route opts that route's cacheable
@@ -81,27 +82,40 @@ flowchart LR
 ## Cacheability (deterministic, closed rules)
 
 A REQUEST is cacheable when: the route has a `cache` block and a proxy
-action; the method is GET; the request carries no body, no
-`Authorization`, no `Cookie`, and no `Upgrade`. Everything else stamps
-`x-cache: bypass` (and counts `dwara_cache_lookups_total{outcome=
-"bypass"}`) and flows through untouched — including HEAD in v1, whose
-no-body replay framing deserves its own machinery.
+action; the method is GET or HEAD (DP-04: HEAD is cacheable — a HEAD
+response carries the same headers as GET with no body, and the method
+folds into the key so the two representations are distinct entries; a
+fresh GET entry also serves a HEAD via the GET-fallback, RFC 9111
+section 4.1); the request carries no body, no `Authorization`, no
+`Cookie`, and no `Upgrade`. Everything else stamps `x-cache: bypass`
+(and counts `dwara_cache_lookups_total{outcome="bypass"}`) and flows
+through untouched.
 
 A RESPONSE is storable when: the status is exactly 200; there is no
 `Set-Cookie`; `Cache-Control` carries none of `no-store` / `private` /
-`no-cache` (the only origin directives honored — the OPERATOR owns the
-entry's lifetime via `ttl_secs`, deliberately not the origin); the body
-is identity (no `Content-Encoding` — the gateway compresses on replay,
-and a stored coded body could not be re-negotiated); and the response's
-`Vary` is `*`-free and a subset of the route's effective vary set.
+`no-cache` (the storage vetoes); the body is identity (no
+`Content-Encoding` — the gateway compresses on replay, and a stored
+coded body could not be re-negotiated); and the response's `Vary` is
+`*`-free and a subset of the route's effective vary set. DP-04
+additionally honors the upstream `Cache-Control` freshness and
+stale-on-error directives (see Freshness below): `s-maxage` (then
+`max-age`) sets the per-entry freshness lifetime, taking precedence
+over the configured `ttl_secs`; `stale-if-error` sets the per-entry
+stale-on-error window (RFC 5861 section 4); and `must-revalidate`
+zeroes the stale-if-error window (the origin forbade serving stale
+without revalidation). The operator-owned `ttl_secs` remains the
+fallback when the upstream sent no freshness directive.
 
 ## Keys and the variance model
 
-The key is `sha256("dwara-rc-v1" | route | epoch | consumer | path |
-query | vary-name=value...)` — hex, never logged (paths and queries
-carry tokens). The consumer component is what makes DW-029 interaction
-safe: two consumers — or one consumer's group variants — can never see
-each other's stored bytes.
+The key is `sha256("dwara-rc-v1" | route | epoch | method | consumer |
+path | query | vary-name=value...)` — hex, never logged (paths and
+queries carry tokens). The method component (DP-04) separates a HEAD
+representation (no body) from a GET representation (full body) of the
+same resource — they are distinct cache entries per RFC 9111 section
+4.1. The consumer component is what makes DW-029 interaction safe: two
+consumers — or one consumer's group variants — can never see each
+other's stored bytes.
 
 Variance is DECLARED, not discovered: RFC 9111's response-driven
 `Vary` requires enumerating stored entries (a two-level lookup) that an
@@ -115,9 +129,12 @@ are identity); the folded set is re-advertised through the tail's
 outside the set vetoes storage (the cache cannot prove it would key
 correctly — `vary_uncovered`).
 
-## Freshness, stale-while-revalidate, ETag
+## Freshness, stale-while-revalidate, stale-if-error, ETag
 
-Fresh for `ttl_secs` (`x-cache: hit`, `Age` stamped). A client
+Fresh for the effective freshness lifetime (DP-04): the upstream
+`Cache-Control: s-maxage`, then `max-age`, when present (RFC 7234
+section 5.2.2.9), else the configured `ttl_secs` — the operator-owned
+default and the v1 behavior (`x-cache: hit`, `Age` stamped). A client
 `If-None-Match` matching the stored validator on a fresh entry answers
 304 straight from the cache (weak comparison, RFC 9110 8.8.3). Within
 `stale_while_revalidate_secs` past expiry the entry serves stale
@@ -130,6 +147,18 @@ always wins the forwarded request), and an upstream 304 refreshes the
 entry and serves the STORED body as 200 (`x-cache: revalidated` —
 RFC 9111 4.3.4 forbids answering a 304 to a client that asked no
 conditional).
+
+Stale-if-error (DP-04, RFC 5861 section 4): when an upstream returns a
+5xx (including the 502 the gateway synthesizes on connection failure),
+a stale entry within its per-entry `stale-if-error` window is served
+instead (`x-cache: stale`, logged `cache_stale_if_error`). The window
+is the upstream-advertised `Cache-Control: stale-if-error=<seconds>`
+captured at store time; an entry without one (0) does not serve stale
+on error, and `must-revalidate` zeroes the window (the origin forbade
+serving stale without revalidation). The error response itself is
+never stored. The window is measured from expiry (`freshness_ttl +
+stale_if_error`), so it stacks on top of the configured
+stale-while-revalidate window rather than replacing it.
 
 The background revalidation is a minimal synthetic GET (the
 vary-relevant headers plus the stored validator) through the full
@@ -154,8 +183,10 @@ bypasses (non-GET, credentialed, body-bearing, upgrade) never
 coalesces (pinned by `bypassed_shapes_never_join_a_coalescing_leader`)
 — in both cases there is no shared CACHEABLE outcome to
 hand a follower, and inventing one (sharing unstored streamed bodies)
-would break the zero-buffering posture. HEAD follows DW-037's bypass
-rule for the same reason.
+would break the zero-buffering posture. (DP-04 made HEAD cacheable, but
+HEAD still never coalesces: a HEAD miss fetches its own response rather
+than share a leader's, because the GET-fallback reuse path is a hit, not
+a miss.)
 
 ```text
 miss + coalescing enabled
@@ -235,11 +266,22 @@ responses are never coalesced.
 Entries record the route's cache EPOCH at store time; a lookup under a
 different epoch is a miss and drops the entry. Epochs advance on:
 
-- **Purge** (`POST /cache/purge` on the admin API, body
-  `{"route": "<name>"}` or `{"all": true}`): an O(1) map write — which
-  is why purge is under 100 ms at ANY store size; the opaque backend is
-  never enumerated. The response names what was invalidated and the
-  epoch it reached.
+- **Purge** (`POST /cache/purge` on the admin API): four bodies.
+  `{"route": "<name>"}` or `{"all": true}` advance a route's (or every
+  route's) epoch — an O(1) map write, which is why these arms are under
+  100 ms at ANY store size; the opaque backend is never enumerated, and
+  the response names what was invalidated and the epoch it reached.
+  `{"tag": "<tag>"}` (DP-04) deletes every entry the upstream tagged
+  with `<tag>` via the `Cache-Tags` response header — an O(keys-with-tag)
+  store deletion through the `CacheStore` seam, using an in-memory
+  tag→keys index populated at store time. `{"url": "<path[?query]>",
+  "prefix": false}` (DP-04) deletes every entry for an exact
+  (`prefix` false, the default) or prefix-matched (`prefix` true) request
+  URL — an O(keys-for-url) store deletion using an in-memory URL→keys
+  index. The tag/url arms return `keys_deleted`; the route/all arms
+  return the invalidated routes and their new epoch. The tag/url indexes
+  are runtime state (lost on restart); the epoch-based route purge
+  remains the durable path.
 - **A config publish that changes a route** (`Route`-equality diff at
   every `DataPlane::refresh`): stored bytes were shaped by the old
   masking/transform/cache policy, so any change to the route's
@@ -280,7 +322,7 @@ remainder — exactly as if no cache existed (`over_cap` store outcome).
 | `dwara_cache_lookups_total` | `outcome` = hit / stale / miss / bypass | one per request on a cache-configured route, decided at lookup |
 | `dwara_cache_stores_total` | `outcome` = stored / vetoed / over_cap / error | one per cacheable fetch that reached the store stage |
 | `dwara_cache_revalidated_total` | — | responses served from the stored body after an upstream 304 |
-| `dwara_cache_purges_total` | `scope` = route / all | purge operations |
+| `dwara_cache_purges_total` | `scope` = route / all / tag / url / url_prefix | purge operations (the tag/url/url_prefix scopes are the DP-04 key-deletion arms) |
 | `dwara_cache_entries` | — | scrape-time snapshot of the store's approximate entry count |
 | `dwara_coalescing_leaders_total` | — | misses that became the coalescing leader (DW-038) |
 | `dwara_coalescing_followers_total` | `outcome` = served / fell_back_timeout / fell_back_unshared / fell_back_epoch | follower resolutions; a closed four-value set |

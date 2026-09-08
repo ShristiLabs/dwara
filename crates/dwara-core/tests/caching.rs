@@ -672,10 +672,12 @@ async fn wire_path_and_metrics_families() {
 // --- tester stage: the remaining closed rules and the replay-tail pin --------
 
 #[tokio::test]
-async fn head_upgrade_and_body_bearing_requests_bypass() {
+async fn head_is_cacheable_and_body_bearing_requests_bypass() {
     let (port, count) = counting_backend(r#"{"n":{n}}"#).await;
     let dp = dataplane_from(&cache_yaml(port, PLAIN_CACHE, ""));
-    // HEAD: cacheable in spirit, bypassed in v1 (no-body replay framing).
+    // DP-04: HEAD is cacheable. The first HEAD is a miss (fetches
+    // upstream, stores a HEAD entry with no body); the second is a hit
+    // served from that entry — one upstream call for the pair.
     let resp = proxy::handle(
         &dp,
         ip(),
@@ -689,9 +691,31 @@ async fn head_upgrade_and_body_bearing_requests_bypass() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers().get("x-cache").and_then(|v| v.to_str().ok()),
-        Some("bypass"),
-        "HEAD is bypassed in v1"
+        Some("miss"),
+        "HEAD is cacheable (DP-04): first HEAD is a miss"
     );
+    let body1 = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body1.is_empty(), "a HEAD response carries no body");
+
+    let resp = proxy::handle(
+        &dp,
+        ip(),
+        Request::builder()
+            .method(hyper::Method::HEAD)
+            .uri("/api/x")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        resp.headers().get("x-cache").and_then(|v| v.to_str().ok()),
+        Some("hit"),
+        "the second HEAD replays the stored HEAD entry"
+    );
+    let body2 = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body2.is_empty(), "a cached HEAD replay carries no body");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
     // A GET with a declared body never caches (the body could select the
     // response; the deterministic rule refuses to guess).
     let resp = proxy::handle(
@@ -710,6 +734,469 @@ async fn head_upgrade_and_body_bearing_requests_bypass() {
         "a body-bearing GET bypasses"
     );
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn head_served_from_cached_get_entry() {
+    // DP-04 GET-fallback (RFC 9111 section 4.1): a fresh GET entry
+    // serves a HEAD request — same headers, no body — without a second
+    // upstream call.
+    let (port, count) = counting_backend(r#"{"n":{n}}"#).await;
+    let dp = dataplane_from(&cache_yaml(port, PLAIN_CACHE, ""));
+    // Populate the GET entry.
+    let (_, h, body) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss");
+    assert_eq!(&body, r#"{"n":1}"#);
+    // A HEAD for the same resource hits via the GET entry.
+    let resp = proxy::handle(
+        &dp,
+        ip(),
+        Request::builder()
+            .method(hyper::Method::HEAD)
+            .uri("/api/x")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("x-cache").and_then(|v| v.to_str().ok()),
+        Some("hit"),
+        "a fresh GET entry serves a HEAD (GET-fallback)"
+    );
+    // Content-Length reflects the GET entity length; the body is empty.
+    assert_eq!(
+        resp.headers()
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()),
+        Some("7"),
+        "Content-Length is the GET entity length (the HEAD framing)"
+    );
+    let head_body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(head_body.is_empty(), "the HEAD replay carries no body");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// --- DP-04: upstream Cache-Control freshness + stale-if-error ----------------
+
+#[tokio::test]
+async fn upstream_max_age_overrides_configured_ttl() {
+    // The route configures ttl_secs: 30, but the upstream advertises
+    // `max-age=1`. DP-04 honors the upstream lifetime for a shared
+    // cache, so the entry expires at 1s, not 30s.
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .header("cache-control", "max-age=1")
+                    .body(Full::new(Bytes::from(format!("{{\"n\":{n}}}"))))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss");
+    // Within the upstream 1s lifetime: hit.
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "hit");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Past the upstream 1s (but well within the configured 30s): the
+    // entry is expired — a miss, proving the upstream TTL won.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(
+        x_cache(&h),
+        "miss",
+        "upstream max-age=1 expired the entry though config ttl_secs is 30"
+    );
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn s_maxage_takes_precedence_over_max_age() {
+    // s-maxage (shared cache lifetime) wins over max-age for the
+    // gateway's shared cache (RFC 7234 section 5.2.2.9).
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .header("cache-control", "max-age=1, s-maxage=30")
+                    .body(Full::new(Bytes::from_static(b"ok")))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 1", ""));
+    let _ = get(&dp, "/api/x").await; // miss + store
+                                      // Past max-age=1 AND the configured ttl_secs=1, but within
+                                      // s-maxage=30: still a hit (s-maxage won).
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(
+        x_cache(&h),
+        "hit",
+        "s-maxage=30 keeps the entry fresh past max-age=1"
+    );
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn stale_if_error_serves_stale_on_upstream_5xx() {
+    // The upstream advertises max-age=1, stale-if-error=10. After
+    // expiry the upstream returns 500; the cache serves the stale entry
+    // (x-cache: stale) instead of the error — the resilience win.
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == 1 {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .header("cache-control", "max-age=1, stale-if-error=10")
+                        .body(Full::new(Bytes::from_static(b"{\"v\":1}")))
+                        .unwrap(),
+                )
+            } else {
+                Ok(Response::builder()
+                    .status(500)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap())
+            }
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let (status, h, body) = get(&dp, "/api/x").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(x_cache(&h), "miss");
+    assert_eq!(&body, "{\"v\":1}");
+    // Let the entry expire (upstream max-age=1).
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    // The upstream now 500s; stale-if-error serves the stale entry.
+    let (status, h, body) = get(&dp, "/api/x").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "stale-if-error serves the stale entry, not the 500"
+    );
+    assert_eq!(x_cache(&h), "stale");
+    assert_eq!(&body, "{\"v\":1}", "the stale body is the first response");
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the errored upstream was still contacted once (then stale served)"
+    );
+}
+
+#[tokio::test]
+async fn stale_if_error_absent_passes_the_error_through() {
+    // Without stale-if-error, an upstream 5xx after expiry passes
+    // straight through to the client (no stale to serve).
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == 1 {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .header("content-type", "text/plain")
+                        .header("cache-control", "max-age=1")
+                        .body(Full::new(Bytes::from_static(b"ok")))
+                        .unwrap(),
+                )
+            } else {
+                Ok(Response::builder()
+                    .status(500)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap())
+            }
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let _ = get(&dp, "/api/x").await; // miss + store
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (status, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(status, 500, "no stale-if-error: the 500 passes through");
+    assert_eq!(x_cache(&h), "miss");
+}
+
+// --- DP-04: purge by tag and by URL ------------------------------------------
+
+#[tokio::test]
+async fn purge_by_tag_deletes_only_tagged_entries() {
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Tag every /api/a response; leave /api/b untagged.
+            let tags = if req.uri().path().starts_with("/api/a") {
+                "user-42"
+            } else {
+                ""
+            };
+            let mut builder = Response::builder()
+                .header("content-type", "text/plain")
+                .header("cache-control", "max-age=60");
+            if !tags.is_empty() {
+                builder = builder.header("cache-tags", tags);
+            }
+            Ok::<_, std::convert::Infallible>(
+                builder.body(Full::new(Bytes::from_static(b"ok"))).unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let _ = get(&dp, "/api/a").await; // miss + store (tagged user-42)
+    let _ = get(&dp, "/api/b").await; // miss + store (untagged)
+    let (_, ha, _) = get(&dp, "/api/a").await;
+    let (_, hb, _) = get(&dp, "/api/b").await;
+    assert_eq!(x_cache(&ha), "hit");
+    assert_eq!(x_cache(&hb), "hit");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // Purge the tagged entry; the untagged one stays warm.
+    let deleted = dp.response_cache().purge_by_tag("user-42").await;
+    assert_eq!(deleted, 1, "one key carried the user-42 tag");
+    let (_, ha, _) = get(&dp, "/api/a").await;
+    let (_, hb, _) = get(&dp, "/api/b").await;
+    assert_eq!(x_cache(&ha), "miss", "the tagged entry was purged");
+    assert_eq!(x_cache(&hb), "hit", "the untagged entry survives");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+    // Purging a tag the gateway never saw is a no-op.
+    let deleted = dp.response_cache().purge_by_tag("never-seen").await;
+    assert_eq!(deleted, 0);
+}
+
+#[tokio::test]
+async fn purge_by_url_exact_and_prefix() {
+    let (port, _count) = counting_backend(r#"{"n":{n}}"#).await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let _ = get(&dp, "/api/users/alice").await;
+    let _ = get(&dp, "/api/users/bob").await;
+    let _ = get(&dp, "/api/org").await;
+    let (_, h, _) = get(&dp, "/api/users/alice").await;
+    assert_eq!(x_cache(&h), "hit");
+
+    // Prefix purge: every /api/users/ entry.
+    let deleted = dp.response_cache().purge_by_url("/api/users/", true).await;
+    assert_eq!(deleted, 2, "two keys under the /api/users/ prefix");
+    let (_, ha, _) = get(&dp, "/api/users/alice").await;
+    let (_, hb, _) = get(&dp, "/api/users/bob").await;
+    let (_, ho, _) = get(&dp, "/api/org").await;
+    assert_eq!(x_cache(&ha), "miss");
+    assert_eq!(x_cache(&hb), "miss");
+    assert_eq!(x_cache(&ho), "hit", "the non-matching URL survives");
+
+    // Exact purge of the remaining entry.
+    let deleted = dp.response_cache().purge_by_url("/api/org", false).await;
+    assert_eq!(deleted, 1);
+    let (_, ho, _) = get(&dp, "/api/org").await;
+    assert_eq!(x_cache(&ho), "miss");
+
+    // Exact purge of a URL with no entry is a no-op.
+    let deleted = dp
+        .response_cache()
+        .purge_by_url("/api/missing", false)
+        .await;
+    assert_eq!(deleted, 0);
+}
+
+#[tokio::test]
+async fn no_cache_response_is_not_stored() {
+    // DP-04: `no-cache` remains a storage veto (the gateway does not
+    // yet serve-then-revalidate, so storing an entry that can never be
+    // replayed fresh is dead weight). Two requests, two upstream calls.
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .header("cache-control", "no-cache, max-age=60")
+                    .body(Full::new(Bytes::from_static(b"ok")))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss");
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss", "no-cache vetoes storage");
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both requests reached upstream"
+    );
+}
+
+#[tokio::test]
+async fn must_revalidate_blocks_stale_if_error() {
+    // DP-04: `must-revalidate` zeroes the stale-if-error window at
+    // store time (the origin forbade serving stale without
+    // revalidation). After expiry an upstream 5xx passes straight
+    // through — no stale serving even though `stale-if-error=10` was
+    // advertised alongside `must-revalidate`.
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == 1 {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .header("content-type", "text/plain")
+                        .header(
+                            "cache-control",
+                            "max-age=1, stale-if-error=10, must-revalidate",
+                        )
+                        .body(Full::new(Bytes::from_static(b"ok")))
+                        .unwrap(),
+                )
+            } else {
+                Ok(Response::builder()
+                    .status(500)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap())
+            }
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let (status, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(x_cache(&h), "miss");
+    // Let the entry expire (upstream max-age=1).
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (status, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(
+        status, 500,
+        "must-revalidate forbids stale-if-error: the 500 passes through"
+    );
+    assert_eq!(x_cache(&h), "miss");
+}
+
+#[tokio::test]
+async fn stale_if_error_window_expired_passes_error_through() {
+    // DP-04: stale-if-error serves stale only WITHIN the window past
+    // expiry. Past the window the upstream 5xx passes through to the
+    // client (the entry is no longer usable).
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == 1 {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .header("content-type", "text/plain")
+                        .header("cache-control", "max-age=1, stale-if-error=1")
+                        .body(Full::new(Bytes::from_static(b"ok")))
+                        .unwrap(),
+                )
+            } else {
+                Ok(Response::builder()
+                    .status(500)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap())
+            }
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let _ = get(&dp, "/api/x").await; // miss + store
+                                      // Expired but within the 1s stale-if-error window: stale served.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (status, h, body) = get(&dp, "/api/x").await;
+    assert_eq!(status, StatusCode::OK, "within the window: stale served");
+    assert_eq!(x_cache(&h), "stale");
+    assert_eq!(&body, "ok");
+    // Past the freshness + stale-if-error window (1s + 1s): the 500
+    // passes through (the entry is no longer usable).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (status, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(
+        status, 500,
+        "past the stale-if-error window: the error passes through"
+    );
+    assert_eq!(x_cache(&h), "miss");
+}
+
+#[tokio::test]
+async fn purge_by_tag_multiple_tags_either_purges() {
+    // DP-04: one entry carrying multiple `Cache-Tags` is purged when
+    // ANY of its tags is purged (the tag index records the key under
+    // every tag). Re-storing re-records under both tags.
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&count);
+    let port = spawn_backend_async(move |_req: Request<hyper::body::Incoming>| {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .header("content-type", "text/plain")
+                    .header("cache-control", "max-age=60")
+                    .header("cache-tags", "alpha, beta")
+                    .body(Full::new(Bytes::from_static(b"ok")))
+                    .unwrap(),
+            )
+        }
+    })
+    .await;
+    let dp = dataplane_from(&cache_yaml(port, "      ttl_secs: 30", ""));
+    let _ = get(&dp, "/api/x").await; // miss + store (tagged alpha AND beta)
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "hit");
+
+    // Purging by either tag deletes the one entry.
+    let deleted = dp.response_cache().purge_by_tag("alpha").await;
+    assert_eq!(deleted, 1, "purging alpha deletes the multi-tag entry");
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(
+        x_cache(&h),
+        "miss",
+        "the entry is gone after the alpha purge"
+    );
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // Re-store (re-records under both tags) and purge by the other tag.
+    let _ = get(&dp, "/api/x").await; // miss + store again
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "hit");
+    let deleted = dp.response_cache().purge_by_tag("beta").await;
+    assert_eq!(deleted, 1, "purging beta deletes the re-stored entry");
+    let (_, h, _) = get(&dp, "/api/x").await;
+    assert_eq!(x_cache(&h), "miss");
 }
 
 /// THE replay-tail pin: a cached hit must still run the decoration

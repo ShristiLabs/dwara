@@ -81,6 +81,19 @@ Redis Pub/Sub:
 The invalidation publication is best-effort: if it fails, the entry
 will still expire via TTL or be overwritten on the next write.
 
+The DP-04 tag/url purge arms (`POST /cache/purge` with `{"tag": ...}`
+or `{"url": ...}`) delete specific keys through `CacheStore::delete`,
+so each deleted key publishes an invalidation message and propagates
+across the fleet. Caveat: the tag→keys and URL→keys indexes the purge
+consults are in-memory and LOCAL to the instance receiving the admin
+request — it can only purge entries its own store path indexed. Entries
+other instances stored (and this one never saw) are not in its index and
+will not be purged by a tag/url request aimed at this instance alone.
+The epoch-based route/all purge remains fleet-wide by construction
+(every instance advances its own epoch on the same config publish). For
+fleet-wide tag/url purge, aim the request at every instance, or prefer
+the route/all arms.
+
 ## Design
 
 - `RedisCacheStore` implements the `CacheStore` trait (the same

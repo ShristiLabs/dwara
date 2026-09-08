@@ -1,9 +1,9 @@
 # Response caching
 
-Dwara can cache a route's GET responses locally and replay them for
-identical requests, cutting upstream load and tail latency. Caching is
-off by default: a route opts in with a `cache` block, and only requests
-Dwara can key safely are ever cached.
+Dwara can cache a route's GET and HEAD responses locally and replay
+them for identical requests, cutting upstream load and tail latency.
+Caching is off by default: a route opts in with a `cache` block, and
+only requests Dwara can key safely are ever cached.
 
 ## When to use this
 
@@ -27,17 +27,20 @@ routes:
 ## What gets cached
 
 A request is cacheable when the route has a `cache` block and the
-request is a plain `GET` — no body, no `Authorization` header, no
-`Cookie` header, no protocol upgrade. Everything else (POSTs, credentialed
-fetches, WebSockets handshakes) always goes upstream.
+request is a plain `GET` or `HEAD` — no body, no `Authorization` header,
+no `Cookie` header, no protocol upgrade. Everything else (POSTs,
+credentialed fetches, WebSockets handshakes) always goes upstream. A
+HEAD response is stored under its own key (no body); a fresh GET entry
+also serves a later HEAD request (same headers, empty body) without a
+round trip.
 
 A response is stored only when it is safe to replay: status 200, no
 `Set-Cookie`, no [Cache-Control](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control): no-store / `private` / `no-cache`,
 not content-encoded, and its [`Vary`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary) (tells caches which request headers affect the response) only names dimensions the route
 keys on. Responses larger than `max_body_bytes` stream through unstored.
 
-Every cached entry is keyed by route, consumer, path, query, and the
-vary dimensions — two consumers never share an entry, so
+Every cached entry is keyed by route, method, consumer, path, query,
+and the vary dimensions — two consumers never share an entry, so
 [masking](./masking) variants can never leak across consumers.
 
 ## Hit, stale, revalidated
@@ -54,14 +57,24 @@ answer before the cache and carry no stamp):
 | `revalidated` | the upstream confirmed the cached body unchanged ([ETag](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag) (a response's version fingerprint) / [304](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/304)) |
 | `bypass` | this request shape is never cached |
 
-Freshness is `ttl_secs`, always — the origin's own `max-age` does not
-extend it (only the storage vetoes above are honored). Inside
+Freshness is the upstream's `Cache-Control: s-maxage` (then `max-age`)
+when the origin advertised one — Dwara honors it as a shared cache
+(RFC 7234) — otherwise the configured `ttl_secs`. The storage vetoes
+above (`no-store` / `private` / `no-cache`) always apply. Inside
 `stale_while_revalidate_secs` (serve a cached entry past its freshness while refreshing it in the background) after expiry, clients keep getting
 instant answers while one background request refreshes the entry. Past
 the window the next request revalidates conditionally: if the upstream
 answers [304 Not Modified](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/304), the stored body re-serves without
 re-sending it. A client that sends a matching [`If-None-Match`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-None-Match) on a
 fresh entry gets an immediate `304`.
+
+When the origin advertises `Cache-Control: stale-if-error=<seconds>`,
+Dwara serves a stale entry in place of an upstream 5xx (a crashed or
+erroring backend) for that many seconds past expiry — `x-cache: stale`,
+same as the stale-while-revalidate path. An entry with no
+`stale-if-error` directive, or one whose `Cache-Control` carries
+`must-revalidate`, is not served stale on error (the error passes
+through to the client instead).
 
 ## Request coalescing
 
@@ -101,18 +114,34 @@ fetch":
 
 ## Purging
 
-The [admin API](./admin-api) invalidates cached entries:
+The [admin API](./admin-api) invalidates cached entries four ways:
 
 ```sh
 curl -X POST --cert admin.crt --key admin.key \
   --cacert ca.crt https://127.0.0.1:19000/cache/purge \
   -H 'content-type: application/json' \
-  -d '{"route": "catalog"}'        # or {"all": true}
+  -d '{"route": "catalog"}'        # one route, or {"all": true}
 ```
 
-The response names what was purged and the invalidation epoch it
-reached. Purge is an O(1) generation advance — it completes in well
-under 100 ms no matter how many entries are live.
+```sh
+# Purge every entry the upstream tagged with a Cache-Tags value
+curl -X POST ... -d '{"tag": "user-42"}'
+
+# Purge by request URL: exact match, or a path prefix
+curl -X POST ... -d '{"url": "/api/users/42", "prefix": false}'
+curl -X POST ... -d '{"url": "/api/users/", "prefix": true}'
+```
+
+The `route` and `all` arms are an O(1) generation advance — they
+complete in well under 100 ms no matter how many entries are live, and
+the response names what was purged and the invalidation epoch it
+reached. The `tag` and `url` arms delete specific entries by key (an
+O(keys-matching) operation) and return `keys_deleted`. Tag purging keys
+off the upstream `Cache-Tags` response header (a comma-separated list of
+opaque tags the origin attaches to a response); URL purging keys off the
+request path plus query. Both use in-memory indexes Dwara builds at
+store time, so they are lost on a restart — the route/all epoch purge is
+the durable path and survives restarts.
 
 Invalidation also happens automatically: any configuration change that
 alters a route (its transforms, masking, or cache policy) retires that
@@ -131,7 +160,8 @@ response body, never beyond the configured cap.
 
 The `/metrics` endpoint exposes `dwara_cache_lookups_total{outcome=...}`
 (hit/stale/miss/bypass), `dwara_cache_stores_total{outcome=...}`,
-`dwara_cache_revalidated_total`, `dwara_cache_purges_total{scope=...}`,
+`dwara_cache_revalidated_total`,
+`dwara_cache_purges_total{scope=route|all|tag|url|url_prefix}`,
 and the live-entry gauge `dwara_cache_entries` — see
 [Observability](./observability). With coalescing enabled,
 `dwara_coalescing_leaders_total`,

@@ -50,6 +50,36 @@ the project follows semantic versioning once 1.0 is reached.
   `MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS` = 600000 ms,
   `MAX_POOL_MAX_CONCURRENT_STREAMS` = 1000000); each rejected knob
   names its field in the validation issue.
+- Cache HTTP semantics and purge API (#177, DP-04): the response cache
+  now honors upstream `Cache-Control` directives as a shared cache
+  (RFC 7234). `s-maxage` (then `max-age`) sets the per-entry freshness
+  lifetime, taking precedence over the configured `ttl_secs` (which
+  remains the fallback when the origin sent no freshness directive);
+  `stale-if-error=<seconds>` (RFC 5861 section 4) serves a stale entry
+  in place of an upstream 5xx (including the 502 synthesized on
+  connection failure) for that many seconds past expiry; and
+  `must-revalidate` zeroes the stale-if-error window (the origin forbade
+  serving stale without revalidation). The storage vetoes (`no-store` /
+  `private` / `no-cache`) are unchanged. HEAD is now cacheable: a HEAD
+  response is stored under its own key (no body), and a fresh GET entry
+  also serves a later HEAD request via the GET-fallback (RFC 9111
+  section 4.1); the method folds into the cache key so HEAD and GET
+  representations of one resource are distinct entries. Two new
+  `POST /cache/purge` arms join the existing route/all epoch arms:
+  `{"tag": "<tag>"}` deletes every entry the upstream tagged with that
+  `Cache-Tags` response header value, and `{"url": "<path[?query]>",
+  "prefix": false}` deletes entries for an exact or prefix-matched
+  request URL. The tag/url arms delete specific keys through the
+  `CacheStore` seam using in-memory tag→keys and URL→keys indexes
+  populated at store time (O(keys-matching), not O(1)), and return
+  `keys_deleted`; the `Cache-Tags` header is stripped before client
+  replay. The indexes are runtime state (lost on restart); the
+  epoch-based route purge remains the durable path. The
+  `dwara_cache_purges_total{scope}` metric adds the `tag`, `url`, and
+  `url_prefix` label values. The entry envelope bumps to v2 (carries
+  the per-entry freshness TTL and stale-if-error window); v1 entries
+  decode with both fields zeroed (the configured policy applies). No
+  new config, no schema changes, no new dependencies.
 - gRPC-Web framing translation and JSON-to-gRPC transcoding (DW-101): a
   `grpc_web` cargo feature (OSS, default OFF) on dwara-core that adds a
   `routes[].grpc_web` config block. When enabled, the gateway translates

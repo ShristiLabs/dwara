@@ -1442,6 +1442,186 @@ async fn cache_purge_error_shapes() {
     );
 }
 
+// --- POST /cache/purge tag/url arms (DP-04) ----------------------------------
+
+/// Purge-by-tag returns 200 naming the tag and the (zero, with no
+/// entries populated) keys deleted. The arm is mTLS-gated like the
+/// route/all arms.
+#[tokio::test]
+async fn cache_purge_by_tag_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+    let body = r#"{"tag": "user-42"}"#;
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "body: {resp}");
+    let doc: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(doc["tag"], "user-42");
+    assert_eq!(doc["keys_deleted"], 0, "no entries were populated");
+}
+
+/// Purge-by-url returns 200 naming the url, the prefix flag, and the
+/// keys deleted.
+#[tokio::test]
+async fn cache_purge_by_url_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+    let body = r#"{"url": "/api/users/", "prefix": true}"#;
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "body: {resp}");
+    let doc: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(doc["url"], "/api/users/");
+    assert_eq!(doc["prefix"], true);
+    assert_eq!(doc["keys_deleted"], 0);
+}
+
+/// An empty tag or url is a 400 (the admin surface rejects the
+/// degenerate purge target with a meaningful shape).
+#[tokio::test]
+async fn cache_purge_empty_tag_and_url_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+
+    let body = r#"{"tag": ""}"#;
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "body: {resp}");
+    assert!(resp.contains("cache_purge_invalid"));
+
+    let body = r#"{"url": ""}"#;
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "body: {resp}");
+    assert!(resp.contains("cache_purge_invalid"));
+}
+
+/// The DP-04 tag/url purge arms inherit the mTLS gate: a request
+/// without a client certificate never reaches the handler (the TLS
+/// handshake fails before any HTTP body is read). Proves the new arms
+/// are not accidentally exposed unauthenticated.
+#[tokio::test]
+async fn cache_purge_tag_and_url_arms_are_mtls_gated() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let body = r#"{"tag": "user-42"}"#;
+    let err = request(
+        server.addr,
+        &pki.ca_path(),
+        None,
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .expect_err("tag purge without a client cert must fail the handshake");
+    assert!(
+        err.contains("handshake") || err.contains("alert"),
+        "expected handshake failure, got: {err}"
+    );
+
+    let body = r#"{"url": "/api/x", "prefix": true}"#;
+    let err = request(
+        server.addr,
+        &pki.ca_path(),
+        None,
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .expect_err("url purge without a client cert must fail the handshake");
+    assert!(
+        err.contains("handshake") || err.contains("alert"),
+        "expected handshake failure, got: {err}"
+    );
+}
+
+/// Malformed JSON on the purge endpoint is a 400 with the
+/// `cache_purge_invalid` code (the same shape as the empty-body arm in
+/// `cache_purge_error_shapes`, but exercising the JSON parse failure
+/// path rather than a valid-but-shapeless object).
+#[tokio::test]
+async fn cache_purge_malformed_json_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    let server = start_mtls(&pki).await;
+    let (cert, key) = pki.issue("admin-client");
+    let client = (pem(&cert), pem(&key));
+    let body = r#"{"tag": "user-42"#; // truncated / invalid JSON
+    let (status, _, resp) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&client.0, &client.1)),
+        &format!(
+            "POST /cache/purge HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "body: {resp}");
+    assert!(
+        resp.contains("cache_purge_invalid"),
+        "malformed JSON yields the cache_purge_invalid envelope: {resp}"
+    );
+}
+
 // --- analytics endpoints (DW-043) ----------------------------------------
 
 async fn plaintext_request(addr: std::net::SocketAddr, req: &str) -> (u16, String) {

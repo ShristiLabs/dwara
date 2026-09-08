@@ -35,10 +35,15 @@
 //!   (when a store is attached), per-upstream breaker states, the
 //!   active-requests gauge, the config generation, and the response
 //!   cache's live-entry estimate and purge count (DW-037).
-//! - `POST /cache/purge` — response-cache invalidation (DW-037): body
-//!   `{"route": "<name>"}` or `{"all": true}`; the response names what
-//!   was invalidated. Purge is an O(1) cache-epoch advance, never a
-//!   store enumeration — sub-100 ms at any store size by construction.
+//! - `POST /cache/purge` — response-cache invalidation (DW-037 +
+//!   DP-04): body `{"route": "<name>"}`, `{"all": true}`,
+//!   `{"tag": "<tag>"}` (DP-04, purge by upstream `Cache-Tags`), or
+//!   `{"url": "<path[?query]>", "prefix": false}` (DP-04, purge by
+//!   exact or prefix-matched request URL); the response names what was
+//!   invalidated. The route/all arms are an O(1) cache-epoch advance,
+//!   never a store enumeration — sub-100 ms at any store size by
+//!   construction; the tag/url arms delete specific keys through the
+//!   `CacheStore` seam using in-memory indexes populated at store time.
 //! - `GET /mcp/sessions` — list active MCP sessions (DW-087).
 //! - `DELETE /mcp/sessions/:id` — teardown an MCP session (DW-087).
 //! - `GET /mcp/tools` — list configured MCP tools (DW-087).
@@ -443,13 +448,24 @@ fn runtime_info_body(ctx: &AdminContext) -> serde_json::Value {
     })
 }
 
-/// POST /cache/purge (DW-037): invalidate cached responses. Body is
-/// `{"route": "<name>"}` (one route; 404 when the name is not in the
-/// CURRENT config) or `{"all": true}` (every current route). Purge is
-/// an O(1) cache-epoch advance — the response names exactly what was
-/// invalidated and the epoch it now sits at; the store is never
-/// enumerated, which is why the operation stays well under the 100 ms
-/// bar at any store size.
+/// POST /cache/purge (DW-037 + DP-04): invalidate cached responses.
+/// Body is one of:
+/// - `{"route": "<name>"}` (one route; 404 when the name is not in the
+///   CURRENT config) — an O(1) cache-epoch advance.
+/// - `{"all": true}` (every current route) — an O(1) epoch advance per
+///   route.
+/// - `{"tag": "<tag>"}` (DP-04) — delete every entry the upstream
+///   tagged with `<tag>` (via `Cache-Tags`). O(keys-with-tag).
+/// - `{"url": "<path[?query]>", "prefix": false}` (DP-04) — delete
+///   every entry for an exact or prefix-matched request URL.
+///   `prefix` defaults to false (exact match); true evicts every entry
+///   whose URL starts with `url` (a path-prefix purge).
+///
+/// The route/all arms name what was invalidated; the tag/url arms name
+/// how many keys were deleted. The store is never enumerated for the
+/// epoch arms (which is why they stay well under the 100 ms bar at any
+/// store size); the tag/url arms delete specific keys through the
+/// `CacheStore` seam using in-memory indexes populated at store time.
 async fn purge_cache(ctx: &AdminContext, body: Bytes, request_id: &str) -> Response<AdminBody> {
     let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -487,11 +503,71 @@ async fn purge_cache(ctx: &AdminContext, body: Bytes, request_id: &str) -> Respo
             }),
         );
     }
+    // DP-04: purge by cache tag (every entry the upstream tagged).
+    if let Some(tag) = parsed.get("tag").and_then(|v| v.as_str()) {
+        if tag.is_empty() {
+            return envelope(
+                400,
+                "cache_purge_invalid",
+                "tag must be a non-empty string",
+                request_id,
+            );
+        }
+        let deleted = ctx.dp.response_cache().purge_by_tag(tag).await;
+        ctx.dp.observability().record_cache_purge("tag");
+        tracing::info!(
+            code = "cache_purged",
+            scope = "tag",
+            tag = tag,
+            keys = deleted,
+            "cache purged by tag (key deletion)"
+        );
+        return json_response(
+            200,
+            serde_json::json!({ "tag": tag, "keys_deleted": deleted }),
+        );
+    }
+    // DP-04: purge by request URL (exact or prefix match).
+    if let Some(url) = parsed.get("url").and_then(|v| v.as_str()) {
+        if url.is_empty() {
+            return envelope(
+                400,
+                "cache_purge_invalid",
+                "url must be a non-empty string",
+                request_id,
+            );
+        }
+        let prefix = parsed
+            .get("prefix")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let deleted = ctx.dp.response_cache().purge_by_url(url, prefix).await;
+        ctx.dp
+            .observability()
+            .record_cache_purge(if prefix { "url_prefix" } else { "url" });
+        tracing::info!(
+            code = "cache_purged",
+            scope = "url",
+            url = url,
+            prefix = prefix,
+            keys = deleted,
+            "cache purged by url (key deletion)"
+        );
+        return json_response(
+            200,
+            serde_json::json!({
+                "url": url,
+                "prefix": prefix,
+                "keys_deleted": deleted,
+            }),
+        );
+    }
     let Some(route) = parsed.get("route").and_then(|v| v.as_str()) else {
         return envelope(
             400,
             "cache_purge_invalid",
-            "body must be {\"route\": \"<name>\"} or {\"all\": true}",
+            "body must be {\"route\": \"<name>\"}, {\"all\": true}, {\"tag\": \"<tag>\"}, \
+             or {\"url\": \"<url>\", \"prefix\": false}",
             request_id,
         );
     };
