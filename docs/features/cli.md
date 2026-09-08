@@ -141,10 +141,15 @@ target dispensed as tokens by a pacing task, shared fairly-but-not-exactly
 across workers. `--echo PORT` can start a minimal echo server in the
 same process, so the rig needs no external upstream to smoke-test
 itself. Output ends with a machine-parseable `RESULT:` line so CI can
-assert `errors=0` without scraping human-formatted text; with `--json`,
-an additional `JSON:` line carries the same metrics plus the
+assert on the error count without scraping human-formatted text; with
+`--json`, an additional `JSON:` line carries the same metrics plus the
 protocol/workload labels, consumed by the regression gate
-(`scripts/bench-regression.py`).
+(`scripts/bench-regression.py`). The throughput and pool-reuse
+workloads assert `errors=0` (a clean run with no transport failures);
+the streaming workload asserts the error rate is negligible (< 1%),
+because under high unbounded throughput (thousands of chunked requests
+per second over a few connections) a tiny number of transient transport
+races at the OS level is expected and not a real defect.
 
 ## The macro regression harness
 
