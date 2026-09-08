@@ -2080,6 +2080,27 @@ the project follows semantic versioning once 1.0 is reached.
   dependencies; `config-reference.json` regenerated; new
   `docs/features/masking.md` and docs-site `guide/masking.md`.
 
+### Changed
+
+- Async cached DNS on the pooled dial path (#170, PERF-05): the pooled
+  upstream connector now resolves hostnames through a shared async
+  hickory `DnsCache` (`happy_dial_via` in `dataplane/upstream.rs`,
+  `DnsCache` in `dataplane/discovery.rs`) instead of the blocking-pool
+  `getaddrinfo` of `tokio::net::lookup_host`. One `Arc<DnsCache>` is
+  built per upstream-registry generation and shared across every
+  upstream in it, so repeated dials to the same host skip both the
+  blocking pool and the network round-trip. Successful dual-stack
+  (A + AAAA) lookups are cached until the record TTL expires (capped
+  at 300 s, floored at 1 s; `/etc/hosts` entries resolve without a
+  network round-trip), and failed lookups are negatively cached for
+  5 s as `AddrNotAvailable` to suppress retry storms against a failing
+  resolver. IP-literal hosts skip DNS and the cache entirely. The map
+  is bounded at 4096 entries (evicts the earliest-expiring entry when
+  full). The RFC 8305 happy-eyeballs racing, NODELAY, and
+  `connect_ms` accounting are unchanged; active health probes keep the
+  system resolver (a background, infrequent path). No new config
+  fields or dependencies; the defaults are not operator-tunable.
+
 ### Fixed
 
 - Linux config-watcher reload loop: each reload's own read bumped the
