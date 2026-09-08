@@ -9,6 +9,34 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Nightly soak with RSS-ceiling and p99-drift assertions (#174,
+  REL-03): a new `scripts/soak.sh` harness boots the real `dwara`
+  gateway against an in-process echo upstream
+  (`dwara-loadgen --echo-only`) and drives sustained load through it in
+  fixed-width windows, sampling the gateway's RSS (KB) and the window's
+  p99 latency after each window. A new `scripts/soak.py` assertion gate
+  reads the per-window `SAMPLE:` stream and fails when either ceiling is
+  breached: max RSS over `SOAK_RSS_CEILING_KB` (default 262144 = 256MB,
+  the memory-leak ceiling) or p99 drift beyond `SOAK_P99_DRIFT` (default
+  0.50 = 50%, the fractional growth from the early-window baseline mean
+  to the late-window tail mean); a window with any errors is a hard
+  failure regardless of metrics. Duration, rate, connections, sample
+  window, RSS ceiling, and p99 drift are all configurable via env vars
+  and dispatch inputs (defaults: 600s duration, 1000 rps, 50
+  connections, 30s windows). A new `.github/workflows/soak.yml` runs the
+  soak nightly (06:13 UTC) and on manual dispatch only — no push/PR
+  triggers, because sustained load is slower and noisier than the per-PR
+  gate; the schedule is offset from `bench-nightly.yml` (04:17 UTC) and
+  `chaos.yml` (Wed 05:11 UTC) so the three never contend for runners.
+  The 24h soak referenced in the issue runs on dedicated hosts via
+  dispatch with `duration=86400` (and a raised timeout/RSS ceiling);
+  the nightly CI duration stays short (10 min) to bound runner cost, the
+  assertions are the same either way. This is the ASSERTING soak,
+  complementary to `bench.yml`'s separate manual-only 24h soak (#127,
+  no assertions) and distinct from the macro regression gate
+  (`bench-nightly.yml`, #171) and the chaos suite (`chaos.yml`, #173).
+  It is separate from `ci.yml` (the per-PR gate). No config, schema, or
+  dependency changes.
 - Chaos / end-to-end resilience fault-injection CI suite (#173,
   REL-02): a new integration suite
   `crates/dwara-core/tests/chaos_resilience.rs` that drives real fault
