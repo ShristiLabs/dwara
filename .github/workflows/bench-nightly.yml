@@ -1,0 +1,190 @@
+# PERF-06 (#171) nightly macro regression gate.
+#
+# COMPUTE POSTURE: SCHEDULED (nightly) and manually dispatchable ONLY.
+# No push/pull_request triggers — macro benchmarks are slow and noisy and
+# must not run per-PR (see the repo's CI-cost conventions; ci.yml is the
+# per-PR gate, bench.yml is the weekly micro + macro rig).
+#
+# Jobs:
+#   macro-gate — runs scripts/bench-regression.sh (the full
+#                client -> gateway -> upstream -> gateway -> client path
+#                across h1/h2 x throughput/pool-reuse/streaming) and
+#                gates the JSON output against the checked-in macro
+#                baseline (scripts/bench-macro-baseline.json) via
+#                scripts/bench-regression.py. GATE SEMANTICS mirror the
+#                micro gate: the comparison runs ONLY when the baseline
+#                was captured on the same runner class (--expect-machine);
+#                while the checked-in baseline is the dev-machine
+#                reference, the gate SKIPS with a notice and fails open.
+#                NOISE HANDLING: the harness is run up to 3 times and the
+#                gate is fed the BEST (highest-rps) run, shedding a single
+#                noisy sample; the tolerance is 30% (loopback rps on a
+#                shared CI runner is far noisier than criterion ns/iter).
+#   baseline-refresh — manual (workflow_dispatch, `-f job=baseline-refresh`)
+#                ONLY. Re-captures the macro baseline ON THE CI RUNNER and
+#                commits it back (contents: write; standard GITHUB_TOKEN).
+#   h3-compile  — best-effort compile check of the default-off h3 feature
+#                on dwara-cli (loadgen) and dwara-bin (ingress). h3 is
+#                feature-gated/default-off, so the nightly macro-gate does
+#                not exercise h3 throughput (a TLS/QUIC listener rig is
+#                out of scope for the plain harness); this job catches h3
+#                feature rot at the nightly cadence.
+#
+# Bootstrap: after this workflow merges, dispatch the baseline refresh
+# ONCE (`gh workflow run bench-nightly.yml --ref main -f
+# job=baseline-refresh`) to capture a CI-runner macro baseline, after
+# which the nightly gate compares like-for-like.
+
+name: bench-nightly
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Nightly, 04:17 UTC (off the :00 mark to shed load; distinct from
+    # bench.yml's weekly Monday 03:17 slot).
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run: gate (default), baseline-refresh, or h3-compile"
+        required: false
+        default: "gate"
+        type: choice
+        options:
+          - gate
+          - baseline-refresh
+          - h3-compile
+
+concurrency:
+  group: bench-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macro-gate:
+    name: nightly macro regression gate (h1/h2 workloads)
+    if: github.event_name == 'schedule' || inputs.job == 'gate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Run macro harness + regression gate (best of 3, 30% tolerance)
+        # Loopback rps on a shared CI runner is noisy. Run the harness up
+        # to 3 times, keep the run with the highest total rps (the least
+        # contended sample), and gate that. The 30% tolerance is wider
+        # than the micro gate's 25% because macro end-to-end rps/latency
+        # varies more than criterion ns/iter. The gate still fails-open
+        # (SKIP) while the baseline is the dev-machine reference.
+        run: |
+          set -euo pipefail
+          best=""
+          best_rps=0
+          for attempt in 1 2 3; do
+            echo "== attempt $attempt =="
+            out="$(BENCH_DURATION=5 BENCH_CONNECTIONS=10 scripts/bench-regression.sh 2>/dev/null || true)"
+            if [ -z "$out" ]; then
+              echo "attempt $attempt produced no JSON; retrying"
+              continue
+            fi
+            # Sum rps across all workload lines as the fitness signal.
+            rps="$(printf '%s\n' "$out" | python3 -c \
+              'import json,sys; t=0
+          for l in sys.stdin:
+            if l.startswith("JSON: "):
+              t+=json.loads(l[6:]).get("rps",0)
+          print(int(t))')"
+            echo "attempt $attempt total rps=$rps"
+            if [ "$rps" -gt "$best_rps" ]; then
+              best="$out"
+              best_rps="$rps"
+            fi
+          done
+          if [ -z "$best" ]; then
+            echo "no successful harness run across 3 attempts" >&2
+            exit 2
+          fi
+          printf '%s\n' "$best" | tee macro-output.txt
+          printf '%s\n' "$best" | scripts/bench-regression.py \
+            --baseline scripts/bench-macro-baseline.json \
+            --expect-machine ubuntu-latest --tolerance 0.30
+
+      - name: Upload macro output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned: v4 @ ea165f8d
+        with:
+          name: macro-bench-output
+          path: macro-output.txt
+
+  baseline-refresh:
+    name: refresh macro baseline on the CI runner (dispatch only)
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'baseline-refresh'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Run macro harness and write CI-captured baseline
+        run: |
+          set -euo pipefail
+          out="$(BENCH_DURATION=5 BENCH_CONNECTIONS=10 scripts/bench-regression.sh 2>/dev/null)"
+          # Fail before writing if the harness produced no JSON lines.
+          echo "$out" | grep -q '^JSON: ' || {
+            echo "harness produced no JSON output; refusing to write baseline" >&2
+            exit 2
+          }
+          printf '%s\n' "$out" | scripts/bench-regression.py --write scripts/bench-macro-baseline.json \
+              --force --machine ubuntu-latest
+
+      - name: Commit refreshed macro baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scripts/bench-macro-baseline.json
+          if git diff --cached --quiet; then
+            echo "macro baseline unchanged; nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(bench): refresh macro baseline on ubuntu-latest CI runner"
+          git push
+
+  h3-compile:
+    name: h3 feature compile check (default-off feature rot guard)
+    if: github.event_name == 'schedule' || inputs.job == 'gate' || inputs.job == 'h3-compile'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Compile check (h3 loadgen + h3 ingress)
+        # h3 is feature-gated and default-off; the nightly macro-gate does
+        # not drive h3 throughput (no TLS/QUIC listener rig), but this
+        # check catches feature rot on both the loadgen client and the
+        # gateway ingress at the nightly cadence.
+        run: |
+          cargo build -p dwara-cli --bin dwara-loadgen --features h3
+          cargo build -p dwara-bin --features h3

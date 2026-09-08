@@ -51,6 +51,18 @@ rusqlite = { workspace = true }
 # Optional + ent-gated so the default CLI build never pulls it in.
 # Already a workspace dependency of dwara-bin (MIT OR Apache-2.0).
 tracing-subscriber = { workspace = true, optional = true }
+# PERF-06 (#171): HTTP/3 (QUIC) load generation in dwara-loadgen. quinn
+# is the QUIC transport, h3 is the HTTP/3 framing, h3-quinn bridges them;
+# rustls + webpki-roots are the TLS stack for the h3 client. All five are
+# already workspace dependencies (allow-listed in deny.toml; MIT OR
+# Apache-2.0) used by dwara-bin's h3 ingress and dwara-core's h3 upstream,
+# so no new external crate enters the tree. Optional + h3-gated so the
+# default CLI build never pulls them in.
+quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 
 [features]
 # DW-064: Kubernetes Gateway API controller + conformance report. When
@@ -63,6 +75,12 @@ k8s = ["dwara-core/k8s"]
 # OFF: tonic + prost add binary size. Build with
 # `cargo build --features ent`.
 ent = ["dwara-core/ent", "dep:tracing-subscriber"]
+# PERF-06 (#171): HTTP/3 (QUIC) load generation in dwara-loadgen
+# (`--protocol h3`). Default OFF: quinn + h3 add significant compile
+# time and binary size, mirroring dwara-bin's h3 ingress gate. Build
+# with `cargo build -p dwara-cli --features h3`. When off, `--protocol
+# h3` is rejected by clap (the variant is absent).
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:rustls", "dep:webpki-roots"]
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]

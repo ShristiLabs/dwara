@@ -162,6 +162,70 @@ fn args_reject_missing_positional_garbage() {
     assert!(Args::try_parse_from(["dwara-loadgen", "nonsense"]).is_err());
 }
 
+// PERF-06 (#171): the new --protocol/--workload/--json flags parse and
+// default to the documented values (h1 / throughput / no JSON line).
+
+#[test]
+fn args_parse_protocol_workload_json_defaults() {
+    let a = Args::parse_from(["dwara-loadgen"]);
+    assert_eq!(a.protocol, Protocol::H1);
+    assert_eq!(a.workload, Workload::Throughput);
+    assert!(!a.json);
+}
+
+#[test]
+fn args_parse_protocol_workload_json_explicit() {
+    let a = Args::parse_from([
+        "dwara-loadgen",
+        "--protocol",
+        "h2",
+        "--workload",
+        "pool-reuse",
+        "--json",
+    ]);
+    assert_eq!(a.protocol, Protocol::H2);
+    assert_eq!(a.workload, Workload::PoolReuse);
+    assert!(a.json);
+}
+
+#[test]
+fn args_parse_streaming_knobs() {
+    let a = Args::parse_from([
+        "dwara-loadgen",
+        "--workload",
+        "streaming",
+        "--stream-chunks",
+        "16",
+        "--stream-chunk-bytes",
+        "2048",
+        "--stream-chunk-delay-ms",
+        "5",
+    ]);
+    assert_eq!(a.workload, Workload::Streaming);
+    assert_eq!(a.stream_chunks, 16);
+    assert_eq!(a.stream_chunk_bytes, 2048);
+    assert_eq!(a.stream_chunk_delay_ms, 5);
+}
+
+#[test]
+fn args_reject_unknown_protocol_and_workload() {
+    assert!(Args::try_parse_from(["dwara-loadgen", "--protocol", "h9"]).is_err());
+    assert!(Args::try_parse_from(["dwara-loadgen", "--workload", "frobnicate"]).is_err());
+}
+
+// The lowercase labels are a consumed contract: the regression gate keys
+// on `{protocol}/{workload}` in the JSON: line, so a stray uppercase or
+// renamed variant would silently break the gate.
+
+#[test]
+fn protocol_and_workload_labels_are_lowercase_stable() {
+    assert_eq!(Protocol::H1.as_str(), "h1");
+    assert_eq!(Protocol::H2.as_str(), "h2");
+    assert_eq!(Workload::Throughput.as_str(), "throughput");
+    assert_eq!(Workload::PoolReuse.as_str(), "pool-reuse");
+    assert_eq!(Workload::Streaming.as_str(), "streaming");
+}
+
 // Pacing dispenser catch-up cap (#127): the top-up target is
 // min(owed schedule, consumed + one slice), so an idle worker accrues no
 // dischargeable backlog, while steady-state dispensing (consumption on

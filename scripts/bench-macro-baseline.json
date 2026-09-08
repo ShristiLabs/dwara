@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "machine": "dev-local",
+    "note": "macro loadgen JSON: rps + latency percentiles; machine-dependent, loopback",
+    "tolerance": 0.1
+  },
+  "workloads": {
+    "h1/pool-reuse": {
+      "connections": 10,
+      "duration_s": 3,
+      "err_p99_ns": 0,
+      "errors": 0,
+      "p50_ns": 122375,
+      "p90_ns": 160709,
+      "p999_ns": 229750,
+      "p99_ns": 198875,
+      "protocol": "h1",
+      "rate": 0,
+      "requests": 201445,
+      "rps": 66978.47035098403,
+      "workload": "pool-reuse"
+    },
+    "h1/streaming": {
+      "connections": 10,
+      "duration_s": 3,
+      "err_p99_ns": 0,
+      "errors": 0,
+      "p50_ns": 131000,
+      "p90_ns": 170541,
+      "p999_ns": 241583,
+      "p99_ns": 208791,
+      "protocol": "h1",
+      "rate": 0,
+      "requests": 219631,
+      "rps": 73207.27082917032,
+      "workload": "streaming"
+    },
+    "h1/throughput": {
+      "connections": 10,
+      "duration_s": 3,
+      "err_p99_ns": 0,
+      "errors": 0,
+      "p50_ns": 131208,
+      "p90_ns": 171208,
+      "p999_ns": 295875,
+      "p99_ns": 215541,
+      "protocol": "h1",
+      "rate": 0,
+      "requests": 216780,
+      "rps": 72256.47147564293,
+      "workload": "throughput"
+    },
+    "h2/pool-reuse": {
+      "connections": 10,
+      "duration_s": 3,
+      "err_p99_ns": 0,
+      "errors": 0,
+      "p50_ns": 616750,
+      "p90_ns": 678667,
+      "p999_ns": 907042,
+      "p99_ns": 816250,
+      "protocol": "h2",
+      "rate": 0,
+      "requests": 47846,
+      "rps": 15945.230692685624,
+      "workload": "pool-reuse"
+    },
+    "h2/throughput": {
+      "connections": 10,
+      "duration_s": 3,
+      "err_p99_ns": 0,
+      "errors": 0,
+      "p50_ns": 145667,
+      "p90_ns": 189291,
+      "p999_ns": 269167,
+      "p99_ns": 231666,
+      "protocol": "h2",
+      "rate": 0,
+      "requests": 190880,
+      "rps": 63489.582943186135,
+      "workload": "throughput"
+    }
+  }
+}
