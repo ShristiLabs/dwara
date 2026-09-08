@@ -9,6 +9,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Cross-attempt total retry deadline (#172, REL-01): an optional
+  `upstreams[].retries.total_deadline_ms` field capping the wall-clock
+  time from the first attempt to the last, including backoff delays
+  between attempts. When set, a retry whose backoff would cross the
+  deadline is aborted and the last response/error is returned to the
+  client; the backoff sleep is clamped to the remaining budget so the
+  loop never sleeps past the deadline. It composes with the per-attempt
+  `read_ms` timeout (one bounds a single attempt, the other bounds the
+  whole chain), and a deadline-aborted retry is not charged against the
+  retry budget. Absent (the default) leaves the cross-attempt budget
+  unbounded, the previous behavior, for backwards compatibility.
+  Validation rejects `0` (omit the field for unbounded) and caps the
+  value at 600000 ms (10 minutes). Standard in Envoy and NGINX.
 - gRPC-Web framing translation and JSON-to-gRPC transcoding (DW-101): a
   `grpc_web` cargo feature (OSS, default OFF) on dwara-core that adds a
   `routes[].grpc_web` config block. When enabled, the gateway translates

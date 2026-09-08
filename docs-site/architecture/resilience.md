@@ -115,7 +115,9 @@ flowchart TD
     C -->|yes| NX
     C -->|no| D[Compute backoff\nmin base*2^attempt, cap]
     D --> E[Full jitter\nrand 0..=nominal]
-    E --> F[Sleep]
+    E --> TD{Total deadline\nset and elapsed?}
+    TD -->|would cross| NX
+    TD -->|within budget| F[Sleep\nclamped to remaining budget]
     F --> G[Next attempt]
     G --> UP[Upstream call]
 ```
@@ -144,6 +146,22 @@ nominal = min(base * 2^(attempt-1), cap)
 The actual sleep is full jitter — a uniform random value in
 `[0, nominal]`. Full jitter avoids the thundering-herd problem where
 many clients retry in lockstep after a downstream recovery.
+
+### Total deadline
+
+`retries.total_deadline_ms` caps the wall-clock time from the first
+attempt to the last, including the backoff delays between attempts.
+When the next backoff would cross the deadline, the retry is aborted
+and the last response (or error) is returned to the client; the sleep
+is clamped to the remaining budget so a retry never sleeps past the
+deadline. It composes with the per-attempt `read_ms` timeout:
+`read_ms` bounds a single attempt, `total_deadline_ms` bounds the
+whole chain. A deadline-aborted retry is not charged against the retry
+budget. The default (unset) is unbounded — the retry loop runs until
+the attempt cap or the retry budget is exhausted, the original
+behavior. Validation rejects `0` (omit the field for unbounded) and
+caps the value at 600000 ms (10 minutes). This is the same knob Envoy
+and NGINX expose for cross-attempt retry budgets.
 
 ### Retry classification
 

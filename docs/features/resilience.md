@@ -107,10 +107,29 @@ errs toward under- rather than over-granting.
 the thundering-herd resynchronization that decorrelated jitter can
 produce while still bounding the worst case by the nominal delay.
 
-**No cross-attempt deadline in v1:** worst case, a retry loop adds up
-to `attempts * (read_ms + backoff_cap_ms)` to one request's total
-latency — there is no overall budget that trims a chain of retries
-short of exhausting all of them.
+**Cross-attempt total deadline (REL-01):** `upstreams[].retries.
+total_deadline_ms` caps the wall-clock time from the first attempt to
+the last, INCLUDING backoff delays between attempts. When set, a retry
+whose backoff would cross the deadline is aborted and the last
+response/error is returned to the client; the backoff sleep is clamped
+to the remaining slice so the loop never sleeps past the deadline. The
+per-attempt `read_ms` timeout still bounds each individual attempt, so
+the two compose: `read_ms` caps one attempt, `total_deadline_ms` caps
+the whole chain. A deadline-aborted retry charges nothing against the
+retry budget (the reservation is taken only when a retry will actually
+run). Absent (the default) leaves the cross-attempt budget unbounded —
+worst case the retry loop adds up to
+`attempts * (read_ms + backoff_cap_ms)` of latency to a single request
+(each attempt pays its own read timeout plus at most the backoff cap
+before it), the v1 behavior kept for backwards compatibility. Validation
+rejects `0` (omit the field for unbounded) and caps the value at
+`MAX_RETRY_TOTAL_DEADLINE_MS` (600_000ms = 10min); beyond that the
+per-upstream circuit breaker and timeouts are the right tool, not a
+wider retry deadline. The gate lives in the proxy retry loop
+(`dataplane/proxy.rs`), measuring elapsed time from a single `Instant`
+captured before the first attempt; the pure clock-agnostic helper is
+`retry_sleep_under_total_deadline` in `resilience/retries.rs`. Standard
+in Envoy and NGINX.
 
 ## Request hedging (DW-063)
 

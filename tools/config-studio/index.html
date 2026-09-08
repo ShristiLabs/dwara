@@ -1206,6 +1206,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "type": "null"
       }
      ]
+    },
+    "unknown_model_policy": {
+     "description": "Unknown-model pricing policy (DW-AI-03\n`ai.unknown_model_policy`): what to do when a provider model\nhas no entry in `ai.pricing`. Absent (the default): `allow`\n(cost 0, fail-open \u2014 the original behavior). `fail_closed`\nrejects the response with 403 `ai_unknown_model_pricing`;\n`alert` proceeds with cost 0 but logs a WARN and increments\nthe `dwara_ai_unknown_pricing_total{model}` metric.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/UnknownModelPolicy"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false
@@ -1235,6 +1246,36 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "additionalProperties": false,
    "required": [
     "credentials"
+   ]
+  },
+  "AiEndpoint": {
+   "description": "AI-02: which AI endpoint a route serves. The `chat` endpoint (the\ndefault) uses the full adapter translation pipeline. The\nother endpoints are proxied as a passthrough: the request body is\nforwarded to the provider's upstream as-is, and the response is\nreturned as-is. Model governance (allowlist check) still applies\nusing the `model` field from the request body.",
+   "oneOf": [
+    {
+     "description": "OpenAI chat-completions (`POST /v1/chat/completions`). The\nfull adapter translation pipeline applies. This is the\ndefault.",
+     "type": "string",
+     "const": "chat"
+    },
+    {
+     "description": "OpenAI embeddings (`POST /v1/embeddings`). Proxied as a\npassthrough; the request body `{model, input}` is forwarded\nas-is. Token usage from the response is recorded for budget\naccounting.",
+     "type": "string",
+     "const": "embeddings"
+    },
+    {
+     "description": "OpenAI images (`POST /v1/images/generations`). Proxied as a\npassthrough; no token usage (image generation is priced per\nimage, not per token).",
+     "type": "string",
+     "const": "images"
+    },
+    {
+     "description": "OpenAI audio (TTS `POST /v1/audio/speech`, transcription\n`POST /v1/audio/transcriptions`). Proxied as a passthrough.",
+     "type": "string",
+     "const": "audio"
+    },
+    {
+     "description": "OpenAI moderation (`POST /v1/moderations`). Proxied as a\npassthrough.",
+     "type": "string",
+     "const": "moderation"
+    }
    ]
   },
   "AiEval": {
@@ -1779,9 +1820,36 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    ]
   },
   "AiPricing": {
-   "description": "Per-model token pricing (`ai.pricing.<provider_model>`).\nCosts are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =\n$1.00 \u2014 no floating-point money). The key in the parent map is the\nPROVIDER MODEL identifier (the actual model the provider charges\nfor), not the client-facing alias. Spend is computed as\n`input_tokens * input_per_1k_micros / 1000 + output_tokens *\noutput_per_1k_micros / 1000` (integer micro-USD, saturating).",
+   "description": "Per-model token pricing (`ai.pricing.<provider_model>`).\nCosts are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =\n$1.00 \u2014 no floating-point money). The key in the parent map is the\nPROVIDER MODEL identifier (the actual model the provider charges\nfor), not the client-facing alias. Spend is computed as\n`input_tokens * input_per_1k_micros / 1000 + output_tokens *\noutput_per_1k_micros / 1000` (integer micro-USD, saturating).\n\nThe optional cached-token and batch-rate fields (DW-AI-03) extend\nthe table for prompt-caching and batch-API discounts. When absent,\nthe standard input/output rates apply (the fallback). Cached tokens\nare priced at `cached_input_per_1k_micros` when present (the\ndiscounted rate providers charge for prompt-cache hits); the\nnon-cached portion of the prompt is priced at the standard\n`input_per_1k_micros`. Batch rates apply when the request is a\nbatch-API call (`batch: true` on the cost computation).",
    "type": "object",
    "properties": {
+    "batch_input_per_1k_micros": {
+     "description": "Micro-USD per 1 000 input tokens under the batch API. When\npresent and the request is a batch call, this rate replaces\n`input_per_1k_micros`. Absent (the default): batch calls fall\nback to the standard input rate.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "batch_output_per_1k_micros": {
+     "description": "Micro-USD per 1 000 output tokens under the batch API. When\npresent and the request is a batch call, this rate replaces\n`output_per_1k_micros`. Absent (the default): batch calls fall\nback to the standard output rate.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "cached_input_per_1k_micros": {
+     "description": "Micro-USD per 1 000 CACHED input (prompt-cached) tokens. When\npresent, the `cached_tokens` portion of the prompt is priced at\nthis discounted rate instead of `input_per_1k_micros`. Absent\n(the default): cached tokens are priced at the standard input\nrate (no separate cached tier).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
     "input_per_1k_micros": {
      "description": "Micro-USD per 1 000 input (prompt) tokens.",
      "type": "integer",
@@ -1906,7 +1974,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "description": "The wire protocol an adapter speaks.",
    "oneOf": [
     {
-     "description": "OpenAI chat-completions API (`POST /v1/chat/completions`). Also\nthe dialect spoken by OpenAI-compatible servers (vLLM, Ollama's\ncompatibility endpoint, and others) \u2014 point the upstream at one\nof those and this adapter speaks to it unchanged.",
+     "description": "OpenAI chat-completions API (`POST /v1/chat/completions`). Also\nthe dialect spoken by OpenAI-compatible servers (vLLM, Ollama's\ncompatibility endpoint, Groq, DeepSeek, Mistral, Cohere, and\nothers) \u2014 point the upstream at one of those and this adapter\nspeaks to it unchanged (AI-01).",
      "type": "string",
      "const": "openai"
     },
@@ -1924,6 +1992,16 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "description": ": A2A (agent-to-agent) protocol. An A2A provider is a\nconfigured `ai.a2a.agents[]` entry: the adapter translates a\ncanonical chat request into an A2A task-submit body and parses\nthe task response back. The task lifecycle state machine is\nimplemented against the A2A Protocol Specification draft (legal\nand illegal transitions are enforced). Feature-gated behind\nthe `a2a` cargo feature; without it the `ai.a2a` block is\naccepted but inert.",
      "type": "string",
      "const": "a2a"
+    },
+    {
+     "description": "AI-01: Azure OpenAI. Uses the Azure deployment URL format\n(`/openai/deployments/{deployment}/chat/completions?api-version=...`)\nand `api-key` header authentication. The request/response body\nis OpenAI-compatible (the adapter reuses the OpenAI body\ntranslation and overrides the path + headers).",
+     "type": "string",
+     "const": "azure_openai"
+    },
+    {
+     "description": "AI-01: AWS Bedrock. Uses the Bedrock invoke API\n(`/model/{model_id}/invoke`) with AWS SigV4 request signing.\nThe request/response body follows the Anthropic messages format\nfor Claude models on Bedrock (the adapter reuses the Anthropic\nbody translation and overrides the path + headers). SigV4\nsigning is applied by the transport layer using the provider's\nconfigured AWS credentials.",
+     "type": "string",
+     "const": "bedrock"
     }
    ]
   },
@@ -5536,7 +5614,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "additionalProperties": false
   },
   "RetryConfig": {
-   "description": "Upstream retry knobs. All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n may be retried; an over-cap body streams without retry. Buffering is\n opt-in: the default (0) buffers only empty bodies, so the default\n proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n attempt; a response body that dies mid-stream is never retried (its\n failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n retry budget (`budget_percent`).",
+   "description": "Upstream retry knobs. All fields default; a `retries:` block\nwith no keys is equivalent to retries off (`attempts` defaults to 0).\n\nFrozen semantics (see `upstream`/`proxy`/`retries` module docs):\n- `attempts` is the maximum number of RETRIES beyond the first attempt\n (0 = off). Validation caps it at 10.\n- Only requests whose body was fully buffered within `buffer_max_bytes`\n may be retried; an over-cap body streams without retry. Buffering is\n opt-in: the default (0) buffers only empty bodies, so the default\n proxy path stays unbuffered.\n- Retries happen strictly BEFORE response headers arrive on the final\n attempt; a response body that dies mid-stream is never retried (its\n failure is reported to passive health instead).\n- Every retried attempt is charged against the upstream's rolling-window\n retry budget (`budget_percent`).\n- `total_deadline_ms` (REL-01) caps the wall-clock time from the first\n attempt to the last, INCLUDING backoff delays between attempts. Absent\n leaves the cross-attempt budget unbounded (the v1 default, kept for\n backwards compatibility). When set, a retry whose backoff would cross\n the deadline is aborted and the last response/error is returned to the\n client; the per-attempt `read_ms` timeout still bounds each individual\n attempt. Standard in Envoy and NGINX.",
    "type": "object",
    "properties": {
     "attempts": {
@@ -5607,6 +5685,15 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "retry_transport": {
      "description": "Retry on transport errors (connect timeout/refusal/reset/framing)\nand per-attempt read timeouts (default true).",
      "type": "boolean"
+    },
+    "total_deadline_ms": {
+     "description": "Cross-attempt total retry deadline in milliseconds (REL-01): caps\nthe wall-clock time from the first attempt to the last, INCLUDING\nbackoff delays between attempts. Absent leaves the cross-attempt\nbudget unbounded (the v1 default, kept for backwards\ncompatibility). When set, a retry whose backoff would cross the\ndeadline is aborted and the last response/error is returned to the\nclient; the per-attempt `read_ms` timeout still bounds each\nindividual attempt. Must be in (0, `MAX_RETRY_TOTAL_DEADLINE_MS`];\n`0` is rejected (omit the field for unbounded).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
     }
    },
    "additionalProperties": false
@@ -6054,9 +6141,13 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ]
     },
     {
-     "description": "AI provider translation: the request body is parsed as\nan OpenAI chat-completions request, its `model` resolved through\nthe gateway's `ai:` block to a provider, translated to that\nprovider's wire format (OpenAI/Anthropic/Gemini), sent through\nthe provider's upstream, and the response translated back to the\nOpenAI shape. The route's `service` is still required by the\nschema but never dialed. Requires an `ai:` block (validation\nrejects the pairing otherwise). `stream: true` requests are\nserved via zero-buffer SSE pass-through.",
+     "description": "AI provider translation: the request body is parsed as\nan OpenAI chat-completions request, its `model` resolved through\nthe gateway's `ai:` block to a provider, translated to that\nprovider's wire format (OpenAI/Anthropic/Gemini), sent through\nthe provider's upstream, and the response translated back to the\nOpenAI shape. The route's `service` is still required by the\nschema but never dialed. Requires an `ai:` block (validation\nrejects the pairing otherwise). `stream: true` requests are\nserved via zero-buffer SSE pass-through.\n\nAI-02: the `endpoint` field selects which AI endpoint the route\nserves. The default is `chat` (the existing behavior). Other\nendpoints (`embeddings`, `images`, `audio`, `moderation`) are\nproxied as a passthrough: the request body is forwarded to the\nprovider's upstream as-is (no adapter translation), and the\nresponse is returned as-is. Model governance (allowlist check)\nstill applies using the `model` field from the request body.",
      "type": "object",
      "properties": {
+      "endpoint": {
+       "$ref": "#/$defs/AiEndpoint",
+       "default": "chat"
+      },
       "type": {
        "type": "string",
        "const": "ai"
@@ -6877,6 +6968,26 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "description": "A SOAP/XML client -> REST/JSON upstream. The gateway parses the\nSOAP envelope and converts the Body's payload element to JSON.",
      "type": "string",
      "const": "soap_to_rest"
+    }
+   ]
+  },
+  "UnknownModelPolicy": {
+   "description": "The unknown-model pricing policy (DW-AI-03\n`ai.unknown_model_policy`): what the gateway does when a provider\nmodel has no entry in the `ai.pricing` table. The default (`allow`)\npreserves the original fail-open behavior (cost 0, never a crash);\n`fail_closed` rejects the response with 403\n`ai_unknown_model_pricing` so an unpriced model cannot serve\ntraffic silently; `alert` proceeds with cost 0 but logs a WARN and\nincrements `dwara_ai_unknown_pricing_total{model}` for observability\nwithout blocking the call.",
+   "oneOf": [
+    {
+     "description": "Proceed with cost 0 (the original fail-open behavior). A\nmisconfigured price table must not 500 a request.",
+     "type": "string",
+     "const": "allow"
+    },
+    {
+     "description": "Reject the response with 403 `ai_unknown_model_pricing` when the\nmodel has no pricing entry. The provider call has already been\nmade (cost is computed from the response usage), but the\nresponse is not returned to the client \u2014 the unpriced model\ncannot serve traffic silently.",
+     "type": "string",
+     "const": "fail_closed"
+    },
+    {
+     "description": "Proceed with cost 0 but log a WARN and increment the\n`dwara_ai_unknown_pricing_total{model}` metric. The call\nsucceeds; the metric and log surface the gap for operators.",
+     "type": "string",
+     "const": "alert"
     }
    ]
   },

@@ -84,3 +84,61 @@ fn resolved_params_default_is_off() {
     assert!(!p.retries_status(500));
     assert_eq!(p.buffer_max_bytes, 0);
 }
+
+#[test]
+fn total_deadline_resolves_from_config() {
+    // Absent -> unbounded (the v1 default).
+    let p = RetryParams::from_config(Some(&RetryConfig::default()));
+    assert!(p.total_deadline.is_none());
+    // Present -> resolved to a Duration.
+    let p = RetryParams::from_config(Some(&RetryConfig {
+        total_deadline_ms: Some(500),
+        ..RetryConfig::default()
+    }));
+    assert_eq!(p.total_deadline, Some(Duration::from_millis(500)));
+}
+
+#[test]
+fn retry_sleep_under_total_deadline_bounds() {
+    let delay = Duration::from_millis(100);
+    // Unbounded: the full delay passes through.
+    assert_eq!(
+        retry_sleep_under_total_deadline(None, Duration::ZERO, delay),
+        Some(delay)
+    );
+    // Elapsed already at/over the deadline: abort.
+    assert_eq!(
+        retry_sleep_under_total_deadline(
+            Some(Duration::from_millis(50)),
+            Duration::from_millis(50),
+            delay
+        ),
+        None
+    );
+    assert_eq!(
+        retry_sleep_under_total_deadline(
+            Some(Duration::from_millis(50)),
+            Duration::from_millis(60),
+            delay
+        ),
+        None
+    );
+    // Delay fits within the remaining budget: full delay.
+    assert_eq!(
+        retry_sleep_under_total_deadline(
+            Some(Duration::from_millis(200)),
+            Duration::from_millis(50),
+            delay
+        ),
+        Some(delay)
+    );
+    // Delay would cross the deadline: clamped to the remaining slice.
+    assert_eq!(
+        retry_sleep_under_total_deadline(
+            Some(Duration::from_millis(80)),
+            Duration::from_millis(50),
+            delay
+        ),
+        Some(Duration::from_millis(30))
+    );
+}

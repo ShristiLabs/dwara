@@ -148,7 +148,11 @@ Retry policy itself lives on the upstream (see
 retries slot into the per-request flow: the balancer re-picks an
 endpoint for every attempt (so health ejection naturally routes a
 retry away from a just-failed endpoint), and each attempt gets its own
-`read_ms` deadline.
+`read_ms` deadline. The optional cross-attempt `total_deadline_ms`
+(REL-01) is enforced in this same loop: a single `Instant` captured
+before the first attempt gates every retry, clamping the backoff sleep
+to the remaining budget and aborting the chain (returning the last
+response/error) once the deadline is crossed.
 
 ## Protocol hardening
 
