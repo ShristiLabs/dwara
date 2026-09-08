@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dwara_core::config::parse_gateway;
-use dwara_core::dataplane::discovery::{DiscoveryTasks, DnsResolver};
+use dwara_core::dataplane::discovery::{DiscoveryTasks, DnsCache, DnsResolver};
 use dwara_core::observability::Observability;
 use dwara_core::snapshot::{self, ConfigState};
 use hickory_resolver::proto::rr::{
@@ -189,6 +189,101 @@ async fn resolver_falls_back_to_default_nameservers() {
     // panicking (the resolver is constructed, but we don't query it —
     // the default public resolvers may not be reachable in CI).
     let _resolver = DnsResolver::new(&[]);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. DnsCache: TTL + negative caching on the pooled dial path (PERF-05,
+// #170). The cache wraps DnsResolver; these tests pin the caching
+// contract through the public `resolve` API using the mock DNS server:
+// positive cache hit (served without a network round-trip after the
+// server is killed), TTL expiry (re-resolves after the record TTL),
+// negative caching (a failed lookup is cached so a second call returns
+// the cached miss without re-querying), and the IP-literal short-circuit
+// (no DNS, no cache).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dns_cache_serves_positive_hit_without_network() {
+    // Resolve via the mock, then kill the server: a second resolve must
+    // return the cached addresses (no network round-trip possible).
+    let dns_server = MockDnsServer::start(&["127.0.0.10", "127.0.0.11"], 60).await;
+    let cache = DnsCache::new(&[dns_server.addr().to_string()]);
+    let first = cache.resolve("svc.test.", 8080).await.unwrap();
+    assert_eq!(first.len(), 2);
+    let ips: Vec<IpAddr> = first.iter().map(|s| s.ip()).collect();
+    assert!(ips.contains(&"127.0.0.10".parse::<IpAddr>().unwrap()));
+    assert!(ips.contains(&"127.0.0.11".parse::<IpAddr>().unwrap()));
+    // Kill the server; the cached entry must still resolve.
+    drop(dns_server);
+    let second = cache.resolve("svc.test.", 8080).await.unwrap();
+    assert_eq!(second.len(), 2);
+    let ips2: Vec<IpAddr> = second.iter().map(|s| s.ip()).collect();
+    assert!(ips2.contains(&"127.0.0.10".parse::<IpAddr>().unwrap()));
+    assert!(ips2.contains(&"127.0.0.11".parse::<IpAddr>().unwrap()));
+}
+
+#[tokio::test]
+async fn dns_cache_positive_entry_expires_after_ttl() {
+    // TTL=1: the entry expires after ~1s. Resolve (cached), kill the
+    // server, resolve within TTL (cached OK), wait past TTL, resolve
+    // again -> fails (server dead, cache expired -> re-resolve hits no
+    // server).
+    let dns_server = MockDnsServer::start(&["127.0.0.20"], 1).await;
+    let cache = DnsCache::new(&[dns_server.addr().to_string()]);
+    let first = cache.resolve("svc.test.", 8080).await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].ip(), "127.0.0.20".parse::<IpAddr>().unwrap());
+    drop(dns_server);
+    // Within TTL: still cached.
+    let cached = cache.resolve("svc.test.", 8080).await.unwrap();
+    assert_eq!(cached[0].ip(), "127.0.0.20".parse::<IpAddr>().unwrap());
+    // Wait past the 1s TTL (plus margin for the cap/floor). The cache
+    // re-resolves; the dead server yields an error.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let expired = cache.resolve("svc.test.", 8080).await;
+    assert!(expired.is_err(), "expected re-resolve after TTL expiry");
+}
+
+#[tokio::test]
+async fn dns_cache_caches_negative_lookups() {
+    // A hostname the mock does not serve -> NXDOMAIN -> cached negative.
+    // Kill the server; a second resolve within the negative TTL must
+    // return the cached AddrNotAvailable (NOT a network error), proving
+    // the miss was served from the cache without re-querying.
+    let dns_server = MockDnsServer::start(&["127.0.0.30"], 60).await;
+    let cache = DnsCache::with_ttls(
+        &[dns_server.addr().to_string()],
+        Duration::from_secs(300),
+        Duration::from_secs(60),
+        4096,
+    );
+    let first = cache.resolve("nope.test.", 8080).await;
+    assert!(first.is_err(), "expected failure for unserved name");
+    // Kill the server. A non-cached negative would now be a network
+    // error (server unreachable, kind != AddrNotAvailable); the cached
+    // miss is served from the cache as AddrNotAvailable. The first
+    // call's error kind is not asserted (NXDOMAIN may surface as either
+    // AddrNotAvailable or Other depending on the resolver's response
+    // shaping); the contract pinned here is the CACHE's stable kind.
+    drop(dns_server);
+    let second = cache.resolve("nope.test.", 8080).await;
+    assert!(second.is_err(), "expected cached negative");
+    assert_eq!(
+        second.unwrap_err().kind(),
+        std::io::ErrorKind::AddrNotAvailable,
+        "negative cache must return AddrNotAvailable, not a network error"
+    );
+}
+
+#[tokio::test]
+async fn dns_cache_ip_literal_skips_dns() {
+    // An IP-literal host never hits DNS (no server needed): the cache
+    // returns the literal paired with the port directly.
+    let cache = DnsCache::new(&["127.0.0.1:1".to_string()]);
+    let v4 = cache.resolve("127.0.0.1", 9001).await.unwrap();
+    assert_eq!(v4, vec!["127.0.0.1:9001".parse().unwrap()]);
+    let v6 = cache.resolve("::1", 9002).await.unwrap();
+    assert_eq!(v6, vec!["[::1]:9002".parse().unwrap()]);
 }
 
 // ---------------------------------------------------------------------------

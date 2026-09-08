@@ -22,10 +22,13 @@
 //!   dial-internal retries, never endpoint failures. The dial (and
 //!   the [`happy_race`] primitive beneath it) is ours, not
 //!   hyper-util's implicit default: the RFC 8305 shape is now
-//!   documented, configurable, and observable in tests. DNS
-//!   resolution is `getaddrinfo` on the blocking pool
-//!   (`tokio::net::lookup_host`), the same resolver hyper-util's
-//!   `HttpConnector` used here before DW-030.
+//!   documented, configurable, and observable in tests. DNS resolution
+//!   on the pooled dial path runs through the shared async hickory
+//!   [`DnsCache`](crate::dataplane::discovery::DnsCache) (PERF-05/#170)
+//!   with TTL and negative caching, replacing the blocking-pool
+//!   `getaddrinfo` of `tokio::net::lookup_host`; IP-literal and
+//!   `/etc/hosts` endpoints skip the network. The active health probes
+//!   keep the system resolver (a background, infrequent path).
 //! - **Read timeout (per-attempt)**: `timeouts.read_ms` wraps each pooled
 //!   request/response-header exchange (DW-014) — from the moment the
 //!   request is handed to the pool (including any connection-cap queue
@@ -121,6 +124,7 @@ use tower_service::Service;
 
 use crate::config::limits::MAX_SLOW_START_MS;
 use crate::config::{Timeouts, Upstream, UpstreamProtocol};
+use crate::dataplane::discovery::DnsCache;
 use crate::observability::Observability;
 use crate::resilience::breaker::{Breaker, BreakerParams, BreakerState};
 use crate::resilience::health::HealthDispatch;
@@ -765,6 +769,36 @@ pub async fn happy_dial(
     .await
 }
 
+/// The cached variant of [`happy_dial`] for the pooled connector (PERF-05,
+/// #170). Resolution runs through the shared [`DnsCache`] (async hickory
+/// with TTL + negative caching) instead of the blocking-pool
+/// `getaddrinfo` of `tokio::net::lookup_host`; the RFC 8305 racing and
+/// NODELAY behavior are identical. IP-literal hosts skip DNS via the
+/// cache's short-circuit. The active health probes keep using
+/// [`happy_dial`] (system resolver) — they are a background, infrequent
+/// path and do not share the pooled connector's cache.
+pub async fn happy_dial_via(
+    dns: &DnsCache,
+    host: &str,
+    port: u16,
+    delay: Option<Duration>,
+) -> std::io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = dns.resolve(host, port).await?;
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("'{host}:{port}' resolved to no addresses"),
+        ));
+    }
+    let seq = interleave_order(&addrs);
+    happy_race(seq, delay, |addr| async move {
+        let stream = TcpStream::connect(addr).await?;
+        let _ = stream.set_nodelay(true);
+        Ok(stream)
+    })
+    .await
+}
+
 /// Per-upstream connector: RFC 8305 resolve + dial (DW-030), optional
 /// rustls TLS with baked-in ALPN, the connect timeout, and the
 /// connection-cap semaphore.
@@ -783,6 +817,12 @@ struct UpstreamConnector {
     pending_cap: Option<Arc<Semaphore>>,
     connect_timeout: Duration,
     stats: Arc<UpstreamStats>,
+    /// Shared async DNS cache (PERF-05, #170). One cache is shared
+    /// across every upstream in a registry so repeated dials to the same
+    /// host hit the TTL/negative cache. Replaces the blocking-pool
+    /// `getaddrinfo` of `tokio::net::lookup_host` on the pooled dial
+    /// path.
+    dns: Arc<DnsCache>,
 }
 
 impl Service<Uri> for UpstreamConnector {
@@ -792,8 +832,8 @@ impl Service<Uri> for UpstreamConnector {
         Pin<Box<dyn Future<Output = Result<CappedStream, UpstreamError>> + Send + 'static>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Resolution happens inside `call` (tokio's blocking-pool
-        // getaddrinfo needs no readiness gating).
+        // Resolution happens inside `call` via the async hickory cache
+        // (PERF-05); no readiness gating needed.
         Poll::Ready(Ok(()))
     }
 
@@ -804,6 +844,7 @@ impl Service<Uri> for UpstreamConnector {
         let pending_cap = self.pending_cap.clone();
         let connect_timeout = self.connect_timeout;
         let stats = Arc::clone(&self.stats);
+        let dns = Arc::clone(&self.dns);
         // Pending admission (DW-015) happens OUTSIDE the async block so a
         // saturated upstream rejects immediately: a request that would
         // have to queue behind more than `max_pending` waiters never even
@@ -849,7 +890,7 @@ impl Service<Uri> for UpstreamConnector {
                 .port_u16()
                 .unwrap_or(if tls.is_some() { 443 } else { 80 });
             let dial = async {
-                let tcp = happy_dial(&host, port, happy_eyeballs)
+                let tcp = happy_dial_via(&dns, &host, port, happy_eyeballs)
                     .await
                     .map_err(UpstreamError::Io)?;
                 let transport = match tls {
@@ -1403,6 +1444,7 @@ fn build_handle(
     root_store: rustls::RootCertStore,
     previous: Option<&Arc<UpstreamHandle>>,
     events: Option<&crate::events::Emitter>,
+    dns: Arc<DnsCache>,
 ) -> Arc<UpstreamHandle> {
     let cap = effective_cap(u);
     let connect_timeout = effective_connect_timeout(u);
@@ -1625,6 +1667,7 @@ fn build_handle(
             .map(|p| Arc::new(Semaphore::new(p as usize))),
         connect_timeout,
         stats: Arc::clone(&stats),
+        dns,
     };
 
     let mut builder = Client::builder(TokioExecutor::new());
@@ -1852,6 +1895,15 @@ impl UpstreamRegistry {
                 .add(c.clone())
                 .map_err(|e| UpstreamError::InvalidRootCertificate(e.to_string()))?;
         }
+        // PERF-05 (#170): one shared async DNS cache for every upstream
+        // in this registry so repeated dials to the same host hit the
+        // TTL/negative cache. Built once per registry generation; a
+        // reload builds a fresh cache (acceptable: reloads are
+        // infrequent, and the cache warms on the first dial to each
+        // host). Default name servers (the public resolvers) plus the
+        // system hosts file cover IP-literal and `/etc/hosts` endpoints
+        // without a network round-trip.
+        let dns = Arc::new(DnsCache::default());
         let handles: BTreeMap<String, Arc<UpstreamHandle>> = snapshot
             .gateway()
             .upstreams
@@ -1877,7 +1929,10 @@ impl UpstreamRegistry {
                     None => default_roots.clone(),
                 };
                 let prev = previous.and_then(|p| p.handles.get(&u.name));
-                (u.name.clone(), build_handle(u, roots, prev, events))
+                (
+                    u.name.clone(),
+                    build_handle(u, roots, prev, events, Arc::clone(&dns)),
+                )
             })
             .collect();
         // DW-040: compile each split service's weighted targets.
@@ -2053,7 +2108,13 @@ mod tests {
             mtls: None,
             pool: None,
         };
-        let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
+        let handle = build_handle(
+            &up,
+            crate::security::tls::webpki_root_store(),
+            None,
+            None,
+            Arc::new(DnsCache::default()),
+        );
         assert!(matches!(
             handle.send(get_request("/x")).await,
             Err(UpstreamError::NoEndpoints)

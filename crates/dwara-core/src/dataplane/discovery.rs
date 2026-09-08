@@ -41,14 +41,16 @@
 //! Consul watch and Kubernetes EndpointSlice watch are DEFERRED to a
 //! future milestone — DNS is the first discovery source.
 
-use std::net::IpAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::config::{DnsDiscovery, Endpoint};
@@ -139,6 +141,29 @@ impl DnsResolver {
         Ok(addrs)
     }
 
+    /// Resolve both A and AAAA records for `hostname` (dual-stack), returning
+    /// `(IpAddr, ttl)` pairs. This is the dial-path resolution primitive:
+    /// `lookup_ip` short-circuits IP-literal inputs (no DNS), consults the
+    /// system hosts file (so `localhost` and any `/etc/hosts` entry resolves
+    /// without a network round-trip), and falls back to the configured name
+    /// servers for real hostnames. The TTL is the minimum across all
+    /// returned records (the earliest-expiring record governs caching).
+    /// Returns an empty vec if the hostname resolves to no addresses.
+    pub async fn resolve_ip(&self, hostname: &str) -> Result<Vec<(IpAddr, u32)>, String> {
+        let lookup = self
+            .inner
+            .lookup_ip(hostname)
+            .await
+            .map_err(|e| format!("DNS lookup for '{hostname}' failed: {e}"))?;
+        let answers = lookup.as_lookup().answers();
+        if answers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ttl = answers.iter().map(|r| r.ttl).min().unwrap_or(60);
+        let addrs: Vec<(IpAddr, u32)> = lookup.iter().map(|ip| (ip, ttl)).collect();
+        Ok(addrs)
+    }
+
     /// Resolve SRV records for `hostname`, returning
     /// `(IpAddr, port, ttl)` triples. The resolver recursively resolves
     /// each SRV target to an IP. The TTL is the minimum TTL across all
@@ -178,6 +203,220 @@ impl DnsResolver {
             }
         }
         Ok(endpoints)
+    }
+}
+
+/// Default cap on a cached positive lookup's effective TTL. Records carry
+/// their own TTL (and `/etc/hosts` entries carry a very large TTL); this
+/// caps the cache lifetime so a stale-but-cached address set does not
+/// linger past operator expectations on the hot dial path.
+const DEFAULT_POSITIVE_TTL_CAP: Duration = Duration::from_secs(300);
+/// Default TTL for cached negative (failed) lookups. Short, to suppress
+/// retry storms against a failing resolver while letting a flapping name
+/// server recover quickly.
+const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(5);
+/// Default max cached hostnames. Bounds memory; the dial path's working
+/// set is the set of distinct upstream hostnames, which is small, but the
+/// bound prevents unbounded growth under adversarial Host headers.
+const DEFAULT_MAX_ENTRIES: usize = 4096;
+/// Floor for a cached positive TTL so a zero-TTL record is still cached
+/// briefly (avoids re-querying a name server that hands out TTL 0).
+const POSITIVE_TTL_FLOOR: Duration = Duration::from_secs(1);
+
+/// One cached DNS entry: either a positive resolution (address set +
+/// expiry) or a negative one (failure + expiry). Negative entries cache
+/// the FACT of failure, not the error text, so the cached miss returns a
+/// stable `AddrNotAvailable` kind.
+enum CacheEntry {
+    Positive {
+        addrs: Vec<IpAddr>,
+        expires_at: Instant,
+    },
+    Negative {
+        expires_at: Instant,
+    },
+}
+
+/// A TTL-cached async DNS resolver for the pooled dial path (PERF-05,
+/// #170).
+///
+/// Wraps [`DnsResolver`] (a hickory `TokioResolver`) with two caches
+/// shared across every upstream in a registry:
+///
+/// - **Positive cache**: a successful lookup is reused until the record
+///   TTL expires (capped at `positive_ttl_cap`), so repeated dials to the
+///   same host skip both the blocking `getaddrinfo` path and the network
+///   round-trip. The cap bounds `/etc/hosts` entries (which carry a
+///   near-infinite TTL) and operator-facing staleness.
+/// - **Negative cache**: a failed lookup is cached for `negative_ttl`
+///   (default 5 s) so a transient resolver failure or NXDOMAIN does not
+///   trigger a retry storm on the hottest code path; the cached miss
+///   returns `AddrNotAvailable` until it expires, then re-resolves.
+///
+/// IP-literal hosts skip DNS and the cache entirely (the same
+/// short-circuit `getaddrinfo` takes). The cache is `Send + Sync` (one
+/// `tokio::sync::Mutex` over a `HashMap`); the critical section holds
+/// only the map read/insert, never the resolver future.
+pub struct DnsCache {
+    resolver: DnsResolver,
+    positive_ttl_cap: Duration,
+    negative_ttl: Duration,
+    max_entries: usize,
+    entries: Mutex<HashMap<String, CacheEntry>>,
+}
+
+impl Default for DnsCache {
+    /// Default cache: public name servers + system hosts file, default
+    /// TTLs (positive cap 300 s, negative 5 s), 4096-entry bound.
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl DnsCache {
+    /// Build a cache backed by the given name servers (empty = the
+    /// default public resolvers, matching [`DnsResolver::new`]) with the
+    /// default TTLs and entry cap.
+    pub fn new(name_servers: &[String]) -> Self {
+        Self::with_ttls(
+            name_servers,
+            DEFAULT_POSITIVE_TTL_CAP,
+            DEFAULT_NEGATIVE_TTL,
+            DEFAULT_MAX_ENTRIES,
+        )
+    }
+
+    /// Build a cache with explicit TTL/size knobs. Public so the
+    /// dial-path cache contract (TTL expiry, negative caching, memory
+    /// bound) can be pinned deterministically in tests without waiting
+    /// out the default 5 s negative TTL.
+    pub fn with_ttls(
+        name_servers: &[String],
+        positive_ttl_cap: Duration,
+        negative_ttl: Duration,
+        max_entries: usize,
+    ) -> Self {
+        Self {
+            resolver: DnsResolver::new(name_servers),
+            positive_ttl_cap,
+            negative_ttl,
+            max_entries,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Resolve `host` to a list of `SocketAddr`s paired with `port`,
+    /// consulting the cache first. IP-literal hosts skip DNS and the
+    /// cache. Hostname hits return the cached address set (positive) or
+    /// a cached `AddrNotAvailable` (negative, within `negative_ttl`);
+    /// misses resolve via hickory and populate the cache.
+    pub async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        // IP-literal short-circuit: no DNS, no cache entry. This is the
+        // same path `getaddrinfo`/`lookup_host` took for literals, so
+        // IP-endpoint configs (the common case, and every test fixture)
+        // are unchanged.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(vec![SocketAddr::new(ip, port)]);
+        }
+        // Cache read. An expired entry is treated as a miss and replaced
+        // after the fresh lookup (below); we do not evict here to keep
+        // the critical section to a map read.
+        {
+            let map = self.entries.lock().await;
+            if let Some(entry) = map.get(host) {
+                match entry {
+                    CacheEntry::Positive { addrs, expires_at } if *expires_at > Instant::now() => {
+                        return Ok(addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect());
+                    }
+                    CacheEntry::Negative { expires_at } if *expires_at > Instant::now() => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AddrNotAvailable,
+                            format!("cached DNS failure for '{host}'"),
+                        ));
+                    }
+                    _ => {} // expired: fall through to a fresh lookup
+                }
+            }
+        }
+        // Resolve via hickory (async, no blocking-pool getaddrinfo).
+        match self.resolver.resolve_ip(host).await {
+            Ok(addrs) if !addrs.is_empty() => {
+                let ttl = addrs
+                    .iter()
+                    .map(|(_, t)| {
+                        Duration::from_secs(u64::from(*t))
+                            .min(self.positive_ttl_cap)
+                            .max(POSITIVE_TTL_FLOOR)
+                    })
+                    .min()
+                    .unwrap_or(self.positive_ttl_cap);
+                let ips: Vec<IpAddr> = addrs.iter().map(|(ip, _)| *ip).collect();
+                let expires_at = Instant::now() + ttl;
+                self.insert(
+                    host.to_string(),
+                    CacheEntry::Positive {
+                        addrs: ips.clone(),
+                        expires_at,
+                    },
+                )
+                .await;
+                Ok(ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+            }
+            Ok(_) => {
+                // No addresses (NXDOMAIN-ish): cache the miss briefly so
+                // a misconfigured hostname does not hammer the resolver.
+                let expires_at = Instant::now() + self.negative_ttl;
+                self.insert(host.to_string(), CacheEntry::Negative { expires_at })
+                    .await;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    format!("'{host}' resolved to no addresses"),
+                ))
+            }
+            Err(e) => {
+                let expires_at = Instant::now() + self.negative_ttl;
+                self.insert(host.to_string(), CacheEntry::Negative { expires_at })
+                    .await;
+                Err(std::io::Error::other(format!(
+                    "DNS lookup for '{host}' failed: {e}"
+                )))
+            }
+        }
+    }
+
+    /// Insert an entry, evicting expired entries first when the cache is
+    /// at capacity. The eviction pass is O(n) but only runs at the cap;
+    /// the working set is small so this is bounded. If expired eviction
+    /// does not free a slot (every entry still live), the new entry
+    /// replaces the one with the nearest expiry (the next to expire
+    /// anyway), keeping the cache at `max_entries` without dropping a
+    /// long-lived entry.
+    async fn insert(&self, host: String, entry: CacheEntry) {
+        let mut map = self.entries.lock().await;
+        let now = Instant::now();
+        if map.len() >= self.max_entries {
+            // Evict every expired entry first.
+            map.retain(|_, e| match e {
+                CacheEntry::Positive { expires_at, .. } => *expires_at > now,
+                CacheEntry::Negative { expires_at } => *expires_at > now,
+            });
+        }
+        if map.len() >= self.max_entries {
+            // Still full: drop the entry nearest to expiry (the next
+            // natural eviction). A fresh insert always wins over the
+            // soonest-expiring resident.
+            if let Some(victim) = map
+                .iter()
+                .min_by_key(|(_, e)| match e {
+                    CacheEntry::Positive { expires_at, .. } => *expires_at,
+                    CacheEntry::Negative { expires_at } => *expires_at,
+                })
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&victim);
+            }
+        }
+        map.insert(host, entry);
     }
 }
 

@@ -234,3 +234,35 @@ same discipline (one dialing discipline per upstream). IPv6
 IP-literal authorities are stripped of their `Uri::host()` brackets
 before resolution and SNI (`[::1]` → `::1`) — the strip hyper-util's
 old resolver did internally, now ours because the dial is ours.
+
+### Async cached DNS on the pooled dial path (#170, PERF-05)
+
+The pooled connector resolves through a shared async
+`DnsCache` (`dataplane/discovery.rs`, `happy_dial_via` in
+`upstream.rs`) instead of the blocking-pool `getaddrinfo` of
+`tokio::net::lookup_host` that the dial path used before. One
+`Arc<DnsCache>` is built per upstream-registry generation and shared
+across every upstream in it, so repeated dials to the same host hit
+the cache:
+
+- **Positive cache**: a successful dual-stack (A + AAAA) lookup is
+  reused until the record TTL expires, capped at 300 s and floored at
+  1 s (a zero-TTL record is still cached briefly). hickory's
+  `lookup_ip` consults the system hosts file first, so `localhost` and
+  any `/etc/hosts` entry resolves without a network round-trip.
+- **Negative cache**: a failed lookup is cached for 5 s and served as
+  `AddrNotAvailable`, so a transient resolver failure or NXDOMAIN does
+  not trigger a retry storm on the hottest code path; the miss
+  re-resolves after the negative TTL.
+- **IP-literal short-circuit**: an IP-literal host skips DNS and the
+  cache entirely (the same short-circuit `getaddrinfo` takes).
+- **Bound**: the map is capped at 4096 entries (evicts the
+  earliest-expiring entry when full), bounding memory under
+  adversarial Host headers.
+
+The RFC 8305 racing, NODELAY, and `connect_ms` accounting above are
+unchanged -- only the resolution step moved off the blocking pool onto
+the async cache. Active health probes keep the system resolver
+(`happy_dial`): they are a background, infrequent path and do not
+share the pooled connector's cache. No new config fields or
+dependencies; the defaults above are not operator-tunable.
