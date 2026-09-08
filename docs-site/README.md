@@ -39,9 +39,22 @@ docs-site/
                                (copied from ../branding; see Branding below)
   .vitepress/
     config.mts                 site + versioning + sidebar config
+    theme/                     custom theme layer: Mermaid zoom, Dwara brand
+                               styles + Outfit font, and the animated home
+                               page (HomeLayout, HomeHeroImage, HomeEditions,
+                               HomeFlags in theme/)
     sidebars/versioned/        one sidebar JSON per frozen version
   scripts/freeze-version.mjs   release-time versioning helper
 ```
+
+The home page's edition cards and feature-flag chips are fed by the
+`editions:` and `flagGroups:` frontmatter arrays in `index.md` (read via
+`useData()` in the theme components), so page content stays in the page
+and travels with frozen version snapshots. Code fences written as
+` ```sh[terminal: title] ` render in macOS-style terminal window chrome
+(see `markdown.config` in `.vitepress/config.mts`). Home-page motion is
+progressively enhanced: reveal/entrance classes are added from JS only
+and every animation is disabled under `prefers-reduced-motion`.
 
 Links between pages must be **relative** (e.g. `./configuration`, not
 `/guide/configuration`) wherever practical — the versioning plugin

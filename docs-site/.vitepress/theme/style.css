@@ -139,3 +139,619 @@
   background: var(--vp-c-bg-soft);
   padding: 24px;
 }
+
+/* ==========================================================================
+ * Dwara brand theme + home page
+ *
+ * Palette and typeface follow branding/README.md: indigo (#1B1650 deep,
+ * #2E2A6B base), teal accent (#12B5A5), cream (#FBF3E6), Outfit for
+ * display text. All motion is gated behind `prefers-reduced-motion:
+ * no-preference`; scroll-reveal additionally requires a JS-added
+ * `.motion-ready` class (see HomeLayout.vue) so SSG/no-JS output is
+ * always fully visible.
+ * ========================================================================== */
+
+:root {
+  --dwara-indigo-deep: #1b1650;
+  --dwara-indigo: #2e2a6b;
+  --dwara-teal: #12b5a5;
+  --dwara-teal-soft: rgba(18, 181, 165, 0.12);
+  --dwara-cream: #fbf3e6;
+  --dwara-font-display: "Outfit Variable", var(--vp-font-family-base);
+
+  --vp-c-brand: #0d8a7e;
+  --vp-c-brand-1: #0fa093;
+  --vp-c-brand-2: #0d8a7e;
+  --vp-c-brand-3: #0a6f66;
+}
+
+.dark {
+  --vp-c-brand: #16bcab;
+  --vp-c-brand-1: #2fd9c7;
+  --vp-c-brand-2: #16bcab;
+  --vp-c-brand-3: #0fa093;
+}
+
+::selection {
+  background: rgba(18, 181, 165, 0.25);
+}
+
+/* Display typeface: hero, page headings, card titles, nav title. */
+.VPHero .name,
+.VPHero .text,
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPFeature .title,
+.VPNavBarTitle .title {
+  font-family: var(--dwara-font-display);
+}
+
+/* --------------------------------------------------------------------------
+ * Hero: animated gradient-mesh + grid backdrop
+ * ------------------------------------------------------------------------ */
+
+.VPHero {
+  position: relative;
+  overflow: hidden;
+  overflow: clip;
+}
+
+.VPHero .container {
+  position: relative;
+  z-index: 1;
+}
+
+.VPHero::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 36% at 16% 26%, rgba(46, 42, 107, 0.16), transparent 70%),
+    radial-gradient(36% 30% at 82% 20%, rgba(18, 181, 165, 0.14), transparent 70%),
+    radial-gradient(30% 26% at 58% 82%, rgba(18, 181, 165, 0.08), transparent 72%);
+}
+
+.dark .VPHero::before {
+  background:
+    radial-gradient(42% 36% at 16% 26%, rgba(27, 22, 80, 0.55), transparent 70%),
+    radial-gradient(36% 30% at 82% 20%, rgba(18, 181, 165, 0.16), transparent 70%),
+    radial-gradient(30% 26% at 58% 82%, rgba(46, 42, 107, 0.4), transparent 72%);
+}
+
+.VPHero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(27, 22, 80, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(27, 22, 80, 0.05) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(64% 64% at 50% 38%, #000 0%, transparent 100%);
+  -webkit-mask-image: radial-gradient(64% 64% at 50% 38%, #000 0%, transparent 100%);
+}
+
+.dark .VPHero::after {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+}
+
+/* Gradient wordmark on the hero name. */
+.VPHero .name .clip {
+  background: linear-gradient(120deg, var(--dwara-indigo) 15%, var(--dwara-teal) 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.dark .VPHero .name .clip {
+  background: linear-gradient(120deg, var(--dwara-cream) 20%, #2fd9c7 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+.VPHero .text {
+  color: var(--vp-c-text-1);
+}
+
+/* Pill-shaped CTA buttons. */
+.VPHero .VPButton,
+.VPHero .VPButton.medium {
+  border-radius: 999px;
+}
+
+/* Badge strip under the hero actions (home-hero-actions-after slot). */
+.home-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.home-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 12px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.home-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dwara-teal);
+}
+
+/* --------------------------------------------------------------------------
+ * Hero mark: glow, float, ripple rings
+ * ------------------------------------------------------------------------ */
+
+.hero-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: min(300px, 72vw);
+  aspect-ratio: 1;
+  margin: 0 auto;
+}
+
+.hero-glow {
+  position: absolute;
+  inset: 8%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(18, 181, 165, 0.28), transparent 72%);
+}
+
+.hero-mark-img {
+  position: relative;
+  width: 76%;
+  filter: drop-shadow(0 14px 34px rgba(18, 181, 165, 0.35));
+}
+
+.hero-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(18, 181, 165, 0.4);
+  opacity: 0.22;
+}
+
+/* --------------------------------------------------------------------------
+ * Feature cards
+ * ------------------------------------------------------------------------ */
+
+.VPFeatures .VPFeature {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.VPFeatures .VPFeature:hover {
+  transform: translateY(-4px);
+  border-color: rgba(18, 181, 165, 0.55);
+  box-shadow: 0 14px 34px -14px rgba(27, 22, 80, 0.28);
+}
+
+.dark .VPFeatures .VPFeature:hover {
+  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.6);
+}
+
+.VPFeature .icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 18px;
+  border-radius: 12px;
+  background: var(--dwara-teal-soft);
+  color: var(--vp-c-brand-2);
+  font-size: 20px;
+  transition: transform 0.25s ease;
+}
+
+.VPFeature:hover .icon {
+  transform: scale(1.06);
+}
+
+.VPFeature .icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.dark .VPFeature .icon {
+  color: var(--vp-c-brand-1);
+}
+
+/* --------------------------------------------------------------------------
+ * Terminal quickstart block (::: terminal custom container)
+ * ------------------------------------------------------------------------ */
+
+.custom-block.terminal {
+  position: relative;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 80, 0.14);
+  border-radius: 12px;
+  background: var(--dwara-cream);
+  overflow: hidden;
+}
+
+.dark .custom-block.terminal {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #17143f;
+}
+
+.custom-block.terminal::before {
+  content: "";
+  display: block;
+  height: 44px;
+  border-bottom: 1px solid rgba(27, 22, 80, 0.1);
+  background:
+    radial-gradient(circle 5px at 20px 22px, #ff5f57 0 5px, transparent 6px),
+    radial-gradient(circle 5px at 42px 22px, #febc2e 0 5px, transparent 6px),
+    radial-gradient(circle 5px at 64px 22px, #28c840 0 5px, transparent 6px);
+}
+
+.dark .custom-block.terminal::before {
+  border-bottom-color: rgba(255, 255, 255, 0.09);
+}
+
+.custom-block.terminal .custom-block-title {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  line-height: 44px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: rgba(27, 22, 80, 0.65);
+}
+
+.dark .custom-block.terminal .custom-block-title {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.custom-block.terminal div[class*="language-"] {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* The window title replaces the default "sh" lang badge. */
+.custom-block.terminal .lang {
+  display: none;
+}
+
+.custom-block.terminal .copy {
+  color: rgba(27, 22, 80, 0.55);
+}
+
+.dark .custom-block.terminal .copy {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.custom-block.terminal div[class*="language-"] pre {
+  margin: 0;
+  background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+ * Editions cards
+ * ------------------------------------------------------------------------ */
+
+.home-editions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin: 8px 0 16px;
+}
+
+.edition-card {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg);
+  text-decoration: none;
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.edition-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(18, 181, 165, 0.55);
+  box-shadow: 0 14px 34px -14px rgba(27, 22, 80, 0.28);
+}
+
+.dark .edition-card:hover {
+  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.6);
+}
+
+.edition-card.highlight {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--vp-c-bg), var(--vp-c-bg)) padding-box,
+    linear-gradient(135deg, var(--dwara-indigo), var(--dwara-teal)) border-box;
+}
+
+.edition-card h3 {
+  margin: 0 0 4px;
+  font-family: var(--dwara-font-display);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.edition-card p {
+  margin: 0 0 14px;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+.edition-card ul {
+  flex: 1;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+}
+
+.edition-card li::marker {
+  color: var(--dwara-teal);
+}
+
+.edition-cta {
+  margin-top: 18px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vp-c-brand-2);
+}
+
+.dark .edition-cta {
+  color: var(--vp-c-brand-1);
+}
+
+/* --------------------------------------------------------------------------
+ * Feature-flag chips
+ * ------------------------------------------------------------------------ */
+
+.home-flags .home-flags-group h3 {
+  margin: 26px 0 10px;
+  padding: 0;
+  border-top: none;
+  font-family: var(--dwara-font-display);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+}
+
+.home-flags-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+  gap: 10px;
+}
+
+.flag-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background: var(--vp-c-bg-soft);
+  text-decoration: none;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.flag-chip:hover {
+  transform: translateY(-2px);
+  border-color: rgba(18, 181, 165, 0.55);
+}
+
+.flag-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flag-chip code {
+  padding: 0;
+  background: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  white-space: nowrap;
+}
+
+.flag-chip:hover code {
+  color: var(--vp-c-brand-2);
+}
+
+.dark .flag-chip:hover code {
+  color: var(--vp-c-brand-1);
+}
+
+.flag-desc {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--vp-c-text-2);
+}
+
+.flag-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.flag-dot.wired,
+.flag-chip.status-wired .flag-dot {
+  background: var(--dwara-teal);
+}
+
+.flag-dot.partial,
+.flag-chip.status-partial .flag-dot {
+  background: #d29922;
+}
+
+.flag-dot.stubbed,
+.flag-chip.status-stubbed .flag-dot {
+  background: #98a2b3;
+}
+
+.flag-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  margin-top: 22px;
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+.flag-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* --------------------------------------------------------------------------
+ * Motion: entrances, reveals, ambient animation
+ * All keyframe animation is wrapped in no-preference; scroll-reveal also
+ * needs the JS-added .motion-ready class (progressive enhancement).
+ * ------------------------------------------------------------------------ */
+
+@keyframes dwara-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes dwara-ripple {
+  0% {
+    transform: scale(0.55);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.12);
+    opacity: 0;
+  }
+}
+
+@keyframes dwara-mesh {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2.5%, -2%, 0) scale(1.06);
+  }
+}
+
+@keyframes dwara-grid {
+  to {
+    background-position: 36px 36px;
+  }
+}
+
+@keyframes dwara-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-mark-img {
+    animation: dwara-float 6s ease-in-out infinite;
+  }
+
+  .hero-ring {
+    animation: dwara-ripple 5s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  }
+
+  .hero-ring.r2 {
+    animation-delay: 2.5s;
+  }
+
+  .VPHero::before {
+    animation: dwara-mesh 16s ease-in-out infinite alternate;
+  }
+
+  .VPHero::after {
+    animation: dwara-grid 60s linear infinite;
+  }
+
+  .VPHome .VPFeature.feature-enter {
+    animation: dwara-card-in 0.55s cubic-bezier(0.22, 0.68, 0.32, 1) both;
+  }
+
+  .VPHome.motion-ready .reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 0.5s ease,
+      transform 0.5s ease;
+  }
+
+  .VPHome.motion-ready .reveal.revealed {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Responsive polish
+ * ------------------------------------------------------------------------ */
+
+@media (max-width: 960px) {
+  .home-badges {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 768px) {
+  .home-editions {
+    grid-template-columns: 1fr;
+  }
+
+  .home-flags-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .flag-legend {
+    gap: 12px;
+  }
+}

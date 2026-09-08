@@ -55,6 +55,36 @@ export default withMermaid(
       // README, not a page of the published site.
       srcExclude: ["README.md"],
 
+      // Terminal-styled code fences for the home page quickstart. A fence
+      // whose info string is `<lang>[terminal: title]` (e.g. ```sh[terminal:
+      // dwara -- quickstart]) is rendered inside macOS-style window chrome
+      // (traffic-light dots + title bar) instead of a plain code block; see
+      // `.custom-block.terminal` in theme/style.css. The bracket marker is
+      // explicit so ordinary fences are never affected. markdown.config runs
+      // after VitePress's own fence plugins, so `fence` here is their final
+      // rule and we delegate to it with the marker stripped.
+      markdown: {
+        config(md) {
+          const fence = md.renderer.rules.fence!;
+          md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+            const token = tokens[idx];
+            const info = token.info || "";
+            const match = info.match(/^(\S+?)\[terminal(?::\s*(.*))?\]$/);
+            if (!match) return fence(tokens, idx, options, env, self);
+            token.info = match[1];
+            const inner = fence(tokens, idx, options, env, self);
+            token.info = info;
+            const title = match[2] || "terminal";
+            return (
+              `<div class="custom-block terminal">` +
+              `<p class="custom-block-title">${md.utils.escapeHtml(title)}</p>` +
+              inner +
+              `</div>`
+            );
+          };
+        },
+      },
+
       versioning: {
         latestVersion: "unstable",
       },
