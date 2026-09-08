@@ -1,0 +1,63 @@
+# REL-02 chaos / end-to-end resilience fault-injection suite (#173).
+#
+# COMPUTE POSTURE: this workflow is SCHEDULED (weekly) and manually
+# dispatchable ONLY. It deliberately has NO push/pull_request triggers --
+# the chaos suite drives real fault injection (killed backends, injected
+# 5xx, induced latency, mid-stream config reload) with timing-sensitive
+# assertions, so it is slower and noisier than the per-PR gate and must
+# not block routine merges. ci.yml remains the per-PR gate; the focused
+# resilience suites (breaker_caps, passive_health, retries_timeouts,
+# load_shedding) run there and pin each feature in isolation. This job is
+# the CONTINUOUSLY-VERIFIED promise layer: it crosses feature boundaries
+# the way a real outage would and asserts the resilience machinery behaves
+# end to end. The schedule is offset from bench.yml (Mon 03:17) and
+# fuzz.yml (Thu 04:23) so the three never contend for runners.
+#
+# The binary-upgrade zero-downtime path (SIGUSR2) is covered by
+# dwara-bin's zero_downtime_upgrade suite (run by the per-PR test command);
+# this job runs the in-process reload + breaker/ejection/retry/shedding
+# fault-injection tests in crates/dwara-core/tests/chaos_resilience.rs.
+
+name: chaos
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Wednesdays 05:11 UTC -- offset from bench.yml (Mon 03:17) and
+    # fuzz.yml (Thu 04:23).
+    - cron: "11 5 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: chaos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  chaos:
+    name: chaos resilience fault-injection suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      # DW-032: cargo metadata (run by cargo build/test) resolves the
+      # optional ent licensing-core dep, so git must authenticate even
+      # though the feature is not enabled. See ci.yml for the rationale.
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
+      - name: Run the chaos resilience suite
+        run: cargo test -p dwara-core --test chaos_resilience -- --nocapture

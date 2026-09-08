@@ -9,6 +9,32 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Chaos / end-to-end resilience fault-injection CI suite (#173,
+  REL-02): a new integration suite
+  `crates/dwara-core/tests/chaos_resilience.rs` that drives real fault
+  injection (killed backends, injected 5xx, induced latency, mid-stream
+  config reload) through the full proxy path and asserts the
+  resilience machinery behaves end to end, not in isolation. It covers
+  breaker open/half-open/close (and re-open) transitions, outlier
+  ejection + failover + recovery, retry-budget bounds (the
+  `retries * 100 <= percent * totals` invariant), load shedding under
+  overload, zero-dropped traffic across an in-process config reload,
+  and a combined breaker + outlier-ejection outage shape. Each test
+  crosses feature boundaries the way a real outage would and inspects
+  both the client-visible behavior and the internal state machines
+  (`Breaker::state`, `EndpointHealth::ejections`, `RetryBudget`,
+  `PriorityCounters`). The suite runs in a SEPARATE CI job
+  (`.github/workflows/chaos.yml`) that is scheduled weekly (Wednesdays
+  05:11 UTC) and manually dispatchable only — it has no push/PR
+  triggers because the fault-injection timing is slower and noisier
+  than the per-PR gate; `ci.yml` remains the per-PR gate and the
+  focused resilience suites (`breaker_caps`, `passive_health`,
+  `retries_timeouts`, `load_shedding`) still pin each feature in
+  isolation there. The schedule is offset from `bench.yml` (Mon 03:17)
+  and `fuzz.yml` (Thu 04:23) so the three never contend for runners.
+  The binary SIGUSR2 upgrade path is covered by dwara-bin's
+  `zero_downtime_upgrade` suite; this suite pins the in-process reload
+  seam. No config, schema, or dependency changes.
 - Cross-attempt total retry deadline (#172, REL-01): an optional
   `upstreams[].retries.total_deadline_ms` field capping the wall-clock
   time from the first attempt to the last, including backoff delays

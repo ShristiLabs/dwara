@@ -5,7 +5,10 @@ Source: `crates/dwara-core/src/resilience/{health,retries,breaker}.rs`
 shedding lives on the gateway-cap path documented in
 [Architecture](../architecture.md)). Tests: `passive_health`,
 `active_health`, `retries_timeouts`, `breaker_caps`, `load_shedding`
-(dwara-core).
+(dwara-core) pin each feature in isolation; the cross-feature
+end-to-end fault-injection suite is `chaos_resilience` (dwara-core,
+#173, REL-02) — see [Chaos / e2e resilience
+suite](#chaos--e2e-resilience-suite) below.
 
 Three layers gate traffic to a struggling upstream, at three different
 granularities, and it's the composition — not any one layer — that
@@ -387,3 +390,71 @@ routes:
   mirror spawn).
 - An empty `fault_injection` block (no `abort` and no `delay`) is
   rejected by validation — omit the block instead.
+
+## Chaos / e2e resilience suite
+
+The focused suites (`passive_health`, `active_health`,
+`retries_timeouts`, `breaker_caps`, `load_shedding`) pin each
+resilience feature in isolation against a single injected fault. The
+chaos suite (`crates/dwara-core/tests/chaos_resilience.rs`, #173,
+REL-02) is the continuously-verified promise layer on top of them: it
+drives **real fault injection** (killed backends, injected 5xx,
+induced latency, mid-stream config reload) through the full proxy
+path and asserts the resilience machinery behaves end to end, not in
+isolation. Each test crosses feature boundaries the way a real outage
+would, and asserts **both** the client-visible behavior (status
+codes, zero drops) and the internal state machines (`Breaker::state`,
+`EndpointHealth::ejections`, `RetryBudget::retries`,
+`PriorityCounters`) so a silent regression in either layer is caught.
+
+What the suite covers:
+
+- **Breaker transitions** — flip a live backend to failing, verify the
+  breaker opens (fail-fast 503 + `Retry-After`, no backend attempt),
+  flip it back, wait past `open_ms`, and verify the half-open probe
+  closes it; plus the open -> half-open -> re-open cycle when the
+  probe fails.
+- **Outlier ejection + failover + recovery** — two endpoints, one
+  flippable; inject failures, verify the bad endpoint is ejected
+  (`ejections > 0`) and traffic fails over to the healthy endpoint,
+  then flip it back and verify recovery via a half-open probe (no new
+  ejections).
+- **Retry-budget bounds** — warm the budget denominator with
+  successful requests, inject a burst of failures, and verify the
+  in-window retry count never exceeds the budget invariant
+  `retries * 100 <= percent * totals` (the budget, not the attempt
+  cap, is the binding constraint).
+- **Load shedding** — overload `max_concurrent_requests` with
+  concurrent requests; the excess is shed immediately (503
+  `gateway_saturated`) while the admitted ones complete 200, and
+  slots are released afterward (no permanent lock-up).
+- **Zero-dropped across in-process reload** — steady concurrent
+  traffic through a mid-stream `compile_and_publish` + `refresh` (the
+  file-watch/SIGHUP seam); zero requests dropped or failed across the
+  generation swap.
+- **Combined breaker + outlier ejection** — a failing endpoint trips
+  passive-health ejection (failover to the good endpoint) while the
+  per-upstream breaker stays closed (one healthy endpoint keeps it
+  healthy), pinning the layer independence under live fault
+  injection.
+
+The binary-upgrade zero-downtime path (SIGUSR2) is **not** in this
+suite — it is covered by dwara-bin's `zero_downtime_upgrade` suite
+(see [zero-downtime upgrade](./zero-downtime-upgrade.md)); the chaos
+suite pins the in-process reload seam instead.
+
+### CI posture
+
+The suite is gated to a **separate** CI job
+(`.github/workflows/chaos.yml`) that is scheduled weekly (Wednesdays
+05:11 UTC) and manually dispatchable only — it deliberately has **no**
+push/pull_request triggers. The fault-injection timing (killed
+backends, induced latency, mid-stream reload) is slower and noisier
+than the per-PR gate, so it must not block routine merges. `ci.yml`
+remains the per-PR gate; the focused resilience suites run there and
+pin each feature in isolation. The chaos schedule is offset from
+`bench.yml` (Mon 03:17) and `fuzz.yml` (Thu 04:23) so the three
+never contend for runners. Determinism in the suite comes from
+bounded readiness polls (never a sleep used as synchronization),
+ephemeral loopback ports unique by construction, and tiny timing
+windows with generous margins.
