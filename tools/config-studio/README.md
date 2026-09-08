@@ -11,9 +11,14 @@ network access required.
   auth + rate limiting, TLS edge, AI gateway, or blank) and build the
   config through schema-driven forms. Required fields are shown
   first; optional fields are collapsed but never hidden.
-- **Visualize**: an Overview shows entity counts and the request
-  wiring table (route -> service -> upstream -> endpoints) with
-  dangling-reference chips.
+  Cross-reference fields are ref-aware: `route.service` and
+  `service.upstream` are dropdowns of the names you have defined, and
+  policy attachments are toggle chips - dangling references are hard
+  to create and easy to see.
+- **Visualize**: an Overview shows entity counts, the request wiring
+  table (route -> service -> upstream -> endpoints) with
+  dangling-reference chips, and copyable next-step commands
+  (`dwara validate`, `DWARA_CONFIG=... dwara run`).
 - **Validate**: structural validation against the same JSON Schema
   Dwara generates from its Rust config types (`dwara schema`), plus
   cross-reference checks the schema cannot express (route -> service
@@ -23,6 +28,10 @@ network access required.
 - **Edit YAML**: a live YAML pane mirrors the forms; "Edit as YAML"
   accepts pasted configs and round-trips them back into the builder
   (parsed with the vendored js-yaml).
+- **Learn in place**: a Help overlay explains the workflow and the
+  listener -> route -> service -> upstream -> endpoint model, with
+  links to the published guides; every section header deep-links its
+  docs page.
 
 The tool only helps produce the YAML. **Loading it into Dwara is a
 separate step**: `dwara validate dwara.yaml`, then run the gateway
@@ -51,9 +60,13 @@ Drafts autosave to browser localStorage. Secrets should be written
 as `${env:...}` / `${file:...}` references, which this tool does not
 resolve.
 
-Internal development tracking references (DW-###) present in the
-upstream schema descriptions are scrubbed at build time; the schema
-embedded here matches `config-reference.json` in every other respect.
+Internal development tracking references present in the upstream
+schema descriptions (issue-tracker IDs, enhancement-catalog IDs,
+bare GitHub issue refs, internal analysis-doc pointers) are
+scrubbed at build time; the schema embedded here matches
+`config-reference.json` in every other respect. Technical tokens
+(SHA-256, HTTP-01, "N-1 or N+1" version-skew semantics) are
+preserved.
 
 ## End-user documentation
 

@@ -30,21 +30,45 @@ def guard_inline(text: str) -> str:
     )
 
 
-def strip_issue_refs(text: str) -> str:
-    """Remove internal DW-### tracking references from help text.
+# Tracking-reference families that appear in upstream doc comments:
+# the internal issue tracker (DW-###, DW-AI-###, pre-DW-###) and the
+# enhancement-catalog IDs (SEC/CFG/AI/DP/REL/PERF/SCALE/USA/FEAT-##).
+# Deliberately UPPERCASE-only so technical tokens survive: SHA-256,
+# HTTP-01, TLS-ALPN-01, "N-1 or N+1" skew semantics, "2^(n-1)" math,
+# region/model names.
+TRACKING_RE = re.compile(
+    r"\b(?:pre-)?(?:DW(?:-[A-Z]+)?|SEC|CFG|AI|DP|REL|PERF|SCALE|USA|FEAT)-\d{1,4}\b"
+)
 
-    The upstream schema descriptions carry development tracking IDs
-    (DW-019, DW-045, "feature analysis 4.7", ...). They are meaningless
-    to operators using this tool, so they are scrubbed here, in the
-    built artifact only.
+
+def strip_issue_refs(text: str) -> str:
+    """Remove internal tracking references from help text.
+
+    The upstream schema descriptions carry development references:
+    issue IDs (DW-###, DW-AI-###), enhancement-catalog IDs (SEC-04,
+    CFG-14, AI-01, ...), bare GitHub refs (#121), and "feature
+    analysis 4.7" pointers. They are meaningless to operators, so the
+    TOKENS are removed here (surrounding words like "(#124,
+    termination mode only)" survive as "(termination mode only)") in
+    the built artifact only.
     """
-    t = re.sub(r"\((?:feature analysis )?DW-\d+(?:, [^()]*)?\)", "", text)
-    t = re.sub(r"\bDW-\d+\b", "", t)
+    t = TRACKING_RE.sub("", text)
+    t = re.sub(r"#\d+\b", "", t)  # JSON pointers are "#/...", never "#<digits>"
+    t = re.sub(r"feature\s+analysis\s+[\w.\-]+", "", t)
+    # orphaned separators left behind by token removal
+    t = re.sub(r"\s*/\s*(?=[,;:.])", "", t)
+    t = re.sub(r"^\s*[,/;:]\s*", "", t)
+    t = re.sub(r"\(\s*[,/;:]\s*", "(", t)
+    t = re.sub(r"\(\s*,\s*", "(", t)
+    t = re.sub(r"\(\s*,\s*\)", "()", t)
+    t = re.sub(r"\(\s*\)", "", t)
     t = re.sub(r"\(\s+", "(", t)
     t = re.sub(r"\s+\)", ")", t)
-    t = re.sub(r"\(\)", "", t)
-    t = re.sub(r"\s+([.,;:])", r"\1", t)
-    t = re.sub(r"  +", " ", t)
+    # sentence punctuation only: not paths (" ../x"), ports (" :8443"),
+    # or ellipses -- the punctuation must be followed by space/end
+    t = re.sub(r"\s+([,;:])(?=\s|$)", r"\1", t)
+    t = re.sub(r"\s+\.(\s|$)", r".\1", t)
+    t = re.sub(r"\s{2,}", " ", t)
     return t
 
 

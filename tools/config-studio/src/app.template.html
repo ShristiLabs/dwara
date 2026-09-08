@@ -132,6 +132,17 @@ details.adv > .body { padding: 4px 12px 10px; }
 .chip { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 9px; background: var(--chip); color: var(--dim); }
 .chip.ok { background: #e2f4e9; color: var(--ok); }
 .chip.err { background: #fdeaea; color: var(--err); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+button.chip { cursor: pointer; border: 1px solid var(--line); font-size: 12px; padding: 2px 10px; }
+button.chip.on { background: #e0eaff; color: #0b3dd6; border-color: #9db9f5; font-weight: 600; }
+button.chip.dangling { background: #fdeaea; color: var(--err); border-color: #f2b8b5; }
+.next-steps { border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 12px 16px; margin: 18px 0; }
+.next-steps .step { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.next-steps .step .n { width: 22px; height: 22px; border-radius: 50%; background: #101828; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; flex: none; }
+.next-steps code { font: 12.5px var(--mono); background: var(--chip); border-radius: 5px; padding: 2px 8px; }
+.help-body h4 { margin: 14px 0 4px; font-size: 14px; }
+.help-body p, .help-body li { font-size: 13px; color: var(--ink); }
+.help-body code { font: 12px var(--mono); background: var(--chip); border-radius: 4px; padding: 1px 5px; }
 .badge-req { color: var(--err); font-weight: 700; }
 #statusbar {
   flex: none; display: flex; align-items: center; gap: 12px; padding: 6px 14px;
@@ -196,6 +207,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
   <div class="wordmark">Dwara <span>/ config studio</span></div>
   <div class="spacer"></div>
   <a class="btn" href="https://shristilabs.github.io/dwara/" target="_blank" rel="noopener">Docs</a>
+  <button id="btn-help">Help</button>
   <button id="btn-templates">Templates</button>
   <button id="btn-validate">Validate</button>
   <button id="btn-refresh">Refresh YAML</button>
@@ -227,6 +239,29 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     <h2>Start from a template</h2>
     <p class="sub">Every template is plain YAML you own - the builder edits it, Dwara loads it. Browser checks are structural; run <span style="font-family:var(--mono)">dwara validate</span> for the final word. New to Dwara? Read the <a href="https://shristilabs.github.io/dwara/guide/getting-started" target="_blank" rel="noopener">getting started guide</a> or the <a href="https://shristilabs.github.io/dwara/guide/configuration" target="_blank" rel="noopener">configuration guide</a>.</p>
     <div class="tpl-grid" id="tpl-grid"></div>
+  </div>
+</div>
+<div class="overlay" id="help-overlay">
+  <div class="box help-body">
+    <h2>How to use Dwara Config Studio</h2>
+    <h4>The workflow</h4>
+    <ol>
+      <li><b>Pick a template</b> (or start blank) and edit through the forms in the middle. Required fields are open; optional fields are collapsed under "optional fields".</li>
+      <li><b>Check the YAML pane</b> on the right - it is the actual config, always in sync. You can also paste an existing config there and "Apply to builder" to edit it as forms.</li>
+      <li><b>Validate</b> - the status bar is always live. Green means structurally valid; click it for details, and click an issue to jump to the field.</li>
+      <li><b>Download</b> <code>dwara.yaml</code>, then load it into Dwara separately: <code>dwara validate dwara.yaml</code> and <code>DWARA_CONFIG=dwara.yaml dwara run</code>. Browser checks are structural only; <code>dwara validate</code> is the final word.</li>
+    </ol>
+    <h4>How a config fits together</h4>
+    <p>A request flows <b>listener &rarr; route &rarr; service &rarr; upstream &rarr; endpoints</b>: a listener binds a port (with optional TLS), a route matches a path and points at a named service, the service names the upstream (its load-balancing pool), and the pool lists endpoint addresses. Names are cross-references - the Overview wiring table shows the chains and flags any dangling name in red. Consumers hold credentials (API key, JWT, mTLS, HMAC) and can carry policies (rate limits, timeouts, budgets) that attach by name at any level.</p>
+    <h4>Good to know</h4>
+    <ul>
+      <li><b>Secrets</b> - write <code>${NAME}</code> or <code>${file:/path}</code> references instead of real values; this tool never resolves them.</li>
+      <li><b>Drafts autosave</b> to this browser (localStorage). Clear wipes the draft.</li>
+      <li><b>Cross-reference fields</b> (service, upstream, policies) are dropdowns/chips fed by the entities you have defined.</li>
+      <li><b>Feature-gated blocks</b> (mesh, plugins, h3 upstreams...) are accepted in config but inert unless Dwara is built with the matching cargo feature - validation notes this where relevant.</li>
+    </ul>
+    <p>Full documentation: <a href="https://shristilabs.github.io/dwara/guide/getting-started" target="_blank" rel="noopener">getting started</a> - <a href="https://shristilabs.github.io/dwara/guide/configuration" target="_blank" rel="noopener">configuration guide</a> - <a href="https://shristilabs.github.io/dwara/guide/routing" target="_blank" rel="noopener">routing</a> - <a href="https://shristilabs.github.io/dwara/reference/configuration-schema" target="_blank" rel="noopener">schema reference</a>.</p>
+    <div style="text-align:right;margin-top:12px"><button id="btn-help-close">Close</button></div>
   </div>
 </div>
 
@@ -757,6 +792,14 @@ function h(tag, attrs, children) {
   return el;
 }
 
+/* ---------- cross-reference helpers ---------- */
+
+/* Names defined in entity lists, for ref-aware selectors. */
+function refNames(kind) {
+  var list = kind === "service" ? doc.services : kind === "upstream" ? doc.upstreams : doc.policies;
+  return (list || []).map(function (e) { return e && typeof e === "object" && typeof e.name === "string" ? e.name : null; }).filter(Boolean);
+}
+
 /* ---------- form rendering ---------- */
 
 function entityTitle(sec, value, idx) {
@@ -827,8 +870,9 @@ function fieldEditor(key, sch, path, isRequired) {
 
   if (tn === "integer" || tn === "number") {
     var num = h("input", { type: "number", step: tn === "integer" ? "1" : "any", placeholder: c.default !== undefined ? String(c.default) : "", oninput: function () {
-      if (this.value === "") delPath(path);
-      else setPath(path, tn === "integer" ? parseInt(this.value, 10) : parseFloat(this.value));
+      if (this.value === "") { delPath(path); return; }
+      var n = tn === "integer" ? parseInt(this.value, 10) : parseFloat(this.value);
+      if (isFinite(n)) setPath(path, n); else delPath(path);
     }});
     if (value !== undefined) num.value = String(value);
     body.appendChild(num);
@@ -836,6 +880,27 @@ function fieldEditor(key, sch, path, isRequired) {
   }
 
   if (tn === "string") {
+    /* ref-aware selector: route.service and service.upstream name entities */
+    if (key === "service" || key === "upstream") {
+      var names = refNames(key);
+      var currentName = typeof value === "string" ? value : undefined;
+      if (names.length || currentName !== undefined) {
+        var rsel = h("select", { onchange: function () {
+          if (this.value === "") delPath(path);
+          else setPath(path, this.value);
+        }});
+        rsel.appendChild(h("option", { value: "", text: optional ? "(unset)" : "-- select --" }));
+        names.forEach(function (n2) { rsel.appendChild(h("option", { value: n2, text: n2 })); });
+        if (currentName !== undefined && names.indexOf(currentName) < 0) {
+          rsel.appendChild(h("option", { value: currentName, text: currentName + "  (not defined)" }));
+        }
+        if (currentName !== undefined) rsel.value = currentName;
+        body.appendChild(rsel);
+        if (!names.length) body.appendChild(h("div", { class: "help", text: "No " + (key === "service" ? "services" : "upstreams") + " defined yet - add one under Traffic first." }));
+        return wrap;
+      }
+      body.appendChild(h("div", { class: "help", text: "Tip: define the " + key + " under Traffic first and this becomes a dropdown." }));
+    }
     var inp = h("input", { type: "text", placeholder: c.default !== undefined ? String(c.default) : "", oninput: function () {
       if (this.value === "") delPath(path);
       else setPath(path, this.value);
@@ -846,6 +911,34 @@ function fieldEditor(key, sch, path, isRequired) {
   }
 
   if (tn === "array") {
+    /* policy attachments are name refs: chips of defined policies */
+    if (key === "policies" && refNames("policies").length) {
+      var selected = Array.isArray(value) ? value.slice() : [];
+      var defined = refNames("policies");
+      var chips = h("div", { class: "chips" });
+      defined.forEach(function (pn) {
+        var on = selected.indexOf(pn) >= 0;
+        var chip = h("button", { class: "chip" + (on ? " on" : ""), text: pn, title: "Toggle policy attachment", onclick: function () {
+          var arr = (getPath(path) || []).slice();
+          var ix = arr.indexOf(pn);
+          if (ix >= 0) arr.splice(ix, 1); else arr.push(pn);
+          if (arr.length) setPath(path, arr); else delPath(path);
+          render();
+        }});
+        chips.appendChild(chip);
+      });
+      selected.filter(function (pn) { return defined.indexOf(pn) < 0; }).forEach(function (pn) {
+        chips.appendChild(h("button", { class: "chip dangling", text: pn + " x", title: "Not defined in policies - click to remove", onclick: function () {
+          var arr = (getPath(path) || []).slice();
+          arr.splice(arr.indexOf(pn), 1);
+          if (arr.length) setPath(path, arr); else delPath(path);
+          render();
+        }}));
+      });
+      body.appendChild(chips);
+      body.appendChild(h("div", { class: "help", text: "Toggle the policies to attach (defined under Policy & Security). Red chips reference policies that do not exist." }));
+      return wrap;
+    }
     body.appendChild(arrayEditor(sch, path));
     return wrap;
   }
@@ -1006,27 +1099,36 @@ function leafInput(sch, path) {
   return inp;
 }
 
+/* Build a starter value for a tagged-union variant: the discriminator
+   const plus prefilled required fields. */
+function variantDefault(variant, disc) {
+  var base = {};
+  if (disc && variant.properties[disc] && variant.properties[disc].const !== undefined) {
+    base[disc] = variant.properties[disc].const;
+  }
+  (variant.required || []).forEach(function (r) {
+    if (r === disc || base[r] !== undefined) return;
+    var ps = variant.properties && variant.properties[r];
+    var t = ps ? typeName(ps) : "string";
+    if (t === "object" || t === "map") base[r] = {};
+    else if (t === "array") base[r] = [];
+    else if (t === "choice") {
+      var cc = coreOf(ps);
+      var ui = unionInfo(ps);
+      var opts = cc.enum || ui.values || ui.variants.map(function (x) { return x.const; });
+      if (opts.length) base[r] = opts[0];
+    }
+    else if (t === "boolean") base[r] = false;
+    else if (t === "integer" || t === "number") base[r] = 0;
+    else base[r] = "";
+  });
+  return base;
+}
+
 function defaultValue(sch) {
   var tn = typeName(sch);
   if (tn === "object") {
-    var v = {};
-    var c = coreOf(sch);
-    (c.required || []).forEach(function (r) {
-      var ps = c.properties && c.properties[r];
-      var ct = ps ? typeName(ps) : "string";
-      if (ct === "object" || ct === "map") v[r] = {};
-      else if (ct === "array") v[r] = [];
-      else if (ct === "choice") {
-        var ui = unionInfo(ps);
-        var cc = coreOf(ps);
-        var opts = cc.enum || ui.values || ui.variants.map(function (x) { return x.const; });
-        if (opts.length) v[r] = opts[0];
-      }
-      else if (ct === "boolean") v[r] = false;
-      else if (ct === "integer" || ct === "number") v[r] = 0;
-      else v[r] = "";
-    });
-    return v;
+    return variantDefault(coreOf(sch), null);
   }
   if (tn === "array") return [];
   if (tn === "map") return {};
@@ -1036,6 +1138,14 @@ function defaultValue(sch) {
     var ui2 = unionInfo(sch);
     var vals2 = ui2.values || ui2.variants.map(function (x) { return x.const; });
     if (vals2.length) return vals2[0];
+  }
+  if (tn === "union") {
+    /* tagged unions (credentials, actions, matchers) get a populated
+       first variant instead of a bogus empty string */
+    var ui3 = unionInfo(sch);
+    if (ui3.kind === "tagged") return variantDefault(ui3.variants[0], ui3.disc);
+    if (ui3.kind === "consts" && ui3.values && ui3.values.length) return ui3.values[0];
+    return {};
   }
   if (tn === "boolean") return false;
   if (tn === "integer" || tn === "number") return 0;
@@ -1104,38 +1214,19 @@ function unionEditor(sch, path, optional) {
   if (info.kind === "tagged") {
     var disc = info.disc;
     var current = value && typeof value === "object" ? value[disc] : undefined;
-    var selEl = h("select", { onchange: function () { setPath(path, dv(this.value)); render(); }});
+    var selEl = h("select", { onchange: function () {
+      var chosen = this.value;
+      var picked = info.variants.filter(function (v) { return String(v.properties[disc].const) === chosen; })[0];
+      if (picked) setPath(path, variantDefault(picked, disc));
+      render();
+    }});
     if (optional) selEl.appendChild(h("option", { value: "", text: "(omit)" }));
     info.variants.forEach(function (v) {
       var cv = v.properties[disc].const;
       var oe = h("option", { value: String(cv), text: String(cv) });
       if (String(current) === String(cv)) oe.selected = true;
       selEl.appendChild(oe);
-      if (current === undefined && optional) { /* nothing */ }
     });
-    function dv(constVal) {
-      var base = {};
-      base[disc] = constVal;
-      /* prefill variant required fields so the form opens populated */
-      info.variants.forEach(function (v) {
-        if (String(v.properties[disc].const) !== String(constVal)) return;
-        (v.required || []).forEach(function (r) {
-          if (r === disc) return;
-          var ps = v.properties[r];
-          var t2 = ps ? typeName(ps) : "string";
-          if (t2 === "object" || t2 === "map") base[r] = {};
-          else if (t2 === "array") base[r] = [];
-          else if (t2 === "choice") {
-            var cc = coreOf(ps);
-            if (cc.enum && cc.enum.length) base[r] = cc.enum[0];
-          }
-          else if (t2 === "boolean") base[r] = false;
-          else if (t2 === "integer" || t2 === "number") base[r] = 0;
-          else base[r] = "";
-        });
-      });
-      return base;
-    }
     container.appendChild(selEl);
     var active = info.variants.filter(function (v) { return String(v.properties[disc].const) === String(current); })[0];
     if (active) {
@@ -1157,21 +1248,7 @@ function unionEditor(sch, path, optional) {
   }
   var selEl2 = h("select", { onchange: function () {
     var v = info.variants[parseInt(this.value, 10)];
-    var d = defaultValue(v);
-    if (d && typeof d === "object" && !Array.isArray(d)) {
-      (v.required || []).forEach(function (r) {
-        if (d[r] !== undefined) return;
-        var ps = v.properties && v.properties[r];
-        var t3 = ps ? typeName(ps) : "string";
-        if (t3 === "object" || t3 === "map") d[r] = {};
-        else if (t3 === "array") d[r] = [];
-        else if (t3 === "choice") { var cc3 = coreOf(ps); if (cc3.enum && cc3.enum.length) d[r] = cc3.enum[0]; }
-        else if (t3 === "boolean") d[r] = false;
-        else if (t3 === "integer" || t3 === "number") d[r] = 0;
-        else d[r] = "";
-      });
-    }
-    setPath(path, d);
+    setPath(path, defaultValue(v));
     render();
   }});
   info.variants.forEach(function (v, i2) {
@@ -1348,7 +1425,27 @@ function renderOverview(fc) {
   if (!(doc.routes || []).length) {
     fc.appendChild(h("div", { class: "notice", text: "No routes yet - start from a template (Templates button) or add routes from the sidebar." }));
   }
-  fc.appendChild(h("div", { class: "notice", text: "This tool generates and checks the YAML only. Load it with: dwara validate dwara.yaml, then run the gateway with DWARA_CONFIG=dwara.yaml. Secrets via ${env:...}/${file:...} references are not resolved here." }));
+  fc.appendChild(h("div", { class: "notice", text: "This tool generates and checks the YAML only. Load it with: dwara validate dwara.yaml, then run the gateway with DWARA_CONFIG=dwara.yaml. Secrets via ${NAME} / ${file:/path} references are not resolved here." }));
+
+  fc.appendChild(h("h3", { class: "subhead", text: "Next steps" }));
+  var steps = h("div", { class: "next-steps" });
+  [["1", "Download the config (or Copy it) from the header.", null],
+   ["2", null, "dwara validate dwara.yaml"],
+   ["3", null, "DWARA_CONFIG=dwara.yaml dwara run"]
+  ].forEach(function (row) {
+    var line = h("div", { class: "step" }, [h("span", { class: "n", text: row[0] })]);
+    if (row[1]) line.appendChild(h("span", { text: row[1] }));
+    if (row[2]) {
+      line.appendChild(h("code", { text: row[2] }));
+      line.appendChild(h("button", { class: "small", text: "copy", onclick: function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(row[2]);
+        else fallbackCopy(row[2]);
+        flashStatus("copied: " + row[2]);
+      }}));
+    }
+    steps.appendChild(line);
+  });
+  fc.appendChild(steps);
   fc.appendChild(h("p", { style: "font-size:12.5px;color:var(--dim)" }, [
     document.createTextNode("Documentation: "),
     h("a", { href: DOCS + "/guide/getting-started", target: "_blank", rel: "noopener", style: "color:var(--accent)", text: "getting started" }),
@@ -1366,12 +1463,16 @@ function renderOverview(fc) {
 var yamlDirty = false;
 function renderYaml(force) {
   var out = document.getElementById("yamlout"), edit = document.getElementById("yamledit");
-  if (yamlDirty && !force) return;
+  var foot = document.getElementById("yamlfoot");
+  if (yamlDirty && !force) {
+    foot.textContent = "unapplied edits in this pane - click \"Apply to builder\" to keep them, or Done to discard";
+    return;
+  }
   var text = docToYaml();
   out.innerHTML = highlightYaml(text);
   edit.value = text;
   yamlDirty = false;
-  document.getElementById("yamlfoot").textContent = Object.keys(doc).length ? Object.keys(doc).length + " top-level block(s) - " + text.split("\n").length + " lines" : "empty";
+  foot.textContent = Object.keys(doc).length ? Object.keys(doc).length + " top-level block(s) - " + text.split("\n").length + " lines" : "empty";
 }
 function enterYamlEdit() {
   document.getElementById("yamlout").style.display = "none";
@@ -1505,14 +1606,14 @@ var TEMPLATES = [
   {
     name: "AI gateway",
     desc: "OpenAI-compatible chat endpoint with an api.openai.com provider, model alias, and AI route action.",
-    yaml: "listeners:\n  - name: edge-http\n    address: 0.0.0.0\n    port: 8080\nroutes:\n  - name: ai-chat\n    service: openai-api\n    match:\n      path:\n        type: exact\n        value: /v1/chat/completions\n    action:\n      type: ai\nservices:\n  - name: openai-api\n    upstream: openai-api\nupstreams:\n  - name: openai-api\n    protocol: https\n    endpoints:\n      - address: api.openai.com\n        port: 443\nai:\n  providers:\n    - name: openai\n      kind: openai\n      upstream: openai-api\n      auth:\n        header: Authorization\n        value: Bearer ${env:OPENAI_API_KEY}\n  models:\n    gpt-4o:\n      provider: openai\n      provider_model: gpt-4o",
+    yaml: "listeners:\n  - name: edge-http\n    address: 0.0.0.0\n    port: 8080\nroutes:\n  - name: ai-chat\n    service: openai-api\n    match:\n      path:\n        type: exact\n        value: /v1/chat/completions\n    action:\n      type: ai\nservices:\n  - name: openai-api\n    upstream: openai-api\nupstreams:\n  - name: openai-api\n    protocol: https\n    endpoints:\n      - address: api.openai.com\n        port: 443\nai:\n  providers:\n    - name: openai\n      kind: openai\n      upstream: openai-api\n      auth:\n        header: Authorization\n        value: Bearer ${OPENAI_API_KEY}\n  models:\n    gpt-4o:\n      provider: openai\n      provider_model: gpt-4o",
     doc: {
       listeners: [{ name: "edge-http", address: "0.0.0.0", port: 8080 }],
       routes: [{ name: "ai-chat", service: "openai-api", match: { path: { type: "exact", value: "/v1/chat/completions" } }, action: { type: "ai" } }],
       services: [{ name: "openai-api", upstream: "openai-api" }],
       upstreams: [{ name: "openai-api", protocol: "https", endpoints: [{ address: "api.openai.com", port: 443 }] }],
       ai: {
-        providers: [{ name: "openai", kind: "openai", upstream: "openai-api", auth: { header: "Authorization", value: "Bearer ${env:OPENAI_API_KEY}" } }],
+        providers: [{ name: "openai", kind: "openai", upstream: "openai-api", auth: { header: "Authorization", value: "Bearer ${OPENAI_API_KEY}" } }],
         models: { "gpt-4o": { provider: "openai", provider_model: "gpt-4o" } }
       }
     }
@@ -1559,6 +1660,8 @@ document.getElementById("btn-yaml-cancel").addEventListener("click", function ()
 document.getElementById("btn-refresh").addEventListener("click", function () { yamlDirty = false; renderYaml(true); });
 document.getElementById("yamledit").addEventListener("input", function () { yamlDirty = true; });
 document.getElementById("btn-download").addEventListener("click", function () {
+  var errs = lastIssues.filter(function (x) { return x.severity === "error"; }).length;
+  if (errs && !confirm("The config has " + errs + " validation error(s). Download anyway?")) return;
   var blob = new Blob([docToYaml()], { type: "text/yaml" });
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1588,6 +1691,23 @@ function flashStatus(msg) {
   txt.textContent = msg;
   setTimeout(function () { txt.textContent = old; }, 1800);
 }
+
+/* help overlay + escape closes panels */
+document.getElementById("btn-help").addEventListener("click", function () {
+  document.getElementById("help-overlay").style.display = "flex";
+});
+document.getElementById("btn-help-close").addEventListener("click", function () {
+  document.getElementById("help-overlay").style.display = "none";
+});
+document.getElementById("help-overlay").addEventListener("click", function (e) {
+  if (e.target === this) this.style.display = "none";
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key !== "Escape") return;
+  document.getElementById("issues").style.display = "none";
+  document.getElementById("help-overlay").style.display = "none";
+  document.getElementById("tpl-overlay").style.display = "none";
+});
 
 /* template grid */
 (function buildTplGrid() {
