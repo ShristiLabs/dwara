@@ -1,0 +1,141 @@
+/* Mermaid diagram container: clipping fix + zoom toolbar styling.
+ *
+ * The "last line trimmed" issue: mermaid emits an explicit height on the
+ * SVG that is slightly too small for nodes with multi-line (\n) labels, and
+ * the SVG's default overflow clips the bottom line. Setting overflow:
+ * visible lets the content escape the SVG bounds, and a little bottom
+ * padding on the inner wrapper gives it room to breathe.
+ */
+
+.mermaid-wrap {
+  position: relative;
+  margin: 16px 0;
+}
+
+/* Zoom toolbar */
+.mermaid-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  width: fit-content;
+}
+
+.mermaid-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  cursor: pointer;
+  transition: border-color 0.25s, color 0.25s, background-color 0.25s;
+}
+
+.mermaid-btn:hover {
+  border-color: var(--vp-c-brand);
+  color: var(--vp-c-brand);
+}
+
+.mermaid-btn:active {
+  background: var(--vp-c-bg-soft-up);
+}
+
+.mermaid-zoom-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vp-c-text-2);
+  min-width: 36px;
+  text-align: center;
+  user-select: none;
+}
+
+/* Scrollable viewport for panning when zoomed in */
+.mermaid-viewport {
+  overflow: auto;
+  max-height: 80vh;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  padding: 16px;
+  /* reserve room so the un-zoomed (scale 1) diagram is fully visible */
+  resize: vertical;
+}
+
+.mermaid-inner {
+  overflow: visible;
+  padding-bottom: 1.5em; /* room for the last line that mermaid clips */
+}
+
+/* The core clipping fix: let SVG content overflow its computed bounds. */
+.mermaid-inner svg {
+  overflow: visible !important;
+  max-width: none;
+  display: block;
+  margin: 0 auto;
+}
+
+/* ForeignObject (HTML labels in flowcharts): let content overflow the
+   computed box so multi-line labels aren't clipped at the node level. */
+.mermaid-inner foreignObject {
+  overflow: visible !important;
+}
+.mermaid-inner foreignObject > div {
+  overflow: visible !important;
+  padding-bottom: 2px;
+}
+
+/* When zoomed in, the scaled SVG may exceed the viewport; keep it
+   left-aligned so scrollbars behave naturally. */
+.mermaid-inner[style*="scale"] svg {
+  margin: 0;
+}
+
+/* Toolbar separator between zoom controls and the expand button. */
+.mermaid-tools-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--vp-c-divider);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+/* --- Fullscreen overlay --- */
+.mermaid-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--vp-c-bg);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+
+.mermaid-overlay-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  width: fit-content;
+}
+
+.mermaid-overlay-viewport {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  padding: 24px;
+}
