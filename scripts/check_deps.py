@@ -110,12 +110,21 @@ ALLOWED = {
 
 USE_RE = re.compile(r"crate::([a-z_][a-z0-9_]*)")
 
+# Strip Rust doc-comment lines (both /// and //!) before matching so
+# intra-doc-link references like [`crate::ai::types::ChatRequest`] in
+# doc comments are not mistaken for actual imports.
+COMMENT_RE = re.compile(r"^\s*//[/!].*$", re.MULTILINE)
+
 violations = []
 src = Path(sys.argv[1] if len(sys.argv) > 1 else "crates/dwara-core/src")
 
 for domain, allowed in ALLOWED.items():
     for path in sorted(src.glob(f"{domain}/**/*.rs")) + sorted(src.glob(f"{domain}.rs")):
         text = path.read_text()
+        # Remove doc-comment lines so intra-doc-link references to
+        # other domains (e.g. [`crate::ai::types::ChatRequest`]) are
+        # not flagged as upward imports.
+        text = COMMENT_RE.sub("", text)
         for dep in sorted(set(USE_RE.findall(text))):
             if dep == domain or dep in allowed:
                 continue
