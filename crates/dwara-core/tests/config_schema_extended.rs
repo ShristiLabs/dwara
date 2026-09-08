@@ -321,6 +321,54 @@ fn upstream_and_endpoint_defaults_apply() {
     assert_eq!(up.protocol, UpstreamProtocol::Http1);
     assert_eq!(up.endpoints[0].weight, 1, "weight defaults to 1");
     assert!(up.timeouts.is_none());
+    // DP-03: the pool block is additive — absent by default.
+    assert!(up.pool.is_none());
+}
+
+// DP-03: the `upstreams[].pool` block parses additively, defaults every
+// omitted sub-field, rejects unknown sub-fields (strict serde), and
+// round-trips through the YAML serializer.
+#[test]
+fn upstream_pool_block_parses_and_defaults() {
+    let gw = parse_ok(
+        "upstreams:\n  - name: u\n    endpoints:\n      - {address: 10.0.0.1, port: 80}\n    pool:\n      pool_idle_timeout_ms: 45000\n      http2_adaptive_window: true\n",
+    );
+    let pool = gw.upstreams[0].pool.as_ref().expect("pool block parsed");
+    assert_eq!(pool.pool_idle_timeout_ms, Some(45_000));
+    assert!(
+        pool.pool_max_idle_per_host.is_none(),
+        "omitted knob defaults"
+    );
+    assert!(pool.http2_keep_alive_interval_ms.is_none());
+    assert!(pool.http2_keep_alive_timeout_ms.is_none());
+    assert!(pool.http2_adaptive_window);
+    assert!(pool.max_concurrent_streams.is_none());
+}
+
+#[test]
+fn upstream_pool_block_rejects_unknown_field() {
+    let err =
+        parse_err("upstreams:\n  - name: u\n    endpoints: []\n    pool:\n      not_a_knob: 1\n");
+    assert!(
+        err.path.starts_with("upstreams[0].pool"),
+        "error path names the pool block: {}",
+        err.path
+    );
+    assert!(
+        err.message.contains("not_a_knob"),
+        "unknown pool field named: {}",
+        err.message
+    );
+}
+
+#[test]
+fn upstream_pool_block_round_trips() {
+    let gw = parse_ok(
+        "upstreams:\n  - name: u\n    endpoints: []\n    pool:\n      pool_max_idle_per_host: 16\n      http2_keep_alive_interval_ms: 30000\n      max_concurrent_streams: 100\n",
+    );
+    let yaml = gateway_to_yaml(&gw).expect("serialize");
+    let gw2 = parse_ok(&yaml);
+    assert_eq!(gw.upstreams[0].pool, gw2.upstreams[0].pool, "round-trip");
 }
 
 // --- Deep / nested error paths -----------------------------------------------
@@ -581,6 +629,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![Consumer {
             name: "c".into(),

@@ -1631,7 +1631,50 @@ fn build_handle(
     if http2_only {
         builder.http2_only(true);
     }
+    // The pool timer is ALWAYS installed: it is required for
+    // `pool_idle_timeout` eviction to fire (hyper-util silently no-ops
+    // idle-timeout without a timer). DP-03: the optional `pool` block
+    // layers operator-tuned knobs on top of this baseline; omitted knobs
+    // keep hyper-util's built-in defaults (the prior behavior).
     builder.pool_timer(TokioTimer::new());
+    // The h2 timer is likewise ALWAYS installed: hyper requires it to
+    // schedule HTTP/2 keep-alive PINGs, and panics ("You must supply a
+    // timer") on the first h2 connection when
+    // `http2_keep_alive_interval` is set without one. Installing it
+    // unconditionally is harmless (it is inert when no PING interval is
+    // configured) and matches the pool-timer pattern.
+    builder.timer(TokioTimer::new());
+    if let Some(p) = &u.pool {
+        // Pool knobs apply to every protocol (h1 and h2 reuse the same
+        // hyper-util connection pool).
+        if let Some(ms) = p.pool_idle_timeout_ms {
+            builder.pool_idle_timeout(Some(Duration::from_millis(ms)));
+        }
+        if let Some(n) = p.pool_max_idle_per_host {
+            builder.pool_max_idle_per_host(n as usize);
+        }
+        // HTTP/2 knobs are only effective on an h2 client, but hyper-util
+        // accepts them on the builder regardless (they are inert when no
+        // h2 connection is negotiated), so they are wired unconditionally
+        // rather than gated on `http2_only`.
+        if let Some(ms) = p.http2_keep_alive_interval_ms {
+            builder.http2_keep_alive_interval(Some(Duration::from_millis(ms)));
+        }
+        if let Some(ms) = p.http2_keep_alive_timeout_ms {
+            builder.http2_keep_alive_timeout(Duration::from_millis(ms));
+        }
+        if p.http2_adaptive_window {
+            builder.http2_adaptive_window(true);
+        }
+        if let Some(n) = p.max_concurrent_streams {
+            // hyper-util exposes the client-side send-concurrency cap as
+            // `http2_initial_max_send_streams` (the h2 client's own
+            // stream limiter, distinct from the SETTINGS value the client
+            // advertises to the server). This is the knob operators mean
+            // when they ask to "tune max_concurrent_streams" for p99.
+            builder.http2_initial_max_send_streams(n as usize);
+        }
+    }
 
     // Hot-swap: an existing balancer for this upstream name keeps its
     // live state (in-flight counters, WRR phase, slow-start clocks,
@@ -2008,6 +2051,7 @@ mod tests {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         };
         let handle = build_handle(&up, crate::security::tls::webpki_root_store(), None, None);
         assert!(matches!(

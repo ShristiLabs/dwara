@@ -214,6 +214,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             },
         );
     }
@@ -251,6 +252,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         pq: false,
                         cert_pinning: None,
                         mtls: None,
+                        pool: None,
                     },
                 );
             } else {
@@ -328,6 +330,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                         pq: false,
                         cert_pinning: None,
                         mtls: None,
+                        pool: None,
                     },
                 );
             }

@@ -131,6 +131,72 @@ captured before the first attempt; the pure clock-agnostic helper is
 `retry_sleep_under_total_deadline` in `resilience/retries.rs`. Standard
 in Envoy and NGINX.
 
+## Connection pool and HTTP/2 tuning (DP-03)
+
+The outbound hyper-util client is built once per upstream in
+`dataplane/upstream.rs::build_handle`. A pool timer is ALWAYS installed
+on the builder — hyper-util silently no-ops idle-timeout eviction
+without one, so the timer is required infrastructure, not an opt-in
+knob. The optional `upstreams[].pool` block layers operator-tuned knobs
+on top of that baseline; every field is optional and the block itself
+is optional, so an omitted field keeps hyper-util's built-in default
+(the same value the gateway used before this block existed) and the
+addition is purely backwards-compatible. Source:
+`crates/dwara-core/src/config/mod.rs` (`UpstreamPoolConfig`),
+`crates/dwara-core/src/snapshot/mod.rs` (bounds validation),
+`crates/dwara-core/src/dataplane/upstream.rs` (builder wiring).
+
+```yaml
+upstreams:
+  - name: up
+    protocol: http2
+    endpoints:
+      - address: 127.0.0.1
+        port: 8080
+    pool:
+      pool_idle_timeout_ms: 45000      # default 90s
+      pool_max_idle_per_host: 32       # default hyper-util default
+      http2_keep_alive_interval_ms: 15000  # default disabled (no PINGs)
+      http2_keep_alive_timeout_ms: 5000     # default 20s
+      http2_adaptive_window: true      # default false
+      max_concurrent_streams: 128      # default usize::MAX
+```
+
+The knobs split by protocol effect:
+
+- **Pool knobs** (`pool_idle_timeout_ms`, `pool_max_idle_per_host`)
+  apply to every protocol — `http1`/`https` connections reuse the same
+  hyper-util connection pool, so idle-timeout and per-host idle limits
+  shape them too. `pool_max_idle_per_host` only shapes the idle
+  fraction; the per-upstream `connection_cap` still bounds the total
+  (active + idle) connections.
+- **HTTP/2 knobs** (`http2_keep_alive_interval_ms`,
+  `http2_keep_alive_timeout_ms`, `http2_adaptive_window`,
+  `max_concurrent_streams`) are only effective on an `http2` upstream,
+  but hyper-util accepts them on the builder regardless, so they are
+  wired unconditionally rather than gated on `http2_only` — they are
+  inert when no h2 connection is negotiated. `max_concurrent_streams`
+  maps to hyper-util's `http2_initial_max_send_streams` (the h2
+  client's own send-concurrency cap, distinct from the
+  SETTINGS_MAX_CONCURRENT_STREAMS value the client advertises to the
+  server); a finite value bounds head-of-line blocking when one stream
+  stalls. `http2_keep_alive_timeout_ms` does nothing when
+  `http2_keep_alive_interval_ms` is absent.
+
+Validation rejects zero where zero is meaningless
+(`pool_idle_timeout_ms`, `http2_keep_alive_interval_ms`,
+`http2_keep_alive_timeout_ms`, `max_concurrent_streams` — omit the
+field for the hyper default) and caps each value at
+`MAX_POOL_IDLE_TIMEOUT_MS` (600000 ms),
+`MAX_POOL_MAX_IDLE_PER_HOST` (1024),
+`MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS` (600000 ms),
+`MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS` (600000 ms), and
+`MAX_POOL_MAX_CONCURRENT_STREAMS` (1000000); each rejected knob names
+its field (`pool.<field>`) in the validation issue. The h2-only knobs
+are accepted on any protocol (the runtime ignores them for non-h2
+upstreams), so validation only checks bounds — protocol gating is a
+runtime concern, not an authoring error.
+
 ## Request hedging (DW-063)
 
 Hedging sends a **speculative duplicate** request to a different

@@ -190,6 +190,7 @@ fn good_gateway() -> Gateway {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -644,4 +645,63 @@ fn validate_bounds_happy_eyeballs_delay() {
             .any(|i| i.field == "timeouts.happy_eyeballs_ms"),
         "zero disables racing and is legal: {issues:?}"
     );
+}
+
+// DP-03: the `upstreams[].pool` block is additive — absent keeps the
+// hyper defaults (no validation issues), present values are bounds-
+// checked, and each rejected knob names its field.
+#[test]
+fn validate_accepts_absent_pool_block() {
+    let gw = good_gateway();
+    let issues = validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.starts_with("pool.")),
+        "absent pool block is legal (hyper defaults): {issues:?}"
+    );
+}
+
+#[test]
+fn validate_accepts_in_bounds_pool_block() {
+    let mut gw = good_gateway();
+    gw.upstreams[0].pool = Some(dwara_core::config::UpstreamPoolConfig {
+        pool_idle_timeout_ms: Some(30_000),
+        pool_max_idle_per_host: Some(32),
+        http2_keep_alive_interval_ms: Some(15_000),
+        http2_keep_alive_timeout_ms: Some(5_000),
+        http2_adaptive_window: true,
+        max_concurrent_streams: Some(128),
+    });
+    let issues = validate(&gw);
+    assert!(
+        !issues.iter().any(|i| i.field.starts_with("pool.")),
+        "in-bounds pool block is legal: {issues:?}"
+    );
+}
+
+#[test]
+fn validate_rejects_pool_zero_and_over_cap_values() {
+    let mut gw = good_gateway();
+    gw.upstreams[0].pool = Some(dwara_core::config::UpstreamPoolConfig {
+        pool_idle_timeout_ms: Some(0),
+        pool_max_idle_per_host: Some(10_000),
+        http2_keep_alive_interval_ms: Some(0),
+        http2_keep_alive_timeout_ms: Some(700_000),
+        http2_adaptive_window: false,
+        max_concurrent_streams: Some(0),
+    });
+    let issues = validate(&gw);
+    for field in [
+        "pool.pool_idle_timeout_ms",
+        "pool.pool_max_idle_per_host",
+        "pool.http2_keep_alive_interval_ms",
+        "pool.http2_keep_alive_timeout_ms",
+        "pool.max_concurrent_streams",
+    ] {
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.entity == "upstream" && i.field == field),
+            "{field} must be rejected: {issues:?}"
+        );
+    }
 }

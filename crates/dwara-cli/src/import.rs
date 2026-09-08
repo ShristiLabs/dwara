@@ -234,6 +234,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: Vec::new(),
         policies: Vec::new(),

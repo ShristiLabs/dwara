@@ -127,6 +127,7 @@ fn bench_gateway() -> Gateway {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         })
         .collect();
     Gateway {

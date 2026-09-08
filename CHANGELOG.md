@@ -22,6 +22,34 @@ the project follows semantic versioning once 1.0 is reached.
   unbounded, the previous behavior, for backwards compatibility.
   Validation rejects `0` (omit the field for unbounded) and caps the
   value at 600000 ms (10 minutes). Standard in Envoy and NGINX.
+- Hyper connection-pool and HTTP/2 tuning (#176, DP-03): an optional
+  `upstreams[].pool` config block exposing six knobs on the per-upstream
+  hyper-util client builder: `pool_idle_timeout_ms`,
+  `pool_max_idle_per_host`, `http2_keep_alive_interval_ms`,
+  `http2_keep_alive_timeout_ms`, `http2_adaptive_window` (bool), and
+  `max_concurrent_streams` (mapped to hyper-util's
+  `http2_initial_max_send_streams`). Every field is optional and the
+  block itself is optional; an omitted field keeps hyper-util's
+  built-in default (the same value the gateway used before this block
+  existed), so the addition is purely backwards-compatible. The pool
+  timer is always installed regardless (it is required for
+  idle-timeout eviction to fire), so the block only needs to carry the
+  knobs an operator wants to change. The pool knobs
+  (`pool_idle_timeout_ms`, `pool_max_idle_per_host`) apply to every
+  protocol (http1/https reuse the same hyper-util connection pool),
+  while the HTTP/2 knobs are only effective on an `http2` upstream but
+  are accepted on any protocol (inert when no h2 connection is
+  negotiated). The per-upstream `connection_cap` still bounds the
+  total (active + idle) connections. Validation rejects zero where
+  zero is meaningless (`pool_idle_timeout_ms`,
+  `http2_keep_alive_interval_ms`, `http2_keep_alive_timeout_ms`,
+  `max_concurrent_streams`) and caps each value
+  (`MAX_POOL_IDLE_TIMEOUT_MS` = 600000 ms,
+  `MAX_POOL_MAX_IDLE_PER_HOST` = 1024,
+  `MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS` = 600000 ms,
+  `MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS` = 600000 ms,
+  `MAX_POOL_MAX_CONCURRENT_STREAMS` = 1000000); each rejected knob
+  names its field in the validation issue.
 - gRPC-Web framing translation and JSON-to-gRPC transcoding (DW-101): a
   `grpc_web` cargo feature (OSS, default OFF) on dwara-core that adds a
   `routes[].grpc_web` config block. When enabled, the gateway translates

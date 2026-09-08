@@ -426,6 +426,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             },
         );
 
@@ -499,6 +500,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                         pq: false,
                         cert_pinning: None,
                         mtls: None,
+                        pool: None,
                     },
                 );
                 services.insert(

@@ -321,6 +321,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 

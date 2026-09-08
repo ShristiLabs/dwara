@@ -215,3 +215,37 @@ pub const MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS: u64 = 1_000;
 /// (beyond that a divergent instance serves stale config for too long
 /// before anyone notices).
 pub const MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS: u64 = 300_000;
+
+/// Validation ceiling on `upstreams[].pool.pool_idle_timeout_ms`
+/// (DP-03): ten minutes is the longest an idle connection should
+/// linger before the pool reaps it (beyond that the upstream or an
+/// intervening proxy has almost certainly reaped it already, and a
+/// stale pooled connection is a p99 regression source).
+pub const MAX_POOL_IDLE_TIMEOUT_MS: u64 = 600_000;
+
+/// Validation ceiling on `upstreams[].pool.pool_max_idle_per_host`
+/// (DP-03): the per-host idle fraction of the per-upstream
+/// `connection_cap`. 1024 is well above any reasonable cap, so this
+/// only catches a typo (a mistyped config that would allocate an
+/// unbounded "bounded" idle set).
+pub const MAX_POOL_MAX_IDLE_PER_HOST: u32 = 1024;
+
+/// Validation ceiling on
+/// `upstreams[].pool.http2_keep_alive_interval_ms` (DP-03): ten
+/// minutes is the longest PING interval worth configuring (beyond
+/// that an intervening proxy's idle timeout fires first, defeating
+/// the keep-alive).
+pub const MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS: u64 = 600_000;
+
+/// Validation ceiling on
+/// `upstreams[].pool.http2_keep_alive_timeout_ms` (DP-03): ten
+/// minutes is the longest a client should wait for a PING ACK before
+/// closing (beyond that the connection is effectively dead and a
+/// reconnect is the right tool).
+pub const MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS: u64 = 600_000;
+
+/// Validation ceiling on `upstreams[].pool.max_concurrent_streams`
+/// (DP-03): one million concurrent streams per connection is well
+/// above any real h2 peer's advertised limit, so this only catches a
+/// typo. The floor is 1 (a zero-concurrency client can never send).
+pub const MAX_POOL_MAX_CONCURRENT_STREAMS: u32 = 1_000_000;

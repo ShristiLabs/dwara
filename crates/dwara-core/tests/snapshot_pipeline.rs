@@ -121,6 +121,7 @@ fn upstream(name: &str) -> Upstream {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 

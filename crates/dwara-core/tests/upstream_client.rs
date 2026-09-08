@@ -15,7 +15,8 @@ use support::*;
 
 use bytes::Bytes;
 use dwara_core::config::{
-    Endpoint, Gateway, LoadBalancer, Timeouts, Upstream as ConfigUpstream, UpstreamProtocol,
+    Endpoint, Gateway, LoadBalancer, Timeouts, Upstream as ConfigUpstream, UpstreamPoolConfig,
+    UpstreamProtocol,
 };
 use dwara_core::snapshot::ConfigState;
 use dwara_core::upstream::{
@@ -117,6 +118,7 @@ fn upstream(
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 
@@ -731,6 +733,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             }],
             consumers: vec![],
             policies: vec![],
@@ -807,6 +810,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -1028,4 +1032,282 @@ async fn support_like_backend() -> (u16, Arc<AtomicU64>) {
         }
     });
     (port, count)
+}
+
+// --- 6. POOL TUNING (DP-03) -------------------------------------------
+//
+// The `upstreams[].pool` block layers hyper-util connection-pool and
+// HTTP/2 tuning knobs onto the per-upstream client builder. The unit
+// suite covers validation bounds and serde; these integration tests
+// exercise the knobs through the real `UpstreamRegistry` -> `build_handle`
+// -> hyper-util path: the wiring must not break the proxy, an explicit
+// `pool_idle_timeout` must actually evict idle connections, and the h2
+// knobs must not break a real h2 (TLS+ALPN) exchange.
+
+/// Build a ConfigUpstream with a `pool` block (all six knobs populated
+/// with in-bounds values), so the whole wiring path is exercised at
+/// once. `protocol` selects h1 vs h2 transport.
+fn upstream_with_pool(
+    name: &str,
+    address: &str,
+    port: u16,
+    protocol: UpstreamProtocol,
+    pool: UpstreamPoolConfig,
+) -> ConfigUpstream {
+    let mut up = upstream(name, address, port, protocol, None, None);
+    up.pool = Some(pool);
+    up
+}
+
+fn full_pool_block() -> UpstreamPoolConfig {
+    UpstreamPoolConfig {
+        pool_idle_timeout_ms: Some(30_000),
+        pool_max_idle_per_host: Some(32),
+        http2_keep_alive_interval_ms: Some(15_000),
+        http2_keep_alive_timeout_ms: Some(5_000),
+        http2_adaptive_window: true,
+        max_concurrent_streams: Some(128),
+    }
+}
+
+/// A full pool block (every knob set) must not break h1 proxying: two
+/// sequential requests succeed and reuse a single pooled connection
+/// (the idle-timeout is long enough that the second reuses the first's
+/// connection). Proves the builder wiring for every pool knob on the
+/// http/1.1 path.
+#[tokio::test]
+async fn pool_block_all_knobs_set_proxies_h1_and_reuses_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let max_concurrent = Arc::new(AtomicU64::new(0));
+    tokio::spawn(serve(
+        listener,
+        Arc::clone(&accepted),
+        max_concurrent,
+        Duration::ZERO,
+    ));
+
+    let snap = gateway_with(vec![upstream_with_pool(
+        "backend",
+        "127.0.0.1",
+        port,
+        UpstreamProtocol::Http1,
+        full_pool_block(),
+    )]);
+    let registry = UpstreamRegistry::from_snapshot(&snap);
+    let handle = registry.get("backend").expect("handle");
+
+    for _ in 0..2 {
+        let resp = bound_send(&handle, "/x").await.expect("sent");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "pool reused one connection across both requests"
+    );
+    assert_eq!(handle.connections_opened(), 1);
+    assert_eq!(handle.requests_sent(), 2);
+}
+
+/// A short `pool_idle_timeout_ms` must actually evict the idle
+/// connection: after the first request completes, sleeping longer than
+/// the timeout leaves the pool empty, so the second request opens a
+/// NEW connection. The `accepted` counter is the deterministic signal
+/// (hyper-util's eviction is timer-driven, and the pool timer is always
+/// installed by `build_handle`). The margin (200 ms vs 50 ms timeout)
+/// is generous for a loaded CI runner while keeping the test fast.
+#[tokio::test]
+async fn pool_idle_timeout_evicts_idle_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let max_concurrent = Arc::new(AtomicU64::new(0));
+    tokio::spawn(serve(
+        listener,
+        Arc::clone(&accepted),
+        max_concurrent,
+        Duration::ZERO,
+    ));
+
+    let snap = gateway_with(vec![upstream_with_pool(
+        "backend",
+        "127.0.0.1",
+        port,
+        UpstreamProtocol::Http1,
+        UpstreamPoolConfig {
+            pool_idle_timeout_ms: Some(50),
+            ..full_pool_block()
+        },
+    )]);
+    let registry = UpstreamRegistry::from_snapshot(&snap);
+    let handle = registry.get("backend").expect("handle");
+
+    let resp = bound_send(&handle, "/first").await.expect("sent");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "first request opened a conn"
+    );
+
+    // Wait long enough for the 50 ms idle timeout to fire and reap the
+    // pooled connection. This is a timer wait, not a synchronization
+    // sleep: the eviction is the behavior under test.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let resp = bound_send(&handle, "/second").await.expect("sent");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "idle connection was evicted; second request opened a new conn"
+    );
+    assert_eq!(handle.connections_opened(), 2);
+}
+
+/// Backwards-compat / default contrast: with NO pool block, the
+/// hyper-util default idle timeout (90 s) keeps the pooled connection
+/// across the same 200 ms gap, so the second request reuses it. This
+/// is the additive-safety proof (omitting the block is the prior
+/// behavior) and the contrast that confirms the eviction test above is
+/// really the timeout firing, not some other teardown.
+#[tokio::test]
+async fn absent_pool_block_keeps_default_idle_connection_across_short_gap() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let max_concurrent = Arc::new(AtomicU64::new(0));
+    tokio::spawn(serve(
+        listener,
+        Arc::clone(&accepted),
+        max_concurrent,
+        Duration::ZERO,
+    ));
+
+    // No pool block: `upstream()` leaves `pool: None`.
+    let snap = gateway_with(vec![upstream(
+        "backend",
+        "127.0.0.1",
+        port,
+        UpstreamProtocol::Http1,
+        None,
+        None,
+    )]);
+    let registry = UpstreamRegistry::from_snapshot(&snap);
+    let handle = registry.get("backend").expect("handle");
+
+    let resp = bound_send(&handle, "/first").await.expect("sent");
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let resp = bound_send(&handle, "/second").await.expect("sent");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "default idle timeout (90 s) keeps the connection across a 200 ms gap"
+    );
+    assert_eq!(handle.connections_opened(), 1);
+}
+
+/// The h2-only knobs (`http2_keep_alive_interval_ms`,
+/// `http2_keep_alive_timeout_ms`, `http2_adaptive_window`,
+/// `max_concurrent_streams`) are wired unconditionally on the builder
+/// and must not break a real h2 (TLS + ALPN h2) exchange. The PING
+/// keep-alive behavior itself is not deterministically observable in a
+/// unit time frame (a PING only fires on an otherwise-idle h2 conn
+/// after the interval, and the server's response is invisible to the
+/// client's request surface), so this test proves the wiring: a request
+/// over a fully-tuned h2 upstream succeeds.
+#[tokio::test]
+async fn pool_block_h2_knobs_proxies_h2_request() {
+    dwara_core::tls::install_aws_lc_rs_provider();
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let root = cert.cert.der().clone();
+    tokio::spawn(serve_tls_alpn(
+        listener,
+        cert,
+        &[b"h2", b"http/1.1"],
+        Arc::clone(&accepted),
+    ));
+
+    let snap = gateway_with(vec![upstream_with_pool(
+        "backend",
+        "localhost",
+        port,
+        UpstreamProtocol::Http2,
+        UpstreamPoolConfig {
+            // Small keep-alive interval so a PING would fire quickly if
+            // the connection lingered; the request completes well before
+            // any PING matters, so this only stresses the builder wiring.
+            http2_keep_alive_interval_ms: Some(1_000),
+            http2_keep_alive_timeout_ms: Some(2_000),
+            http2_adaptive_window: true,
+            max_concurrent_streams: Some(64),
+            ..full_pool_block()
+        },
+    )]);
+    let registry =
+        UpstreamRegistry::with_root_certificates(&snap, &[root]).expect("roots accepted");
+    let handle = registry.get("backend").expect("handle");
+
+    let resp = bound_send(&handle, "/h2").await.expect("sent");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "h2 request reached the backend"
+    );
+    assert_eq!(handle.connections_opened(), 1);
+}
+
+/// `pool_max_idle_per_host` shapes the idle fraction of the pool but
+/// does not change the request surface. With a cap of 1 idle per host
+/// and a short idle timeout, two sequential requests still succeed (the
+/// knob must be accepted by the builder without breaking reuse). This
+/// is a wiring proof for the max-idle knob on the h1 path.
+#[tokio::test]
+async fn pool_max_idle_per_host_one_does_not_break_sequential_reuse() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let max_concurrent = Arc::new(AtomicU64::new(0));
+    tokio::spawn(serve(
+        listener,
+        Arc::clone(&accepted),
+        max_concurrent,
+        Duration::ZERO,
+    ));
+
+    let snap = gateway_with(vec![upstream_with_pool(
+        "backend",
+        "127.0.0.1",
+        port,
+        UpstreamProtocol::Http1,
+        UpstreamPoolConfig {
+            pool_max_idle_per_host: Some(1),
+            pool_idle_timeout_ms: Some(30_000),
+            http2_keep_alive_interval_ms: None,
+            http2_keep_alive_timeout_ms: None,
+            http2_adaptive_window: false,
+            max_concurrent_streams: None,
+        },
+    )]);
+    let registry = UpstreamRegistry::from_snapshot(&snap);
+    let handle = registry.get("backend").expect("handle");
+
+    for _ in 0..3 {
+        let resp = bound_send(&handle, "/x").await.expect("sent");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "sequential requests reuse the single permitted idle connection"
+    );
+    assert_eq!(handle.connections_opened(), 1);
 }

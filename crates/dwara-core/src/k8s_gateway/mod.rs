@@ -506,6 +506,7 @@ pub fn translate(
                             peak_ewma: None,
                             cert_pinning: None,
                             mtls: None,
+                            pool: None,
                         };
                         upstreams.push(upstream);
 

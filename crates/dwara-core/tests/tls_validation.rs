@@ -161,6 +161,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],

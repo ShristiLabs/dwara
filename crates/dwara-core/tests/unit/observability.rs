@@ -119,6 +119,7 @@ fn render_contains_families() {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             }],
             consumers: vec![],
             policies: vec![],

@@ -344,6 +344,7 @@ pub fn translate_ingress(
                         peak_ewma: None,
                         cert_pinning: None,
                         mtls: None,
+                        pool: None,
                     };
                     upstreams.push(upstream);
 

@@ -4851,6 +4851,83 @@ pub struct Upstream {
     /// on an `http1` upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls: Option<UpstreamMtls>,
+    /// DP-03: hyper connection-pool and HTTP/2 tuning for this
+    /// upstream's outbound client. Absent (the default): every knob
+    /// falls back to hyper-util's built-in defaults (the prior
+    /// behavior — only the pool timer was wired). When present, the
+    /// configured knobs are applied to the per-upstream hyper-util
+    /// legacy client builder; omitted sub-fields keep their hyper
+    /// defaults. The pool timer is ALWAYS installed (it is required
+    /// for idle-timeout eviction to fire), so this block only needs to
+    /// carry the knobs an operator wants to change. Meaningful for
+    /// every protocol: `http1`/`https` connections reuse the pool's
+    /// idle-timeout and max-idle-per-host knobs, while `http2`
+    /// connections additionally honor the keep-alive and
+    /// concurrent-streams knobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<UpstreamPoolConfig>,
+}
+
+/// DP-03: hyper connection-pool and HTTP/2 tuning for an upstream
+/// (`upstreams[].pool`). Every field is optional; an omitted field
+/// keeps hyper-util's built-in default (the same value the gateway
+/// used before this block existed), so the block is purely additive.
+/// Validation rejects zero/negative-forbidden values; the runtime
+/// clamps nothing beyond the documented bounds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamPoolConfig {
+    /// How long an idle connection may sit in the pool before it is
+    /// closed (hyper-util `pool_idle_timeout`). In milliseconds.
+    /// Absent: hyper-util's default (90 s). `0` is rejected at
+    /// validation (use a very small positive value to evict
+    /// aggressively, or omit the block for the default). Bounds: at
+    /// most 10 minutes (600000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_idle_timeout_ms: Option<u64>,
+    /// Maximum number of idle connections retained per host
+    /// (hyper-util `pool_max_idle_per_host`). Absent: hyper-util's
+    /// default. The per-upstream `connection_cap` still bounds the
+    /// total (active + idle) connections, so this only shapes the
+    /// idle fraction. Bounds: at most 1024.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_max_idle_per_host: Option<u32>,
+    /// HTTP/2 PING keep-alive interval (hyper-util
+    /// `http2_keep_alive_interval`). In milliseconds. Absent: disabled
+    /// (hyper's default — no PINGs). A positive value sends a PING
+    /// this often on an otherwise-idle h2 connection so proxies/ALB
+    /// in front of the upstream do not reap it. Only meaningful for
+    /// the `http2` protocol; ignored for `http1`/`https`. Bounds: at
+    /// most 10 minutes (600000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_keep_alive_interval_ms: Option<u64>,
+    /// HTTP/2 keep-alive timeout (hyper-util
+    /// `http2_keep_alive_timeout`): the time the client waits for a
+    /// PING ACK before closing the connection. In milliseconds.
+    /// Absent: hyper's default (20 s). Does nothing when
+    /// `http2_keep_alive_interval_ms` is absent. Only meaningful for
+    /// the `http2` protocol. Bounds: at most 10 minutes (600000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_keep_alive_timeout_ms: Option<u64>,
+    /// Enable HTTP/2 adaptive flow-control window (hyper-util
+    /// `http2_adaptive_window`). Absent: false (hyper's default —
+    /// fixed initial window). When true, the connection window grows
+    /// and shrinks based on throughput, which helps large/long
+    /// responses on high-BDP paths. Only meaningful for the `http2`
+    /// protocol; ignored otherwise.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub http2_adaptive_window: bool,
+    /// Initial cap on the number of concurrent HTTP/2 streams the
+    /// client will send over a single connection (hyper-util
+    /// `http2_initial_max_send_streams`). This is an *initial* value
+    /// only: hyper-util's default is 100, and the effective cap is
+    /// further bounded by the server's advertised
+    /// SETTINGS_MAX_CONCURRENT_STREAMS once the peer's SETTINGS frame
+    /// arrives. A finite value bounds head-of-line blocking when one
+    /// stream stalls. Only meaningful for the `http2` protocol.
+    /// Bounds: at least 1, at most 1_000_000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_streams: Option<u32>,
 }
 
 /// SEC-03: upstream mTLS client certificate configuration. Reuses the
