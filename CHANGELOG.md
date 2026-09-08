@@ -2109,6 +2109,35 @@ the project follows semantic versioning once 1.0 is reached.
   per-request group union resolves at apply time); zero new
   dependencies; `config-reference.json` regenerated; new
   `docs/features/masking.md` and docs-site `guide/masking.md`.
+- End-to-end benchmark harness + regression gate (#171, PERF-06): the
+  `dwara-loadgen` rig now drives HTTP/1.1, HTTP/2 (h2c prior-knowledge),
+  and feature-gated HTTP/3 (QUIC) protocols across three macro
+  workloads — `throughput` (back-to-back persistent requests),
+  `pool-reuse` (shared pooled client / multiplexed streams), and
+  `streaming` (chunked response draining; latency includes body
+  completion). New `--protocol`, `--workload`, `--stream-chunks`,
+  `--stream-chunk-bytes`, `--stream-chunk-delay-ms`, `--json`, and
+  `--insecure` flags extend the existing `--url`/`--connections`/
+  `--duration`/`--rate`/`--echo`/`--timeout-ms` surface; the `RESULT:`
+  line contract is unchanged and a new `JSON:` line (behind `--json`)
+  carries protocol/workload labels and the same metrics for
+  machine-parseable regression comparison. H3 is feature-gated behind a
+  new default-off `h3` cargo feature on `dwara-cli` (quinn/h3/h3-quinn/
+  rustls/webpki-roots, all already workspace dependencies; no new
+  external crate) and rejects `--echo` (no in-process QUIC echo). A new
+  `scripts/bench-regression.sh` harness boots the real gateway against
+  an in-process echo upstream and runs the full
+  client -> gateway -> upstream -> gateway -> client path across the
+  h1/h2 workloads (h3 opt-in via `DWARA_BENCH_H3_URL`); a new
+  `scripts/bench-regression.py` gate compares the JSON output against a
+  checked-in macro baseline (`scripts/bench-macro-baseline.json`,
+  10% default tolerance, fail-open across machine classes, mirroring
+  the micro-benchmark gate); `scripts/bench-macro.sh` gains
+  `BENCH_PROTOCOL`/`BENCH_WORKLOAD`/`BENCH_JSON` passthrough; and a new
+  `.github/workflows/bench-nightly.yml` runs the macro gate nightly
+  (best-of-3 runs, 30% tolerance for CI noise) plus an h3 feature
+  compile-check. Protects the high-performance claim and is the
+  prerequisite for validating any performance improvement.
 
 ### Changed
 

@@ -11,6 +11,12 @@
 # Environment:
 #   BENCH_GATEWAY_PORT  default 18080
 #   BENCH_ECHO_PORT     default 18081
+#   BENCH_PROTOCOL      h1 | h2 | h3  (default h1; h3 needs --features h3)
+#   BENCH_WORKLOAD      throughput | pool-reuse | streaming (default throughput)
+#   BENCH_JSON          set to 1 to emit a JSON: line per run (for the
+#                       regression gate; scripts/bench-regression.sh is the
+#                       full multi-workload harness)
+#   BENCH_H3_FEATURE    set to 1 to build loadgen with --features h3
 #
 # Connection-count caveat (100k-connection test):
 #   This script deliberately stays at <= 10,000 connections by default —
@@ -41,13 +47,24 @@ fi
 
 GW_PORT="${BENCH_GATEWAY_PORT:-18080}"
 ECHO_PORT="${BENCH_ECHO_PORT:-18081}"
+PROTOCOL="${BENCH_PROTOCOL:-h1}"
+WORKLOAD="${BENCH_WORKLOAD:-throughput}"
+JSON="${BENCH_JSON:-0}"
+H3_FEATURE="${BENCH_H3_FEATURE:-0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 
 command -v python3 >/dev/null || { echo "python3 required" >&2; exit 2; }
 
 echo "== building (release) =="
-cargo build --release -p dwara-cli --bin dwara-loadgen -p dwara-bin --bin dwara >/dev/null
+LOADGEN_ARGS=(-p dwara-cli --bin dwara-loadgen)
+GATEWAY_ARGS=(-p dwara-bin --bin dwara)
+if [ "$H3_FEATURE" = "1" ]; then
+    LOADGEN_ARGS+=(--features h3)
+    GATEWAY_ARGS+=(--features h3)
+fi
+cargo build --release "${LOADGEN_ARGS[@]}" >/dev/null
+cargo build --release "${GATEWAY_ARGS[@]}" >/dev/null
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dwara-bench.XXXXXX")"
 trap 'kill ${GW_PID:-0} ${ECHO_PID:-0} 2>/dev/null || true; rm -rf "$WORK"' EXIT
@@ -116,17 +133,29 @@ printf '%.0s-' {1..84}; echo
 
 FAIL=0
 for C in "${CONNS[@]}"; do
-    OUT="$("$BIN/dwara-loadgen" \
+    LOADGEN_RUN=("$BIN/dwara-loadgen" \
         --url "http://127.0.0.1:${GW_PORT}/bench" \
-        --connections "$C" --duration "$DURATION" --rate 0 2>/dev/null)" || FAIL=1
+        --protocol "$PROTOCOL" --workload "$WORKLOAD" \
+        --connections "$C" --duration "$DURATION" --rate 0)
+    if [ "$WORKLOAD" = "streaming" ]; then
+        LOADGEN_RUN+=(--stream-chunks 8 --stream-chunk-bytes 1024)
+    fi
+    if [ "$JSON" = "1" ]; then
+        LOADGEN_RUN+=(--json)
+    fi
+    OUT="$("${LOADGEN_RUN[@]}" 2>/dev/null)" || FAIL=1
+    if [ "$JSON" = "1" ]; then
+        # Forward the JSON: line so this script can feed the regression gate.
+        printf '%s\n' "$OUT" | grep '^JSON: '
+    fi
     ROW="$(printf '%s\n' "$OUT" | grep '^RESULT: ' | sed 's/^RESULT: //')"
     REQUESTS="$(printf '%s\n' "$OUT" | grep -o 'requests=[0-9]*' | head -1 | cut -d= -f2)"
     RPS="$(printf '%s' "$ROW" | grep -o 'rps=[0-9.]*' | cut -d= -f2)"
     ERRORS="$(printf '%s' "$ROW" | grep -o 'errors=[0-9]*' | cut -d= -f2)"
-    P50="$(printf '%s' "$ROW" | grep -o 'p50_ns=[0-9]*' | cut -d= -f2)"
-    P90="$(printf '%s' "$ROW" | grep -o 'p90_ns=[0-9]*' | cut -d= -f2)"
-    P99="$(printf '%s' "$ROW" | grep -o 'p99_ns=[0-9]*' | cut -d= -f2)"
-    P999="$(printf '%s' "$ROW" | grep -o 'p999_ns=[0-9]*' | cut -d= -f2)"
+    P50="$(printf '%s' "$ROW" | grep -o ' p50_ns=[0-9]*' | cut -d= -f2)"
+    P90="$(printf '%s' "$ROW" | grep -o ' p90_ns=[0-9]*' | cut -d= -f2)"
+    P99="$(printf '%s' "$ROW" | grep -o ' p99_ns=[0-9]*' | cut -d= -f2)"
+    P999="$(printf '%s' "$ROW" | grep -o ' p999_ns=[0-9]*' | cut -d= -f2)"
     printf '%-12s %10s %10.0f %10s %10s %10s %10s %10s\n' \
         "$C" "$REQUESTS" "$RPS" "$ERRORS" \
         "$((P50 / 1000))" "$((P90 / 1000))" "$((P99 / 1000))" "$((P999 / 1000))"

@@ -151,22 +151,43 @@ published OSS binaries do not include it. See
 ## `dwara-loadgen`
 
 `dwara-loadgen` is a separate benchmarking binary shipped alongside
-the CLI. It drives concurrent load at a target and optionally runs an
+the CLI. It drives concurrent load at a target across HTTP/1.1,
+HTTP/2 (h2c), and feature-gated HTTP/3 (QUIC), and optionally runs an
 in-process echo upstream:
 
 ```sh
 dwara-loadgen --url http://127.0.0.1:8080/v1/ --connections 10 \
   --duration 30 --rate 500
 dwara-loadgen --echo 9000 --echo-only        # just the echo upstream
+dwara-loadgen --url http://127.0.0.1:8080/ --protocol h2 \
+  --workload pool-reuse --json               # h2 pool-reuse, JSON output
 ```
+
+`--protocol h3` requires building with the `h3` cargo feature
+(`cargo build -p dwara-cli --features h3 --bin dwara-loadgen`) and
+rejects `--echo` (no in-process QUIC echo — point it at a real h3
+listener); `--insecure` skips certificate verification for loopback
+targets. The three `--workload` shapes are `throughput` (default,
+back-to-back requests on an owned connection), `pool-reuse` (a shared
+pooled client exercising connection/stream reuse), and `streaming`
+(chunked echo the client drains fully). With `--json`, a
+machine-parseable `JSON:` line is emitted alongside the `RESULT:` line
+for the regression gate (`scripts/bench-regression.py`).
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--url` | `http://127.0.0.1:18080/` | Target URL. |
+| `--protocol` | `h1` | Wire protocol: `h1`, `h2` (h2c), or `h3` (feature-gated). |
+| `--workload` | `throughput` | Macro workload: `throughput`, `pool-reuse`, or `streaming`. |
 | `--connections` | `10` | Concurrent worker connections. |
 | `--duration` | `10` | Run length in seconds. |
 | `--rate` | `0` (unbounded) | Target requests/second across all connections. |
 | `--echo <port>` | off | Also serve a minimal HTTP/1.1 echo upstream on this port. |
 | `--echo-only` | off | Serve only the echo upstream (requires `--echo`). |
-| `--echo-body` | `128` | Echo response body size in bytes. |
+| `--echo-body` | `128` | Echo response body size in bytes (throughput/pool-reuse). |
+| `--stream-chunks` | `8` | Chunks the streaming echo emits per response (streaming + `--echo`). |
+| `--stream-chunk-bytes` | `1024` | Bytes per streaming chunk (streaming + `--echo`). |
+| `--stream-chunk-delay-ms` | `0` | Delay between streaming chunks in ms (streaming + `--echo`). |
 | `--timeout-ms` | `10000` | Per-request timeout. |
+| `--json` | off | Emit a machine-parseable `JSON:` line (for the regression gate). |
+| `--insecure` | off | (h3 only) Skip server certificate verification; loopback targets only. |
