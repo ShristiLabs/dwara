@@ -449,6 +449,7 @@ fn hcl_escapes_special_characters() {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     });
     gw.allow_empty_routes = false;
     let hcl = gateway_to_hcl(&gw);

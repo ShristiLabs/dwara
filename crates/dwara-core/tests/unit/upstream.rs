@@ -109,6 +109,7 @@ fn test_upstream(
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 
@@ -442,6 +443,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],

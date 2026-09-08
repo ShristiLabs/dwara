@@ -422,6 +422,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],

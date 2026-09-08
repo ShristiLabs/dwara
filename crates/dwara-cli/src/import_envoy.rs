@@ -295,6 +295,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             },
         );
         // Each cluster gets a service with the same name.

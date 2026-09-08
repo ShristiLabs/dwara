@@ -6568,6 +6568,106 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // DP-03: hyper connection-pool and HTTP/2 tuning bounds. Every
+        // field is optional; a present value must be within bounds. The
+        // h2-only knobs are accepted on any protocol (the runtime ignores
+        // them for non-h2 upstreams), so validation only checks bounds —
+        // protocol gating is a runtime concern, not an authoring error.
+        if let Some(p) = &u.pool {
+            if let Some(ms) = p.pool_idle_timeout_ms {
+                if ms == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.pool_idle_timeout_ms",
+                        "pool_idle_timeout_ms must be > 0 (omit the field for the hyper default)",
+                    ));
+                } else if ms > crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.pool_idle_timeout_ms",
+                        format!(
+                            "pool_idle_timeout_ms must be at most {}",
+                            crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS
+                        ),
+                    ));
+                }
+            }
+            if let Some(n) = p.pool_max_idle_per_host {
+                if n > crate::config::limits::MAX_POOL_MAX_IDLE_PER_HOST {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.pool_max_idle_per_host",
+                        format!(
+                            "pool_max_idle_per_host must be at most {}",
+                            crate::config::limits::MAX_POOL_MAX_IDLE_PER_HOST
+                        ),
+                    ));
+                }
+            }
+            if let Some(ms) = p.http2_keep_alive_interval_ms {
+                if ms == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.http2_keep_alive_interval_ms",
+                        "http2_keep_alive_interval_ms must be > 0 (omit the field to disable PINGs)",
+                    ));
+                } else if ms > crate::config::limits::MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.http2_keep_alive_interval_ms",
+                        format!(
+                            "http2_keep_alive_interval_ms must be at most {}",
+                            crate::config::limits::MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS
+                        ),
+                    ));
+                }
+            }
+            if let Some(ms) = p.http2_keep_alive_timeout_ms {
+                if ms == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.http2_keep_alive_timeout_ms",
+                        "http2_keep_alive_timeout_ms must be > 0 (omit the field for the hyper default)",
+                    ));
+                } else if ms > crate::config::limits::MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.http2_keep_alive_timeout_ms",
+                        format!(
+                            "http2_keep_alive_timeout_ms must be at most {}",
+                            crate::config::limits::MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS
+                        ),
+                    ));
+                }
+            }
+            if let Some(n) = p.max_concurrent_streams {
+                if n == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_concurrent_streams",
+                        "max_concurrent_streams must be > 0 (omit the field for the hyper default)",
+                    ));
+                } else if n > crate::config::limits::MAX_POOL_MAX_CONCURRENT_STREAMS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_concurrent_streams",
+                        format!(
+                            "max_concurrent_streams must be at most {}",
+                            crate::config::limits::MAX_POOL_MAX_CONCURRENT_STREAMS
+                        ),
+                    ));
+                }
+            }
+        }
         if let Some(r) = &u.retries {
             if r.attempts > crate::config::limits::MAX_RETRY_ATTEMPTS {
                 issues.push(issue(

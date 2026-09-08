@@ -123,6 +123,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     };
     if !gateway.upstreams.iter().any(|u| u.name == "pool") {
         gateway.upstreams.push(pool);

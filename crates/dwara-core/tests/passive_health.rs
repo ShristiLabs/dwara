@@ -610,6 +610,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],
@@ -821,6 +822,7 @@ fn upstream_cfg(
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 
@@ -1114,6 +1116,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             pq: false,
             cert_pinning: None,
             mtls: None,
+            pool: None,
         }],
         consumers: vec![],
         policies: vec![],

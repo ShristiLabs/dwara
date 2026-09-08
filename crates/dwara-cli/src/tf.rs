@@ -567,6 +567,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     })
 }
 
@@ -1172,6 +1173,7 @@ mod tests {
                 pq: false,
                 cert_pinning: None,
                 mtls: None,
+                pool: None,
             }],
             consumers: Vec::new(),
             policies: Vec::new(),

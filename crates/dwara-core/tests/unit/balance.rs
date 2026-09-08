@@ -408,6 +408,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         pq: false,
         cert_pinning: None,
         mtls: None,
+        pool: None,
     }
 }
 

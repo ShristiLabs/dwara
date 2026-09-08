@@ -7127,6 +7127,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       }
      ]
     },
+    "pool": {
+     "description": "DP-03: hyper connection-pool and HTTP/2 tuning for this\nupstream's outbound client. Absent (the default): every knob\nfalls back to hyper-util's built-in defaults (the prior\nbehavior \u2014 only the pool timer was wired). When present, the\nconfigured knobs are applied to the per-upstream hyper-util\nlegacy client builder; omitted sub-fields keep their hyper\ndefaults. The pool timer is ALWAYS installed (it is required\nfor idle-timeout eviction to fire), so this block only needs to\ncarry the knobs an operator wants to change. Meaningful for\nevery protocol: `http1`/`https` connections reuse the pool's\nidle-timeout and max-idle-per-host knobs, while `http2`\nconnections additionally honor the keep-alive and\nconcurrent-streams knobs.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/UpstreamPoolConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
     "pq": {
      "description": ": opt in to post-quantum hybrid key exchange\n(X25519+ML-KEM) for this upstream's TLS connections. When\n`true` AND the `pq` cargo feature is ON, the X25519+ML-KEM\nhybrid kx group is prepended to the rustls client config's kx\ngroup list, PREFERRING the hybrid group while keeping the\nclassical X25519 fallback for non-PQ upstreams. When the `pq`\ncargo feature is OFF, `pq: true` is accepted by the parser\n(additive-only, strict serde preserved) but is INERT: no kx\ngroup is prepended, and validation emits a warning issue.\nEXPERIMENTAL: the rustls PQ API is not yet stable. Only\nmeaningful for the TLS protocols (`https`, `http2`); validation\nrejects `pq: true` on an `http1` upstream (no TLS is\nnegotiated). Rejected when combined with FIPS mode (ML-KEM is\nnot on the FIPS-validated list for aws-lc-rs).",
      "type": "boolean"
@@ -7228,6 +7239,62 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "client_cert_file",
     "client_key_file"
    ]
+  },
+  "UpstreamPoolConfig": {
+   "description": "DP-03: hyper connection-pool and HTTP/2 tuning for an upstream\n(`upstreams[].pool`). Every field is optional; an omitted field\nkeeps hyper-util's built-in default (the same value the gateway\nused before this block existed), so the block is purely additive.\nValidation rejects zero/negative-forbidden values; the runtime\nclamps nothing beyond the documented bounds.",
+   "type": "object",
+   "properties": {
+    "http2_adaptive_window": {
+     "description": "Enable HTTP/2 adaptive flow-control window (hyper-util\n`http2_adaptive_window`). Absent: false (hyper's default \u2014\nfixed initial window). When true, the connection window grows\nand shrinks based on throughput, which helps large/long\nresponses on high-BDP paths. Only meaningful for the `http2`\nprotocol; ignored otherwise.",
+     "type": "boolean"
+    },
+    "http2_keep_alive_interval_ms": {
+     "description": "HTTP/2 PING keep-alive interval (hyper-util\n`http2_keep_alive_interval`). In milliseconds. Absent: disabled\n(hyper's default \u2014 no PINGs). A positive value sends a PING\nthis often on an otherwise-idle h2 connection so proxies/ALB\nin front of the upstream do not reap it. Only meaningful for\nthe `http2` protocol; ignored for `http1`/`https`. Bounds: at\nmost 10 minutes (600000 ms).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "http2_keep_alive_timeout_ms": {
+     "description": "HTTP/2 keep-alive timeout (hyper-util\n`http2_keep_alive_timeout`): the time the client waits for a\nPING ACK before closing the connection. In milliseconds.\nAbsent: hyper's default (20 s). Does nothing when\n`http2_keep_alive_interval_ms` is absent. Only meaningful for\nthe `http2` protocol. Bounds: at most 10 minutes (600000 ms).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "max_concurrent_streams": {
+     "description": "Initial cap on the number of concurrent HTTP/2 streams the\nclient will send over a single connection (hyper-util\n`http2_initial_max_send_streams`). This is an *initial* value\nonly: hyper-util's default is 100, and the effective cap is\nfurther bounded by the server's advertised\nSETTINGS_MAX_CONCURRENT_STREAMS once the peer's SETTINGS frame\narrives. A finite value bounds head-of-line blocking when one\nstream stalls. Only meaningful for the `http2` protocol.\nBounds: at least 1, at most 1_000_000.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "pool_idle_timeout_ms": {
+     "description": "How long an idle connection may sit in the pool before it is\nclosed (hyper-util `pool_idle_timeout`). In milliseconds.\nAbsent: hyper-util's default (90 s). `0` is rejected at\nvalidation (use a very small positive value to evict\naggressively, or omit the block for the default). Bounds: at\nmost 10 minutes (600000 ms).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "pool_max_idle_per_host": {
+     "description": "Maximum number of idle connections retained per host\n(hyper-util `pool_max_idle_per_host`). Absent: hyper-util's\ndefault. The per-upstream `connection_cap` still bounds the\ntotal (active + idle) connections, so this only shapes the\nidle fraction. Bounds: at most 1024.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    }
+   },
+   "additionalProperties": false
   },
   "UpstreamProtocol": {
    "oneOf": [
