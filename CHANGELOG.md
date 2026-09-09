@@ -142,6 +142,15 @@ the project follows semantic versioning once 1.0 is reached.
   configuration for syncing prompt/response logs to S3/GCS via an
   external command (lean-dependency alternative to embedding S3/GCS
   SDKs). Config reference and config-studio rebuilt.
+- Configurable filter-chain ordering (#191, CFG-05): formalizes the
+  request pipeline phases (acl, rate_limit, authn, authz, validate,
+  transform, cache, route) with a `FilterPhase` enum. Adds
+  `filter_chain` config block at both the gateway and route level
+  with `dry_run` (per-phase dry-run mode: log but don't enforce) and
+  `order` (optional ordering override: a permutation of the default
+  phase set). Validation rejects invalid orderings (duplicates,
+  missing phases, wrong count). Config reference and config-studio
+  rebuilt.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

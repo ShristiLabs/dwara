@@ -224,6 +224,7 @@ fn empty_document_is_valid() {
             redis_cache: None,
             config_convergence: None,
             plugins: Vec::new(),
+            filter_chain: None,
             ai: None,
             fleet: None,
             lifecycle: None,

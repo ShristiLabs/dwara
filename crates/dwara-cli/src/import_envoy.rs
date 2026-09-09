@@ -412,6 +412,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
                                         mirror: None,
                                         fault_injection: None,
                                         plugins: Vec::new(),
+                                        filter_chain: None,
                                         oidc_login: None,
                                     });
                                 }
@@ -459,6 +460,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
         redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
         ai: None,
         fleet: None,
         lifecycle: None,

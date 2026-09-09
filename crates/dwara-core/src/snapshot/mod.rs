@@ -1804,6 +1804,70 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+/// SCALE-12 (#191): validate a filter-chain config block. The `order`
+/// override, if present, must be a permutation of the default phase
+/// set (no duplicates, no unknown phases, all phases present).
+fn validate_filter_chain(
+    fc: &crate::config::FilterChainConfig,
+    entity: &str,
+    name: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Some(order) = &fc.order {
+        let default = crate::config::FilterPhase::DEFAULT_ORDER;
+        if order.len() != default.len() {
+            issues.push(issue(
+                entity,
+                name,
+                "filter_chain.order",
+                format!(
+                    "order must contain exactly {} phases, got {}",
+                    default.len(),
+                    order.len()
+                ),
+            ));
+        } else {
+            let mut seen = std::collections::BTreeSet::new();
+            for phase in order {
+                if !seen.insert(*phase) {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        "filter_chain.order",
+                        format!("duplicate phase '{}' in filter_chain.order", phase.as_str()),
+                    ));
+                }
+            }
+            // Check all default phases are present.
+            for dp in &default {
+                if !order.contains(dp) {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        "filter_chain.order",
+                        format!("filter_chain.order is missing phase '{}'", dp.as_str()),
+                    ));
+                }
+            }
+        }
+    }
+    // dry_run: check for duplicates.
+    let mut seen = std::collections::BTreeSet::new();
+    for phase in &fc.dry_run {
+        if !seen.insert(*phase) {
+            issues.push(issue(
+                entity,
+                name,
+                "filter_chain.dry_run",
+                format!(
+                    "duplicate phase '{}' in filter_chain.dry_run",
+                    phase.as_str()
+                ),
+            ));
+        }
+    }
+}
+
 /// Validate the `gateway.license` block (DW-032): the grace-period days
 /// must be in 0..=30, and the file path must be non-empty. The signature
 /// and expiry checks are NOT validation concerns — they run at startup
@@ -4434,6 +4498,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // DW-055/DW-119: plugin definitions -- exactly one of wasm/native,
     // non-empty phases, duplicate names.
     validate_plugins(gateway, &mut issues);
+
+    // SCALE-12 (#191): global filter-chain ordering and dry-run.
+    if let Some(fc) = &gateway.filter_chain {
+        validate_filter_chain(fc, "gateway", "filter_chain", &mut issues);
+    }
+
+    // SCALE-12 (#191): per-route filter-chain overrides.
+    for route in &gateway.routes {
+        if let Some(fc) = &route.filter_chain {
+            validate_filter_chain(fc, "route", &route.name, &mut issues);
+        }
+    }
 
     // JWT providers (DW-019): url shape, algorithm allowlist, refresh
     // cadence, and consumer references are compile-time checked — a
@@ -8326,6 +8402,7 @@ impl Snapshot {
                 redis_cache: None,
                 config_convergence: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 ai: None,
                 fleet: None,
                 mesh: None,

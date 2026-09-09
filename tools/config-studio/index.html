@@ -529,6 +529,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "$ref": "#/$defs/PluginConfig"
    }
   },
+  "filter_chain": {
+   "description": ": global filter-chain ordering and dry-run\nconfiguration. Per-route `filter_chain` overrides take\nprecedence. See [`FilterChainConfig`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/FilterChainConfig"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
   "ai": {
    "description": "The AI provider-adapter pack: the provider pool and the\nmodel alias table behind every `ai` route action. Absent (the\ndefault): no AI surface \u2014 an `ai` route action is rejected by\nvalidation. When present, clients send OpenAI chat-completions\nshaped requests to an `ai` route and the gateway translates to\nthe target provider's wire format (OpenAI, Anthropic, Gemini),\nnormalizing responses (and streaming deltas) back to the OpenAI\nshape. See [`ai::AiConfig`] and the `ai` domain docs.",
    "anyOf": [
@@ -1335,6 +1346,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "items": {
       "type": "string"
      }
+    },
+    "filter_chain": {
+     "description": ": per-route filter-chain ordering and dry-run\noverrides. When absent, the global `filter_chain` config (or\nthe default order) applies. See [`FilterChainConfig`].",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/FilterChainConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
     },
     "oidc_login": {
      "description": "OIDC browser login flow as a route auth mode. When\npresent, the gateway acts as an OIDC relying party: unauthenticated\nbrowser requests are redirected to the IdP's authorization\nendpoint, and the callback (`redirect_uri`) exchanges the\nauthorization code for tokens, sets a session cookie, and\nredirects the user back to the original URL. Subsequent requests\ncarry the session cookie (validated by the gateway). Absent (the\ndefault): no browser login flow (the route uses its normal auth\nmode). See [`OidcLoginConfig`].",
@@ -2945,6 +2967,75 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "required": [
     "percentage",
     "fixed_ms"
+   ]
+  },
+  "FilterChainConfig": {
+   "description": ": per-phase dry-run configuration. When dry-run is\nenabled for a phase, the phase executes its checks but does NOT\nenforce (reject/block). Failures are logged as warnings and the\nrequest continues. This enables safe policy rollout: enable a\nphase in dry-run mode, observe the would-be rejections, then\nswitch to enforcement.",
+   "type": "object",
+   "properties": {
+    "dry_run": {
+     "description": "Phases to run in dry-run mode (log but don't enforce). Each\nentry is a phase name from [`FilterPhase`]. A phase in\ndry-run mode still executes its logic; the difference is that\na rejection is logged as a warning and the request continues.",
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/FilterPhase"
+     }
+    },
+    "order": {
+     "description": "Optional ordering override: a list of phase names in the\norder they should execute. Phases not listed keep their\ndefault relative order. The override must contain exactly the\nsame set of phases as the default (no duplicates, no unknown\nphases); validation rejects invalid overrides.",
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "$ref": "#/$defs/FilterPhase"
+     }
+    }
+   },
+   "additionalProperties": false
+  },
+  "FilterPhase": {
+   "description": ": formalized request-pipeline filter phases. The\ndefault order is the order the variants are declared (the same\norder the dataplane has always executed them). Per-route\n`filter_chain` overrides can reorder a subset of these phases;\nphases not listed in an override keep their default relative\norder.",
+   "oneOf": [
+    {
+     "description": "IP ACL and consumer ACL checks.",
+     "type": "string",
+     "const": "acl"
+    },
+    {
+     "description": "Rate limiting (per-consumer and per-route limiters).",
+     "type": "string",
+     "const": "rate_limit"
+    },
+    {
+     "description": "Authentication (API key, JWT, OIDC, mTLS).",
+     "type": "string",
+     "const": "authn"
+    },
+    {
+     "description": "Authorization (route/service/listener/global policy chain).",
+     "type": "string",
+     "const": "authz"
+    },
+    {
+     "description": "Request body validation (JSON schema, size limits).",
+     "type": "string",
+     "const": "validate"
+    },
+    {
+     "description": "Request transforms (path rewrite, header/query transforms).",
+     "type": "string",
+     "const": "transform"
+    },
+    {
+     "description": "Response cache lookup.",
+     "type": "string",
+     "const": "cache"
+    },
+    {
+     "description": "Route dispatch (proxy, redirect, respond, ai, etc.).",
+     "type": "string",
+     "const": "route"
+    }
    ]
   },
   "OidcLoginConfig": {

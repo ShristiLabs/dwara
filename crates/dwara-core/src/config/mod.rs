@@ -376,6 +376,11 @@ pub struct Gateway {
     /// accepted but inert (plugins are not instantiated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
+    /// SCALE-12 (#191): global filter-chain ordering and dry-run
+    /// configuration. Per-route `filter_chain` overrides take
+    /// precedence. See [`FilterChainConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_chain: Option<FilterChainConfig>,
     /// The AI provider-adapter pack (DW-075): the provider pool and the
     /// model alias table behind every `ai` route action. Absent (the
     /// default): no AI surface — an `ai` route action is rejected by
@@ -2976,6 +2981,11 @@ pub struct Route {
     /// `wasm` cargo feature must be enabled for plugins to load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    /// SCALE-12 (#191): per-route filter-chain ordering and dry-run
+    /// overrides. When absent, the global `filter_chain` config (or
+    /// the default order) applies. See [`FilterChainConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_chain: Option<FilterChainConfig>,
     /// SEC-05: OIDC browser login flow as a route auth mode. When
     /// present, the gateway acts as an OIDC relying party: unauthenticated
     /// browser requests are redirected to the IdP's authorization
@@ -6371,6 +6381,87 @@ pub enum PluginPhase {
     ResponseHeaders,
     /// After masking, before compression.
     ResponseBody,
+}
+
+/// SCALE-12 (#191): formalized request-pipeline filter phases. The
+/// default order is the order the variants are declared (the same
+/// order the dataplane has always executed them). Per-route
+/// `filter_chain` overrides can reorder a subset of these phases;
+/// phases not listed in an override keep their default relative
+/// order.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterPhase {
+    /// IP ACL and consumer ACL checks.
+    Acl,
+    /// Rate limiting (per-consumer and per-route limiters).
+    RateLimit,
+    /// Authentication (API key, JWT, OIDC, mTLS).
+    Authn,
+    /// Authorization (route/service/listener/global policy chain).
+    Authz,
+    /// Request body validation (JSON schema, size limits).
+    Validate,
+    /// Request transforms (path rewrite, header/query transforms).
+    Transform,
+    /// Response cache lookup.
+    Cache,
+    /// Route dispatch (proxy, redirect, respond, ai, etc.).
+    Route,
+}
+
+impl FilterPhase {
+    /// The default pipeline order (the order the dataplane has
+    /// always executed the phases).
+    pub const DEFAULT_ORDER: [FilterPhase; 8] = [
+        FilterPhase::Acl,
+        FilterPhase::RateLimit,
+        FilterPhase::Authn,
+        FilterPhase::Authz,
+        FilterPhase::Validate,
+        FilterPhase::Transform,
+        FilterPhase::Cache,
+        FilterPhase::Route,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FilterPhase::Acl => "acl",
+            FilterPhase::RateLimit => "rate_limit",
+            FilterPhase::Authn => "authn",
+            FilterPhase::Authz => "authz",
+            FilterPhase::Validate => "validate",
+            FilterPhase::Transform => "transform",
+            FilterPhase::Cache => "cache",
+            FilterPhase::Route => "route",
+        }
+    }
+}
+
+/// SCALE-12 (#191): per-phase dry-run configuration. When dry-run is
+/// enabled for a phase, the phase executes its checks but does NOT
+/// enforce (reject/block). Failures are logged as warnings and the
+/// request continues. This enables safe policy rollout: enable a
+/// phase in dry-run mode, observe the would-be rejections, then
+/// switch to enforcement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FilterChainConfig {
+    /// Phases to run in dry-run mode (log but don't enforce). Each
+    /// entry is a phase name from [`FilterPhase`]. A phase in
+    /// dry-run mode still executes its logic; the difference is that
+    /// a rejection is logged as a warning and the request continues.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dry_run: Vec<FilterPhase>,
+    /// Optional ordering override: a list of phase names in the
+    /// order they should execute. Phases not listed keep their
+    /// default relative order. The override must contain exactly the
+    /// same set of phases as the default (no duplicates, no unknown
+    /// phases); validation rejects invalid overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<FilterPhase>>,
 }
 
 /// Resource limits for a proxy-wasm plugin (DW-055 decision 4; §9.3).
