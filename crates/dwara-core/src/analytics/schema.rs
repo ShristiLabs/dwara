@@ -286,7 +286,7 @@ pub const SCHEMA_V10: &str = "
 ";
 
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 10;
+pub const LATEST_SCHEMA_VERSION: u32 = 11;
 
 /// Schema v6 (DW-086): three tables for prompt experimentation.
 ///
@@ -428,6 +428,10 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     if version < 10 {
         conn.execute_batch(SCHEMA_V10)?;
         conn.pragma_update(None, "user_version", 10)?;
+    }
+    if version < 11 {
+        conn.execute_batch(super::partition::SCHEMA_V11)?;
+        conn.pragma_update(None, "user_version", 11)?;
     }
     Ok(())
 }

@@ -106,6 +106,19 @@ the project follows semantic versioning once 1.0 is reached.
   retry/budget shape. Config validation enforces the same URL,
   header, timeout, attempts, and backoff bounds as the webhook sink.
   Config reference and config-studio rebuilt.
+- Analytics store partitioning and retention automation (#188,
+  SCALE-09): rotates the raw table daily into partition tables
+  (`raw_YYYYMMDD`) within the same SQLite database, making retention
+  enforcement O(1) (DROP TABLE) instead of O(n) (DELETE rows +
+  incremental vacuum). The `raw_all` view UNION ALLs the `raw` table
+  and all partition tables so the rollup and query layers read across
+  all partitions without per-query changes. The maintenance worker
+  calls `maybe_rotate` at each tick to move old rows to partitions,
+  and `drop_expired_partitions` to drop partitions older than the raw
+  retention period. Schema v11 adds the `raw_partitions` meta table.
+  The rollup and query layers now read from `raw_all` instead of
+  `raw`. The retention sweep only deletes intra-day rows from `raw`
+  (old partitions are dropped by the partition manager).
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

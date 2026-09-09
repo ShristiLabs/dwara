@@ -54,6 +54,7 @@
 
 pub mod exports;
 pub mod insights;
+pub mod partition;
 pub mod query;
 pub mod rollup;
 pub mod schema;
@@ -803,6 +804,14 @@ impl EmbeddedAnalytics {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         schema::migrate(&conn)?;
+        // SCALE-09 (#188): ensure the raw_all view exists (it may not
+        // if the database was created before partitioning was added).
+        if let Err(e) = partition::refresh_raw_all_view(&conn) {
+            tracing::warn!(
+                code = "analytics_raw_all_view_failed",
+                "failed to create raw_all view: {e}"
+            );
+        }
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
         let (gov_tx, gov_rx) = mpsc::channel(CHANNEL_CAP);
@@ -1771,6 +1780,16 @@ impl EmbeddedAnalytics {
     fn maintain(&self) {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
+        // SCALE-09 (#188): rotate the raw table into a daily partition
+        // if it has rows from a previous day. This bounds the raw
+        // table to the current day and makes retention O(1) (DROP
+        // TABLE) for old partitions.
+        if let Err(e) = partition::maybe_rotate(&conn, now) {
+            tracing::warn!(
+                code = "analytics_partition_rotate_failed",
+                "raw partition rotation failed: {e}"
+            );
+        }
         let mut rolled = 0usize;
         match rollup::roll_raw_to_1m(&conn, now, ROLLUP_GRACE_MS) {
             Ok(n) => rolled = n,
@@ -1803,6 +1822,14 @@ impl EmbeddedAnalytics {
                 code = "analytics_rollup",
                 windows = rolled,
                 "rollup pass complete"
+            );
+        }
+        // SCALE-09 (#188): drop expired daily partition tables (O(1)
+        // DROP TABLE vs O(n) DELETE rows).
+        if let Err(e) = partition::drop_expired_partitions(&conn, self.retention_ms[0], now) {
+            tracing::warn!(
+                code = "analytics_partition_drop_failed",
+                "expired partition drop failed: {e}"
             );
         }
         // DW-081: prompt log retention sweep. Records older than the

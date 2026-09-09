@@ -1086,7 +1086,7 @@ pub fn journey_query(
     let mut sql = String::from(
         "SELECT ts_ms, request_id, correlation_id, listener, route, \
          consumer, upstream, method, status, duration_ms, dims \
-         FROM raw WHERE correlation_id = ?",
+         FROM raw_all WHERE correlation_id = ?",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(correlation_id.to_string())];
     if let Some(from) = from_ms {
