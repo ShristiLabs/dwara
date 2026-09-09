@@ -13,10 +13,10 @@
 //! [`DnsResolver`] wraps a `hickory_resolver::TokioAsyncResolver`. A
 //! records are resolved to `(IpAddr, ttl)` pairs; SRV records to
 //! `(IpAddr, port, ttl)` triples (the SRV target is resolved to an IP by
-//! the resolver's recursive lookup). The resolver is configured with
-//! explicit name servers (the system resolver is NOT used by default —
-//! `system-config` is off); the gateway's config controls which name
-//! servers to query.
+//! the resolver's recursive lookup). The resolver is configured with the
+//! SYSTEM resolver's name servers when `/etc/resolv.conf` is readable
+//! (so container-internal names resolve), and the public Google
+//! resolvers otherwise.
 //!
 //! # Refresh cycle
 //!
@@ -58,13 +58,50 @@ use crate::dataplane::balance::UpstreamLb;
 use crate::dataplane::upstream::UpstreamHandle;
 use crate::observability::Observability;
 
-/// Default DNS name servers when none are explicitly configured: the
-/// system's resolver is NOT used (the `system-config` feature is off);
-/// instead the gateway falls back to the public Google resolvers, which
-/// are the hickory-resolver default. Operators who need a custom
-/// resolver configure it at the OS level and the gateway will pick it up
-/// once `system-config` support is added (a follow-up).
+/// Default DNS name servers when none are explicitly configured AND the
+/// system resolver config is unreadable: the public Google resolvers.
+/// When `/etc/resolv.conf` is present and parses (the container case —
+/// Docker and Kubernetes write their embedded resolver there), its name
+/// servers are PREFERRED (see [`system_nameservers`]) so cluster-local
+/// names (`my-svc`, `my-svc.ns.svc.cluster.local`) resolve: public
+/// resolvers cannot answer those names, and an explicit-public-only
+/// default would make every service-name endpoint unresolvable in a
+/// container deployment.
 const DEFAULT_NAMESERVERS: &[&str] = &["8.8.8.8:53", "8.8.4.4:53"];
+
+/// Name servers from the system resolver configuration: the
+/// `nameserver` lines of `/etc/resolv.conf` (the file Docker and
+/// Kubernetes write their embedded resolver into). Returns None when
+/// the file is absent, unreadable, or carries no `nameserver` lines —
+/// the caller then falls back to [`DEFAULT_NAMESERVERS`]. Only the
+/// server addresses are taken (port 53; DNS options and search domains
+/// are ignored — cluster-local names resolve as-is against the embedded
+/// resolver, which sets `ndots:0`). Hand-parsed rather than via
+/// hickory's `system-config` feature: that feature drags in
+/// platform-specific dependencies (ipconfig, jni, system-configuration)
+/// for what is, on every container platform, a three-line file.
+fn system_nameservers() -> Option<Vec<String>> {
+    let text = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    let servers: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("nameserver"))
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+        // `ip:port` socket-addr form: IPv6 literals need brackets.
+        .map(|ip| {
+            if ip.contains(':') {
+                format!("[{ip}]:53")
+            } else {
+                format!("{ip}:53")
+            }
+        })
+        // Only well-formed addresses survive; a malformed line must not
+        // panic the resolver constructor downstream.
+        .filter(|addr| addr.parse::<SocketAddr>().is_ok())
+        .collect();
+    (!servers.is_empty()).then_some(servers)
+}
 
 /// A TTL-aware DNS resolver wrapping `hickory_resolver::TokioResolver`.
 ///
@@ -78,11 +115,15 @@ pub struct DnsResolver {
 impl DnsResolver {
     /// Build a resolver that queries the given name server addresses
     /// (e.g. `["127.0.0.1:5353"]`). An empty list falls back to the
-    /// default public resolvers.
+    /// SYSTEM resolver configuration when one is readable (container
+    /// deployments: Docker/Kubernetes embedded DNS), and to the default
+    /// public resolvers otherwise (see [`system_nameservers`]).
     pub fn new(name_servers: &[String]) -> Self {
         let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
         let servers: Vec<String> = if name_servers.is_empty() {
-            DEFAULT_NAMESERVERS.iter().map(|s| s.to_string()).collect()
+            system_nameservers().unwrap_or_else(|| {
+                DEFAULT_NAMESERVERS.iter().map(|s| s.to_string()).collect()
+            })
         } else {
             name_servers.to_vec()
         };
@@ -266,7 +307,8 @@ pub struct DnsCache {
 }
 
 impl Default for DnsCache {
-    /// Default cache: public name servers + system hosts file, default
+    /// Default cache: the system resolver's name servers when readable
+    /// (else the public resolvers) + the system hosts file, default
     /// TTLs (positive cap 300 s, negative 5 s), 4096-entry bound.
     fn default() -> Self {
         Self::new(&[])
@@ -275,7 +317,8 @@ impl Default for DnsCache {
 
 impl DnsCache {
     /// Build a cache backed by the given name servers (empty = the
-    /// default public resolvers, matching [`DnsResolver::new`]) with the
+    /// resolver default: system config when readable, else the public
+    /// resolvers; see [`DnsResolver::new`]) with the
     /// default TTLs and entry cap.
     pub fn new(name_servers: &[String]) -> Self {
         Self::with_ttls(
