@@ -1,0 +1,35 @@
+# Dev overlay: single replica, low resources, no HPA.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+metadata:
+  name: dwara-dev
+resources:
+  - ../../base
+  - service.yaml
+namespace: dwara-system
+namePrefix: dev-
+patches:
+  - target:
+      kind: Deployment
+      name: dwara-controller
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 50m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 64Mi
+      - op: replace
+        path: /spec/template/spec/containers/1/resources/requests/cpu
+        value: 50m
+      - op: replace
+        path: /spec/template/spec/containers/1/resources/requests/memory
+        value: 64Mi
+images:
+  - name: ghcr.io/shristilabs/dwara-k8s-controller
+    newTag: dev
+  - name: ghcr.io/shristilabs/dwara
+    newTag: dev

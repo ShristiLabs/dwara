@@ -1,0 +1,21 @@
+apiVersion: v2
+name: dwara
+description: |
+  Dwara is a streaming reverse-proxy API gateway. This chart deploys the
+  Kubernetes Gateway API controller and the gateway data plane as a
+  two-container pod, plus the supporting Service, HPA, PDB, NetworkPolicy
+  and ServiceMonitor objects.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/shristilabs/dwara
+sources:
+  - https://github.com/shristilabs/dwara
+maintainers:
+  - name: ShristiLabs
+keywords:
+  - gateway
+  - api-gateway
+  - reverse-proxy
+  - kubernetes-gateway-api
+  - ingress

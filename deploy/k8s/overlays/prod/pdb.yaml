@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dwara-controller
+  namespace: dwara-system
+  labels:
+    app.kubernetes.io/name: dwara
+    app.kubernetes.io/component: gateway
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dwara
+      app.kubernetes.io/component: controller

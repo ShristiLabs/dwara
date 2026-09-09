@@ -1,0 +1,20 @@
+{{- if .Values.pdb.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dwara.fullname" . }}
+  namespace: {{ include "dwara.namespace" . }}
+  labels:
+    {{- include "dwara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dwara.selectorLabels" . | nindent 6 }}
+{{- end -}}

@@ -1,0 +1,159 @@
+# Default values for the dwara Helm chart.
+# Override per-environment via values files or `--set`.
+
+# -- Override the chart name (rarely needed).
+nameOverride: ""
+# -- Override the full resource name (rarely needed).
+fullnameOverride: ""
+
+# Namespace the chart installs into. Set `namespace: ""` to install into
+# the release namespace (recommended for Helm install --namespace).
+namespace:
+  create: true
+  name: dwara-system
+  labels:
+    app.kubernetes.io/name: dwara
+    app.kubernetes.io/part-of: dwara
+
+# Controller container (Kubernetes Gateway API reconciler).
+controller:
+  image:
+    repository: ghcr.io/shristilabs/dwara-k8s-controller
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Extra args passed verbatim to the controller binary.
+  args: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    DWARA_K8S_CONTROLLER_NAME: shristilabs.com/dwara
+    DWARA_K8S_INGRESS_CLASS: dwara
+    DWARA_K8S_OUTPUT_CONFIG: /etc/dwara/generated/dwara.yaml
+    # Empty = watch all namespaces.
+    DWARA_K8S_NAMESPACE: ""
+
+# Gateway container (data plane / reverse proxy).
+gateway:
+  image:
+    repository: ghcr.io/shristilabs/dwara
+    tag: latest
+    pullPolicy: IfNotPresent
+  # The config file path the gateway hot-reloads (file-watch).
+  configPath: /etc/dwara/generated/dwara.yaml
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  ports:
+    http: 8080
+    https: 8443
+  # Optional TLS cert/key secret mounted into the gateway container.
+  tls:
+    enabled: false
+    # Name of an existing Secret of type kubernetes.io/tls.
+    secretName: ""
+    mountPath: /etc/dwara/certs
+
+# Shared emptyDir volume for the generated config the controller writes
+# and the gateway reads.
+generatedConfig:
+  mountPath: /etc/dwara/generated
+  sizeLimit: ""
+
+# Service exposing the gateway data plane.
+service:
+  enabled: true
+  type: ClusterIP
+  # ClusterIP traffic policy. `Local` preserves client IP for
+  # LoadBalancer/NodePort; ignored for ClusterIP.
+  externalTrafficPolicy: Cluster
+  annotations: {}
+  ports:
+    http: 80
+    https: 443
+
+# HorizontalPodAutoscaler for the gateway data plane.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  # Target CPU utilization percentage (of request).
+  cpuUtilization: 80
+  # Target memory utilization percentage (of request). Set to null to omit.
+  memoryUtilization: null
+  # Scale-down stabilization window (seconds).
+  scaleDownStabilization: 300
+
+# PodDisruptionBudget to keep the data plane available during drains.
+pdb:
+  enabled: true
+  # Use minAvailable or maxUnavailable (set the other to null).
+  minAvailable: 1
+  maxUnavailable: null
+
+# NetworkPolicy restricting ingress to the gateway.
+networkPolicy:
+  enabled: false
+  # List of namespace labels allowed to talk to the gateway. Empty
+  # allows all (deny-by-default requires at least one entry).
+  ingressFrom: []
+
+# ServiceMonitor for Prometheus scraping (requires the Prometheus
+# Operator CRD; the chart does not install it).
+serviceMonitor:
+  enabled: false
+  # Prometheus scrape interval.
+  interval: 30s
+  # Scrape timeout.
+  scrapeTimeout: 10s
+  # Path the gateway exposes metrics on (admin listener).
+  path: /metrics
+  # Additional labels to select the monitor (e.g. release: kube-prom).
+  labels: {}
+
+# GatewayClass the controller reconciles.
+gatewayClass:
+  enabled: true
+  name: dwara
+  controller: shristilabs.com/dwara
+
+# RBAC for the controller.
+rbac:
+  enabled: true
+
+# Number of gateway replicas (used when HPA is disabled).
+replicas: 2
+
+# Pod-level annotations applied to the gateway pod.
+podAnnotations: {}
+
+# Image pull secrets (list of existing Secret names).
+imagePullSecrets: []
+
+# Node selector, tolerations, affinity for the gateway pod.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Pod security context (non-root, read-only rootfs).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+# Container security context (no privilege escalation).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

@@ -151,6 +151,35 @@ configure retention at the log collector, not in the gateway.
 | `POST /credentials/{id}/retire` | retire (or schedule retirement of) a credential — see [Key rotation workflows](#key-rotation-workflows) |
 | `GET /analytics/dashboard`, `GET /analytics/top`, `POST /analytics/query`, `GET /analytics/exports`, `POST /analytics/exports/run` | the embedded analytics store's query surface — see [Analytics](./analytics) |
 | `GET /analytics/live`, `GET /analytics/forecast`, `GET /analytics/anomalies` | live sketch snapshot, capacity forecast, and anomaly status — see [Analytics](./analytics#live-sketches) |
+| `GET /routes`, `GET /routes/{name}`, `POST /routes`, `PUT /routes/{name}`, `DELETE /routes/{name}` | entity-level CRUD for routes — list, get, create (409 on duplicate), replace (404 if not found), delete; all with ETag/If-Match optimistic concurrency |
+| `GET /services`, `GET /services/{name}`, `POST /services`, `PUT /services/{name}`, `DELETE /services/{name}` | entity-level CRUD for services (same semantics as routes) |
+| `GET /upstreams`, `GET /upstreams/{name}`, `POST /upstreams`, `PUT /upstreams/{name}`, `DELETE /upstreams/{name}` | entity-level CRUD for upstreams (same semantics as routes) |
+| `GET /consumers`, `GET /consumers/{name}`, `POST /consumers`, `PUT /consumers/{name}`, `DELETE /consumers/{name}` | entity-level CRUD for consumers (same semantics as routes) |
+| `GET /policies`, `GET /policies/{name}`, `POST /policies`, `PUT /policies/{name}`, `DELETE /policies/{name}` | entity-level CRUD for policies (same semantics as routes) |
+
+### Entity CRUD and optimistic concurrency
+
+The entity CRUD endpoints (`/routes`, `/services`, `/upstreams`,
+`/consumers`, `/policies`) allow per-entity management without sending
+the full config document. Each follows the same pattern:
+
+- `GET /<entity>` — list all entities as JSON (with `ETag` header).
+- `GET /<entity>/<name>` — get one entity as JSON (404 if not found).
+- `POST /<entity>` — create an entity (body = entity JSON; 409 if the
+  name already exists).
+- `PUT /<entity>/<name>` — replace an entity (404 if not found).
+- `DELETE /<entity>/<name>` — delete an entity (404 if not found).
+
+**Optimistic concurrency:** every GET response carries an `ETag` header
+(the config content hash). Mutating requests (`POST`, `PUT`, `DELETE`)
+and `PATCH /config` may include an `If-Match` header; the gateway
+compares it to the current ETag and returns `412 Precondition Failed`
+on mismatch (the config changed since the client's GET). Without
+`If-Match`, the mutation applies unconditionally (last-write-wins).
+
+All mutations go through the same pipeline as `PATCH /config`: parse,
+dry-run validate, write atomically, compile-and-publish. Concurrent
+mutations are serialized via the same lock.
 
 `PATCH /config` bodies over 4 MiB are rejected with 413; concurrent
 PATCHes are serialized. Errors use the same JSON error envelope as the

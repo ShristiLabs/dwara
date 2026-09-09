@@ -400,8 +400,8 @@ verifies both plus the cluster-free CLI half:
 `dwara-cli k8s conformance-report` generates the upstream Gateway API
 conformance report YAML from the features the translator actually
 supports. To run against a cluster: deploy
-`deploy/k8s/{namespace,rbac,gatewayclass,configmap,deployment}.yaml`
-(two containers per pod — the `dwara-k8s-controller` writing the
+`deploy/k8s/base/` (raw manifests, or a Kustomize overlay / the Helm
+chart — two containers per pod — the `dwara-k8s-controller` writing the
 generated config to a shared volume, and the `dwara` gateway
 hot-reloading it), then `kubectl apply -f fixtures/gateway.yaml -f
 fixtures/httproute.yaml`. The translator is pinned cluster-free by

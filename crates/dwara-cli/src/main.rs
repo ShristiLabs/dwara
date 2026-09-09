@@ -56,6 +56,12 @@ enum Command {
     Validate {
         /// Path to the gateway YAML config.
         file: String,
+        /// Apply the named profile (CFG-01, #180) before validating.
+        /// Loads `<profiles_dir>/<profile>.yaml` when `profiles_dir` is
+        /// set, else the inline `profile_overrides` entry. Also resolves
+        /// `includes:` directives.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Normalize a config file in place.
     Fmt {
@@ -73,6 +79,9 @@ enum Command {
     Lint {
         /// Path to the gateway YAML config.
         file: String,
+        /// Apply the named profile (CFG-01, #180) before linting.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Print the JSON Schema of the gateway config.
     Schema,
@@ -135,6 +144,38 @@ enum Command {
         #[command(subcommand)]
         kind: K8sKind,
     },
+    /// Show the running gateway's status (generation, health, breakers).
+    Status {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019). Defaults to
+        /// `DWARA_ADMIN` or http://127.0.0.1:2019.
+        #[arg(long)]
+        admin: Option<String>,
+    },
+    /// Live view of upstream load-balancer state and shedding. Refreshes
+    /// until interrupted (Ctrl-C).
+    Top {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019). Defaults to
+        /// `DWARA_ADMIN` or http://127.0.0.1:2019.
+        #[arg(long)]
+        admin: Option<String>,
+        /// Refresh interval in milliseconds (default 1000).
+        #[arg(long, default_value_t = 1000)]
+        interval: u64,
+    },
+    /// Generate shell completion scripts (bash/zsh/fish/PowerShell).
+    Completions {
+        /// The target shell.
+        shell: CompletionShell,
+    },
+}
+
+/// Supported shells for `dwara completions` (USA-02, #179).
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
 }
 
 /// Subcommands of `dwara k8s` (DW-064).
@@ -304,23 +345,38 @@ fn main() {
                 }
             }
         }
-        Command::Validate { file } => match read(&file) {
+        Command::Validate { file, profile } => match read(&file) {
             Err(e) => {
                 eprintln!("{e}");
                 1
             }
-            Ok(text) => match dwara_cli::validate_config_text(&text) {
-                dwara_cli::ValidateOutcome::Valid { routes } => {
-                    println!("ok: {routes} routes");
-                    0
-                }
-                dwara_cli::ValidateOutcome::Invalid(issues) => {
-                    for i in issues {
-                        eprintln!("{i}");
+            Ok(text) => {
+                // CFG-01 (#180): resolve includes + profile before
+                // validating. The base_dir is the config file's parent.
+                let base_dir = std::path::Path::new(&file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                match dwara_core::config::includes::preprocess(&text, &base_dir, profile.as_deref())
+                {
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
                     }
-                    1
+                    Ok(text) => match dwara_cli::validate_config_text(&text) {
+                        dwara_cli::ValidateOutcome::Valid { routes } => {
+                            println!("ok: {routes} routes");
+                            0
+                        }
+                        dwara_cli::ValidateOutcome::Invalid(issues) => {
+                            for i in issues {
+                                eprintln!("{i}");
+                            }
+                            1
+                        }
+                    },
                 }
-            },
+            }
         },
         Command::Fmt { file } => match read(&file) {
             Err(e) => {
@@ -360,34 +416,48 @@ fn main() {
                 },
             }
         }
-        Command::Lint { file } => match read(&file) {
+        Command::Lint { file, profile } => match read(&file) {
             Err(e) => {
                 eprintln!("{e}");
                 1
             }
-            Ok(text) => match dwara_cli::validate_config_text(&text) {
-                dwara_cli::ValidateOutcome::Invalid(issues) => {
-                    for i in issues {
-                        eprintln!("{i}");
+            Ok(text) => {
+                // CFG-01 (#180): resolve includes + profile before linting.
+                let base_dir = std::path::Path::new(&file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                match dwara_core::config::includes::preprocess(&text, &base_dir, profile.as_deref())
+                {
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
                     }
-                    eprintln!("config is invalid; fix validation before linting");
-                    1
+                    Ok(text) => match dwara_cli::validate_config_text(&text) {
+                        dwara_cli::ValidateOutcome::Invalid(issues) => {
+                            for i in issues {
+                                eprintln!("{i}");
+                            }
+                            eprintln!("config is invalid; fix validation before linting");
+                            1
+                        }
+                        dwara_cli::ValidateOutcome::Valid { .. } => {
+                            let gateway =
+                                dwara_core::config::parse_gateway(&text).expect("validated above");
+                            let warnings = dwara_cli::lint_config(&gateway);
+                            for w in &warnings {
+                                eprintln!("warning: {w}");
+                            }
+                            if warnings.is_empty() {
+                                0
+                            } else {
+                                eprintln!("{} lint warning(s)", warnings.len());
+                                2
+                            }
+                        }
+                    },
                 }
-                dwara_cli::ValidateOutcome::Valid { .. } => {
-                    let gateway =
-                        dwara_core::config::parse_gateway(&text).expect("validated above");
-                    let warnings = dwara_cli::lint_config(&gateway);
-                    for w in &warnings {
-                        eprintln!("warning: {w}");
-                    }
-                    if warnings.is_empty() {
-                        0
-                    } else {
-                        eprintln!("{} lint warning(s)", warnings.len());
-                        2
-                    }
-                }
-            },
+            }
         },
         Command::Import { kind } => match kind {
             ImportKind::Openapi { spec, output } => match read(&spec) {
@@ -528,6 +598,9 @@ fn main() {
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
+        Command::Status { admin } => run_status(admin),
+        Command::Top { admin, interval } => run_top(admin, interval),
+        Command::Completions { shell } => run_completions(shell),
         Command::Replay {
             recording,
             from,
@@ -859,4 +932,66 @@ fn build_recording_from_store(
         requests,
     };
     serde_json::to_string(&recording).map_err(|e| format!("cannot serialize recording: {e}"))
+}
+
+/// USA-02 (#179): `dwara status` — one-shot snapshot of the running
+/// gateway over the admin API. Exit 0 on success, 1 on error.
+fn run_status(admin: Option<String>) -> i32 {
+    let admin_url = dwara_cli::status::resolve_admin(admin.as_deref());
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("status: cannot start tokio runtime: {e}");
+            return 1;
+        }
+    };
+    match rt.block_on(dwara_cli::status::status(&admin_url)) {
+        Ok(out) => {
+            print!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("status: {e}");
+            1
+        }
+    }
+}
+
+/// USA-02 (#179): `dwara top` — live, refreshing view of upstream
+/// load-balancer state. Runs until interrupted (Ctrl-C). Exit 0 on
+/// interrupt, 1 on error.
+fn run_top(admin: Option<String>, interval: u64) -> i32 {
+    let admin_url = dwara_cli::status::resolve_admin(admin.as_deref());
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("top: cannot start tokio runtime: {e}");
+            return 1;
+        }
+    };
+    match rt.block_on(dwara_cli::status::top(&admin_url, interval)) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("top: {e}");
+            1
+        }
+    }
+}
+
+/// USA-02 (#179): `dwara completions <shell>` — generate a shell
+/// completion script for the dwara-cli command model and print it to
+/// stdout. Install per the clap_complete docs, e.g. for bash:
+/// `dwara completions bash > /etc/bash_completion.d/dwara`.
+fn run_completions(shell: CompletionShell) -> i32 {
+    use clap::CommandFactory as _;
+    let cmd = Cli::command();
+    let shell = match shell {
+        CompletionShell::Bash => clap_complete::Shell::Bash,
+        CompletionShell::Zsh => clap_complete::Shell::Zsh,
+        CompletionShell::Fish => clap_complete::Shell::Fish,
+        CompletionShell::Powershell => clap_complete::Shell::PowerShell,
+    };
+    let bin = "dwara-cli";
+    clap_complete::generate(shell, &mut cmd.clone(), bin, &mut std::io::stdout());
+    0
 }

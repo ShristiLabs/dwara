@@ -7027,6 +7027,13 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "profiles_dir": {
+          "description": "Directory of file-based profile patches (CFG-01, #180). When\nset, the selected profile's patch is loaded from\n`<profiles_dir>/<profile>.yaml` instead of the inline\n`profile_overrides` map. Relative paths resolve against the\nconfig file's directory. Takes precedence over\n`profile_overrides` when both are set.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

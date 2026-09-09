@@ -30,6 +30,58 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Admin entity CRUD + optimistic concurrency (#181, CFG-02):
+  per-entity endpoints for routes, services, upstreams, consumers, and
+  policies. Each entity type supports GET (list/get), POST (create,
+  409 on duplicate), PUT (replace, 404 if not found), and DELETE (404
+  if not found). All GET responses carry an ETag header (the config
+  content hash); all mutating requests (POST/PUT/DELETE and PATCH
+  /config) support If-Match optimistic concurrency (412 Precondition
+  Failed on mismatch). Mutations go through the same pipeline as
+  PATCH /config: parse, dry-run validate, write atomically,
+  compile-and-publish. 12 unit tests cover ETag format, If-Match
+  checking (absent/wildcard/exact/mismatch), entity kind dispatch,
+  find/add/replace/remove, and list JSON.
+- Config includes and profile files (#180, CFG-01): a config document
+  may carry a top-level `includes:` key listing file paths, directories,
+  or globs (relative to the config file's directory). Each is read,
+  recursively resolved, and merged into the base with conflict
+  detection (scalar keys set in both are an error; collection keys
+  replace). File-based profiles: `gateway.lifecycle.profiles.profiles_dir`
+  loads the selected profile's patch from `<profiles_dir>/<profile>.yaml`
+  instead of inline `profile_overrides` (backward compatible; file-based
+  takes precedence). The profile is selected via `DWARA_PROFILE` or the
+  new `--profile` flag on `validate`/`lint`. Preprocessing runs before
+  `parse_gateway`, so `includes:`/`profiles_dir` never reach the strict
+  schema. 13 unit tests cover includes, globs, conflict detection,
+  recursion, file-based profiles, inline profiles, and the combined
+  preprocess flow.
+- `dwara status` / `dwara top` + shell completions (#179, USA-02):
+  three new `dwara-cli` subcommands. `status` prints a one-shot
+  snapshot of the running gateway over the admin API (version, uptime,
+  readiness, config generation + hash, per-upstream endpoint health,
+  circuit-breaker states, active requests, cache stats). `top` renders
+  a live, refreshing table of upstream load-balancer state (algorithm,
+  scheme, connections, requests, breaker state, per-endpoint health +
+  inflight) polling `/clusters` and `/stats` every second until
+  interrupted. `completions <shell>` generates bash/zsh/fish/PowerShell
+  completion scripts from the clap command model via `clap_complete`
+  (new workspace dependency, MIT OR Apache-2.0, allow-listed). The admin
+  URL defaults to `DWARA_ADMIN` or `http://127.0.0.1:2019`. No config or
+  schema changes.
+- Helm chart + Kustomize overlays + complete K8s object set (#178,
+  USA-01): a Helm chart at `deploy/helm/dwara/` renders the full
+  Kubernetes object set — Deployment, Service, HorizontalPodAutoscaler,
+  PodDisruptionBudget, NetworkPolicy, ServiceMonitor, GatewayClass,
+  and RBAC — each toggleable via values. Kustomize overlays
+  (`deploy/k8s/overlays/{dev,staging,prod}`) layer on a self-contained
+  base (`deploy/k8s/base/`, where the five raw manifests now live),
+  adding Service/HPA/PDB in staging and the full set (plus
+  NetworkPolicy + ServiceMonitor) in prod. The chart adds readiness and
+  liveness probes, a non-root security context, and configurable TLS
+  secret mounts. A new `.github/workflows/helm.yml` CI job lints the
+  chart and builds all three overlays on every change to `deploy/`.
+  No config, schema, or dependency changes.
 - Nightly soak with RSS-ceiling and p99-drift assertions (#174,
   REL-03): a new `scripts/soak.sh` harness boots the real `dwara`
   gateway against an in-process echo upstream

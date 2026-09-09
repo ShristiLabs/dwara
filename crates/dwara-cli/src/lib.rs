@@ -39,6 +39,9 @@ pub mod tf;
 // DW-064: Kubernetes Gateway API conformance report generator
 // (`dwara k8s conformance-report`). Feature-gated behind `k8s`.
 pub mod k8s_conformance;
+// USA-02 (#179): live operator views over the admin API
+// (`dwara status`, `dwara top`).
+pub mod status;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};

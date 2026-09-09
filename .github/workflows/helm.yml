@@ -1,0 +1,74 @@
+name: helm
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/helm/**"
+      - "deploy/k8s/**"
+      - ".github/workflows/helm.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/helm/**"
+      - "deploy/k8s/**"
+      - ".github/workflows/helm.yml"
+
+concurrency:
+  group: helm-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: helm lint + kustomize build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - name: Install Helm
+        uses: azure/setup-helm@fe7b79cd5ee4529d0e2a3e78fc9e25f6f0ac27f # pinned: v4 @ fe7b79cd
+
+      - name: Helm lint (default values)
+        run: helm lint deploy/helm/dwara
+
+      - name: Helm template (default values)
+        run: helm template dwara deploy/helm/dwara --namespace dwara-system > /tmp/rendered.yaml
+
+      - name: Helm template (prod-ish overrides)
+        run: |
+          helm template dwara deploy/helm/dwara --namespace dwara-system \
+            --set service.type=LoadBalancer \
+            --set hpa.maxReplicas=20 \
+            --set serviceMonitor.enabled=true \
+            --set networkPolicy.enabled=true > /tmp/rendered-prod.yaml
+
+      - name: Install Kustomize
+        uses: imranismail/setup-kustomize@a764c6a43da5e29bd107c7f2693a2e0231be0c1f # pinned: v2 @ a764c6a4
+
+      - name: Kustomize build (dev)
+        run: kustomize build deploy/k8s/overlays/dev > /tmp/dev.yaml
+
+      - name: Kustomize build (staging)
+        run: kustomize build deploy/k8s/overlays/staging > /tmp/staging.yaml
+
+      - name: Kustomize build (prod)
+        run: kustomize build deploy/k8s/overlays/prod > /tmp/prod.yaml
+
+      - name: Validate rendered YAML parses
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+          for f in [
+              "/tmp/rendered.yaml",
+              "/tmp/rendered-prod.yaml",
+              "/tmp/dev.yaml",
+              "/tmp/staging.yaml",
+              "/tmp/prod.yaml",
+          ]:
+              with open(f) as fh:
+                list(yaml.safe_load_all(fh))
+              print(f"ok: {f}")
+          PY

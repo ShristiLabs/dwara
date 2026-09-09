@@ -183,3 +183,46 @@ dwara-cli validate path/to/dwara.yaml   # same pipeline the gateway runs
 dwara-cli lint path/to/dwara.yaml       # advisory: shadowed routes, unused policies, ...
 dwara-cli fmt path/to/dwara.yaml        # normalize in place
 ```
+
+## Config includes and profiles
+
+Large configurations can be split across multiple files using
+`includes:`. Each entry is a file path, directory, or glob (relative to
+the config file's directory). Directories include every `*.yaml`/`*.yml`
+file inside (sorted). Includes are resolved recursively, and the
+`includes:` key is consumed before validation, so it never reaches the
+strict schema.
+
+```yaml
+includes:
+  - listeners.yaml
+  - routes/            # every *.yaml in routes/
+  - "upstreams/*.yaml"  # glob match
+```
+
+Collection keys (`listeners`, `routes`, `upstreams`, ...) from an
+include REPLACE the base's collections (an include is a full overlay,
+not a delta). Scalar keys set in both the base and an include are a
+conflict error, forcing the operator to be explicit.
+
+Environment profiles (dev/staging/prod) overlay the base config at
+load time. The profile is selected via the `DWARA_PROFILE` env var or
+the `--profile` flag on `validate`/`lint`. Profiles can be defined
+inline or as separate files in a `profiles_dir`:
+
+```yaml
+gateway:
+  lifecycle:
+    profiles:
+      profiles_dir: profiles   # loads profiles/<name>.yaml
+```
+
+```sh
+dwara-cli validate dwara.yaml --profile prod
+DWARA_PROFILE=staging dwara-cli validate dwara.yaml
+```
+
+When `profiles_dir` is set, the selected profile's patch is loaded
+from `<profiles_dir>/<profile>.yaml`. Inline `profile_overrides` still
+work when `profiles_dir` is absent (backward compatible). File-based
+profiles take precedence when both are set.

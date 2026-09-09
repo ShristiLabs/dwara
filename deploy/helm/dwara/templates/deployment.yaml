@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dwara.fullname" . }}
+  namespace: {{ include "dwara.namespace" . }}
+  labels:
+    {{- include "dwara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  {{- if not .Values.hpa.enabled }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dwara.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dwara.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "dwara.fullname" . }}-controller
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: generated-config
+          emptyDir:
+            {{- if .Values.generatedConfig.sizeLimit }}
+            sizeLimit: {{ .Values.generatedConfig.sizeLimit }}
+            {{- end }}
+        {{- if .Values.gateway.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.gateway.tls.secretName }}
+        {{- end }}
+      containers:
+        - name: controller
+          image: {{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- with .Values.controller.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "dwara.fullname" . }}-controller-config
+          volumeMounts:
+            - name: generated-config
+              mountPath: {{ .Values.generatedConfig.mountPath }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: gateway
+          image: {{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          env:
+            - name: DWARA_CONFIG
+              value: {{ .Values.gateway.configPath | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.ports.http }}
+              protocol: TCP
+            - name: https
+              containerPort: {{ .Values.gateway.ports.https }}
+              protocol: TCP
+          volumeMounts:
+            - name: generated-config
+              mountPath: {{ .Values.generatedConfig.mountPath }}
+              readOnly: true
+            {{- if .Values.gateway.tls.enabled }}
+            - name: tls-certs
+              mountPath: {{ .Values.gateway.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20

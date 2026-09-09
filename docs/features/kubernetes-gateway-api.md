@@ -175,16 +175,16 @@ To earn the actual conformance badge:
 1. Deploy the controller + gateway to a Kubernetes cluster:
 
 ```sh
-kubectl apply -f deploy/k8s/namespace.yaml
-kubectl apply -f deploy/k8s/rbac.yaml
-kubectl apply -f deploy/k8s/gatewayclass.yaml
-kubectl apply -f deploy/k8s/configmap.yaml
-kubectl apply -f deploy/k8s/deployment.yaml
+kubectl apply -f deploy/k8s/base/
 ```
+
+Or use a Kustomize overlay (`deploy/k8s/overlays/<env>`) or the Helm
+chart (`deploy/helm/dwara`).
 
 2. Build the controller + gateway images with the `k8s` feature and push
    them to your registry. Update the image references in
-   `deploy/k8s/deployment.yaml`.
+   `deploy/k8s/base/deployment.yaml` (or via Helm values / Kustomize
+   `images:`).
 
 3. Clone the upstream Gateway API conformance suite:
 

@@ -148,6 +148,42 @@ requires building `dwara-cli` with the `k8s` feature
 published OSS binaries do not include it. See
 [Kubernetes Gateway API](./kubernetes-gateway-api).
 
+## `status`
+
+```sh
+dwara-cli status
+dwara-cli status --admin http://127.0.0.1:2019
+```
+
+Prints a one-shot snapshot of the running gateway: version, uptime,
+readiness, config generation and hash, per-upstream endpoint health,
+circuit-breaker states, active request count, and cache stats. The
+admin URL defaults to `DWARA_ADMIN` or `http://127.0.0.1:2019`.
+
+## `top`
+
+```sh
+dwara-cli top
+dwara-cli top --interval 2000
+```
+
+A live, refreshing view of upstream load-balancer state: algorithm,
+scheme, connections opened, requests sent, breaker state, and
+per-endpoint health and inflight counts. Refreshes every second
+(override with `--interval <ms>`) until interrupted with Ctrl-C.
+
+## `completions`
+
+```sh
+dwara-cli completions bash > /etc/bash_completion.d/dwara
+dwara-cli completions zsh  > ~/.zfunc/_dwara-cli
+dwara-cli completions fish > ~/.config/fish/completions/dwara-cli.fish
+dwara-cli completions powershell | Out-File dwara-cli.ps1
+```
+
+Generates a shell completion script for the `dwara-cli` command model.
+Supported shells: bash, zsh, fish, PowerShell.
+
 ## `dwara-loadgen`
 
 `dwara-loadgen` is a separate benchmarking binary shipped alongside
