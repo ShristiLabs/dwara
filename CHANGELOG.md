@@ -30,6 +30,20 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Config includes and profile files (#180, CFG-01): a config document
+  may carry a top-level `includes:` key listing file paths, directories,
+  or globs (relative to the config file's directory). Each is read,
+  recursively resolved, and merged into the base with conflict
+  detection (scalar keys set in both are an error; collection keys
+  replace). File-based profiles: `gateway.lifecycle.profiles.profiles_dir`
+  loads the selected profile's patch from `<profiles_dir>/<profile>.yaml`
+  instead of inline `profile_overrides` (backward compatible; file-based
+  takes precedence). The profile is selected via `DWARA_PROFILE` or the
+  new `--profile` flag on `validate`/`lint`. Preprocessing runs before
+  `parse_gateway`, so `includes:`/`profiles_dir` never reach the strict
+  schema. 13 unit tests cover includes, globs, conflict detection,
+  recursion, file-based profiles, inline profiles, and the combined
+  preprocess flow.
 - `dwara status` / `dwara top` + shell completions (#179, USA-02):
   three new `dwara-cli` subcommands. `status` prints a one-shot
   snapshot of the running gateway over the admin API (version, uptime,

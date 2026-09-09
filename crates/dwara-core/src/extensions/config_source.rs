@@ -27,6 +27,7 @@
 
 use async_trait::async_trait;
 
+use crate::config::includes;
 use crate::config::{parse_gateway, Gateway};
 
 use super::ExtensionsError;
@@ -60,6 +61,17 @@ impl ConfigSource for FileConfigSource {
         // already path-precise.
         let text = std::fs::read_to_string(&self.path)
             .map_err(|e| ExtensionsError::Io(format!("{}: {e}", self.path.display())))?;
+        // CFG-01 (#180): resolve `includes:` directives and apply the
+        // selected profile (from DWARA_PROFILE) before parsing. The
+        // base_dir is the config file's parent (relative include/profile
+        // paths resolve against it).
+        let base_dir = self
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let text =
+            includes::preprocess(&text, &base_dir, None).map_err(ExtensionsError::Invalid)?;
         parse_gateway(&text).map_err(ExtensionsError::from)
     }
 }

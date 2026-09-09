@@ -31,6 +31,7 @@
 pub mod ai;
 pub mod cache;
 pub mod credentials;
+pub mod includes;
 pub mod limits;
 pub mod mesh;
 pub mod net;
@@ -985,6 +986,14 @@ pub struct LifecycleProfilesConfig {
     /// base config when that profile is selected.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub profile_overrides: std::collections::BTreeMap<String, String>,
+    /// Directory of file-based profile patches (CFG-01, #180). When
+    /// set, the selected profile's patch is loaded from
+    /// `<profiles_dir>/<profile>.yaml` instead of the inline
+    /// `profile_overrides` map. Relative paths resolve against the
+    /// config file's directory. Takes precedence over
+    /// `profile_overrides` when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles_dir: Option<String>,
 }
 
 /// Journey recorder config (DW-110, `gateway.lifecycle.journey`).

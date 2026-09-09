@@ -56,6 +56,12 @@ enum Command {
     Validate {
         /// Path to the gateway YAML config.
         file: String,
+        /// Apply the named profile (CFG-01, #180) before validating.
+        /// Loads `<profiles_dir>/<profile>.yaml` when `profiles_dir` is
+        /// set, else the inline `profile_overrides` entry. Also resolves
+        /// `includes:` directives.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Normalize a config file in place.
     Fmt {
@@ -73,6 +79,9 @@ enum Command {
     Lint {
         /// Path to the gateway YAML config.
         file: String,
+        /// Apply the named profile (CFG-01, #180) before linting.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Print the JSON Schema of the gateway config.
     Schema,
@@ -336,23 +345,38 @@ fn main() {
                 }
             }
         }
-        Command::Validate { file } => match read(&file) {
+        Command::Validate { file, profile } => match read(&file) {
             Err(e) => {
                 eprintln!("{e}");
                 1
             }
-            Ok(text) => match dwara_cli::validate_config_text(&text) {
-                dwara_cli::ValidateOutcome::Valid { routes } => {
-                    println!("ok: {routes} routes");
-                    0
-                }
-                dwara_cli::ValidateOutcome::Invalid(issues) => {
-                    for i in issues {
-                        eprintln!("{i}");
+            Ok(text) => {
+                // CFG-01 (#180): resolve includes + profile before
+                // validating. The base_dir is the config file's parent.
+                let base_dir = std::path::Path::new(&file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                match dwara_core::config::includes::preprocess(&text, &base_dir, profile.as_deref())
+                {
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
                     }
-                    1
+                    Ok(text) => match dwara_cli::validate_config_text(&text) {
+                        dwara_cli::ValidateOutcome::Valid { routes } => {
+                            println!("ok: {routes} routes");
+                            0
+                        }
+                        dwara_cli::ValidateOutcome::Invalid(issues) => {
+                            for i in issues {
+                                eprintln!("{i}");
+                            }
+                            1
+                        }
+                    },
                 }
-            },
+            }
         },
         Command::Fmt { file } => match read(&file) {
             Err(e) => {
@@ -392,34 +416,48 @@ fn main() {
                 },
             }
         }
-        Command::Lint { file } => match read(&file) {
+        Command::Lint { file, profile } => match read(&file) {
             Err(e) => {
                 eprintln!("{e}");
                 1
             }
-            Ok(text) => match dwara_cli::validate_config_text(&text) {
-                dwara_cli::ValidateOutcome::Invalid(issues) => {
-                    for i in issues {
-                        eprintln!("{i}");
+            Ok(text) => {
+                // CFG-01 (#180): resolve includes + profile before linting.
+                let base_dir = std::path::Path::new(&file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                match dwara_core::config::includes::preprocess(&text, &base_dir, profile.as_deref())
+                {
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
                     }
-                    eprintln!("config is invalid; fix validation before linting");
-                    1
+                    Ok(text) => match dwara_cli::validate_config_text(&text) {
+                        dwara_cli::ValidateOutcome::Invalid(issues) => {
+                            for i in issues {
+                                eprintln!("{i}");
+                            }
+                            eprintln!("config is invalid; fix validation before linting");
+                            1
+                        }
+                        dwara_cli::ValidateOutcome::Valid { .. } => {
+                            let gateway =
+                                dwara_core::config::parse_gateway(&text).expect("validated above");
+                            let warnings = dwara_cli::lint_config(&gateway);
+                            for w in &warnings {
+                                eprintln!("warning: {w}");
+                            }
+                            if warnings.is_empty() {
+                                0
+                            } else {
+                                eprintln!("{} lint warning(s)", warnings.len());
+                                2
+                            }
+                        }
+                    },
                 }
-                dwara_cli::ValidateOutcome::Valid { .. } => {
-                    let gateway =
-                        dwara_core::config::parse_gateway(&text).expect("validated above");
-                    let warnings = dwara_cli::lint_config(&gateway);
-                    for w in &warnings {
-                        eprintln!("warning: {w}");
-                    }
-                    if warnings.is_empty() {
-                        0
-                    } else {
-                        eprintln!("{} lint warning(s)", warnings.len());
-                        2
-                    }
-                }
-            },
+            }
         },
         Command::Import { kind } => match kind {
             ImportKind::Openapi { spec, output } => match read(&spec) {

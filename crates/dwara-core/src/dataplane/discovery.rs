@@ -121,9 +121,8 @@ impl DnsResolver {
     pub fn new(name_servers: &[String]) -> Self {
         let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
         let servers: Vec<String> = if name_servers.is_empty() {
-            system_nameservers().unwrap_or_else(|| {
-                DEFAULT_NAMESERVERS.iter().map(|s| s.to_string()).collect()
-            })
+            system_nameservers()
+                .unwrap_or_else(|| DEFAULT_NAMESERVERS.iter().map(|s| s.to_string()).collect())
         } else {
             name_servers.to_vec()
         };
