@@ -1,0 +1,63 @@
+# Category 10: TLS & Transport.
+#
+# Starts the dwara gateway with three data-plane listeners plus the
+# mTLS-only admin API:
+#   - 8080  edge-http        plaintext HTTP (local tests / health checks)
+#   - 8443  edge-https      TLS terminate (multi-SNI + optional mTLS)
+#   - 8444  edge-passthrough TLS SNI passthrough (see dwara.yaml note)
+#   - 2019  admin            mTLS-only admin API
+#
+# Two upstreams share the default bridge network:
+#   - echo   (dwara-demo/echo)   reflects the request as JSON (HTTP only)
+#   - static (dwara-demo/static) serves demo HTML + JSON files (HTTP only)
+#
+# Certs are mounted read-only from ../_shared/certs.
+#
+#   docker compose up -d
+#   ./test-01-tls-terminate.sh   (and the other test-NN-*.sh scripts)
+#
+# The gateway image is the prebuilt `dwara:demo` (FROM scratch, static
+# musl binary). Scratch has no users, so the service injects the
+# nonroot UID 65532 via `user:`. A `build:` fallback is included so
+# `docker compose up` works even before the image is tagged.
+services:
+  dwara:
+    image: dwara:demo
+    build:
+      context: ../..
+      dockerfile: Dockerfile.scratch
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./data:/var/lib/dwara
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+      - "8444:8444"
+      - "2019:2019"
+    depends_on:
+      - echo
+      - static
+    networks:
+      - tls-net
+
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+      PORT: "8080"
+    networks:
+      - tls-net
+
+  static:
+    image: dwara-demo/static
+    networks:
+      - tls-net
+
+networks:
+  tls-net:
+    driver: bridge

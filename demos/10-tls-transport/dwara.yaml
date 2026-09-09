@@ -1,0 +1,163 @@
+# Category 10: TLS & Transport demo config.
+#
+# Exercises the OSS TLS and transport capabilities:
+#   - TLS termination with a fallback cert + multi-SNI SNI-scoped certs
+#   - Optional mTLS client-cert verification (client CA present)
+#   - SNI passthrough (configured but inert in this demo — see below)
+#   - HTTP/2 (negotiated via ALPN on the terminate listener)
+#   - PROXY protocol (documented; opt-in, not enabled here)
+#
+# Three data-plane listeners:
+#   - edge-http        (0.0.0.0:8080)  plaintext HTTP
+#   - edge-https       (0.0.0.0:8443)  TLS terminate, multi-SNI + mTLS
+#   - edge-passthrough (0.0.0.0:8444)  TLS SNI passthrough
+#
+# No authentication is required on any route (auth_required defaults to
+# false); this demo focuses purely on transport-layer behavior.
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP listener (for local dev / health checks).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+  # TLS-terminated HTTPS listener: the primary entry point.
+  # The single cert_file/key_file pair is the fallback for unmatched
+  # SNI; the `certificates` list serves SNI-scoped pairs (multi-SNI).
+  # client_ca_file requests + verifies a client certificate (mTLS);
+  # a connection without a cert is still accepted (no credential is
+  # required here), but an unverified cert fails the handshake.
+  - name: edge-https
+    address: 0.0.0.0
+    port: 8443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/certs/server.crt
+      key_file: /etc/dwara/certs/server.key
+      certificates:
+        - server_names:
+            - api.example.com
+          cert_file: /etc/dwara/certs/server.crt
+          key_file: /etc/dwara/certs/server.key
+      client_ca_file: /etc/dwara/certs/client-ca.crt
+
+  # SNI passthrough listener: the gateway peeks the TLS ClientHello
+  # SNI and splices the raw TLS stream byte-for-byte to the upstream
+  # matched by `sni_routes`. Passthrough does NOT terminate TLS, so
+  # the upstream must speak TLS itself.
+  #
+  # LIMITATION: the echo and static demo upstreams are HTTP only, so a
+  # real client TLS handshake through this listener cannot complete
+  # (the spliced bytes hit a plaintext HTTP server). The listener is
+  # configured here to demonstrate the SNI-passthrough config shape;
+  # the live test (test-03-sni-passthrough.sh) documents this and
+  # skips the actual connection. To exercise passthrough end to end,
+  # point an sni_route at an HTTPS upstream (e.g. an nginx with TLS).
+  - name: edge-passthrough
+    address: 0.0.0.0
+    port: 8444
+    protocol: https
+    tls:
+      mode: passthrough
+      sni_routes:
+        - server_names:
+            - api.example.com
+          upstream: echo-upstream
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # Echo API: prefix match, strip the prefix before proxying.
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  # Static site: exact match on the root path.
+  - name: static-route
+    service: static-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: proxy
+
+  # Health check: respond directly (no upstream dial).
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow

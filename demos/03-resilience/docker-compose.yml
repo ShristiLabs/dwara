@@ -1,0 +1,67 @@
+# Category 03: Traffic Policy & Resilience.
+#
+# Starts the dwara gateway (HTTP on :8080) plus the upstream services
+# needed to exercise passive/active health, circuit breaking, retries,
+# hedging, timeouts, load shedding, fault injection, mirroring, and
+# maintenance mode.
+#
+#   docker compose up
+#   ./test-01-passive-health.sh   # (and the other test-*.sh scripts)
+#
+# All services share the default docker network so the gateway can
+# reach every upstream by service name (echo, echo2, flaky, slow, mirror).
+#
+# The gateway image (dwara:demo) and the upstream images
+# (dwara-demo/echo, dwara-demo/flaky, dwara-demo/slow) are pre-built by
+# demos/_shared/docker-compose.yml. Build them first if missing:
+#   docker compose -f ../_shared/docker-compose.yml build
+services:
+  dwara:
+    image: dwara:demo
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      # State store: SQLite DB for consumer quotas and runtime state.
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ./data:/var/lib/dwara
+    ports:
+      # Plaintext HTTP entry point (all demo test scripts hit this).
+      - "8080:8080"
+    depends_on:
+      - echo
+      - echo2
+      - flaky
+      - slow
+      - mirror
+
+  # Primary healthy echo upstream.
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+
+  # Second healthy echo upstream (gives the healthy pool two endpoints).
+  echo2:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo2
+
+  # Flaky upstream: /flaky/<pct> returns 500 on <pct>% of requests.
+  flaky:
+    image: dwara-demo/flaky
+    environment:
+      INSTANCE_NAME: flaky
+
+  # Slow upstream: /slow/<ms> delays <ms> before responding.
+  slow:
+    image: dwara-demo/slow
+    environment:
+      INSTANCE_NAME: slow
+
+  # Mirror target: receives shadow traffic from the mirror-test route.
+  mirror:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: mirror

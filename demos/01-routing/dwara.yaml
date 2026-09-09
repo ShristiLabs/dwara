@@ -1,0 +1,209 @@
+# Category 01: Core Gateway & Routing
+#
+# Demonstrates every routing match type and action the gateway supports:
+#   - exact match        (healthz, mock-api, static-demo)
+#   - prefix match       (api-v1, versioned-api, method-test, legacy-redirect)
+#   - regex match        (users-by-id)
+#   - respond action     (healthz)
+#   - proxy action       (api-v1, users-by-id, static-demo, method-test, versioned-api)
+#   - redirect action    (legacy-redirect)
+#   - mock action        (mock-api)
+#   - path rewrite       (strip_prefix on /v1/ routes)
+#   - method allowlist   (method-test: GET/POST only -> 405 for others)
+#   - api deprecation     (versioned-api: Deprecation + Sunset headers)
+#
+# Route precedence: exact beats regex beats longest-prefix. Equal-length
+# prefix ties go to the first-declared route. See the snapshot module docs
+# for the full canonical spec.
+#
+# No auth is required (auth_required: false on every route) so the demos
+# focus purely on routing. The listener is plaintext HTTP on :8080; TLS
+# demos live in Category 10.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # --- Exact: health check (respond directly, no upstream contact) ---
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+    auth_required: false
+
+  # --- Exact: mock response with simulated latency ---
+  # The service is required by the schema but a mock route never dials it.
+  - name: mock-api
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /v1/mock
+    action:
+      type: mock
+      status: 200
+      body: '{"mock": true}'
+      headers:
+        Content-Type: application/json
+      delay_ms: 50
+    auth_required: false
+
+  # --- Exact: serve the static index page ---
+  - name: static-demo
+    service: static-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: proxy
+    auth_required: false
+
+  # --- Regex: path-parameter matching (/v1/users/<id>) ---
+  # Regex beats prefix, so /v1/users/42 resolves here, not to the /v1/
+  # prefix routes below.
+  - name: users-by-id
+    service: echo-service
+    match:
+      path:
+        type: regex
+        value: /v1/users/[^/]+
+    action:
+      type: proxy
+    auth_required: false
+
+  # --- Prefix: versioned API with deprecation headers ---
+  # Declared BEFORE api-v1 so it wins the equal-length prefix tie for
+  # /v1/ paths. Emits Deprecation + Sunset headers on every response.
+  # strip_prefix rewrites /v1/test -> /test before proxying to echo.
+  - name: versioned-api
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    deprecation:
+      since: Wed, 01 Jan 2025 00:00:00 GMT
+      sunset: Fri, 01 Jan 2027 00:00:00 GMT
+    auth_required: false
+
+  # --- Prefix: generic v1 API (same prefix, declared after versioned-api) ---
+  # Shadowed by versioned-api for /v1/ paths (equal-length tie, first
+  # declared wins). Kept to show the base config shape without deprecation.
+  - name: api-v1
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    auth_required: false
+
+  # --- Prefix: method allowlist (GET/POST only, 405 for others) ---
+  # /v1/methods (length 11) is a longer prefix than /v1/ (length 3 after
+  # trimming the trailing slash), so it wins for /v1/methods paths.
+  - name: method-test
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/methods
+    action:
+      type: proxy
+    methods:
+      - GET
+      - POST
+    auth_required: false
+
+  # --- Prefix: legacy redirect (301 to /v1/) ---
+  - name: legacy-redirect
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /old
+    action:
+      type: redirect
+      path: /v1/
+      status: 301
+    auth_required: false
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80

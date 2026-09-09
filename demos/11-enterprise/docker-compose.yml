@@ -1,0 +1,58 @@
+# Category 11: Enterprise Features
+#
+# Demonstrates the enterprise feature surface of dwara using the OSS
+# edition image (dwara:demo). The enterprise edition (built from
+# Dockerfile.ent with the `ent` cargo feature) adds CP/DP split,
+# distributed cache, Redis-backed rate limiters, Vault/KMS secrets,
+# workspace RBAC, federated analytics, credential pools, service mesh,
+# and licensing. This demo documents each feature and verifies the
+# OSS-equivalent behavior the gateway provides today.
+#
+# The gateway runs on HTTP :8080 with an mTLS admin API on :2019.
+# Two upstreams (echo + static) provide test targets. The config at
+# ./dwara.yaml includes enterprise-adjacent config blocks that are
+# accepted-but-inert in the OSS build (redis_rate_limiter,
+# config_convergence, license) so the config SHAPE is visible even
+# though the features are not active without the ent build + a license.
+#
+#   docker compose up -d
+#   ./test-01-cp-dp-split.sh   (and the other test-NN-*.sh scripts)
+#
+# The gateway image is the prebuilt `dwara:demo` (FROM scratch, static
+# musl binary, OSS edition). Scratch has no users, so the service
+# injects the nonroot UID 65532 via `user:`. See the enterprise
+# quickstart at quickstart/enterprise/ for the full CP/DP split topology
+# (controller + edge + gateway, built from Dockerfile.ent).
+services:
+  dwara:
+    image: dwara:demo
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./data:/var/lib/dwara
+    ports:
+      # Plaintext HTTP (the primary entry point).
+      - "8080:8080"
+      # mTLS-only admin API: GET/PATCH /config, /health, /stats.
+      # Requires a client cert signed by ../_shared/certs/client-ca.crt:
+      #   curl --cert ../_shared/certs/client.crt \
+      #     --key ../_shared/certs/client.key \
+      #     --cacert ../_shared/certs/server.crt \
+      #     https://localhost:2019/health
+      - "2019:2019"
+    depends_on:
+      - echo
+      - static
+
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+      PORT: "8080"
+
+  static:
+    image: dwara-demo/static

@@ -1,0 +1,59 @@
+# Category 05: Request/Response Processing.
+#
+# Starts the dwara gateway plus three upstreams: an echo server that
+# reflects the incoming request as JSON (used to verify request
+# transforms), a static nginx server serving JSON/HTML files (used for
+# compression and caching demos), and a WebSocket echo server. All
+# services share a single docker network so the gateway can reach
+# upstreams by service name.
+#
+#   docker compose up -d
+#   ./test-01-header-transforms.sh
+#
+# The gateway image is built from the repo-root Dockerfile.scratch
+# (static musl binary on FROM scratch). Scratch has no users, so the
+# service injects the nonroot UID 65532 via `user:` (same UID the
+# distroless variant bakes in).
+services:
+  dwara:
+    image: dwara:demo
+    build:
+      context: ../..
+      dockerfile: Dockerfile.scratch
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./data:/var/lib/dwara
+    ports:
+      - "8080:8080"
+    depends_on:
+      - echo
+      - static
+      - ws-echo
+    networks:
+      - rr-net
+
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+    networks:
+      - rr-net
+
+  static:
+    image: dwara-demo/static
+    networks:
+      - rr-net
+
+  ws-echo:
+    image: dwara-demo/ws-echo
+    networks:
+      - rr-net
+
+networks:
+  rr-net:
+    driver: bridge

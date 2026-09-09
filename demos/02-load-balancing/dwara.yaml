@@ -1,0 +1,202 @@
+# Category 02: Load Balancing & Upstream Management.
+#
+# Five load-balancer strategies (round-robin, least-requests, IP-hash,
+# peak-EWMA, sticky sessions) plus a weighted traffic split, each
+# exposed on its own /lb/<strategy>/ prefix. No auth is required so the
+# test scripts can exercise the pools with a plain curl.
+#
+# Upstream endpoints use docker service names (echo-a, echo-b, echo-c,
+# slow) as addresses; the compose network resolves them.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  - name: lb-round-robin
+    service: rr-service
+    match:
+      path:
+        type: prefix
+        value: /lb/rr/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: lb-least-requests
+    service: lr-service
+    match:
+      path:
+        type: prefix
+        value: /lb/lr/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: lb-ip-hash
+    service: ip-hash-service
+    match:
+      path:
+        type: prefix
+        value: /lb/hash/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: lb-peak-ewma
+    service: ewma-service
+    match:
+      path:
+        type: prefix
+        value: /lb/ewma/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: lb-sticky
+    service: sticky-service
+    match:
+      path:
+        type: prefix
+        value: /lb/sticky/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: lb-traffic-split
+    service: split-service
+    match:
+      path:
+        type: prefix
+        value: /lb/split/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: rr-service
+    upstream: rr-pool
+
+  - name: lr-service
+    upstream: lr-pool
+
+  - name: ip-hash-service
+    upstream: ip-hash-pool
+
+  - name: ewma-service
+    upstream: ewma-pool
+
+  - name: sticky-service
+    upstream: sticky-pool
+    sticky:
+      cookie: dwara-affinity
+      ttl_s: 3600
+
+  - name: split-service
+    split:
+      targets:
+        - upstream: rr-pool
+          weight: 90
+        - upstream: lr-pool
+          weight: 10
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  # Round-robin pool: equal-weight echo-a/b/c.
+  - name: rr-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo-a
+        port: 8080
+        weight: 1
+      - address: echo-b
+        port: 8080
+        weight: 1
+      - address: echo-c
+        port: 8080
+        weight: 1
+
+  # Least-requests pool: equal-weight echo-a/b/c.
+  - name: lr-pool
+    load_balancer: least_requests
+    protocol: http1
+    endpoints:
+      - address: echo-a
+        port: 8080
+        weight: 1
+      - address: echo-b
+        port: 8080
+        weight: 1
+      - address: echo-c
+        port: 8080
+        weight: 1
+
+  # IP-hash pool: equal-weight echo-a/b/c. Same client IP maps to the
+  # same endpoint, so a single-source test sees one instance.
+  - name: ip-hash-pool
+    load_balancer: ip_hash
+    protocol: http1
+    endpoints:
+      - address: echo-a
+        port: 8080
+        weight: 1
+      - address: echo-b
+        port: 8080
+        weight: 1
+      - address: echo-c
+        port: 8080
+        weight: 1
+
+  # Peak-EWMA pool: echo-a (fast) and slow (adds ~200ms delay). The
+  # latency-aware balancer should skew traffic toward echo-a.
+  - name: ewma-pool
+    load_balancer: peak_ewma
+    protocol: http1
+    endpoints:
+      - address: echo-a
+        port: 8080
+        weight: 1
+      - address: slow
+        port: 8080
+        weight: 1
+    peak_ewma:
+      decay_ms: 10000
+      default_rtt_ms: 250
+
+  # Sticky-session pool: echo-a and echo-b. The sticky-service attaches
+  # a dwara-affinity cookie so repeat requests from the same client
+  # pin to the same endpoint.
+  - name: sticky-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo-a
+        port: 8080
+        weight: 1
+      - address: echo-b
+        port: 8080
+        weight: 1

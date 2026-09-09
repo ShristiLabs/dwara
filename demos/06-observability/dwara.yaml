@@ -1,0 +1,188 @@
+# Category 06: Observability & Analytics demo config.
+#
+# Exercises every OSS observability and analytics capability:
+#   - Prometheus /metrics endpoint (counters, histograms, SLO burn rate)
+#   - X-Request-Id propagation (inbound respected, outbound echoed)
+#   - Structured access logs (emitted to the gateway's stdout/docker logs)
+#   - Embedded analytics store (SQLite) with 1m/5m/1h/1d rollups + retention
+#   - Custom request-header dimensions (X-API-Version, X-Client-Type)
+#   - Live in-process sketches (sub-second freshness)
+#   - ML traffic insights (forecast + seasonal-baseline anomaly detection)
+#   - Scheduled usage-report exports (csv + json, daily)
+#   - Real-time analytics stream (NDJSON firehose to the webhook receiver)
+#   - Alert/event webhooks (breaker, ejection, config publish/reject)
+#
+# One plaintext HTTP listener on :8080. The admin API on :2019 is
+# mTLS-only (server cert + client CA). No authentication is required
+# on the data plane so the test scripts can drive traffic with plain
+# curl.
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP listener (the data-plane entry point).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # Plain echo route: proxies to the echo upstream, stripping the
+  # /v1/echo/ prefix. No SLO attached (used for baseline traffic).
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+
+  # SLO-instrumented route: same upstream, but carries availability +
+  # latency objectives. The gateway exports per-route SLO burn-rate
+  # and target gauges on /metrics (dwara_slo_burn_rate, dwara_slo_target).
+  - name: slo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/slo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+    slo:
+      availability: 99.9
+      latency_ms: 500
+      latency_target: 95
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Analytics (embedded SQLite store)
+# ---------------------------------------------------------------------------
+
+analytics:
+  path: /var/lib/dwara/analytics.db
+  # Fast flush cadence so test scripts see data within ~2s.
+  flush_ms: 100
+  # Custom dimensions: request-header-sourced tags that become
+  # analytics dimensions, queryable via POST /analytics/dimensions.
+  dimensions:
+    - name: api_version
+      header: X-API-Version
+    - name: client_type
+      header: X-Client-Type
+  # Per-store retention (raw 1d, 1m 2d, 5m 7d, 1h 30d, 1d 90d).
+  retention:
+    raw_ms: 86400000
+    m1_ms: 172800000
+    m5_ms: 604800000
+    h1_ms: 2592000000
+    d1_ms: 7776000000
+  # Live in-process sketches: sub-second-freshness per-route rolling
+  # window, queried via GET /analytics/live.
+  live_sketches:
+    enabled: true
+    freshness_target_ms: 500
+  # ML traffic insights: EWMA capacity forecasting + seasonal-baseline
+  # anomaly detection, queried via GET /analytics/forecast and
+  # GET /analytics/anomalies.
+  insights:
+    forecast: true
+    anomaly_baseline: true
+    baseline_windows: 1440
+  # Scheduled usage-report exports (csv + json, daily window).
+  exports:
+    directory: /var/lib/dwara/exports
+    formats:
+      - csv
+      - json
+    window: daily
+
+# ---------------------------------------------------------------------------
+# Real-time analytics stream (NDJSON firehose to a webhook sink)
+# ---------------------------------------------------------------------------
+
+# Streams every access record as NDJSON to the webhook-receiver's
+# /analytics endpoint. Fire-and-forget; never blocks the dataplane.
+analytics_stream:
+  sink:
+    type: webhook
+    url: http://webhook-receiver:8080/analytics
+    timeout_ms: 5000
+    max_attempts: 3
+    backoff_base_ms: 100
+    backoff_cap_ms: 1000
+  flush_ms: 1000
+  batch_max: 512
+  buffer: 8192
+
+# ---------------------------------------------------------------------------
+# Alert/event webhooks
+# ---------------------------------------------------------------------------
+
+# Delivers breaker transitions, endpoint ejection/recovery, and config
+# publish/reject events to the webhook-receiver's /events endpoint.
+webhooks:
+  - url: http://webhook-receiver:8080/events
+    events:
+      - breaker_opened
+      - breaker_closed
+      - endpoint_ejected
+      - endpoint_recovered
+      - config_published
+      - config_rejected
+    timeout_ms: 5000
+    max_attempts: 3
+    backoff_base_ms: 100
+    backoff_cap_ms: 1000
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow

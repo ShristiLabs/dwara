@@ -1,0 +1,224 @@
+# Category 05: Request/Response Processing.
+#
+# Seven routes, each exercising a different request/response processing
+# capability: header & query transforms, security-header injection, CORS,
+# response compression, response caching, response field masking, and
+# WebSocket proxying. No auth is required so the test scripts can exercise
+# the routes with a plain curl.
+#
+# Upstream endpoints use docker service names (echo, static, ws-echo) as
+# addresses; the compose network resolves them.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # --- Header & query transforms: set/add/remove headers on the
+  #     forwarded request and set headers on the returned response.
+  - name: transforms-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/transforms/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    transforms:
+      request:
+        headers:
+          set:
+            X-Forwarded-By: dwara
+            X-Request-Source: demo
+          add:
+            X-Gateway-Version: v1
+          remove:
+            - X-Internal-Token
+        query:
+          add:
+            source: gateway
+      response:
+        headers:
+          set:
+            X-Served-By: dwara-demo
+
+  # --- Security-header injection: HSTS, nosniff, CSP, X-Frame-Options
+  #     stamped on every response.
+  - name: security-headers-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/secure/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    security_headers:
+      hsts_max_age_secs: 31536000
+      hsts_include_subdomains: true
+      nosniff: true
+      frame_options: deny
+      content_security_policy: "default-src 'self'"
+
+  # --- CORS: preflight handling + actual-response headers.
+  - name: cors-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/cors/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    cors:
+      allowed_origins:
+        - "https://app.example.com"
+      allowed_methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+      allowed_headers:
+        - Content-Type
+        - Authorization
+      expose_headers:
+        - X-Request-Id
+      allow_credentials: true
+      max_age_secs: 3600
+
+  # --- Response compression: negotiate gzip/brotli for large
+  #     text/JSON responses from the static upstream.
+  - name: compression-route
+    service: static-service
+    match:
+      path:
+        type: prefix
+        value: /v1/compress/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    compression:
+      algorithms:
+        - gzip
+        - brotli
+      min_size: 100
+      content_types:
+        - text/
+        - application/json
+
+  # --- Response caching: TTL + stale-while-revalidate + vary +
+  #     request coalescing (collapse concurrent identical GETs).
+  - name: cache-route
+    service: static-service
+    match:
+      path:
+        type: prefix
+        value: /v1/cache/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    cache:
+      ttl_secs: 60
+      stale_while_revalidate_secs: 300
+      max_body_bytes: 1048576
+      vary:
+        - accept
+        - accept-encoding
+      coalescing:
+        wait_ms: 5000
+
+  # --- Response field masking: fail-closed redaction of sensitive
+  #     JSON fields. The echo upstream reflects the request (not a
+  #     response carrying password/secret fields), so masking is
+  #     configured here for completeness but is best verified against
+  #     a JSON API upstream that returns sensitive fields.
+  - name: masking-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/mask/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    masking:
+      max_bytes: 1048576
+      fields:
+        - /password
+        - /secret
+
+  # --- WebSocket proxying with origin check + frame-rate limit.
+  - name: ws-route
+    service: ws-service
+    match:
+      path:
+        type: prefix
+        value: /ws
+    action:
+      type: proxy
+    websocket:
+      origins:
+        - "https://app.example.com"
+      max_frames_per_sec: 100
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+  - name: ws-service
+    upstream: ws-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  # Echo upstream: reflects the request as JSON so test scripts can
+  # verify what the gateway forwarded (headers, query, body).
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  # Static upstream: nginx serving index.html and api/*.json files,
+  # used for compression and caching demos.
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+  # WebSocket echo upstream: echoes back any message received.
+  - name: ws-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: ws-echo
+        port: 8080

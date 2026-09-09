@@ -1,0 +1,190 @@
+# Category 08: Extensibility
+#
+# Demonstrates dwara's extensibility surface:
+#   - Native plugin filters (NativeFilter trait, `plugins` cargo feature)
+#   - Proxy-Wasm (WebAssembly) plugins (`wasm` cargo feature)
+#   - CEL (Common Expression Language) matching/transforms (`cel` feature)
+#   - Nano-services (WASM route handlers, `nano_services` feature)
+#
+# The config schema ACCEPTS the `plugins` top-level block and the
+# `nano_service` route action regardless of which cargo features are
+# compiled in (so configs round-trip without the features). When the
+# features are OFF (the default `dwara:demo` build), the blocks are
+# accepted but inert: plugins are not instantiated, nano-service
+# routes return 502, and CEL fields (where wired) are no-ops.
+#
+# This config includes the `plugins` block with example native and
+# WASM plugin definitions (commented, since the default build is inert)
+# and a working set of proxy routes so the gateway starts and serves
+# traffic. The test scripts document each extensibility mechanism and
+# verify the gateway proxies correctly with the default build.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # --- Health check (respond directly, no upstream contact) ---
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+    auth_required: false
+
+  # --- Echo route: prefix match with strip_prefix rewrite ---
+  # /v1/echo/test -> /test on the echo upstream.
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+    # Plugin attachment (DW-055): uncomment to attach a plugin defined
+    # in the top-level `plugins` list. Requires the `wasm` cargo
+    # feature for WASM plugins or the `plugins` feature for native
+    # filters. With the default build (no features), this list is
+    # accepted but the plugins are not instantiated.
+    # plugins:
+    #   - example-native-filter
+    #   - example-wasm-plugin
+
+  # --- Static route: serve the index page (exact /) ---
+  - name: static-route
+    service: static-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: proxy
+    auth_required: false
+
+  # --- Nano-service route (DW-106, commented) ---
+  # A nano-service route runs a WASM module that generates the response
+  # directly instead of proxying to an upstream. Requires the
+  # `nano_services` cargo feature (which pulls in `wasm`). With the
+  # default build, the action is accepted but inert (the route returns
+  # 502). Uncomment and supply a real .wasm module path to test with a
+  # feature-enabled build.
+  # - name: nano-hello
+  #   service: echo-service
+  #   match:
+  #     path:
+  #       type: exact
+  #       value: /nano/hello
+  #   action:
+  #     type: nano_service
+  #     module: /etc/dwara/plugins/hello.wasm
+  #     memory_limit: 1048576
+  #     execution_timeout_ms: 100
+  #   auth_required: false
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+# ---------------------------------------------------------------------------
+# Plugins (DW-055 / DW-119, commented)
+# ---------------------------------------------------------------------------
+# The top-level `plugins` list defines proxy-wasm modules and native
+# filters. Each plugin declares its phases and optional config. Routes
+# reference plugins by name via their `plugins` field.
+#
+# Requires the `wasm` cargo feature for WASM plugins or the `plugins`
+# feature for native filters. The default `dwara:demo` build has
+# neither, so this block is commented to avoid referencing .wasm files
+# that are not present in the image. Uncomment and supply real paths
+# to test with a feature-enabled build.
+#
+# plugins:
+#   # Native filter (DW-119): a compile-in Rust filter registered at
+#   # startup. Requires the `plugins` cargo feature and a factory
+#   # registered under this name.
+#   - name: example-native-filter
+#     native: request_id_injector
+#     phases:
+#       - request_headers
+#       - response_headers
+#     config: '{"header_name": "X-Request-Id"}'
+#
+#   # Proxy-Wasm plugin (DW-055): a .wasm module loaded at startup.
+#   # Requires the `wasm` cargo feature. Community Kong/Envoy filters
+#   # run unmodified.
+#   - name: example-wasm-plugin
+#     wasm: /etc/dwara/plugins/filter.wasm
+#     phases:
+#       - request_headers
+#       - request_body
+#       - response_headers
+#       - response_body
+#     config: '{"mode": "observe"}'
+#     limits:
+#       fuel: 1000000
+#       memory_mb: 32
+#       timeout_ms: 100
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt

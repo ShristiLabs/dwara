@@ -1,0 +1,284 @@
+# Category 07: AI Gateway demo config.
+#
+# Exercises the dwara AI gateway (DW-075 through DW-087): provider
+# adapters (OpenAI / Anthropic), model aliasing, failover chains,
+# weighted canary splits, per-model pricing, token budgets, model
+# governance (team allowlists), prompt/response guardrails, prompt
+# logging with redaction, and the MCP gateway.
+#
+# One listener:
+#   - edge-http (0.0.0.0:8080) plaintext HTTP for local tests
+#
+# The mock providers (ai-mock, ai-mock-2) are OpenAI-compatible: they
+# echo the model name back in the response and return canned content.
+# Special model names trigger 429 (rate-limit-test) / 500 (error-test)
+# so failover and circuit-breaker paths are exercisable without real
+# provider accounts.
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # AI chat-completions route. The `ai` action hands the request to the
+  # AI provider-adapter pipeline: alias resolution, governance, guard
+  # rails, budget, then provider transport (the provider's upstream,
+  # not the service's upstream, carries the call).
+  - name: ai-chat
+    service: ai-service
+    match:
+      path:
+        type: exact
+        value: /v1/chat/completions
+      methods:
+        - POST
+    action:
+      type: ai
+    auth_required: true
+    policies:
+      - ai-budget
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  # The service upstream is NOT dialed for AI routes (the provider's
+  # upstream is used instead), but the service is required by the
+  # schema. It points at the primary mock provider for completeness.
+  - name: ai-service
+    upstream: ai-primary
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  # Primary AI provider transport (the `openai` provider adapter).
+  - name: ai-primary
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: ai-mock
+        port: 8080
+
+  # Secondary AI provider transport (the `anthropic` provider adapter);
+  # the failover and canary targets.
+  - name: ai-secondary
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: ai-mock-2
+        port: 8080
+
+# ---------------------------------------------------------------------------
+# Consumers (authentication identities)
+# ---------------------------------------------------------------------------
+
+consumers:
+  - name: demo-user
+    type: user
+    credentials:
+      - type: api_key
+        key: demo-ai-key
+    # Per-consumer AI token budget (DW-078).
+    token_budget:
+      tokens_per_min: 100000
+      cost_per_day_micros: 1000000
+      scope: consumer
+    # Opt this consumer into prompt/response logging capture.
+    ai_logging: true
+
+# ---------------------------------------------------------------------------
+# Policies (reusable rule bundles)
+# ---------------------------------------------------------------------------
+
+policies:
+  # Policy-level AI token budget (composed with the consumer budget;
+  # deny-wins intersection, same resolution order as rate limiting).
+  - name: ai-budget
+    token_budget:
+      tokens_per_min: 200000
+      cost_per_day_micros: 5000000
+      scope: policy
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow
+
+# ---------------------------------------------------------------------------
+# Analytics store (required for prompt logging, DW-081)
+# ---------------------------------------------------------------------------
+
+analytics:
+  path: /var/lib/dwara/analytics.db
+  flush_ms: 1000
+
+# ---------------------------------------------------------------------------
+# AI gateway
+# ---------------------------------------------------------------------------
+
+ai:
+  # Provider pool: each entry names an upstream that carries the
+  # transport and the wire-protocol adapter kind.
+  providers:
+    - name: openai
+      kind: openai
+      upstream: ai-primary
+      auth:
+        header: Authorization
+        value: "Bearer sk-demo-key"
+    - name: anthropic
+      kind: anthropic
+      upstream: ai-secondary
+      auth:
+        header: x-api-key
+        value: "sk-demo-key"
+
+  # Model alias table: the `model` value in a client request maps to
+  # a provider + provider's own model identifier.
+  models:
+    # Simple alias: one provider, one model.
+    gpt-4o-mini:
+      provider: openai
+      provider_model: gpt-4o-mini
+    # Failover chain: try primary, fall back on 429/5xx.
+    gpt-4o:
+      provider: openai
+      provider_model: gpt-4o
+      failover:
+        - provider: anthropic
+          provider_model: claude-sonnet-4-5
+    # Weighted canary: split traffic across versions. 90% stable
+    # (openai/gpt-4o), 10% canary (anthropic/claude-sonnet-4-5).
+    gpt-4o-canary:
+      provider: openai
+      provider_model: gpt-4o
+      canary:
+        - version: stable
+          weight: 90
+          provider: openai
+          provider_model: gpt-4o
+        - version: canary
+          weight: 10
+          provider: anthropic
+          provider_model: claude-sonnet-4-5
+    # Failover under 429: the primary model returns 429 (the mock's
+    # rate-limit-test behavior), so the gateway falls over to the
+    # anthropic provider's gpt-4o-mini.
+    rate-limit-test:
+      provider: openai
+      provider_model: rate-limit-test
+      failover:
+        - provider: anthropic
+          provider_model: gpt-4o-mini
+
+  # Per-model pricing table: micro-USD per 1K tokens (DW-079).
+  pricing:
+    gpt-4o:
+      input_per_1k_micros: 250
+      output_per_1k_micros: 1000
+    gpt-4o-mini:
+      input_per_1k_micros: 15
+      output_per_1k_micros: 60
+    claude-sonnet-4-5:
+      input_per_1k_micros: 300
+      output_per_1k_micros: 1500
+
+  # Model governance: per-team model allowlists + shadow audit (DW-084).
+  # The `ai-budget` policy (attached to the demo-user consumer via the
+  # route) restricts its models to the allowlist below. Any other alias
+  # (e.g. claude-sonnet-4-5) is blocked at the edge with 403 before
+  # routing. The failover and canary test aliases are admitted so their
+  # paths exercise the provider pipeline rather than the governance
+  # gate.
+  governance:
+    audit: true
+    team_allowlists:
+      ai-budget:
+        - gpt-4o-mini
+        - gpt-4o
+        - gpt-4o-canary
+        - rate-limit-test
+
+  # Guardrails: prompt-injection / PII checks (DW-082). A `block` action
+  # rejects the request with 400 `guardrail_blocked`; a `redact` action
+  # scrubs the matched content before the provider call.
+  guardrails:
+    rules:
+      - name: block-injection
+        kind: injection
+        action: block
+        phase: prompt
+        patterns:
+          - "(?i)ignore.*instructions"
+      - name: redact-pii
+        kind: pii
+        action: redact
+        phase: both
+
+  # Prompt/response logging: opt-in capture with redaction (DW-081).
+  # Sample every request (1.0) for the demo; retain 7 days. The
+  # 16-digit pattern scrubs card numbers to [REDACTED].
+  logging:
+    enabled: true
+    sample_rate: 1.0
+    retention_secs: 604800
+    redaction:
+      patterns:
+        - "[0-9]{16}"
+      replacement: "[REDACTED]"
+
+  # MCP gateway (DW-087): turns dwara into an MCP server that routes
+  # tool calls to upstreams. The tool table maps tool names to
+  # upstreams; the gateway translates MCP JSON-RPC calls into HTTP
+  # requests to the configured upstream. The /mcp path shadows any
+  # configured route (checked before route resolution).
+  mcp:
+    path: /mcp
+    tools:
+      search_docs:
+        description: Search the documentation
+        upstream: ai-primary
+        input_schema:
+          type: object
+          properties:
+            query:
+              type: string
+          required:
+            - query
+      get_status:
+        description: Get the system status
+        upstream: ai-primary
+        input_schema:
+          type: object
+    sessions:
+      ttl_secs: 3600
+      max_concurrent: 1000

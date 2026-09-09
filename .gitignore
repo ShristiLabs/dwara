@@ -41,3 +41,4 @@ docs-site/.vitepress/dist/
 # them; each build regenerates them.
 crates/dwara-ebpf/Cargo.lock
 crates/dwara-uring/Cargo.lock
+demos/*/data/

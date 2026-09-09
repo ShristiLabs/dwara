@@ -1,0 +1,52 @@
+# Shared upstream services for dwara demos.
+# Build all upstream images: docker compose -f docker-compose.yml build
+# This file is NOT meant to be run directly — each demo category has
+# its own docker-compose.yml that references these images.
+services:
+  echo:
+    build: ./upstreams/echo
+    image: dwara-demo/echo
+    ports:
+      - "19000:8080"
+    environment:
+      INSTANCE_NAME: echo
+
+  flaky:
+    build: ./upstreams/flaky
+    image: dwara-demo/flaky
+    ports:
+      - "19001:8080"
+    environment:
+      INSTANCE_NAME: flaky
+
+  slow:
+    build: ./upstreams/slow
+    image: dwara-demo/slow
+    ports:
+      - "19002:8080"
+    environment:
+      INSTANCE_NAME: slow
+
+  static:
+    build: ./upstreams/static
+    image: dwara-demo/static
+    ports:
+      - "19003:80"
+
+  ws-echo:
+    build: ./upstreams/ws-echo
+    image: dwara-demo/ws-echo
+    ports:
+      - "19004:8080"
+
+  ai-mock:
+    build: ./upstreams/ai-mock
+    image: dwara-demo/ai-mock
+    ports:
+      - "19005:8080"
+
+  webhook-receiver:
+    build: ./upstreams/webhook-receiver
+    image: dwara-demo/webhook-receiver
+    ports:
+      - "19006:8080"

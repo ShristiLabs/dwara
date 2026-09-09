@@ -1,0 +1,41 @@
+# Category 01: Core Gateway & Routing
+#
+# Starts the dwara gateway (HTTP, no TLS) plus two upstreams:
+#   - echo   (dwara-demo/echo)   reflects the request as JSON
+#   - static (dwara-demo/static) serves demo HTML + JSON files
+#
+# All three services share the default bridge network so the gateway
+# can reach the upstreams by service name.
+#
+#   docker compose up -d
+#   ./test-01-exact-match.sh   (and the other test-NN-*.sh scripts)
+#
+# The gateway image is the prebuilt `dwara:demo` (FROM scratch, static
+# musl binary). Scratch has no users, so the service injects the
+# nonroot UID 65532 via `user:`. The HTTP listener is plaintext on
+# :8080 for simplicity; TLS demos live in Category 10.
+services:
+  dwara:
+    image: dwara:demo
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./data:/var/lib/dwara
+    ports:
+      - "8080:8080"
+    depends_on:
+      - echo
+      - static
+
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+      PORT: "8080"
+
+  static:
+    image: dwara-demo/static

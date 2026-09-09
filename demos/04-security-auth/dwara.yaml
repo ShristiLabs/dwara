@@ -1,0 +1,293 @@
+# Category 04: Security & Authentication demo config.
+#
+# Exercises every OSS authentication and authorization capability:
+# API key, Basic, HMAC request signing, mTLS client-cert mapping,
+# the consumer > route > service > listener > global authorization
+# chain, IP ACLs, rate limiting, quotas, and WAF-lite heuristic
+# filtering (SQLi/XSS/path-traversal).
+#
+# Two listeners:
+#   - edge-http  (0.0.0.0:8080)  plaintext HTTP for local tests
+#   - edge-https (0.0.0.0:8443)  TLS terminate + mTLS client-cert verify
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP listener (for API-key / Basic / HMAC / public tests).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+  # TLS-terminated HTTPS listener with mTLS client-cert verification.
+  - name: edge-https
+    address: 0.0.0.0
+    port: 8443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/certs/server.crt
+      key_file: /etc/dwara/certs/server.key
+      # Require client certificates chained to this CA (mTLS).
+      client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # API-key authenticated route.
+  - name: api-key-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/api/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+  # Basic-auth authenticated route.
+  - name: basic-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/basic/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+  # mTLS-authenticated route: only the partner-mtls consumer may call it.
+  - name: mtls-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/mtls/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+    authorization:
+      allowed_consumers:
+        - partner-mtls
+
+  # HMAC request-signing authenticated route.
+  - name: hmac-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/hmac/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+  # Public route: no authentication required.
+  - name: public-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /public/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+
+  # IP ACL route: only private/loopback ranges are allowed.
+  - name: ip-acl-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/acl/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+    authorization:
+      ip_acl:
+        allow:
+          - 127.0.0.1
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+          - 192.168.0.0/16
+        default: allow
+
+  # Rate-limited route: 5 requests per 10 seconds.
+  - name: rate-limited-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/ratelimited/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+    policies:
+      - demo-rate-limit
+
+  # WAF-lite route: SQLi/XSS/path-traversal heuristic filtering.
+  - name: waf-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/waf/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+    waf:
+      enabled: true
+      filters:
+        - sqli
+        - xss
+        - path_traversal
+      max_body_inspect_bytes: 4096
+
+  # Quota route: authenticated + per-route rate-limit policy.
+  - name: quota-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/quota/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+    policies:
+      - demo-quota
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+# ---------------------------------------------------------------------------
+# Consumers (authentication identities)
+# ---------------------------------------------------------------------------
+
+consumers:
+  # Mobile app consumer: API key + HMAC credentials.
+  - name: mobile-app
+    type: user
+    groups:
+      - internal
+    credentials:
+      - type: api_key
+        key: demo-api-key-123
+      - type: hmac
+        key_id: mobile-hmac
+        secret: demo-hmac-secret
+    quotas:
+      daily_requests: 100000
+      monthly_requests: 1000000
+
+  # Partner consumer: mTLS client certificate (mapped by subject CN).
+  - name: partner-mtls
+    type: user
+    groups:
+      - external
+    credentials:
+      - type: mtls
+        subject: dwara-admin-client
+
+  # Basic-auth consumer. Basic credentials are store-managed (not
+  # config-declared): the username is the lookup selector and the
+  # password is hashed through the same path as API keys. The seed
+  # script (seed-basic-auth.sh) inserts the admin:secret123 credential
+  # into the state DB after the gateway starts.
+  - name: basic-user
+    type: user
+
+# ---------------------------------------------------------------------------
+# Policies (reusable rule bundles)
+# ---------------------------------------------------------------------------
+
+policies:
+  # Rate limit for the rate-limited demo route: 5 requests / 10s.
+  - name: demo-rate-limit
+    rate_limit:
+      requests: 5
+      window_seconds: 10
+
+  # Quota policy for the quota demo route: 3 requests / 60s.
+  - name: demo-quota
+    rate_limit:
+      requests: 3
+      window_seconds: 60
+
+# ---------------------------------------------------------------------------
+# Authentication providers / settings
+# ---------------------------------------------------------------------------
+
+# HMAC request-signing verification.
+hmac_auth:
+  max_clock_skew_secs: 300
+
+# mTLS client-certificate consumer mapping: maps verified
+# client certificates to consumers by subject CN.
+mtls_consumer_mapping:
+  enabled: true
+  subject_cn_mapping:
+    dwara-admin-client: partner-mtls
+
+# Identity-forwarding headers for mTLS.
+mtls_forward_headers:
+  enabled: true
+  prefix: X-Client-Cert
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow

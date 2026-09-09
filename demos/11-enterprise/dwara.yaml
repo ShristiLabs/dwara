@@ -1,0 +1,184 @@
+# Category 11: Enterprise Features
+#
+# This config demonstrates the enterprise feature surface of dwara.
+# The gateway image used here (dwara:demo) is the OSS edition: the
+# `ent` cargo feature is NOT compiled in, so enterprise-only blocks
+# (redis_rate_limiter, config_convergence, license, mesh, fleet) are
+# accepted by validation but INERT at runtime -- the gateway logs a
+# notice and falls back to the OSS equivalent (local in-memory limiter,
+# local file watcher, no license gate). The config SHAPE is included
+# so operators can see what the enterprise edition accepts and plan
+# a migration by swapping the image to Dockerfile.ent + a license.
+#
+# The enterprise quickstart at quickstart/enterprise/ shows the full
+# CP/DP split topology (controller + edge + gateway) built from
+# Dockerfile.ent. This demo runs a single-node OSS gateway instead and
+# documents each enterprise feature in the test scripts + README.
+#
+# See the config schema in crates/dwara-core/src/config/ for the full
+# field reference, and crates/dwara-core/src/extensions/ for the
+# extension-trait boundary (RateLimiter, CacheStore, SecretSource,
+# AnalyticsSink, ConfigSource) that the enterprise backends implement.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP listener (the primary entry point for this demo).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # --- Echo route: prefix match with strip_prefix rewrite ---
+  # /v1/echo/test -> /test on the echo upstream.
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+
+  # --- Static route: exact match on / (serves the index page) ---
+  - name: static-route
+    service: static-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: proxy
+    auth_required: false
+
+  # --- Health check: respond directly (no upstream contact) ---
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+    auth_required: false
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only, OSS feature)
+# ---------------------------------------------------------------------------
+
+# The admin listener is an OSS feature: GET/PATCH /config, /health,
+# /stats, all over mTLS. The client certificate IS the auth (no token
+# layer in v1). See crates/dwara-core/src/config/mod.rs AdminConfig.
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Embedded analytics (OSS feature, DW-043)
+# ---------------------------------------------------------------------------
+
+# The embedded analytics store is an OSS feature: every completed
+# request's access record is written to a separate SQLite file on a
+# fire-and-forget channel, with 1m/5m/1h/1d additive rollups and
+# per-granularity retention. The enterprise edition adds federated
+# analytics (edge-to-controller gRPC streaming, DW-095) on top of this
+# local store.
+analytics:
+  path: /var/lib/dwara/analytics.db
+
+# ---------------------------------------------------------------------------
+# Enterprise-adjacent config blocks (accepted but INERT in OSS)
+# ---------------------------------------------------------------------------
+
+# The blocks below are part of the config schema and pass validation in
+# the OSS build, but they are INERT at runtime because the `ent` cargo
+# feature is not compiled in. The gateway logs a one-line notice at
+# startup for each inert block and falls back to the OSS equivalent.
+# Including them here shows the config shape an enterprise deployment
+# would use and lets operators plan a migration by swapping the image
+# to Dockerfile.ent + providing a license file.
+
+# Distributed Redis-backed rate limiter (DW-031, enterprise).
+# OSS fallback: local in-memory GCRA limiter (one limit per process).
+# In the enterprise edition, the bucket state lives in Redis and is
+# updated atomically via a Lua script, so a fleet of N instances shares
+# one rate limit. See crates/dwara-core/src/extensions/redis_rate_limiter.rs.
+redis_rate_limiter:
+  url: redis://redis:6379
+  fail_open: true
+  key_prefix: "dwara:rl:"
+  connection_timeout_ms: 1000
+  key_ttl_s: 3600
+
+# Config convergence (DW-054, enterprise).
+# OSS fallback: local file watcher only (each instance serves its own
+# config generation, no cross-instance coordination).
+# In the enterprise edition, the gateway publishes its config
+# generation to a shared Redis backend and polls for generations
+# published by other instances, converging to the highest generation.
+# See crates/dwara-core/src/extensions/config_convergence.rs.
+config_convergence:
+  enabled: false
+  backend: redis
+  redis_url: redis://redis:6379
+  key_prefix: dwara:config
+  poll_interval_ms: 1000
+  drift_check_interval_ms: 5000
+  fail_open: true
+
+# Enterprise license (DW-032).
+# OSS behavior: the block is accepted but inert (the gate is always
+# LicenseGate::none() -- all features available are OSS-only). In the
+# enterprise edition, the gateway verifies the license file at startup
+# and gates enterprise features behind the license's feature claims.
+# See crates/dwara-core/src/extensions/licensing.rs.
+license:
+  file: /etc/dwara/license.json
+  grace_period_days: 7

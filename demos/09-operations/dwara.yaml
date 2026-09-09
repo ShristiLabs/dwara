@@ -1,0 +1,139 @@
+# Category 09: Operations & Config Management demo config.
+#
+# Exercises the operator-facing surface: a plaintext HTTP listener, two
+# proxied upstreams (echo + static), a direct-respond health route, the
+# mTLS-only admin API (GET /health, GET /config, GET /stats), and a
+# secret reference resolved from the environment at config-compile time.
+#
+# No route requires authentication (auth_required is omitted/false) so
+# the operational tests can focus on the control plane rather than the
+# data-plane auth chain. A single consumer is defined purely to
+# demonstrate the ${ENV_NAME} secret-reference grammar (DW-045): its
+# api_key value is ${DEMO_SECRET}, resolved from the container
+# environment set in docker-compose.yml. Unset/empty fails closed.
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP listener (the public entry point on :8080).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # Echo route: prefix match, strip the prefix before forwarding.
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  # Static route: exact match on the root path, proxy to the static
+  # upstream (serves demo HTML + JSON files).
+  - name: static-route
+    service: static-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: proxy
+
+  # Health route: direct-respond 200 "ok" (no upstream hop).
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+# ---------------------------------------------------------------------------
+# Consumers (authentication identities)
+# ---------------------------------------------------------------------------
+
+# A single consumer defined to demonstrate the ${ENV_NAME} secret
+# reference grammar (DW-045). Its api_key value is ${DEMO_SECRET},
+# resolved from the DEMO_SECRET environment variable at
+# config-compile time. No route requires auth, so this consumer is
+# seeded into the state DB but never enforced; it exists purely to
+# prove the secret resolves (unset/empty fails closed and the gateway
+# refuses to start). See test-08-secrets.sh.
+consumers:
+  - name: ops-consumer
+    type: user
+    credentials:
+      - type: api_key
+        key: ${DEMO_SECRET}
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+# The admin API binds 0.0.0.0:2019 and requires a client certificate
+# chained to the client CA. Endpoints: GET /health, GET /config,
+# PATCH /config, GET /stats. See test-02-admin-api.sh for the curl
+# incantation (--cert/--key/--cacert against the shared certs).
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow

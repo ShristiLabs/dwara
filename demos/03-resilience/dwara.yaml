@@ -1,0 +1,294 @@
+# Category 03: Traffic Policy & Resilience.
+#
+# A single HTTP listener on :8080 fronts seven upstream pools that each
+# demonstrate one resilience mechanism. Routes strip their prefix so the
+# path-based control segments of the demo upstreams are preserved:
+#   /flaky/flaky/80  -> flaky-pool -> flaky:8080/flaky/80  (80% error rate)
+#   /hedge/slow/300  -> hedge-pool -> slow:8080/slow/300   (300ms delay)
+#
+# No auth is required on any route (auth_required omitted / false) so the
+# test scripts can exercise the resilience behavior directly with curl.
+#
+# Run `docker compose up` then any test-*.sh script.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  - name: healthy
+    service: healthy-service
+    match:
+      path:
+        type: prefix
+        value: /healthy/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: flaky
+    service: flaky-service
+    match:
+      path:
+        type: prefix
+        value: /flaky/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: retry
+    service: retry-service
+    match:
+      path:
+        type: prefix
+        value: /retry/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: hedge
+    service: hedge-service
+    match:
+      path:
+        type: prefix
+        value: /hedge/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: timeout
+    service: timeout-service
+    match:
+      path:
+        type: prefix
+        value: /timeout/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: breaker
+    service: breaker-service
+    match:
+      path:
+        type: prefix
+        value: /breaker/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  # Mirrors 100% of traffic to mirror-pool while still serving the
+  # main response from main-service (healthy-pool).
+  - name: mirror-test
+    service: main-service
+    match:
+      path:
+        type: prefix
+        value: /mirror-test/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    mirror:
+      upstream: mirror-pool
+      percentage: 100
+
+  # Fault injection: every request gets a 100ms delay before proxying.
+  - name: fault
+    service: main-service
+    match:
+      path:
+        type: prefix
+        value: /fault/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    fault_injection:
+      delay:
+        percentage: 100
+        fixed_ms: 100
+
+  # Maintenance mode: the gateway short-circuits with 503 + Retry-After.
+  - name: maint
+    service: main-service
+    match:
+      path:
+        type: prefix
+        value: /maint/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    maintenance:
+      retry_after_secs: 60
+      message: "Under maintenance"
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: healthy-service
+    upstream: healthy-pool
+
+  - name: flaky-service
+    upstream: flaky-pool
+
+  - name: retry-service
+    upstream: retry-pool
+
+  - name: hedge-service
+    upstream: hedge-pool
+
+  - name: timeout-service
+    upstream: timeout-pool
+
+  - name: breaker-service
+    upstream: breaker-pool
+
+  - name: main-service
+    upstream: healthy-pool
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  # Two healthy echo endpoints for round-robin distribution.
+  - name: healthy-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+      - address: echo2
+        port: 8080
+    health:
+      consecutive_failures: 3
+      eject_ms: 10000
+      failure_ratio: 0.5
+      failure_min_volume: 5
+      window_ms: 30000
+
+  # Flaky + healthy: passive health ejects the flaky endpoint after
+  # enough failures, leaving only the healthy echo endpoint.
+  - name: flaky-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: flaky
+        port: 8080
+      - address: echo
+        port: 8080
+    health:
+      consecutive_failures: 3
+      eject_ms: 10000
+      failure_ratio: 0.5
+      failure_min_volume: 5
+      window_ms: 30000
+
+  # Retry on 500/502/503 plus transport errors: a failing flaky request
+  # is retried on the healthy echo endpoint.
+  - name: retry-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: flaky
+        port: 8080
+      - address: echo
+        port: 8080
+    retries:
+      attempts: 3
+      backoff_base_ms: 10
+      backoff_cap_ms: 100
+      retry_statuses:
+        - 500
+        - 502
+        - 503
+      retry_transport: true
+
+  # Hedging: after 100ms a speculative copy is sent to the healthy echo
+  # endpoint; whichever responds first wins. buffer_max_bytes lets the
+  # body be replayed to the hedge copy.
+  - name: hedge-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: slow
+        port: 8080
+      - address: echo
+        port: 8080
+    retries:
+      attempts: 2
+      hedge:
+        hedge_after_ms: 100
+        hedge_max: 1
+      buffer_max_bytes: 1048576
+
+  # Read timeout: the slow upstream takes longer than read_ms, so the
+  # gateway returns 504.
+  - name: timeout-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: slow
+        port: 8080
+    timeouts:
+      connect_ms: 2000
+      read_ms: 500
+
+  # Circuit breaker: opens after the flaky endpoint trips the error
+  # threshold, returning 502/503 until the open window elapses.
+  - name: breaker-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: flaky
+        port: 8080
+    breaker:
+      consecutive_failures: 3
+      error_ratio: 0.5
+      error_volume: 5
+      open_ms: 10000
+      half_open_probes: 1
+
+  # Mirror target: receives shadow traffic from the mirror-test route.
+  - name: mirror-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: mirror
+        port: 8080
+
+# ---------------------------------------------------------------------------
+# Gateway-level global settings
+# ---------------------------------------------------------------------------
+
+# Gateway-wide concurrency cap. Over-cap requests are shed with 503 or
+# queued (see admission_queue below). Kept high for the normal resilience
+# demos; test-07-load-shedding.sh lowers it via a config override to
+# exercise shedding in a controlled way.
+max_concurrent_requests: 10000
+
+# Bounded admission queue: when the concurrency cap is saturated, requests
+# WAIT up to queue_timeout_ms instead of being shed immediately.
+admission_queue:
+  enabled: true
+  max_queue_size: 1000
+  queue_timeout_ms: 5000

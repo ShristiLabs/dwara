@@ -1,0 +1,72 @@
+# Category 07: AI Gateway.
+#
+# Starts the dwara gateway (HTTP on :8080) plus two OpenAI-compatible
+# mock AI providers (ai-mock, ai-mock-2) that the gateway's AI provider
+# adapters translate to. The gateway exposes the admin API (mTLS-only)
+# on :2019 so the prompt-logging test can query the ai_prompt_logs table.
+#
+#   docker compose up -d
+#   ./test-01-provider-adapters.sh   # (and the other test-*.sh scripts)
+#
+# All services share a single docker network so the gateway can reach
+# every mock provider by service name (ai-mock, ai-mock-2). The mock
+# providers are pinned to static IPs and the gateway's /etc/hosts is
+# seeded with those names (via `extra_hosts`) so the gateway's async
+# DNS resolver resolves them without a network round-trip.
+#
+# The gateway image (dwara:demo) is a static musl binary on FROM scratch.
+# Scratch has no users, so the service injects the nonroot UID 65532 via
+# `user:` (same UID the distroless variant bakes in).
+services:
+  dwara:
+    image: dwara:demo
+    user: "65532:65532"
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      # State store: SQLite DB for consumer quotas, AI token budgets,
+      # MCP sessions, and runtime state.
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./data:/var/lib/dwara
+    ports:
+      # Plaintext HTTP entry point (all demo test scripts hit this).
+      - "8080:8080"
+      # mTLS-only admin API (prompt-logs / governance-audit queries).
+      - "2019:2019"
+    # Seed /etc/hosts with the mock providers' static IPs so the
+    # gateway resolves them by the names used in dwara.yaml.
+    extra_hosts:
+      - "ai-mock:172.28.0.10"
+      - "ai-mock-2:172.28.0.11"
+    depends_on:
+      - ai-mock
+      - ai-mock-2
+    networks:
+      ai-net:
+        ipv4_address: 172.28.0.2
+
+  # Primary mock AI provider (OpenAI-compatible). The gateway's `openai`
+  # provider adapter forwards to this upstream.
+  ai-mock:
+    image: dwara-demo/ai-mock
+    networks:
+      ai-net:
+        ipv4_address: 172.28.0.10
+
+  # Secondary mock AI provider (OpenAI-compatible). The gateway's
+  # `anthropic` provider adapter forwards to this upstream; used as the
+  # failover target and the canary variant.
+  ai-mock-2:
+    image: dwara-demo/ai-mock
+    networks:
+      ai-net:
+        ipv4_address: 172.28.0.11
+
+networks:
+  ai-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
