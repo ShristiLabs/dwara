@@ -376,6 +376,13 @@ pub struct Gateway {
     /// accepted but inert (plugins are not instantiated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
+    /// SCALE-12 (#192): remote/signed plugin registry configuration.
+    /// When present, plugin `source.url` references are resolved
+    /// against the registry's base URL and signatures are verified
+    /// against the registry's pinned public keys. See
+    /// [`PluginRegistryConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_registry: Option<PluginRegistryConfig>,
     /// SCALE-12 (#191): global filter-chain ordering and dry-run
     /// configuration. Per-route `filter_chain` overrides take
     /// precedence. See [`FilterChainConfig`].
@@ -6338,6 +6345,14 @@ pub struct PluginConfig {
     /// plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<String>,
+    /// SCALE-12 (#192): remote source for this plugin. When set, the
+    /// gateway downloads the .wasm artifact from the registry at
+    /// startup (and on reload), verifies its digest, and caches it
+    /// locally before loading. Mutually exclusive with `native`; when
+    /// `source` is set, `wasm` is the local cache path (created by
+    /// the download if absent). See [`PluginSourceConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginSourceConfig>,
     /// Phases this plugin hooks. Must be a non-empty subset of:
     /// `request_headers`, `request_body`, `response_headers`,
     /// `response_body`. The host calls the plugin's corresponding
@@ -6357,6 +6372,71 @@ pub struct PluginConfig {
     /// are bounded by the gateway's own resource limits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<PluginLimitsConfig>,
+}
+
+/// SCALE-12 (#192): remote/signed plugin source configuration. The
+/// gateway downloads the .wasm artifact from `url`, verifies its
+/// SHA-256 `digest`, and optionally verifies an Ed25519 `signature`
+/// against `public_key` before loading. The artifact is cached at
+/// `cache_path` (or a default location under the gateway's data
+/// directory if `cache_path` is absent).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginSourceConfig {
+    /// The registry URL to download the .wasm artifact from. Must be
+    /// `https://` or `oci://` (OCI artifact reference). For `https://`,
+    /// the gateway fetches the artifact via a simple HTTP GET. For
+    /// `oci://`, the gateway uses the OCI distribution spec (pull
+    /// manifest, pull layer). The URL is fetched at startup and on
+    /// reload; the cached artifact is reused if its digest matches.
+    pub url: String,
+    /// Expected SHA-256 digest of the downloaded artifact, hex-encoded.
+    /// The gateway verifies the downloaded bytes match this digest
+    /// before loading. Required (no unsigned remote plugins).
+    pub digest: String,
+    /// Optional Ed25519 signature over the artifact bytes, hex-encoded.
+    /// When set, `public_key` must also be set; the gateway verifies
+    /// the signature before loading. Absent means only the digest is
+    /// verified (suitable for trusted registries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Ed25519 public key (32 bytes, hex-encoded) for signature
+    /// verification. Required when `signature` is set; ignored
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// Local cache path for the downloaded artifact. When absent, the
+    /// gateway uses `<data_dir>/plugins/<name>.wasm`. The cached file
+    /// is reused if its digest matches `digest`; otherwise it is
+    /// re-downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_path: Option<String>,
+}
+
+/// SCALE-12 (#192): plugin registry configuration. When present, the
+/// gateway can resolve plugin `source.url` references against the
+/// registry's base URL and verify signatures against the registry's
+/// pinned public keys. This enables fleet-consistent plugin pinning:
+/// all gateways in a fleet reference the same registry and get the
+/// same signed artifacts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRegistryConfig {
+    /// Registry base URL (e.g., `https://registry.example.com/plugins`).
+    /// Plugin `source.url` values that are relative (no scheme) are
+    /// resolved against this base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Pinned Ed25519 public keys (hex-encoded, 32 bytes each). When
+    /// set, plugin signatures are verified against these keys in
+    /// addition to any per-plugin `public_key`. A plugin with no
+    /// signature is rejected when the registry has pinned keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_keys: Vec<String>,
+    /// Local cache directory for downloaded artifacts. Default:
+    /// `<data_dir>/plugins`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
 }
 
 /// The phases a plugin can hook (DW-055, §9.3 phase contract).

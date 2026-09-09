@@ -518,6 +518,7 @@ fn chain_native_filter_modifies_request_headers() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("add-header".to_string()),
         phases: vec![PluginPhase::RequestHeaders],
         config: None,
@@ -537,6 +538,7 @@ fn chain_native_filter_modifies_request_body() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("append-body".to_string()),
         phases: vec![PluginPhase::RequestBody],
         config: None,
@@ -554,6 +556,7 @@ fn chain_native_filter_modifies_response_headers() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("resp-header".to_string()),
         phases: vec![PluginPhase::ResponseHeaders],
         config: None,
@@ -574,6 +577,7 @@ fn chain_native_filter_short_circuits_with_local_response() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("deny".to_string()),
         phases: vec![PluginPhase::RequestHeaders],
         config: None,
@@ -596,6 +600,7 @@ fn chain_native_filter_error_becomes_chain_error() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("error-filter".to_string()),
         phases: vec![PluginPhase::RequestHeaders],
         config: None,
@@ -625,6 +630,7 @@ fn chain_skips_phases_not_declared() {
     let configs = configs_map(vec![PluginConfig {
         name: "p".to_string(),
         wasm: None,
+        source: None,
         native: Some("add-header".to_string()),
         phases: vec![PluginPhase::RequestHeaders],
         config: None,
@@ -653,6 +659,7 @@ fn chain_native_and_wasm_same_phase_slot() {
         PluginConfig {
             name: "n".to_string(),
             wasm: None,
+            source: None,
             native: Some("add-header".to_string()),
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -661,6 +668,7 @@ fn chain_native_and_wasm_same_phase_slot() {
         PluginConfig {
             name: "w".to_string(),
             wasm: Some("/opt/w.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -703,6 +711,7 @@ fn chain_wasm_short_circuits_before_later_native() {
         PluginConfig {
             name: "w".to_string(),
             wasm: Some("/opt/w.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -711,6 +720,7 @@ fn chain_wasm_short_circuits_before_later_native() {
         PluginConfig {
             name: "n".to_string(),
             wasm: None,
+            source: None,
             native: Some("add-header".to_string()),
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -772,6 +782,7 @@ fn chain_native_short_circuits_before_later_wasm() {
         PluginConfig {
             name: "n".to_string(),
             wasm: None,
+            source: None,
             native: Some("deny".to_string()),
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -780,6 +791,7 @@ fn chain_native_short_circuits_before_later_wasm() {
         PluginConfig {
             name: "w".to_string(),
             wasm: Some("/opt/w.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,

@@ -529,6 +529,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "$ref": "#/$defs/PluginConfig"
    }
   },
+  "plugin_registry": {
+   "description": ": remote/signed plugin registry configuration.\nWhen present, plugin `source.url` references are resolved\nagainst the registry's base URL and signatures are verified\nagainst the registry's pinned public keys. See\n[`PluginRegistryConfig`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/PluginRegistryConfig"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
   "filter_chain": {
    "description": ": global filter-chain ordering and dry-run\nconfiguration. Per-route `filter_chain` overrides take\nprecedence. See [`FilterChainConfig`].",
    "anyOf": [
@@ -5962,6 +5973,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ]
     },
+    "source": {
+     "description": ": remote source for this plugin. When set, the\ngateway downloads the .wasm artifact from the registry at\nstartup (and on reload), verifies its digest, and caches it\nlocally before loading. Mutually exclusive with `native`; when\n`source` is set, `wasm` is the local cache path (created by\nthe download if absent). See [`PluginSourceConfig`].",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/PluginSourceConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
     "phases": {
      "description": "Phases this plugin hooks. Must be a non-empty subset of:\n`request_headers`, `request_body`, `response_headers`,\n`response_body`. The host calls the plugin's corresponding\n`proxy_on_*` export at each declared phase (WASM) or the\n`NativeFilter` trait method (native).",
      "type": "array",
@@ -5991,6 +6013,46 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "additionalProperties": false,
    "required": [
     "name"
+   ]
+  },
+  "PluginSourceConfig": {
+   "description": ": remote/signed plugin source configuration. The\ngateway downloads the .wasm artifact from `url`, verifies its\nSHA-256 `digest`, and optionally verifies an Ed25519 `signature`\nagainst `public_key` before loading. The artifact is cached at\n`cache_path` (or a default location under the gateway's data\ndirectory if `cache_path` is absent).",
+   "type": "object",
+   "properties": {
+    "url": {
+     "description": "The registry URL to download the .wasm artifact from. Must be\n`https://` or `oci://` (OCI artifact reference). For `https://`,\nthe gateway fetches the artifact via a simple HTTP GET. For\n`oci://`, the gateway uses the OCI distribution spec (pull\nmanifest, pull layer). The URL is fetched at startup and on\nreload; the cached artifact is reused if its digest matches.",
+     "type": "string"
+    },
+    "digest": {
+     "description": "Expected SHA-256 digest of the downloaded artifact, hex-encoded.\nThe gateway verifies the downloaded bytes match this digest\nbefore loading. Required (no unsigned remote plugins).",
+     "type": "string"
+    },
+    "signature": {
+     "description": "Optional Ed25519 signature over the artifact bytes, hex-encoded.\nWhen set, `public_key` must also be set; the gateway verifies\nthe signature before loading. Absent means only the digest is\nverified (suitable for trusted registries).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "public_key": {
+     "description": "Ed25519 public key (32 bytes, hex-encoded) for signature\nverification. Required when `signature` is set; ignored\notherwise.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "cache_path": {
+     "description": "Local cache path for the downloaded artifact. When absent, the\ngateway uses `<data_dir>/plugins/<name>.wasm`. The cached file\nis reused if its digest matches `digest`; otherwise it is\nre-downloaded.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "url",
+    "digest"
    ]
   },
   "PluginPhase": {
@@ -6048,6 +6110,34 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ],
      "format": "uint64",
      "minimum": 0
+    }
+   },
+   "additionalProperties": false
+  },
+  "PluginRegistryConfig": {
+   "description": ": plugin registry configuration. When present, the\ngateway can resolve plugin `source.url` references against the\nregistry's base URL and verify signatures against the registry's\npinned public keys. This enables fleet-consistent plugin pinning:\nall gateways in a fleet reference the same registry and get the\nsame signed artifacts.",
+   "type": "object",
+   "properties": {
+    "base_url": {
+     "description": "Registry base URL (e.g., `https://registry.example.com/plugins`).\nPlugin `source.url` values that are relative (no scheme) are\nresolved against this base URL.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "public_keys": {
+     "description": "Pinned Ed25519 public keys (hex-encoded, 32 bytes each). When\nset, plugin signatures are verified against these keys in\naddition to any per-plugin `public_key`. A plugin with no\nsignature is rejected when the registry has pinned keys.",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "cache_dir": {
+     "description": "Local cache directory for downloaded artifacts. Default:\n`<data_dir>/plugins`.",
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "additionalProperties": false

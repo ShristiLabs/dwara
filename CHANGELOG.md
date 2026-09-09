@@ -151,6 +151,16 @@ the project follows semantic versioning once 1.0 is reached.
   phase set). Validation rejects invalid orderings (duplicates,
   missing phases, wrong count). Config reference and config-studio
   rebuilt.
+- Remote/signed plugin registry (#192, CFG-06): adds `source` block
+  to `PluginConfig` for remote plugin artifacts (URL, SHA-256 digest,
+  optional Ed25519 signature + public key, cache path). Adds
+  `plugin_registry` block to `Gateway` for fleet-consistent pinning
+  (base URL, pinned public keys, cache directory). Validation
+  enforces digest presence, URL scheme (https/oci), and
+  signature/public_key pairing. CLI gains `dwara plugin search` and
+  `dwara plugin install` commands (downloads via curl, verifies
+  SHA-256 digest with sha2). Config reference and config-studio
+  rebuilt.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

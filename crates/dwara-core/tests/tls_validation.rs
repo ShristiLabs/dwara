@@ -189,6 +189,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         config_convergence: None,
         plugins: Vec::new(),
         filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,

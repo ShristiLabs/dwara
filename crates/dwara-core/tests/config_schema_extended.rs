@@ -684,6 +684,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         config_convergence: None,
         plugins: Vec::new(),
         filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,

@@ -1776,20 +1776,33 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
         }
         let has_wasm = p.wasm.is_some();
         let has_native = p.native.is_some();
-        if !has_wasm && !has_native {
+        let has_source = p.source.is_some();
+        // SCALE-12 (#192): source is a remote variant of wasm. A plugin
+        // with `source` is a WASM plugin whose artifact is downloaded
+        // from the registry; `wasm` is the optional local cache path.
+        let has_wasm_or_source = has_wasm || has_source;
+        if !has_wasm_or_source && !has_native {
             issues.push(issue(
                 "plugin",
                 &p.name,
                 "wasm",
-                "plugin must set exactly one of `wasm` or `native` (both are absent)",
+                "plugin must set exactly one of `wasm`, `source`, or `native` (all are absent)",
             ));
         }
-        if has_wasm && has_native {
+        if has_wasm_or_source && has_native {
             issues.push(issue(
                 "plugin",
                 &p.name,
                 "native",
-                "plugin must set exactly one of `wasm` or `native` (both are set)",
+                "plugin must set exactly one of `wasm`/`source` or `native` (both are set)",
+            ));
+        }
+        if has_wasm && has_source {
+            issues.push(issue(
+                "plugin",
+                &p.name,
+                "source",
+                "plugin must not set both `wasm` and `source` (use `source` with optional `cache_path`)",
             ));
         }
         if p.phases.is_empty() {
@@ -1800,6 +1813,46 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 "phases must be a non-empty subset of request_headers, \
                  request_body, response_headers, response_body",
             ));
+        }
+        // SCALE-12 (#192): validate remote source config.
+        if let Some(src) = &p.source {
+            if src.digest.is_empty() {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.digest",
+                    "source digest must be a non-empty SHA-256 hex string",
+                ));
+            }
+            if !src.url.starts_with("https://") && !src.url.starts_with("oci://") {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.url",
+                    "source url must use https:// or oci:// scheme",
+                ));
+            }
+            if src.signature.is_some() && src.public_key.is_none() {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.public_key",
+                    "source.public_key is required when source.signature is set",
+                ));
+            }
+        }
+    }
+    // SCALE-12 (#192): validate plugin registry config.
+    if let Some(reg) = &gateway.plugin_registry {
+        for pk in &reg.public_keys {
+            if pk.len() != 64 {
+                issues.push(issue(
+                    "plugin_registry",
+                    "gateway",
+                    "public_keys",
+                    "each public key must be a 32-byte Ed25519 key hex-encoded (64 chars)",
+                ));
+            }
         }
     }
 }
@@ -8403,6 +8456,7 @@ impl Snapshot {
                 config_convergence: None,
                 plugins: Vec::new(),
                 filter_chain: None,
+                plugin_registry: None,
                 ai: None,
                 fleet: None,
                 mesh: None,

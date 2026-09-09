@@ -441,6 +441,7 @@ mod tests {
         PluginConfig {
             name: name.to_string(),
             wasm: Some(wasm.to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -462,6 +463,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -476,6 +478,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("/nonexistent/path.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -490,6 +493,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("/tmp/test.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![],
             config: None,
@@ -504,6 +508,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("/tmp/test.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -522,6 +527,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("/tmp/test.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -540,6 +546,7 @@ mod tests {
         let config = PluginConfig {
             name: "test".to_string(),
             wasm: Some("/tmp/test.wasm".to_string()),
+            source: None,
             native: None,
             phases: vec![PluginPhase::RequestHeaders],
             config: None,
@@ -745,6 +752,7 @@ mod tests {
             PluginConfig {
                 name: "plugin-a".to_string(),
                 wasm: Some("/tmp/a.wasm".to_string()),
+                source: None,
                 native: None,
                 phases: vec![PluginPhase::RequestHeaders, PluginPhase::ResponseBody],
                 config: None,
@@ -756,6 +764,7 @@ mod tests {
             PluginConfig {
                 name: "plugin-b".to_string(),
                 wasm: Some("/tmp/b.wasm".to_string()),
+                source: None,
                 native: None,
                 phases: vec![PluginPhase::RequestHeaders, PluginPhase::RequestBody],
                 config: None,
@@ -787,6 +796,7 @@ mod tests {
             PluginConfig {
                 name: "plugin-a".to_string(),
                 wasm: Some("/tmp/a.wasm".to_string()),
+                source: None,
                 native: None,
                 phases: vec![PluginPhase::ResponseHeaders],
                 config: None,

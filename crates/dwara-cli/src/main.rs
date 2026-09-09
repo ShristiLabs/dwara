@@ -202,6 +202,31 @@ enum PluginKind {
         #[arg(long, short = 'o', default_value = ".")]
         dir: String,
     },
+    /// SCALE-12 (#192): Search the plugin registry for available plugins.
+    Search {
+        /// The registry URL to search. If absent, uses the
+        /// `DWARA_PLUGIN_REGISTRY` env var or the default registry.
+        #[arg(long)]
+        registry: Option<String>,
+        /// Optional search query (substring match on plugin names).
+        query: Option<String>,
+    },
+    /// SCALE-12 (#192): Download and verify a plugin from the registry.
+    Install {
+        /// The plugin name to install.
+        name: String,
+        /// The registry URL to install from. If absent, uses the
+        /// `DWARA_PLUGIN_REGISTRY` env var or the default registry.
+        #[arg(long)]
+        registry: Option<String>,
+        /// The expected SHA-256 digest (hex). If absent, the digest is
+        /// fetched from the registry manifest.
+        #[arg(long)]
+        digest: Option<String>,
+        /// Output directory for the downloaded .wasm file.
+        #[arg(long, short = 'o', default_value = ".")]
+        dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -590,6 +615,43 @@ fn main() {
                     }
                     Err(e) => {
                         eprintln!("plugin new: {e}");
+                        1
+                    }
+                }
+            }
+            PluginKind::Search { registry, query } => {
+                match dwara_cli::plugin_registry::search(registry.as_deref(), query.as_deref()) {
+                    Ok(output) => {
+                        println!("{output}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin search: {e}");
+                        1
+                    }
+                }
+            }
+            PluginKind::Install {
+                name,
+                registry,
+                digest,
+                dir,
+            } => {
+                match dwara_cli::plugin_registry::install(
+                    &name,
+                    registry.as_deref(),
+                    digest.as_deref(),
+                    &dir,
+                ) {
+                    Ok(result) => {
+                        println!(
+                            "installed plugin '{}' -> {} (digest: {})",
+                            result.name, result.path, result.digest
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin install: {e}");
                         1
                     }
                 }

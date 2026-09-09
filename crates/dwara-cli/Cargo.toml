@@ -50,6 +50,10 @@ libc = { workspace = true }
 # SQLite store. Already a workspace dependency (dwara-core/state uses
 # it); no new external crate enters the tree. MIT.
 rusqlite = { workspace = true }
+# SCALE-12 (#192): SHA-256 digest verification for plugin registry
+# downloads. Already a workspace dependency (dwara-core uses it for
+# API-key hashing); no new external crate enters the tree.
+sha2 = { workspace = true }
 # DW-066: tracing subscriber for the ent controller/edge binaries (the
 # same registry + EnvFilter + JSON fmt stack dwara-bin installs).
 # Optional + ent-gated so the default CLI build never pulls it in.
