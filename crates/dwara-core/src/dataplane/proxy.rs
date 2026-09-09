@@ -1089,6 +1089,10 @@ impl DataPlane {
         // or edge labels) to every upstream's load balancer. On `refresh`,
         // the context is re-applied to the new registry.
         dp.apply_locality_to_registry();
+        // SCALE-10 (#189): pre-warm connection pools for upstreams that
+        // configure `pool.pre_warm`. Best-effort; failures are logged
+        // and silently ignored.
+        dp.current.load().registry.pre_warm();
         Arc::new(dp)
     }
 
@@ -1667,6 +1671,9 @@ impl DataPlane {
         // registry's balancers (the registry was just rebuilt with fresh
         // upstream handles whose balancers start with an empty context).
         self.apply_locality_to_registry();
+        // SCALE-10 (#189): pre-warm connection pools for upstreams that
+        // configure `pool.pre_warm` on reload. Best-effort.
+        self.current.load().registry.pre_warm();
     }
 
     /// The current (snapshot, registry) generation pair. pub(super):

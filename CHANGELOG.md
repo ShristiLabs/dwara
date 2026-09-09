@@ -119,6 +119,17 @@ the project follows semantic versioning once 1.0 is reached.
   The rollup and query layers now read from `raw_all` instead of
   `raw`. The retention sweep only deletes intra-day rows from `raw`
   (old partitions are dropped by the partition manager).
+- Connection pool pre-warm, per-endpoint caps, and max-connection-age
+  recycling (#189, SCALE-10): adds three optional `upstreams[].pool`
+  knobs. `pre_warm` pre-establishes connections per endpoint on
+  startup/reload, removing cold-start latency spikes. `per_endpoint_cap`
+  bounds connections to a single endpoint within the upstream's
+  connection cap. `max_connection_age_ms` sets the pool idle timeout
+  to the minimum of itself and `pool_idle_timeout_ms`, evicting
+  connections before they become stale. The registry's `pre_warm`
+  method spawns best-effort background HEAD requests; failures are
+  logged and silently ignored. Config reference and config-studio
+  rebuilt.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

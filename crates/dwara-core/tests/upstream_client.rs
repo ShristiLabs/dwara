@@ -1070,6 +1070,9 @@ fn full_pool_block() -> UpstreamPoolConfig {
         http2_keep_alive_timeout_ms: Some(5_000),
         http2_adaptive_window: true,
         max_concurrent_streams: Some(128),
+        pre_warm: None,
+        per_endpoint_cap: None,
+        max_connection_age_ms: None,
     }
 }
 
@@ -1298,6 +1301,9 @@ async fn pool_max_idle_per_host_one_does_not_break_sequential_reuse() {
             http2_keep_alive_timeout_ms: None,
             http2_adaptive_window: false,
             max_concurrent_streams: None,
+            pre_warm: None,
+            per_endpoint_cap: None,
+            max_connection_age_ms: None,
         },
     )]);
     let registry = UpstreamRegistry::from_snapshot(&snap);

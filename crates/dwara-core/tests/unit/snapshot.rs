@@ -671,6 +671,9 @@ fn validate_accepts_in_bounds_pool_block() {
         http2_keep_alive_timeout_ms: Some(5_000),
         http2_adaptive_window: true,
         max_concurrent_streams: Some(128),
+        pre_warm: None,
+        per_endpoint_cap: None,
+        max_connection_age_ms: None,
     });
     let issues = validate(&gw);
     assert!(
@@ -689,6 +692,9 @@ fn validate_rejects_pool_zero_and_over_cap_values() {
         http2_keep_alive_timeout_ms: Some(700_000),
         http2_adaptive_window: false,
         max_concurrent_streams: Some(0),
+        pre_warm: None,
+        per_endpoint_cap: None,
+        max_connection_age_ms: None,
     });
     let issues = validate(&gw);
     for field in [

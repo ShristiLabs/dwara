@@ -4090,6 +4090,33 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ],
      "format": "uint32",
      "minimum": 0
+    },
+    "pre_warm": {
+     "description": ": number of connections to pre-establish per\nendpoint on startup/reload. Pre-warming removes cold-start\nlatency spikes after reloads and upgrade hand-offs. `0` or\nabsent: no pre-warming (the default \u2014 connections are\nestablished on first use). Bounds: at most 64 per endpoint.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "per_endpoint_cap": {
+     "description": ": per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "max_connection_age_ms": {
+     "description": ": maximum age of a pooled connection before it\nis recycled. In milliseconds. Absent: no max-age (connections\nlive until the idle timeout or a peer-initiated close). A\npositive value sets the pool idle timeout to the minimum of\nthis and `pool_idle_timeout_ms`, so connections are evicted\nbefore they become stale. Bounds: at most 10 minutes\n(600000 ms).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
     }
    },
    "additionalProperties": false

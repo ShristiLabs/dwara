@@ -6676,6 +6676,54 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+            // SCALE-10 (#189): pre-warm, per-endpoint cap, max-age.
+            if let Some(n) = p.pre_warm {
+                if n > 64 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.pre_warm",
+                        "pre_warm must be at most 64 per endpoint",
+                    ));
+                }
+            }
+            if let Some(n) = p.per_endpoint_cap {
+                if n == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.per_endpoint_cap",
+                        "per_endpoint_cap must be > 0 (omit the field for no per-endpoint cap)",
+                    ));
+                } else if n > 1024 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.per_endpoint_cap",
+                        "per_endpoint_cap must be at most 1024",
+                    ));
+                }
+            }
+            if let Some(ms) = p.max_connection_age_ms {
+                if ms == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_connection_age_ms",
+                        "max_connection_age_ms must be > 0 (omit the field for no max-age)",
+                    ));
+                } else if ms > crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_connection_age_ms",
+                        format!(
+                            "max_connection_age_ms must be at most {}",
+                            crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS
+                        ),
+                    ));
+                }
+            }
         }
         if let Some(r) = &u.retries {
             if r.attempts > crate::config::limits::MAX_RETRY_ATTEMPTS {

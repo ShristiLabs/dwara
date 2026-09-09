@@ -431,6 +431,15 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     }
     if version < 11 {
         conn.execute_batch(super::partition::SCHEMA_V11)?;
+        // SCALE-09 (#188): create the initial raw_all view (just
+        // `raw` — partition tables are added by `refresh_raw_all_view`
+        // as they are created). This ensures databases that migrate
+        // to v11 have the view even if they never call
+        // `refresh_raw_all_view` directly (e.g., test databases).
+        conn.execute_batch(
+            "DROP VIEW IF EXISTS raw_all;
+             CREATE VIEW raw_all AS SELECT * FROM raw;",
+        )?;
         conn.pragma_update(None, "user_version", 11)?;
     }
     Ok(())

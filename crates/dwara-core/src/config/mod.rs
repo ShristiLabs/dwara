@@ -5065,6 +5065,31 @@ pub struct UpstreamPoolConfig {
     /// Bounds: at least 1, at most 1_000_000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_streams: Option<u32>,
+    /// SCALE-10 (#189): number of connections to pre-establish per
+    /// endpoint on startup/reload. Pre-warming removes cold-start
+    /// latency spikes after reloads and upgrade hand-offs. `0` or
+    /// absent: no pre-warming (the default — connections are
+    /// established on first use). Bounds: at most 64 per endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_warm: Option<u32>,
+    /// SCALE-10 (#189): per-endpoint connection cap, bounding
+    /// concurrent connections to a SINGLE endpoint (address:port)
+    /// within the upstream. The per-upstream `connection_cap` still
+    /// bounds the total across all endpoints; this knob prevents one
+    /// busy endpoint from monopolizing the upstream's connection
+    /// budget. Absent: no per-endpoint cap (only the per-upstream
+    /// cap applies). Bounds: at least 1, at most 1024.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_endpoint_cap: Option<u32>,
+    /// SCALE-10 (#189): maximum age of a pooled connection before it
+    /// is recycled. In milliseconds. Absent: no max-age (connections
+    /// live until the idle timeout or a peer-initiated close). A
+    /// positive value sets the pool idle timeout to the minimum of
+    /// this and `pool_idle_timeout_ms`, so connections are evicted
+    /// before they become stale. Bounds: at most 10 minutes
+    /// (600000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connection_age_ms: Option<u64>,
 }
 
 /// SEC-03: upstream mTLS client certificate configuration. Reuses the

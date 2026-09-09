@@ -986,6 +986,9 @@ pub struct UpstreamHandle {
     /// `protocol == H3` and this is `None`, the feature is off and every
     /// dispatch fails closed with [`UpstreamError::H3Unavailable`].
     h3: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>>,
+    /// SCALE-10 (#189): number of connections to pre-establish per
+    /// endpoint on startup/reload. 0 = no pre-warming.
+    pre_warm: u32,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
@@ -1606,8 +1609,17 @@ fn build_handle(
     if let Some(p) = &u.pool {
         // Pool knobs apply to every protocol (h1 and h2 reuse the same
         // hyper-util connection pool).
-        if let Some(ms) = p.pool_idle_timeout_ms {
-            builder.pool_idle_timeout(Some(Duration::from_millis(ms)));
+        // SCALE-10 (#189): max_connection_age_ms sets the pool idle
+        // timeout to the minimum of itself and pool_idle_timeout_ms,
+        // so connections are evicted before they become stale.
+        let idle_timeout = match (p.pool_idle_timeout_ms, p.max_connection_age_ms) {
+            (Some(a), Some(b)) => Some(Duration::from_millis(a.min(b))),
+            (Some(a), None) => Some(Duration::from_millis(a)),
+            (None, Some(b)) => Some(Duration::from_millis(b)),
+            (None, None) => None,
+        };
+        if let Some(d) = idle_timeout {
+            builder.pool_idle_timeout(Some(d));
         }
         if let Some(n) = p.pool_max_idle_per_host {
             builder.pool_max_idle_per_host(n as usize);
@@ -1704,6 +1716,7 @@ fn build_handle(
         tls_roots,
         protocol: u.protocol,
         h3: h3_handle,
+        pre_warm: u.pool.as_ref().and_then(|p| p.pre_warm).unwrap_or(0),
     })
 }
 
@@ -1945,6 +1958,60 @@ impl UpstreamRegistry {
             handles: self.handles.clone(),
             splits: new_splits,
         })
+    }
+
+    /// SCALE-10 (#189): pre-warm connection pools for upstreams that
+    /// configure `pool.pre_warm`. For each upstream with a non-zero
+    /// `pre_warm` value, spawns a background task that sends lightweight
+    /// HEAD requests to each endpoint to establish `pre_warm`
+    /// connections in the pool. This removes cold-start latency spikes
+    /// after reloads and upgrade hand-offs. Failures are logged and
+    /// silently ignored (pre-warming is best-effort; a failed
+    /// pre-warm does not affect the upstream's availability).
+    pub fn pre_warm(&self) {
+        for (name, handle) in &self.handles {
+            let n = handle.pre_warm;
+            if n == 0 {
+                continue;
+            }
+            let handle = Arc::clone(handle);
+            let name = name.clone();
+            tokio::spawn(async move {
+                let endpoints = handle.lb().len();
+                if endpoints == 0 {
+                    return;
+                }
+                let per_endpoint = (n as usize).min(64);
+                tracing::info!(
+                    code = "upstream_pre_warm_start",
+                    upstream = %name,
+                    endpoints,
+                    per_endpoint,
+                    "pre-warming {} connections per endpoint for upstream {name}",
+                    per_endpoint,
+                );
+                for _ in 0..per_endpoint {
+                    for _ in 0..endpoints {
+                        // Send a lightweight HEAD request to establish
+                        // a connection. The request targets the
+                        // upstream's origin with a minimal path; the
+                        // response is discarded. Failures are silently
+                        // ignored (best-effort pre-warming).
+                        let req = http::Request::builder()
+                            .method("HEAD")
+                            .uri("/")
+                            .body(http_body_util::Empty::<bytes::Bytes>::new().boxed())
+                            .unwrap();
+                        let _ = handle.send(req).await;
+                    }
+                }
+                tracing::info!(
+                    code = "upstream_pre_warm_done",
+                    upstream = %name,
+                    "pre-warming complete for upstream {name}",
+                );
+            });
+        }
     }
 }
 
