@@ -32,12 +32,14 @@ function applyHomeMotion() {
   // Scroll-triggered reveal for the content sections below the cards.
   // The page content may be nested inside single-child wrapper divs
   // (versioning plugin etc.), so descend to the first level that holds
-  // the actual sections.
+  // the actual sections. Individual capability bands reveal one by one.
   let contentRoot: Element | null = home.querySelector(".vp-doc");
   while (contentRoot && contentRoot.children.length === 1) {
     contentRoot = contentRoot.firstElementChild;
   }
-  const targets = contentRoot ? [...contentRoot.children] : [];
+  const targets = contentRoot
+    ? [...contentRoot.children, ...home.querySelectorAll<HTMLElement>(".home-band")]
+    : [];
   if (!targets.length) return;
 
   home.classList.add("motion-ready");

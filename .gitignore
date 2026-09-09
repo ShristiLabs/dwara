@@ -42,3 +42,6 @@ docs-site/.vitepress/dist/
 crates/dwara-ebpf/Cargo.lock
 crates/dwara-uring/Cargo.lock
 demos/*/data/
+graphify-out/
+
+.DS_Store

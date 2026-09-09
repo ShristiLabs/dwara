@@ -641,6 +641,316 @@
 }
 
 /* --------------------------------------------------------------------------
+ * Sidebar maturity badges
+ *
+ * VitePress renders sidebar item `text` via v-html, so a small styled
+ * span embedded in the text string (see config.mts) becomes a pill that
+ * surfaces the feature-reference maturity tier directly in navigation.
+ * Three tiers match feature-reference.md: wired (no badge), partial,
+ * experimental (stubbed). The pill is muted so it does not overpower
+ * the link text but is still scannable at a glance.
+ * ------------------------------------------------------------------------ */
+
+.vp-sb-badge {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  text-transform: lowercase;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vp-sb-badge.partial {
+  color: #8a6d00;
+  background: rgba(210, 153, 34, 0.12);
+  border-color: rgba(210, 153, 34, 0.3);
+}
+
+.vp-sb-badge.experimental {
+  color: #6b7280;
+  background: rgba(152, 162, 179, 0.12);
+  border-color: rgba(152, 162, 179, 0.3);
+}
+
+.dark .vp-sb-badge.partial {
+  color: #d29922;
+  background: rgba(210, 153, 34, 0.16);
+  border-color: rgba(210, 153, 34, 0.35);
+}
+
+.dark .vp-sb-badge.experimental {
+  color: #b0b8c4;
+  background: rgba(152, 162, 179, 0.16);
+  border-color: rgba(152, 162, 179, 0.35);
+}
+
+/* Enterprise tier (indigo) — used by home-page capability bands. */
+.vp-sb-badge.ent {
+  color: #4338ca;
+  background: rgba(67, 56, 202, 0.1);
+  border-color: rgba(67, 56, 202, 0.3);
+}
+
+.dark .vp-sb-badge.ent {
+  color: #a5b4fc;
+  background: rgba(129, 140, 248, 0.14);
+  border-color: rgba(129, 140, 248, 0.35);
+}
+
+/* --------------------------------------------------------------------------
+ * Home capability bands: one band per docs domain, mirroring the sidebar.
+ * Each band is a heading row (icon + title + link + animated illustration)
+ * over a compact grid of capability cards with maturity/edition badges.
+ * Card/heading links must outrank VitePress's global `.vp-doc a` underline.
+ * ------------------------------------------------------------------------ */
+
+.vp-doc a.home-band-head,
+.vp-doc a.band-card,
+.vp-doc a.edition-card,
+.vp-doc a.flag-chip {
+  text-decoration: none;
+}
+
+.home-bands {
+  display: flex;
+  flex-direction: column;
+  gap: 44px;
+  margin-top: 12px;
+}
+
+.home-band-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.home-band-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-band-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.home-band-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--dwara-teal-soft);
+  color: var(--vp-c-brand-2);
+  flex-shrink: 0;
+}
+
+.dark .home-band-icon {
+  color: var(--vp-c-brand-1);
+}
+
+.home-band-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.home-band-title {
+  font-family: var(--dwara-font-display);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  transition: color 0.2s ease;
+}
+
+.home-band-head:hover .home-band-title {
+  color: var(--vp-c-brand-2);
+}
+
+.dark .home-band-head:hover .home-band-title {
+  color: var(--vp-c-brand-1);
+}
+
+.home-band-arrow {
+  color: var(--vp-c-text-3);
+  transition:
+    transform 0.2s ease,
+    color 0.2s ease;
+}
+
+.home-band-head:hover .home-band-arrow {
+  transform: translateX(3px);
+  color: var(--vp-c-brand-2);
+}
+
+.home-band-blurb {
+  margin: 8px 0 14px;
+  max-width: 62ch;
+  font-size: 14.5px;
+  color: var(--vp-c-text-2);
+}
+
+.home-band-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(238px, 1fr));
+  gap: 8px;
+}
+
+.band-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 13px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 9px;
+  background: var(--vp-c-bg-soft);
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.band-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(18, 181, 165, 0.55);
+}
+
+.band-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--vp-c-text-1);
+}
+
+.band-card:hover .band-card-name {
+  color: var(--vp-c-brand-2);
+}
+
+.dark .band-card:hover .band-card-name {
+  color: var(--vp-c-brand-1);
+}
+
+.band-card-desc {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--vp-c-text-2);
+}
+
+/* --- Band illustrations (HomeBandVisual.vue) --- */
+
+.band-visual {
+  flex-shrink: 0;
+  width: 220px;
+  height: 84px;
+  margin-top: 2px;
+}
+
+.band-visual .bv-line {
+  stroke: var(--dwara-indigo);
+  stroke-opacity: 0.65;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dark .band-visual .bv-line {
+  stroke: #9d97d8;
+  stroke-opacity: 0.7;
+}
+
+/* Dashed strokes default to the base line color; .bv-teal (defined next)
+   overrides the color when the classes are combined. */
+.band-visual .bv-dash {
+  stroke: var(--dwara-indigo);
+  stroke-opacity: 0.65;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-dasharray: 5 6;
+}
+
+.dark .band-visual .bv-dash {
+  stroke: #9d97d8;
+}
+
+.band-visual .bv-teal {
+  stroke: var(--dwara-teal);
+  stroke-opacity: 1;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dark .band-visual .bv-teal {
+  stroke: #2fd9c7;
+}
+
+.band-visual .bv-stroke2 {
+  stroke-width: 2;
+}
+
+.band-visual .bv-dot {
+  fill: var(--dwara-teal);
+}
+
+.dark .band-visual .bv-dot {
+  fill: #2fd9c7;
+}
+
+.band-visual .bv-dim {
+  fill-opacity: 0.55;
+}
+
+.band-visual .bv-ringpulse {
+  fill: none;
+  stroke: var(--dwara-teal);
+  stroke-width: 1.4;
+  opacity: 0.4;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.band-visual .bv-draw {
+  stroke-dasharray: 190;
+  stroke-dashoffset: 0;
+}
+
+.band-visual .bv-bar {
+  stroke: var(--dwara-indigo);
+  stroke-opacity: 0.6;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+
+.dark .band-visual .bv-bar {
+  stroke: #9d97d8;
+}
+
+/* Rotating groups pivot on their true centers (viewBox coordinates), not
+   their bounding boxes -- the needle turns on its hub, orbits on the scene
+   center. */
+.band-visual .bv-needle,
+.band-visual .bv-orbit,
+.band-visual .bv-spin {
+  transform-box: view-box;
+}
+
+.band-visual .bv-needle {
+  transform-origin: 110px 64px;
+}
+
+.band-visual .bv-orbit,
+.band-visual .bv-spin {
+  transform-origin: 110px 42px;
+}
+
+/* --------------------------------------------------------------------------
  * Motion: entrances, reveals, ambient animation
  * All keyframe animation is wrapped in no-preference; scroll-reveal also
  * needs the JS-added .motion-ready class (progressive enhancement).
@@ -693,6 +1003,78 @@
   }
 }
 
+/* Band illustration motion (HomeBandVisual.vue). */
+
+@keyframes bv-march {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+@keyframes bv-flow {
+  to {
+    transform: translateX(192px);
+  }
+}
+
+@keyframes bv-slide {
+  50% {
+    transform: translateX(46px);
+  }
+}
+
+@keyframes bv-needle {
+  50% {
+    transform: rotate(14deg);
+  }
+}
+
+@keyframes bv-ringpulse {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+@keyframes bv-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes bv-plug {
+  50% {
+    transform: translateX(9px);
+  }
+}
+
+@keyframes bv-draw {
+  0%,
+  12% {
+    stroke-dashoffset: 190;
+  }
+  62%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes bv-bar {
+  50% {
+    transform: scaleY(0.45);
+  }
+}
+
+@keyframes bv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .hero-mark-img {
     animation: dwara-float 6s ease-in-out infinite;
@@ -730,6 +1112,324 @@
     opacity: 1;
     transform: none;
   }
+
+  .band-visual .bv-dash {
+    animation: bv-march 2.4s linear infinite;
+  }
+
+  .band-visual .bv-march-r {
+    animation-direction: reverse;
+  }
+
+  .band-visual .bv-flow {
+    animation: bv-flow 3.2s linear infinite;
+  }
+
+  .band-visual .bv-slide {
+    animation: bv-slide 3s ease-in-out infinite;
+  }
+
+  .band-visual .bv-needle {
+    animation: bv-needle 2.8s ease-in-out infinite alternate;
+    transform: rotate(-8deg);
+  }
+
+  .band-visual .bv-ringpulse {
+    animation: bv-ringpulse 3s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  }
+
+  .band-visual .bv-orbit {
+    animation: bv-orbit 14s linear infinite;
+  }
+
+  .band-visual .bv-plug {
+    animation: bv-plug 3.4s ease-in-out infinite;
+  }
+
+  .band-visual .bv-draw {
+    animation: bv-draw 4.5s ease-in-out infinite;
+  }
+
+  .band-visual .bv-bar {
+    animation: bv-bar 2.6s ease-in-out infinite;
+  }
+
+  .band-visual .bv-bar:nth-of-type(2) {
+    animation-delay: 0.25s;
+  }
+
+  .band-visual .bv-bar:nth-of-type(3) {
+    animation-delay: 0.5s;
+  }
+
+  .band-visual .bv-bar:nth-of-type(4) {
+    animation-delay: 0.75s;
+  }
+
+  .band-visual .bv-spin {
+    animation: bv-spin 9s linear infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Home value-props section ("Why dwara")
+ * A clean bullet list with bold lead-ins, styled to stand apart from
+ * the rest of the page body. Uses the teal accent for the bullet dots.
+ * ------------------------------------------------------------------------ */
+
+.vp-doc .home-value-props {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  display: grid;
+  gap: 14px;
+}
+
+.vp-doc .home-value-props li {
+  position: relative;
+  padding-left: 28px;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--vp-c-text-2);
+}
+
+.vp-doc .home-value-props li::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dwara-teal);
+}
+
+.vp-doc .home-value-props li strong {
+  color: var(--vp-c-text-1);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+ * Home persona cards ("Built for your team")
+ * A responsive grid of cards, each with an icon, title, blurb, and
+ * up to three guide links. Mirrors the dvarahq.com "Built for your team"
+ * pattern.
+ * ------------------------------------------------------------------------ */
+
+.home-personas {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.persona-card {
+  display: flex;
+  flex-direction: column;
+  padding: 22px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg);
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.persona-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(18, 181, 165, 0.55);
+  box-shadow: 0 14px 34px -14px rgba(27, 22, 80, 0.28);
+}
+
+.dark .persona-card:hover {
+  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.6);
+}
+
+.persona-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  background: var(--dwara-teal-soft);
+  color: var(--vp-c-brand-2);
+}
+
+.dark .persona-icon {
+  color: var(--vp-c-brand-1);
+}
+
+.persona-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.persona-title {
+  margin: 0 0 8px;
+  font-family: var(--dwara-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.persona-blurb {
+  flex: 1;
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+}
+
+.persona-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.vp-doc a.persona-link {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--vp-c-brand-2);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.vp-doc a.persona-link:hover {
+  color: var(--vp-c-brand-1);
+}
+
+.dark .vp-doc a.persona-link {
+  color: var(--vp-c-brand-1);
+}
+
+.dark .vp-doc a.persona-link:hover {
+  color: var(--vp-c-brand-2);
+}
+
+/* --------------------------------------------------------------------------
+ * Home FAQ accordion ("Questions teams ask before they deploy")
+ * A clean disclosure list. Only one item open at a time. The chevron
+ * rotates on open. Answers expand smoothly. Uses a <button> (not native
+ * <details>) so the single-open rule is deterministic.
+ * ------------------------------------------------------------------------ */
+
+.home-faq {
+  margin-top: 18px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.faq-item {
+  border-bottom: 1px solid var(--vp-c-divider);
+  transition: background-color 0.2s ease;
+}
+
+.faq-item-open {
+  background: var(--vp-c-bg-soft);
+}
+
+.faq-q {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 4px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  transition: color 0.2s ease;
+}
+
+.faq-q:focus-visible {
+  outline: 2px solid var(--vp-c-brand-2);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.faq-q-text {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  transition: color 0.2s ease;
+}
+
+.faq-q:hover .faq-q-text {
+  color: var(--vp-c-brand-2);
+}
+
+.dark .faq-q:hover .faq-q-text {
+  color: var(--vp-c-brand-1);
+}
+
+.faq-chevron {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  position: relative;
+  transition: transform 0.25s ease;
+}
+
+.faq-chevron::before,
+.faq-chevron::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--vp-c-text-3);
+  transition:
+    transform 0.25s ease,
+    background-color 0.2s ease;
+}
+
+.faq-chevron::before {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.faq-chevron::after {
+  transform: translate(-50%, -50%);
+}
+
+.faq-item-open .faq-chevron::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+  background: var(--vp-c-brand-2);
+}
+
+.faq-item-open .faq-chevron::after {
+  transform: translate(-50%, -50%) scaleX(0);
+}
+
+.dark .faq-item-open .faq-chevron::before {
+  background: var(--vp-c-brand-1);
+}
+
+.faq-a {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition:
+    max-height 0.3s ease,
+    opacity 0.25s ease;
+}
+
+.faq-a-open {
+  max-height: 500px;
+  opacity: 1;
+}
+
+.faq-a p {
+  margin: 0 0 18px;
+  padding: 0 4px 0 4px;
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--vp-c-text-2);
 }
 
 /* --------------------------------------------------------------------------
@@ -740,6 +1440,10 @@
   .home-badges {
     justify-content: center;
   }
+
+  .band-visual {
+    display: none;
+  }
 }
 
 @media (max-width: 768px) {
@@ -748,6 +1452,14 @@
   }
 
   .home-flags-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .home-band-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .home-personas {
     grid-template-columns: 1fr;
   }
 

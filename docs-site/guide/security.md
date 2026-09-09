@@ -12,6 +12,8 @@ your config files entirely.
 
 ## In this section
 
+- [Authentication methods](./authentication-methods) - quick-reference
+  for choosing among API key, Basic, JWT/JWKS, mTLS, HMAC, and OIDC.
 - [Secrets](./secrets) - inline values vs. resolvable references, and
   the redaction model that keeps secrets out of logs and admin output.
 - [HMAC request signing](./hmac-signing) - a credential family for

@@ -121,46 +121,56 @@ export default withMermaid(
                   link: "/guide/concepts",
                 },
                 { text: "Configuration", link: "/guide/configuration" },
+                { text: "First scenarios", link: "/guide/first-scenarios" },
               ],
             },
             {
-              text: "Deployment and operations",
-              link: "/guide/deployment-operations",
+              text: "Proxying and transport",
+              link: "/guide/proxying-transport",
               collapsed: false,
               items: [
-                { text: "Overview", link: "/guide/deployment-operations" },
-                { text: "Deployment", link: "/guide/deployment" },
-                { text: "Operations", link: "/guide/operations" },
+                { text: "Overview", link: "/guide/proxying-transport" },
                 {
-                  text: "Zero-downtime upgrade",
-                  link: "/guide/zero-downtime-upgrade",
-                },
-                { text: "CLI", link: "/guide/cli" },
-                { text: "Admin API", link: "/guide/admin-api" },
-                {
-                  text: "Web console",
-                  link: "/guide/web-console",
+                  text: "Routing and matching",
+                  link: "/guide/routing",
                 },
                 {
-                  text: "Agent-operable administration",
-                  link: "/guide/agent-operable-admin",
+                  text: "Load balancing and traffic splitting",
+                  link: "/guide/traffic-splitting",
                 },
                 {
-                  text: "Terraform state tool",
-                  link: "/guide/terraform-state",
+                  text: "Dynamic upstream discovery",
+                  link: "/guide/dynamic-discovery",
                 },
                 {
-                  text: "Replay time-travel debugging",
-                  link: "/guide/replay-debugging",
+                  text: "gRPC and WebSockets",
+                  link: "/guide/grpc-websockets",
+                },
+                { text: "HTTP/3 ingress", link: "/guide/http3" },
+                {
+                  text: "H3/QUIC upstream transport",
+                  link: "/guide/h3-quic-upstream",
+                },
+                {
+                  text: "L4 TCP/UDP proxying" +
+                    '<span class="vp-sb-badge partial">partial</span>',
+                  link: "/guide/l4-proxying",
+                },
+                {
+                  text: "Post-quantum TLS",
+                  link: "/guide/post-quantum-tls",
                 },
               ],
             },
             {
-              text: "Routing and request handling",
-              link: "/guide/routing",
+              text: "Request and response control",
+              link: "/guide/request-response-control",
               collapsed: false,
               items: [
-                { text: "Overview", link: "/guide/routing" },
+                {
+                  text: "Overview",
+                  link: "/guide/request-response-control",
+                },
                 {
                   text: "CORS, compression, and request limits",
                   link: "/guide/edge-policies",
@@ -175,66 +185,106 @@ export default withMermaid(
                 },
                 { text: "Response caching", link: "/guide/caching" },
                 { text: "API versioning", link: "/guide/api-versioning" },
+              ],
+            },
+            {
+              text: "Protocol translation and API management",
+              link: "/guide/protocol-translation",
+              collapsed: false,
+              items: [
                 {
-                  text: "Traffic splitting and sticky sessions",
-                  link: "/guide/traffic-splitting",
-                },
-                { text: "gRPC and WebSockets", link: "/guide/grpc-websockets" },
-                {
-                  text: "HTTP/3 ingress",
-                  link: "/guide/http3",
-                },
-                {
-                  text: "Dynamic upstream discovery",
-                  link: "/guide/dynamic-discovery",
-                },
-                {
-                  text: "OpenAPI import and mock mode",
-                  link: "/guide/openapi-import",
-                },
-                {
-                  text: "Config import (NGINX, Kong, Envoy)",
-                  link: "/guide/config-import",
-                },
-                {
-                  text: "API aggregation",
-                  link: "/guide/api-aggregation",
-                },
-                {
-                  text: "OpenAPI response validation",
-                  link: "/guide/openapi-response-validation",
-                },
-                {
-                  text: "CEL expressions",
-                  link: "/guide/cel-expressions",
-                },
-                {
-                  text: "Kubernetes Gateway API",
-                  link: "/guide/kubernetes-gateway-api",
-                },
-                {
-                  text: "GraphQL awareness",
-                  link: "/guide/graphql",
+                  text: "Overview",
+                  link: "/guide/protocol-translation",
                 },
                 {
                   text: "gRPC-Web and transcoding",
                   link: "/guide/grpc-web",
                 },
                 {
-                  text: "Protocol translation",
+                  text: "Protocol translation (REST, gRPC, GraphQL, SOAP)",
                   link: "/guide/protocol-translation",
                 },
                 {
-                  text: "L4 TCP/UDP proxying",
-                  link: "/guide/l4-proxying",
+                  text: "GraphQL awareness" +
+                    '<span class="vp-sb-badge partial">partial</span>',
+                  link: "/guide/graphql",
                 },
                 {
-                  text: "H3/QUIC upstream transport",
-                  link: "/guide/h3-quic-upstream",
+                  text: "API aggregation",
+                  link: "/guide/api-aggregation",
                 },
                 {
-                  text: "API lifecycle and dev portal",
+                  text: "OpenAPI import and mock mode",
+                  link: "/guide/openapi-import",
+                },
+                {
+                  text: "OpenAPI response validation",
+                  link: "/guide/openapi-response-validation",
+                },
+                {
+                  text: "API lifecycle and dev portal" +
+                    '<span class="vp-sb-badge partial">partial</span>',
                   link: "/guide/api-lifecycle",
+                },
+              ],
+            },
+            {
+              text: "Traffic policy and resilience",
+              link: "/guide/traffic-policy",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/traffic-policy" },
+                {
+                  text: "Maintenance mode and dry-run",
+                  link: "/guide/maintenance",
+                },
+                { text: "Admission queues", link: "/guide/admission-queue" },
+                { text: "WAF-lite filtering", link: "/guide/waf-lite" },
+                { text: "Consumer quotas", link: "/guide/quotas" },
+                {
+                  text: "Request hedging",
+                  link: "/guide/request-hedging",
+                },
+                {
+                  text: "Mirroring and fault injection",
+                  link: "/guide/mirroring-fault-injection",
+                },
+              ],
+            },
+            {
+              text: "Security and identity",
+              link: "/guide/security",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/security" },
+                {
+                  text: "Authentication methods",
+                  link: "/guide/authentication-methods",
+                },
+                {
+                  text: "HMAC request signing",
+                  link: "/guide/hmac-signing",
+                },
+                { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
+                { text: "OpenID Connect", link: "/guide/oidc" },
+                { text: "Authorization rules", link: "/guide/authorization" },
+                {
+                  text: "Cedar and OPA authorization",
+                  link: "/guide/cedar-opa-authz",
+                },
+                {
+                  text: "CEL expressions",
+                  link: "/guide/cel-expressions",
+                },
+                { text: "Secrets and references", link: "/guide/secrets" },
+                {
+                  text: "ACME certificate automation" +
+                    '<span class="vp-sb-badge experimental">experimental</span>',
+                  link: "/guide/acme",
+                },
+                {
+                  text: "FIPS mode",
+                  link: "/guide/fips-mode",
                 },
               ],
             },
@@ -273,75 +323,23 @@ export default withMermaid(
                   link: "/guide/ai-semantic-caching",
                 },
                 {
-                  text: "MCP gateway",
+                  text: "MCP gateway" +
+                    '<span class="vp-sb-badge experimental">experimental</span>',
                   link: "/guide/ai-mcp-gateway",
                 },
                 {
-                  text: "A2A protocol",
+                  text: "A2A protocol" +
+                    '<span class="vp-sb-badge partial">partial</span>',
                   link: "/guide/a2a-protocol",
                 },
               ],
             },
             {
-              text: "Traffic policy and resilience",
-              link: "/guide/traffic-policy",
+              text: "Extensibility and plugins",
+              link: "/guide/extensibility-overview",
               collapsed: false,
               items: [
-                { text: "Overview", link: "/guide/traffic-policy" },
-                {
-                  text: "Maintenance mode and dry-run",
-                  link: "/guide/maintenance",
-                },
-                { text: "Admission queues", link: "/guide/admission-queue" },
-                { text: "WAF-lite filtering", link: "/guide/waf-lite" },
-                { text: "Consumer quotas", link: "/guide/quotas" },
-                {
-                  text: "Request hedging",
-                  link: "/guide/request-hedging",
-                },
-                {
-                  text: "Mirroring and fault injection",
-                  link: "/guide/mirroring-fault-injection",
-                },
-              ],
-            },
-            {
-              text: "Security and authentication",
-              link: "/guide/security",
-              collapsed: false,
-              items: [
-                { text: "Overview", link: "/guide/security" },
-                { text: "Secrets", link: "/guide/secrets" },
-                {
-                  text: "HMAC request signing",
-                  link: "/guide/hmac-signing",
-                },
-                { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
-                { text: "OpenID Connect", link: "/guide/oidc" },
-                { text: "Authorization rules", link: "/guide/authorization" },
-                {
-                  text: "Cedar and OPA authorization",
-                  link: "/guide/cedar-opa-authz",
-                },
-                {
-                  text: "ACME certificate automation",
-                  link: "/guide/acme",
-                },
-                {
-                  text: "Post-quantum TLS",
-                  link: "/guide/post-quantum-tls",
-                },
-                {
-                  text: "FIPS mode",
-                  link: "/guide/fips-mode",
-                },
-              ],
-            },
-            {
-              text: "Plugins and WASM",
-              link: "/guide/proxy-wasm-plugins",
-              collapsed: false,
-              items: [
+                { text: "Overview", link: "/guide/extensibility-overview" },
                 {
                   text: "Proxy-Wasm plugins",
                   link: "/guide/proxy-wasm-plugins",
@@ -351,7 +349,8 @@ export default withMermaid(
                   link: "/guide/native-plugins",
                 },
                 {
-                  text: "Extism plugin development kit",
+                  text: "Extism plugin development kit" +
+                    '<span class="vp-sb-badge experimental">experimental</span>',
                   link: "/guide/extism-pdk",
                 },
                 {
@@ -365,6 +364,10 @@ export default withMermaid(
                 {
                   text: "Plugin SDK",
                   link: "/guide/plugin-sdk",
+                },
+                {
+                  text: "Extension traits",
+                  link: "/guide/extension-traits",
                 },
               ],
             },
@@ -395,7 +398,47 @@ export default withMermaid(
               ],
             },
             {
-              text: "Enterprise",
+              text: "Operations and management",
+              link: "/guide/deployment-operations",
+              collapsed: false,
+              items: [
+                { text: "Overview", link: "/guide/deployment-operations" },
+                { text: "Deployment", link: "/guide/deployment" },
+                { text: "Operations", link: "/guide/operations" },
+                {
+                  text: "Zero-downtime upgrade",
+                  link: "/guide/zero-downtime-upgrade",
+                },
+                { text: "CLI", link: "/guide/cli" },
+                { text: "Admin API", link: "/guide/admin-api" },
+                {
+                  text: "Web console",
+                  link: "/guide/web-console",
+                },
+                {
+                  text: "Agent-operable administration",
+                  link: "/guide/agent-operable-admin",
+                },
+                {
+                  text: "Terraform state tool",
+                  link: "/guide/terraform-state",
+                },
+                {
+                  text: "Replay time-travel debugging",
+                  link: "/guide/replay-debugging",
+                },
+                {
+                  text: "Config import (NGINX, Kong, Envoy)",
+                  link: "/guide/config-import",
+                },
+                {
+                  text: "Kubernetes Gateway API",
+                  link: "/guide/kubernetes-gateway-api",
+                },
+              ],
+            },
+            {
+              text: "Enterprise and fleet",
               link: "/guide/enterprise",
               collapsed: false,
               items: [
@@ -405,7 +448,7 @@ export default withMermaid(
                   link: "/guide/editions",
                 },
                 {
-                  text: "Feature reference",
+                  text: "Feature reference and maturity",
                   link: "/guide/feature-reference",
                 },
                 {
@@ -445,7 +488,8 @@ export default withMermaid(
                   link: "/guide/ent-controller-persistence",
                 },
                 {
-                  text: "Service mesh mode",
+                  text: "Service mesh mode" +
+                    '<span class="vp-sb-badge experimental">experimental</span>',
                   link: "/guide/service-mesh",
                 },
               ],
