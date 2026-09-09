@@ -1357,6 +1357,198 @@ impl StateStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    // ------------------------------------------------------------------
+    // SCALE-06 (#185): leader election for CP/DP HA. The
+    // controller_leader table (migration 009) holds a single row
+    // with the current leader's instance ID, epoch, and lease expiry.
+    // ------------------------------------------------------------------
+
+    /// Try to acquire leadership. Returns `Ok(LeaderRow)` if this
+    /// instance now holds the lease; returns `Err(String)` with
+    /// "instance_id:expires_at_ms" of the current holder if another
+    /// instance holds a valid (non-expired) lease.
+    pub fn try_acquire_leader(&self, instance_id: &str, ttl_ms: i64) -> Result<LeaderRow> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let expires_at = now + ttl_ms;
+
+        // Check if there's an existing valid lease.
+        let existing: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT instance_id, epoch, expires_at_ms \
+                 FROM controller_leader WHERE key = 'leader'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+
+        match existing {
+            Some((id, _epoch, expires)) if expires > now && id != instance_id => {
+                // Another instance holds a valid lease.
+                Err(StoreError::Sqlite(format!("{id}:{expires}")))
+            }
+            Some((id, epoch, _)) if id == instance_id => {
+                // We already hold the lease; renew it.
+                let new_epoch = epoch;
+                conn.execute(
+                    "UPDATE controller_leader \
+                     SET expires_at_ms = ?1 \
+                     WHERE key = 'leader' AND instance_id = ?2",
+                    params![expires_at, instance_id],
+                )?;
+                Ok(LeaderRow {
+                    instance_id: instance_id.to_string(),
+                    epoch: new_epoch as u64,
+                    acquired_at_ms: now,
+                    expires_at_ms: expires_at,
+                })
+            }
+            _ => {
+                // No lease or expired lease: acquire it.
+                let epoch = existing.map(|(_, e, _)| e + 1).unwrap_or(1);
+                conn.execute(
+                    "INSERT OR REPLACE INTO controller_leader \
+                     (key, instance_id, epoch, acquired_at_ms, expires_at_ms) \
+                     VALUES ('leader', ?1, ?2, ?3, ?4)",
+                    params![instance_id, epoch, now, expires_at],
+                )?;
+                Ok(LeaderRow {
+                    instance_id: instance_id.to_string(),
+                    epoch: epoch as u64,
+                    acquired_at_ms: now,
+                    expires_at_ms: expires_at,
+                })
+            }
+        }
+    }
+
+    /// Renew the leader lease. Returns `Ok(LeaderRow)` with the new
+    /// expiry if this instance still holds the lease; `Err` if the
+    /// lease was lost (expired or stolen).
+    pub fn renew_leader_lease(&self, instance_id: &str, ttl_ms: i64) -> Result<LeaderRow> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let expires_at = now + ttl_ms;
+
+        let updated = conn.execute(
+            "UPDATE controller_leader \
+             SET expires_at_ms = ?1 \
+             WHERE key = 'leader' AND instance_id = ?2 AND expires_at_ms > ?3",
+            params![expires_at, instance_id, now],
+        )?;
+
+        if updated == 0 {
+            // Either no row, or the lease was stolen/expired.
+            return Err(StoreError::Sqlite(
+                "lease lost: no valid lease held by this instance".to_string(),
+            ));
+        }
+
+        // Read back the full row.
+        let row = conn.query_row(
+            "SELECT instance_id, epoch, acquired_at_ms, expires_at_ms \
+             FROM controller_leader WHERE key = 'leader'",
+            [],
+            |r| {
+                Ok(LeaderRow {
+                    instance_id: r.get(0)?,
+                    epoch: r.get::<_, i64>(1)? as u64,
+                    acquired_at_ms: r.get(2)?,
+                    expires_at_ms: r.get(3)?,
+                })
+            },
+        )?;
+        Ok(row)
+    }
+
+    /// Voluntarily release the lease (graceful shutdown). Returns
+    /// `Ok(())` if the lease was released, `Err` if this instance
+    /// did not hold the lease.
+    pub fn step_down_leader(&self, instance_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let deleted = conn.execute(
+            "DELETE FROM controller_leader \
+             WHERE key = 'leader' AND instance_id = ?1",
+            params![instance_id],
+        )?;
+        if deleted == 0 {
+            return Err(StoreError::Sqlite(
+                "step_down failed: this instance does not hold the lease".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get the current leader (if any), or `None` if no valid
+    /// (non-expired) lease exists.
+    pub fn current_leader(&self) -> Result<Option<LeaderRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let row = conn
+            .query_row(
+                "SELECT instance_id, epoch, acquired_at_ms, expires_at_ms \
+                 FROM controller_leader WHERE key = 'leader' AND expires_at_ms > ?1",
+                params![now],
+                |r| {
+                    Ok(LeaderRow {
+                        instance_id: r.get(0)?,
+                        epoch: r.get::<_, i64>(1)? as u64,
+                        acquired_at_ms: r.get(2)?,
+                        expires_at_ms: r.get(3)?,
+                    })
+                },
+            )
+            .ok();
+        // Distinguish "no row" from "query error".
+        match row {
+            Some(r) => Ok(Some(r)),
+            None => {
+                // Check if a row exists at all (expired or not).
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM controller_leader WHERE key = 'leader'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if count == 0 {
+                    Ok(None)
+                } else {
+                    // Row exists but expired.
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Persist the current config generation counter (SCALE-06, #185).
+    /// This survives controller restarts so the generation counter
+    /// does not reset to 1.
+    pub fn save_generation_counter(&self, generation: u64) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        conn.execute(
+            "INSERT OR REPLACE INTO generation_counter (key, generation, updated_at_ms) \
+             VALUES ('cp', ?1, ?2)",
+            params![generation as i64, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load the persisted config generation counter (SCALE-06, #185).
+    /// Returns `None` if no counter has been persisted (fresh store).
+    pub fn load_generation_counter(&self) -> Result<Option<u64>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let row = conn
+            .query_row(
+                "SELECT generation FROM generation_counter WHERE key = 'cp'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok();
+        Ok(row.map(|v| v as u64))
+    }
 }
 
 /// One workspace row (SCALE-05, #184). Plain data — the workspace
@@ -1400,6 +1592,17 @@ pub struct AuditRow {
     pub before_state: Option<String>,
     pub after_state: Option<String>,
     pub request_id: String,
+}
+
+/// One leader row (SCALE-06, #185). The current leader's instance ID,
+/// epoch, and lease expiry. Plain data — the leader election module
+/// owns the domain types; the store stays backend-neutral.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderRow {
+    pub instance_id: String,
+    pub epoch: u64,
+    pub acquired_at_ms: i64,
+    pub expires_at_ms: i64,
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38
@@ -1459,6 +1662,14 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Wall-clock Unix milliseconds (SCALE-06, #185).
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 

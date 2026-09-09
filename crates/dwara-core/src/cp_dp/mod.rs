@@ -54,6 +54,9 @@ pub mod cluster_sync;
 pub mod analytics;
 pub mod controller;
 pub mod edge;
+// SCALE-06 (#185): leader election for CP/DP HA. Lease-based
+// distributed locking with renewal and failover.
+pub mod leader_election;
 pub mod transport;
 
 // ---------------------------------------------------------------------------
@@ -171,6 +174,28 @@ impl ControllerState {
 
         *self.current_generation.write().unwrap() = Some(generation.clone());
         generation
+    }
+
+    /// SCALE-06 (#185): seed the generation counter from a persisted
+    /// value. Called on controller startup when a state store is
+    /// attached, so the generation counter does not reset to 1 after
+    /// a controller restart. Only bumps upward (never goes backwards).
+    pub fn seed_generation_from_persisted(&self, persisted: u64) {
+        let current = self.current_generation.read().unwrap();
+        let current_gen = current.as_ref().map(|g| g.generation).unwrap_or(0);
+        if persisted > current_gen {
+            drop(current);
+            let mut gen = self.current_generation.write().unwrap();
+            let controller_gen = gen.as_ref().map(|g| g.generation).unwrap_or(0);
+            if persisted > controller_gen {
+                *gen = Some(ConfigGeneration {
+                    generation: persisted,
+                    config: String::new(),
+                    config_hash: String::new(),
+                    timestamp_ms: now_unix_ms(),
+                });
+            }
+        }
     }
 
     /// Get the current config generation.
@@ -544,6 +569,11 @@ pub enum LeaderElectionResult {
 /// A simple leader election: the instance with the lowest ID wins.
 /// In a real implementation, this would use a distributed lock
 /// (Redis, etcd) or Raft consensus.
+///
+/// SCALE-06 (#185): for real leader election with lease renewal and
+/// failover, use [`leader_election::LeaderElector`] and
+/// [`leader_election::election_loop`]. This function remains as the
+/// simple in-memory fallback for single-controller deployments.
 pub fn elect_leader(instance_id: &str, candidate_ids: &[String]) -> LeaderElectionResult {
     if candidate_ids.is_empty() {
         return LeaderElectionResult::Won;

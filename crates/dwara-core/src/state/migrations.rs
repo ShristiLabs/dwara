@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 8;
+pub const LATEST_SCHEMA_VERSION: u32 = 9;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -219,6 +219,29 @@ const MIGRATION_008_WORKSPACE_PERSISTENCE: &str = "
         ON workspace_audit (timestamp_ms);
 ";
 
+/// SCALE-06 (#185): leader election for CP/DP HA. A single-row table
+/// holds the current leader's instance ID, epoch, and lease expiry.
+/// The epoch increments on each leadership transition. The lease
+/// expiry is a Unix-epoch-millis timestamp; a stale lease (expiry in
+/// the past) allows a standby to acquire leadership.
+///
+/// Additive (new table; existing databases get an empty table = no
+/// leader, so the first controller to call `try_acquire_leader` wins).
+const MIGRATION_009_LEADER_ELECTION: &str = "
+    CREATE TABLE IF NOT EXISTS controller_leader (
+        key            TEXT PRIMARY KEY DEFAULT 'leader',
+        instance_id    TEXT NOT NULL,
+        epoch          INTEGER NOT NULL,
+        acquired_at_ms INTEGER NOT NULL,
+        expires_at_ms  INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS generation_counter (
+        key            TEXT PRIMARY KEY DEFAULT 'cp',
+        generation     INTEGER NOT NULL,
+        updated_at_ms  INTEGER NOT NULL
+    );
+";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -231,6 +254,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_006_PROMPT_OVERRIDES),
         M::up(MIGRATION_007_MCP_SESSIONS),
         M::up(MIGRATION_008_WORKSPACE_PERSISTENCE),
+        M::up(MIGRATION_009_LEADER_ELECTION),
     ])
 }
 

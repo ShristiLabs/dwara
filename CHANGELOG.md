@@ -70,6 +70,19 @@ the project follows semantic versioning once 1.0 is reached.
   a state store the manager runs in-memory only (the pre-#184
   behavior). The `ent` feature now forwards to `dwara-admin/ent` so
   the workspace admin endpoints compile in.
+- CP/DP leader election and HA (#185, SCALE-06, ent): real leader
+  election with lease-based distributed locking, lease renewal, and
+  failover. The `LeaderElector` trait is a swappable seam; the
+  `SqliteLeaderElector` uses the state store's `controller_leader`
+  table (migration 009) for durable lease persistence. The
+  `election_loop` acquires leadership on startup, renews the lease
+  periodically, and steps down on loss or shutdown. The
+  `ControllerRuntime` now supports `with_elector` for HA mode; the
+  static `--leader` flag remains for single-controller deployments.
+  Durable generation counter persistence (`save_generation_counter` /
+  `load_generation_counter`) survives controller restarts so the
+  generation counter does not reset to 1. The `cp_dp` domain may now
+  depend on `state` for lease persistence.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

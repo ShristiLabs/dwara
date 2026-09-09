@@ -90,7 +90,10 @@ ALLOWED = {
     # DW-095: federated analytics — the controller-side collector
     # implements the AnalyticsSink trait and uses Event/ExtensionsError
     # from extensions, so cp_dp may depend on extensions.
-    "cp_dp": {"config", "snapshot", "extensions"},
+    # SCALE-06 (#185): leader election — the SqliteLeaderElector uses
+    # the StateStore for durable lease persistence, so cp_dp may depend
+    # on state.
+    "cp_dp": {"config", "snapshot", "extensions", "state"},
     # DW-075: AI provider-adapter pack. Pure translation over the
     # canonical chat types plus the compiled alias table; the config
     # block's schema lives in config. The HTTP transport is the
