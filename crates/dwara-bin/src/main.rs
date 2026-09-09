@@ -874,11 +874,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dwara_admin::ListenMode::mtls(&admin_cfg)?
         };
         let admin_tcp = tokio::net::TcpListener::bind(&admin_cfg.bind).await?;
-        let admin_ctx = Arc::new(dwara_admin::AdminContext::new(
+        let admin_ctx = dwara_admin::AdminContext::new(
             Arc::clone(&state),
             Arc::clone(&dp),
             config_path.clone(),
-        ));
+        );
+        // SCALE-05 (#184): attach the workspace manager (ent only).
+        // When a state store is present, the manager persists
+        // workspaces/roles/principals/audit to SQLite; without a
+        // store it runs in-memory only.
+        #[cfg(feature = "ent")]
+        let admin_ctx = {
+            let ws_mgr = Arc::new(dwara_core::workspace::WorkspaceManager::with_store(
+                state_store.clone(),
+            ));
+            admin_ctx.with_workspace(ws_mgr)
+        };
+        let admin_ctx = Arc::new(admin_ctx);
         let admin_shutdown = shutdown_rx.clone();
         let bind_label = admin_cfg.bind.clone();
         tracing::info!(

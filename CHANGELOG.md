@@ -54,6 +54,22 @@ the project follows semantic versioning once 1.0 is reached.
   cache. The `ResponseCache` store is now swappable at startup via
   `set_store` so the Redis backend drops in without rebuilding the
   cache machinery.
+- Workspace persistence and admin API (#184, SCALE-05, ent): the
+  workspace manager (workspaces, RBAC roles, principals, audit log)
+  now persists to the state store. Migration 008 adds `workspaces`,
+  `rbac_roles`, `rbac_principals`, and `workspace_audit` tables
+  (SQLite for OSS, backend-neutral API for future PostgreSQL ent
+  backend). The manager loads state on startup (seeding the `default`
+  workspace if the table is empty) and persists every mutation
+  (workspace create/delete, role add, role assignment, audit append).
+  New admin API endpoints: `GET/POST /workspaces`,
+  `GET/DELETE /workspaces/:name`, `GET/POST /roles`,
+  `GET /principals`, `GET /principals/:identity`,
+  `POST /principals/:identity/roles`, and `GET /audit` (with
+  `workspace`, `since_ms`, `until_ms`, `limit` query params). Without
+  a state store the manager runs in-memory only (the pre-#184
+  behavior). The `ent` feature now forwards to `dwara-admin/ent` so
+  the workspace admin endpoints compile in.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

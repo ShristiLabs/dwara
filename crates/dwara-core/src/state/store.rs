@@ -1125,6 +1125,281 @@ impl StateStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    // ----------------------------------------------------------------------
+    // SCALE-05 (#184): workspace persistence — workspaces, RBAC roles,
+    // principals, and the append-only audit log. The SQL schema lives
+    // in migration 008; these methods are the store's typed CRUD over
+    // it. The workspace manager owns the domain types and calls these
+    // methods; the store stays backend-neutral (no upward import of
+    // workspace types — the record structs here are plain data,
+    // serialized to/from JSON at the boundary).
+    // ----------------------------------------------------------------------
+
+    /// Insert or replace a workspace row. The `default` workspace is
+    /// seeded by the manager on first open; this method is the
+    /// manager's persistence path for create/update.
+    pub fn upsert_workspace(&self, name: &str, description: &str, active: bool) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO workspaces (name, description, active, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (name) DO UPDATE SET \
+             description = excluded.description, \
+             active = excluded.active",
+            params![name, description, active as i64, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a workspace row. Returns true if a row was deleted.
+    pub fn delete_workspace_row(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute("DELETE FROM workspaces WHERE name = ?1", params![name])?;
+        Ok(n > 0)
+    }
+
+    /// List all workspace rows.
+    pub fn list_workspace_rows(&self) -> Result<Vec<WorkspaceRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, description, active, created_at FROM workspaces ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorkspaceRow {
+                name: r.get(0)?,
+                description: r.get(1)?,
+                active: r.get::<_, i64>(2)? != 0,
+                created_at: r.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Get a single workspace row by name.
+    pub fn get_workspace_row(&self, name: &str) -> Result<Option<WorkspaceRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, description, active, created_at FROM workspaces WHERE name = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![name], |r| {
+                Ok(WorkspaceRow {
+                    name: r.get(0)?,
+                    description: r.get(1)?,
+                    active: r.get::<_, i64>(2)? != 0,
+                    created_at: r.get(3)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Insert or replace an RBAC role row. The permissions are stored
+    /// as a JSON array of `{"action":"...","workspace":"..."}`.
+    pub fn upsert_role(&self, name: &str, permissions_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO rbac_roles (name, permissions, created_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT (name) DO UPDATE SET permissions = excluded.permissions",
+            params![name, permissions_json, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete an RBAC role row. Returns true if a row was deleted.
+    pub fn delete_role_row(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute("DELETE FROM rbac_roles WHERE name = ?1", params![name])?;
+        Ok(n > 0)
+    }
+
+    /// List all RBAC role rows.
+    pub fn list_role_rows(&self) -> Result<Vec<RoleRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt =
+            conn.prepare("SELECT name, permissions, created_at FROM rbac_roles ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RoleRow {
+                name: r.get(0)?,
+                permissions_json: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Insert or replace a principal row. The roles are stored as a
+    /// JSON array of role-name strings.
+    pub fn upsert_principal(&self, identity: &str, roles_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO rbac_principals (identity, roles, created_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT (identity) DO UPDATE SET roles = excluded.roles",
+            params![identity, roles_json, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Get a single principal row by identity.
+    pub fn get_principal_row(&self, identity: &str) -> Result<Option<PrincipalRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let row = conn
+            .query_row(
+                "SELECT identity, roles, created_at FROM rbac_principals WHERE identity = ?1",
+                params![identity],
+                |r| {
+                    Ok(PrincipalRow {
+                        identity: r.get(0)?,
+                        roles_json: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List all principal rows.
+    pub fn list_principal_rows(&self) -> Result<Vec<PrincipalRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn
+            .prepare("SELECT identity, roles, created_at FROM rbac_principals ORDER BY identity")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PrincipalRow {
+                identity: r.get(0)?,
+                roles_json: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Append an audit entry. Returns the assigned sequence number.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_workspace_audit(
+        &self,
+        timestamp_ms: i64,
+        principal: &str,
+        action: &str,
+        workspace: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        request_id: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO workspace_audit \
+             (timestamp_ms, principal, action, workspace, before_state, after_state, request_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                timestamp_ms,
+                principal,
+                action,
+                workspace,
+                before,
+                after,
+                request_id
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Query audit entries, optionally filtered by workspace and
+    /// bounded by a time range. Returns entries ordered by seq
+    /// descending (newest first), capped at `limit`.
+    pub fn query_workspace_audit(
+        &self,
+        workspace: Option<&str>,
+        since_ms: Option<i64>,
+        until_ms: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<AuditRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut sql = String::from(
+            "SELECT seq, timestamp_ms, principal, action, workspace, before_state, after_state, request_id \
+             FROM workspace_audit WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ws) = workspace {
+            sql.push_str(" AND workspace = ?");
+            params_vec.push(Box::new(ws.to_string()));
+        }
+        if let Some(since) = since_ms {
+            sql.push_str(" AND timestamp_ms >= ?");
+            params_vec.push(Box::new(since));
+        }
+        if let Some(until) = until_ms {
+            sql.push_str(" AND timestamp_ms <= ?");
+            params_vec.push(Box::new(until));
+        }
+        sql.push_str(" ORDER BY seq DESC LIMIT ?");
+        params_vec.push(Box::new(limit));
+        let mut stmt = conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok(AuditRow {
+                seq: r.get(0)?,
+                timestamp_ms: r.get(1)?,
+                principal: r.get(2)?,
+                action: r.get(3)?,
+                workspace: r.get(4)?,
+                before_state: r.get(5)?,
+                after_state: r.get(6)?,
+                request_id: r.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+}
+
+/// One workspace row (SCALE-05, #184). Plain data — the workspace
+/// domain types live in [`crate::workspace`]; the store serializes
+/// at the SQL boundary so it never imports upward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub name: String,
+    pub description: String,
+    pub active: bool,
+    pub created_at: i64,
+}
+
+/// One RBAC role row (SCALE-05, #184). `permissions_json` is a JSON
+/// array of `{"action":"read|write|admin","workspace":"<name or *>"}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleRow {
+    pub name: String,
+    pub permissions_json: String,
+    pub created_at: i64,
+}
+
+/// One principal row (SCALE-05, #184). `roles_json` is a JSON array
+/// of role-name strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalRow {
+    pub identity: String,
+    pub roles_json: String,
+    pub created_at: i64,
+}
+
+/// One audit log row (SCALE-05, #184). `before_state` and
+/// `after_state` are optional JSON strings (None for create/delete).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub seq: i64,
+    pub timestamp_ms: i64,
+    pub principal: String,
+    pub action: String,
+    pub workspace: String,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub request_id: String,
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38

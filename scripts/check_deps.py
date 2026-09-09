@@ -60,6 +60,11 @@ ALLOWED = {
     # listener/upstream TLS config, so snapshot may depend on security.
     "snapshot": {"config", "events", "security"},
     "state": {"config"},
+    # SCALE-05 (#184): workspace persistence — the workspace manager
+    # delegates CRUD to the state store (SQLite for OSS, the same
+    # backend-neutral API surface for ent). The workspace domain owns
+    # the RBAC/audit types; the store serializes at the SQL boundary.
+    "workspace": {"config", "state"},
     "analytics": {"config", "observability", "extensions"},
     # DW-107: service mesh/SPIFFE. The mesh domain owns the sidecar
     # controller and SPIFFE client; security::tls imports mesh types

@@ -23,6 +23,13 @@ tracing = { workspace = true }
 # the write-to-temp + rename dance without shell tricks.
 tempfile = { workspace = true }
 
+[features]
+# SCALE-05 (#184): workspace admin endpoints. When enabled, the admin
+# API exposes /workspaces, /roles, /principals, and /audit endpoints
+# backed by the workspace manager (which requires dwara-core's ent
+# feature).
+ent = ["dwara-core/ent"]
+
 [dev-dependencies]
 rcgen = { workspace = true }
 tempfile = { workspace = true }

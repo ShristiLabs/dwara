@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -166,6 +166,59 @@ const MIGRATION_007_MCP_SESSIONS: &str = "
     );
 ";
 
+/// Migration 008 (SCALE-05, #184): workspace persistence — durable
+/// storage for the multi-tenant workspace/RBAC/audit model (DW-067).
+/// Four tables:
+/// - `workspaces`: one row per tenant namespace (name PK, description,
+///   active flag, created_at). The `default` workspace is seeded by the
+///   workspace manager at first open, not by this migration (the
+///   manager treats a missing `default` row as "seed it").
+/// - `rbac_roles`: one row per named role (name PK, permissions JSON,
+///   created_at). `permissions` is a JSON array of
+///   `{"action":"read|write|admin","workspace":"<name or *>"}`.
+/// - `rbac_principals`: one row per authenticated principal (identity
+///   PK, roles JSON array of role names, created_at).
+/// - `workspace_audit`: append-only audit log (seq PK AUTOINCREMENT,
+///   timestamp_ms, principal, action, workspace, before JSON, after
+///   JSON, request_id). Indexed on `workspace` for per-workspace
+///   queries and on `timestamp_ms` for time-bounded queries.
+///
+/// Additive (new tables; existing databases have no rows = the
+/// pre-008 in-memory behavior, which the manager seeds on first
+/// open).
+const MIGRATION_008_WORKSPACE_PERSISTENCE: &str = "
+    CREATE TABLE IF NOT EXISTS workspaces (
+        name        TEXT PRIMARY KEY,
+        description TEXT NOT NULL DEFAULT '',
+        active      INTEGER NOT NULL DEFAULT 1,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rbac_roles (
+        name        TEXT PRIMARY KEY,
+        permissions TEXT NOT NULL DEFAULT '[]',
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rbac_principals (
+        identity    TEXT PRIMARY KEY,
+        roles       TEXT NOT NULL DEFAULT '[]',
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workspace_audit (
+        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp_ms INTEGER NOT NULL,
+        principal    TEXT NOT NULL,
+        action       TEXT NOT NULL,
+        workspace    TEXT NOT NULL,
+        before_state TEXT,
+        after_state  TEXT,
+        request_id   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workspace_audit_workspace
+        ON workspace_audit (workspace);
+    CREATE INDEX IF NOT EXISTS idx_workspace_audit_timestamp
+        ON workspace_audit (timestamp_ms);
+";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -177,6 +230,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_005_CREDENTIAL_RETIRE_AT),
         M::up(MIGRATION_006_PROMPT_OVERRIDES),
         M::up(MIGRATION_007_MCP_SESSIONS),
+        M::up(MIGRATION_008_WORKSPACE_PERSISTENCE),
     ])
 }
 
