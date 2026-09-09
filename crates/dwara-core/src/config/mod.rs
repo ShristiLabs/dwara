@@ -338,6 +338,20 @@ pub struct Gateway {
     /// rejects with 429.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_quotas: Option<RedisQuotaConfig>,
+    /// Distributed Redis-backed response cache (SCALE-04, #183, ent
+    /// feature). Absent (the default): the local in-memory moka cache
+    /// is used (one cache per instance, so a fleet of N instances has
+    /// N x cold caches). When present, the `ent` cargo feature is
+    /// compiled in, AND a valid license with the `redis_cache` feature
+    /// claim is loaded, the gateway uses a Redis-backed response cache
+    /// so two or more instances share one cache — fleet-wide hit
+    /// ratios. A local moka tier can front Redis (two-tier with Pub/Sub
+    /// invalidation) or be disabled for a pure Redis cache. When the
+    /// `ent` feature is NOT compiled in, or the license lacks the
+    /// claim, the block is accepted but inert (the local moka cache is
+    /// used and a one-line notice is logged at startup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_cache: Option<RedisCacheConfig>,
     /// Config convergence (DW-054, enterprise feature). Absent (the
     /// default): each gateway instance serves only its local config
     /// generation and never watches remote instances. When present,
@@ -736,6 +750,57 @@ fn default_redis_key_ttl_s() -> u64 {
 
 fn is_default_redis_key_ttl_s(v: &u64) -> bool {
     *v == 3600
+}
+
+/// Distributed Redis-backed response cache config (SCALE-04, #183,
+/// `gateway.redis_cache`, ent feature).
+///
+/// When present and the `ent` cargo feature is compiled in AND a valid
+/// license with the `redis_cache` feature claim is loaded, the gateway
+/// uses a Redis-backed response cache instead of (or in addition to)
+/// the local in-memory moka cache — so two or more gateway instances
+/// share one response cache. Fleet-wide cache hit ratios replace N x
+/// per-instance cold caches, particularly impactful for canary and
+/// rolling-deploy scenarios where new instances start empty. When the
+/// `ent` feature is NOT compiled in, or the license lacks the claim,
+/// the block is accepted but inert (the local moka cache is used and a
+/// one-line notice is logged at startup).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedisCacheConfig {
+    /// Redis connection URL (e.g. `redis://127.0.0.1:6379` or
+    /// `redis-cluster://...`). The connection is established once at
+    /// startup with the configured timeout.
+    pub url: String,
+    /// Prefix for cache keys in Redis (default `dwara:cache:`). Each
+    /// cached response is stored as `{prefix}{key}`.
+    #[serde(
+        default = "default_redis_cache_key_prefix",
+        skip_serializing_if = "is_default_redis_cache_key_prefix"
+    )]
+    pub key_prefix: String,
+    /// Connection timeout in milliseconds (default 1000; validated to
+    /// 100..=30 000).
+    #[serde(
+        default = "default_redis_connection_timeout_ms",
+        skip_serializing_if = "is_default_redis_connection_timeout_ms"
+    )]
+    pub connection_timeout_ms: u64,
+    /// Whether to keep a local fronting cache (two-tier: local moka +
+    /// Redis). Default true: the local cache fronts Redis for hot keys,
+    /// and Redis Pub/Sub invalidation evicts local entries when another
+    /// instance purges a key. Set to false for a pure Redis cache (no
+    /// local tier).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub local_tier: bool,
+}
+
+fn default_redis_cache_key_prefix() -> String {
+    "dwara:cache:".to_string()
+}
+
+fn is_default_redis_cache_key_prefix(p: &str) -> bool {
+    p == "dwara:cache:"
 }
 
 /// Config convergence config (DW-054, `gateway.config_convergence`).

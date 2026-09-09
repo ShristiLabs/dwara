@@ -230,6 +230,17 @@
         }
       ]
     },
+    "redis_cache": {
+      "description": "Distributed Redis-backed response cache (SCALE-04, #183, ent\nfeature). Absent (the default): the local in-memory moka cache\nis used (one cache per instance, so a fleet of N instances has\nN x cold caches). When present, the `ent` cargo feature is\ncompiled in, AND a valid license with the `redis_cache` feature\nclaim is loaded, the gateway uses a Redis-backed response cache\nso two or more instances share one cache — fleet-wide hit\nratios. A local moka tier can front Redis (two-tier with Pub/Sub\ninvalidation) or be disabled for a pure Redis cache. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local moka cache is\nused and a one-line notice is logged at startup).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RedisCacheConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "config_convergence": {
       "description": "Config convergence (DW-054, enterprise feature). Absent (the\ndefault): each gateway instance serves only its local config\ngeneration and never watches remote instances. When present,\nthe `ent` cargo feature is compiled in, AND a valid license\nwith the `config_convergence` feature claim is loaded, the\ngateway publishes its config generation to a shared backend\n(Redis in v1; etcd/Consul are deferred behind the\n`ConfigConvergenceBackend` trait) and polls for generations\npublished by other instances, converging to the highest\ngeneration within the poll interval. A drift report is emitted\nat `drift_check_interval_ms` when instances diverge. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local file watcher\nruns alone) and a one-line notice is logged at startup.",
       "anyOf": [
@@ -5402,6 +5413,34 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "RedisCacheConfig": {
+      "description": "Distributed Redis-backed response cache config (SCALE-04, #183,\n`gateway.redis_cache`, ent feature).\n\nWhen present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `redis_cache` feature claim is loaded, the gateway\nuses a Redis-backed response cache instead of (or in addition to)\nthe local in-memory moka cache — so two or more gateway instances\nshare one response cache. Fleet-wide cache hit ratios replace N x\nper-instance cold caches, particularly impactful for canary and\nrolling-deploy scenarios where new instances start empty. When the\n`ent` feature is NOT compiled in, or the license lacks the claim,\nthe block is accepted but inert (the local moka cache is used and a\none-line notice is logged at startup).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Redis connection URL (e.g. `redis://127.0.0.1:6379` or\n`redis-cluster://...`). The connection is established once at\nstartup with the configured timeout.",
+          "type": "string"
+        },
+        "key_prefix": {
+          "description": "Prefix for cache keys in Redis (default `dwara:cache:`). Each\ncached response is stored as `{prefix}{key}`.",
+          "type": "string"
+        },
+        "connection_timeout_ms": {
+          "description": "Connection timeout in milliseconds (default 1000; validated to\n100..=30 000).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "local_tier": {
+          "description": "Whether to keep a local fronting cache (two-tier: local moka +\nRedis). Default true: the local cache fronts Redis for hot keys,\nand Redis Pub/Sub invalidation evicts local entries when another\ninstance purges a key. Set to false for a pure Redis cache (no\nlocal tier).",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,

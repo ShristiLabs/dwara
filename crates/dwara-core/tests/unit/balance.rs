@@ -443,6 +443,7 @@ async fn dataplane_reload_changes_weights_without_restart() {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,

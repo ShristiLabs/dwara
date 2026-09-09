@@ -43,6 +43,17 @@ the project follows semantic versioning once 1.0 is reached.
   UDP, not TCP, and are managed separately). The
   `DWARA_BIND` override is respected on reload so the listener manager
   always diffs the same set.
+- Shared response cache via Redis (#183, SCALE-04, ent): the
+  `CacheStore` seam now has a Redis backend. Configure
+  `gateway.redis_cache` with a Redis URL and the `ent` edition + a
+  `redis_cache` license claim to share one response cache across a
+  fleet of N instances — fleet-wide hit ratios instead of N x cold
+  caches. A two-tier `CoordinatedCache` (local moka + Redis) is the
+  default; Redis Pub/Sub invalidation evicts local entries when another
+  instance purges a key. Set `local_tier: false` for a pure Redis
+  cache. The `ResponseCache` store is now swappable at startup via
+  `set_store` so the Redis backend drops in without rebuilding the
+  cache machinery.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

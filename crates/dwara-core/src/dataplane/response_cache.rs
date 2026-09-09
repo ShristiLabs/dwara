@@ -243,7 +243,10 @@ fn now_ms() -> u64 {
 /// single-flight revalidation guard + the request-coalescing leader
 /// map. Owned by the [`DataPlane`]; survives reloads.
 pub struct ResponseCache {
-    store: Arc<dyn CacheStore>,
+    /// The backing `CacheStore` (SCALE-04, #183: swappable at startup
+    /// so the OSS moka backend can be replaced with a Redis-backed
+    /// shared cache without rebuilding the whole `ResponseCache`).
+    store: RwLock<Arc<dyn CacheStore>>,
     /// Route name -> cache epoch (DW-037 invalidations). Grows with
     /// distinct route names ever seen (bounded by operator config
     /// churn; entries for long-gone routes are a few dozen bytes each
@@ -291,7 +294,7 @@ impl ResponseCache {
     /// in-memory store; the OSS gateway uses the moka backend).
     pub fn new(store: Arc<dyn CacheStore>) -> Self {
         ResponseCache {
-            store,
+            store: RwLock::new(store),
             epochs: RwLock::new(HashMap::new()),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             coalescing: Arc::new(Mutex::new(HashMap::new())),
@@ -301,15 +304,28 @@ impl ResponseCache {
         }
     }
 
-    /// The backing store (admin/metrics introspection seam).
-    pub fn store(&self) -> &Arc<dyn CacheStore> {
-        &self.store
+    /// Swap the backing store (SCALE-04, #183). Called at startup when
+    /// a Redis cache config is present and the license grants the
+    /// `redis_cache` feature claim. The old store's entries are NOT
+    /// migrated (the new store starts cold; a two-tier `CoordinatedCache`
+    /// fronts Redis with the local moka cache so hot keys survive).
+    pub fn set_store(&self, store: Arc<dyn CacheStore>) {
+        *self.store.write().expect("cache store lock poisoned") = store;
+    }
+
+    /// Clone of the backing store Arc (admin/metrics introspection seam).
+    pub fn store_handle(&self) -> Arc<dyn CacheStore> {
+        Arc::clone(&self.store.read().expect("cache store lock poisoned"))
     }
 
     /// Approximate live entries (the `dwara_cache_entries` gauge walk;
     /// 0 when the backend cannot report).
     pub fn live_entries(&self) -> i64 {
-        self.store.entry_count().unwrap_or(0) as i64
+        self.store
+            .read()
+            .expect("cache store lock poisoned")
+            .entry_count()
+            .unwrap_or(0) as i64
     }
 
     /// Purges + epoch bumps performed since process start.
@@ -367,7 +383,10 @@ impl ResponseCache {
         };
         let n = keys.len();
         for key in &keys {
-            let _ = self.store.delete(key).await;
+            let _ = {
+                let s = self.store_handle();
+                s.delete(key).await
+            };
         }
         // Drop the purged keys from the URL index too (lazy cleanup of
         // any dead cross-references the purge just made).
@@ -414,7 +433,10 @@ impl ResponseCache {
         }
         let n = keys.len();
         for key in &keys {
-            let _ = self.store.delete(key).await;
+            let _ = {
+                let s = self.store_handle();
+                s.delete(key).await
+            };
         }
         // Lazy cleanup of the tag index's now-dead cross-references.
         if !keys.is_empty() {
@@ -579,19 +601,26 @@ impl ResponseCache {
             &vary_values,
         );
 
-        let stored = match self.store.get(&key).await {
+        let store = self.store_handle();
+        let stored = match store.get(&key).await {
             Ok(Some(bytes)) => match EntryEnvelope::decode(&bytes) {
                 Some(entry) if entry.epoch == epoch => Some(entry),
                 Some(_) => {
                     // Dead generation (config change or purge raced the
                     // lookup): drop it so it costs no one else a read.
-                    let _ = self.store.delete(&key).await;
+                    let _ = {
+                        let s = self.store_handle();
+                        s.delete(&key).await
+                    };
                     None
                 }
                 None => {
                     // Undecodable envelope (backend corruption or a
                     // foreign writer): drop, degrade to miss.
-                    let _ = self.store.delete(&key).await;
+                    let _ = {
+                        let s = self.store_handle();
+                        s.delete(&key).await
+                    };
                     None
                 }
             },
@@ -615,7 +644,10 @@ impl ResponseCache {
                 query,
                 &vary_values,
             );
-            if let Ok(Some(bytes)) = self.store.get(&get_key).await {
+            if let Ok(Some(bytes)) = {
+                let s = self.store_handle();
+                s.get(&get_key).await
+            } {
                 if let Some(entry) = EntryEnvelope::decode(&bytes) {
                     if entry.epoch == epoch {
                         let age_ms = now_ms().saturating_sub(entry.stored_at_ms);
@@ -657,7 +689,10 @@ impl ResponseCache {
                 }
                 // An entry that cannot be rebuilt (a header that no
                 // longer parses) is a miss, not a failure: drop it.
-                let _ = self.store.delete(&key).await;
+                let _ = {
+                    let s = self.store_handle();
+                    s.delete(&key).await
+                };
             } else if stale_ok && !is_head {
                 if let Some(resp) = serve_from_entry(policy, entry, age_ms, None, "stale") {
                     obs.record_cache_lookup("stale");
@@ -678,7 +713,10 @@ impl ResponseCache {
                     );
                     return LookupOutcome::Serve(Box::new(resp));
                 }
-                let _ = self.store.delete(&key).await;
+                let _ = {
+                    let s = self.store_handle();
+                    s.delete(&key).await
+                };
             } else {
                 // Expired past the stale window: fall through as a
                 // miss, but keep the entry — its validator makes the
@@ -936,8 +974,8 @@ impl ResponseCache {
                     };
                     if self.epoch(&flow.route_name) == flow.epoch {
                         let ttl = flow.policy.ttl + flow.policy.stale_while_revalidate;
-                        let outcome = match self
-                            .store
+                        let store = self.store_handle();
+                        let outcome = match store
                             .set_with_ttl(flow.key.clone(), refreshed.encode(), ttl)
                             .await
                         {
@@ -969,7 +1007,10 @@ impl ResponseCache {
                 // Validator drift (the 304 names a different ETag than
                 // the stored entry): the stored representation is no
                 // longer current — drop it and pass the 304 through.
-                let _ = self.store.delete(&flow.key).await;
+                let _ = {
+                    let s = self.store_handle();
+                    s.delete(&flow.key).await
+                };
             }
             stamp(&mut resp, "miss");
             return resp;
@@ -1073,8 +1114,8 @@ impl ResponseCache {
                             + flow.policy.stale_while_revalidate.as_millis() as u64
                             + stale_if_error_ms,
                     );
-                    let outcome = match self
-                        .store
+                    let store = self.store_handle();
+                    let outcome = match store
                         .set_with_ttl(flow.key.clone(), entry.encode(), ttl)
                         .await
                     {
@@ -1234,7 +1275,8 @@ impl ResponseCache {
                 // completed before it published (guard Drop order), so
                 // a present entry is the leader's outcome — replay it
                 // exactly like a hit.
-                let stored = match self.store.get(&flow.key).await {
+                let store = self.store_handle();
+                let stored = match store.get(&flow.key).await {
                     Ok(Some(bytes)) => match EntryEnvelope::decode(&bytes) {
                         Some(entry) if entry.epoch == flow.epoch => Some(entry),
                         _ => None,

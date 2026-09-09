@@ -687,6 +687,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // SCALE-04 (#183): Distributed Redis-backed response cache (ent
+    // feature only). Activated when ALL three conditions hold:
+    //   1. The `ent` cargo feature is compiled in.
+    //   2. The config carries a `redis_cache` block.
+    //   3. The license grants the `redis_cache` feature claim.
+    // When any condition fails, the block is accepted but inert and the
+    // local moka cache is used. The Redis connection is established
+    // ONCE here (with the configured timeout); the RedisCacheStore (or
+    // a two-tier CoordinatedCache wrapping the local moka + Redis) is
+    // built over it and swapped into the ResponseCache.
+    #[cfg(feature = "ent")]
+    {
+        if let Some(rc_cfg) = state.snapshot().gateway().redis_cache.clone() {
+            if license_gate.has_feature("redis_cache") {
+                match establish_redis_cache_connection(&rc_cfg).await {
+                    Ok(conn) => {
+                        let remote = Arc::new(
+                            dwara_core::extensions::redis_cache::RedisCacheStore::with_conn(
+                                conn,
+                                &rc_cfg.key_prefix,
+                            ),
+                        );
+                        let store: Arc<dyn dwara_core::extensions::cache::CacheStore> = if rc_cfg
+                            .local_tier
+                        {
+                            let local: Arc<dyn dwara_core::extensions::cache::CacheStore> =
+                                Arc::new(dwara_core::extensions::cache::MokaCache::default());
+                            Arc::new(dwara_core::extensions::redis_cache::CoordinatedCache::new(
+                                local, remote,
+                            ))
+                        } else {
+                            remote as Arc<dyn dwara_core::extensions::cache::CacheStore>
+                        };
+                        dp.response_cache().set_store(store);
+                        tracing::info!(
+                            code = "redis_cache_active",
+                            url = %rc_cfg.url,
+                            local_tier = rc_cfg.local_tier,
+                            "Redis shared response cache activated (SCALE-04)"
+                        );
+                        // SCALE-04 (#183): when the two-tier
+                        // CoordinatedCache is in use, spawn the Redis
+                        // Pub/Sub invalidation listener so a purge on
+                        // any instance evicts the local copy here. The
+                        // listener runs for the process lifetime; it
+                        // reconnects on its own and is best-effort
+                        // (a missed invalidation falls back to TTL).
+                        if rc_cfg.local_tier {
+                            let cache_for_invalidation = Arc::clone(dp.response_cache());
+                            let mut listener_shutdown = shutdown_rx.clone();
+                            let listener_url = rc_cfg.url.clone();
+                            tokio::spawn(async move {
+                                let listener = match dwara_core::extensions::redis_cache::InvalidationListener::from_url(&listener_url) {
+                                    Ok(l) => l,
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            code = "cache_invalidation_listener_init_failed",
+                                            "Redis invalidation listener init failed ({err}); \
+                                             local tier will rely on TTL for cross-instance eviction"
+                                        );
+                                        return;
+                                    }
+                                };
+                                tokio::select! {
+                                    _ = listener.run(move |key| {
+                                        let store = cache_for_invalidation.store_handle();
+                                        tokio::spawn(async move {
+                                            let _ = store.delete(&key).await;
+                                        });
+                                    }) => {},
+                                    _ = listener_shutdown.changed() => {
+                                        tracing::info!(code = "cache_invalidation_listener_stopped", "Redis cache invalidation listener stopped on shutdown");
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            code = "redis_cache_connect_failed",
+                            url = %rc_cfg.url,
+                            "Redis connection failed ({err}); serving with the LOCAL moka \
+                             cache (fail_open by default — the cache is an optimization)"
+                        );
+                    }
+                }
+            } else {
+                tracing::info!(
+                    code = "redis_cache_not_licensed",
+                    "redis_cache config block present but the license does not grant the \
+                     redis_cache feature claim; using the local moka cache"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "ent"))]
+    {
+        if state.snapshot().gateway().redis_cache.is_some() {
+            tracing::info!(
+                code = "redis_cache_inert",
+                "redis_cache config block present but the ent cargo feature is not compiled \
+                 in; using the local moka cache"
+            );
+        }
+    }
+
     // DW-054: config convergence (ent feature only). Activated when ALL
     // three conditions hold:
     //   1. The `ent` cargo feature is compiled in.
@@ -1335,6 +1441,20 @@ async fn establish_redis_connection(
 #[cfg(feature = "ent")]
 async fn establish_redis_quota_connection(
     config: &dwara_core::config::RedisQuotaConfig,
+) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
+    let client = redis::Client::open(config.url.as_str())?;
+    let timeout = Duration::from_millis(config.connection_timeout_ms);
+    let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+    Ok(conn)
+}
+
+/// Establish a pooled Redis connection for the shared response cache
+/// (SCALE-04, #183, ent feature only). Same shape as the rate-limiter
+/// connection helper but over the `RedisCacheConfig` schema. Returns a
+/// `ConnectionManager` (multiplexed, auto-reconnecting) on success.
+#[cfg(feature = "ent")]
+async fn establish_redis_cache_connection(
+    config: &dwara_core::config::RedisCacheConfig,
 ) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
     let client = redis::Client::open(config.url.as_str())?;
     let timeout = Duration::from_millis(config.connection_timeout_ms);

@@ -258,6 +258,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
         ai: None,

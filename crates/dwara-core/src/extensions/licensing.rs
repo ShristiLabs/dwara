@@ -51,6 +51,7 @@
 //! - `redis_rate_limiter` — DW-031 (not yet implemented; the gate
 //!   provides the check, the feature will call it).
 //! - `config_convergence` — DW-054 (not yet implemented; same).
+//! - `redis_cache` — SCALE-04 (#183): Redis-backed shared response cache.
 //!
 //! Future enterprise features add their claim string here and call
 //! [`LicenseGate::has_feature`] at their config-validation site.
@@ -93,6 +94,12 @@ pub const FEATURE_REDIS_QUOTAS: &str = "redis_quotas";
 
 /// License claim string for config convergence (DW-054).
 pub const FEATURE_CONFIG_CONVERGENCE: &str = "config_convergence";
+
+/// License claim string for the Redis shared response cache (SCALE-04,
+/// #183). A license that carries this claim enables the Redis-backed
+/// response cache so a fleet of N instances shares one cache and
+/// achieves fleet-wide hit ratios instead of N x cold caches.
+pub const FEATURE_REDIS_CACHE: &str = "redis_cache";
 
 /// License claim string for FIPS 140-3 mode (DW-111). A license that
 /// carries this claim REQUIRES the gateway to be running in FIPS mode
