@@ -13,6 +13,11 @@ practical contributor rules (build/test commands, code organization,
 conventions) — this directory goes deeper on specific subsystems than
 AGENTS.md's index-level summaries.
 
+New contributors may also want the [networking fundamentals](./networking-fundamentals.md)
+reference: OSI model, DNS resolution, HTTP version evolution, the TLS
+handshake, and the full request pipeline — with mermaid diagrams. It
+is the shared vocabulary the feature docs assume.
+
 ## Status of this directory
 
 Feature areas written up so far (M1-M6 complete):

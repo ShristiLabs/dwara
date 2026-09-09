@@ -1,606 +1,280 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repository.
+Guidance for AI coding agents. Detailed reference material lives in
+[`docs/agent-guide/`](docs/agent-guide/).
 
-## Project
+---
 
-dwara is a Rust API gateway (Apache-2.0, OSS edition). Cargo workspace with a
-pinned toolchain (`rust-toolchain.toml`, Rust 1.94.0). Public GitHub repo:
-`shristilabs/dwara`.
+## 1. Project overview and code organization
 
-**Status:** milestone M1 ("It proxies") is complete — reverse proxying with
-TLS (multi-SNI terminate + SNI passthrough, h2/h2c), routing and rewrites,
-load balancing, passive/active health, retries and timeouts, circuit
-breaking, load shedding, rate limiting, authn (API key / Basic / JWT via
-JWKS / mTLS client-cert / HMAC request signing), authz + IP ACL,
-SQLite state + migrations,
-observability, mTLS admin API, CLI, protocol hardening, fuzzing/benchmarks,
-and packaging. Later milestones (management plane, extensions, AI/LLM
-features) are not yet implemented.
+**dwara** is a streaming reverse-proxy API gateway in Rust (Apache-2.0).
+Cargo workspace, pinned toolchain (Rust 1.94.0, `rust-toolchain.toml`).
+Repo: `shristilabs/dwara`. Pre-1.0, milestones M1-M6 complete.
 
-## Hard rules
+Two editions: **OSS** (`cargo build`) and **Enterprise** (`cargo build
+--features ent`). Only two cargo features exist: `ent` and `loom`
+(test-only). Everything else compiles unconditionally into OSS.
 
-1. **Never commit `docs-internal/`.** It holds private planning material and
-   is intentionally untracked. Never reference it from committed files.
-2. **Never push or create PRs** without an explicit user instruction.
-3. No new dependencies without checking licenses against `deny.toml` and
-   flagging the addition in your report.
-4. No emoji in code, comments, docs, or commit messages.
-5. `.sdlc/` is internal pipeline state; leave it untracked unless told
-   otherwise.
-6. **No issue IDs in end-user-facing content.** Internal tracking
-   references (`DW-###`, `DW-AI-###`, enhancement-catalog IDs, bare
-   `#123`, internal analysis-doc pointers) must not appear in the root
-   README, other user-facing READMEs (`quickstart/`, `packaging/`,
-   `tools/`), `docs-site/`, or operator-facing sample files (quickstart
-   configs, `deploy/`, `grafana/`) — users cannot resolve them. They
-   are fine in `CHANGELOG.md` (historical record), `docs/` (contributor
-   docs cite them by convention), commit messages, and source-code
-   comments. The config-studio build scrubs them from its embedded
-   schema help text automatically (see Config studio); hand-authored
-   files must simply not contain them.
+### Workspace crates
 
-## Commands
+| Crate | Role |
+|---|---|
+| `dwara-core` | Library. Bounded-context domains behind facade `lib.rs`. |
+| `dwara-bin` | Gateway binary (`main.rs`, `listeners.rs`, `reload.rs`, `otlp.rs`, `h3.rs`, `upgrade.rs`). |
+| `dwara-admin` | mTLS admin API + web console. |
+| `dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`/`import`/`tf`/`upgrade`/`plugin`/`replay`/`k8s`). |
+| `dwara-console` | Read-only web console SPA (no deps, `publish = false`). |
+| `dwara-ebpf` | eBPF research spike. **Excluded** from workspace. See `docs/adr/0002-ebpf-hooks-research-spike.md`. |
+| `dwara-uring` | io_uring experiment. **Excluded** from workspace. See `docs/adr/0003-io-uring-engine.md`. |
+
+Other paths: `fuzz/` (cargo-fuzz, own workspace), `quickstart/`,
+`packaging/`, `grafana/`, `scripts/`, `tools/config-studio/`,
+`config-reference.json`, `docs/`, `docs-site/`.
+
+### Domain modules (`dwara-core/src/`)
+
+```
+config/          schema types, YAML parsing, shared grammar
+snapshot/        validate -> compile -> publish; immutable Snapshot (ArcSwap)
+extensions/      swappable traits (RateLimiter, ConfigSource, CacheStore,
+                 AnalyticsSink, SecretSource) + LicenseGate + Redis/Vault (ent)
+observability.rs spans, metrics, access logs, SLO/error budgets
+events/          event bus, webhook delivery, event stream
+state/           SQLite store + migrations
+analytics/       embedded analytics (SQLite), live sketches, ML insights
+security/        tls, authn, authz, geoip, oauth2, oidc, cedar, fips, pq, acme
+resilience/      health, retries, breaker, adaptive rate-limit tuning
+plugins/         native filter chain + WasmDispatch bridge
+wasm/            proxy-wasm host (wasmtime/cranelift)
+ai/              provider adapters, routing, streaming, budgets, cost,
+                 governance, guardrails, semantic cache, experiments, MCP, A2A
+cel/             CEL expression engine
+openapi/         OpenAPI response validation
+aggregation/     API aggregation
+mcp/             agent-operable admin via MCP
+synthetic/       synthetic monitoring probes
+lifecycle/       developer portal, environment profiles, API journey
+mesh/            service mesh (scaffolded no-ops, intended ent-only)
+k8s_gateway/     Kubernetes Gateway API translator
+cp_dp/           CP/DP split (ent)
+workspace/       workspaces + RBAC + audit (ent)
+dataplane/       reverse-proxy request path, upstreams, balancers, transforms,
+                 caching, waf, anomaly, canary, discovery, l4, graphql, grpc_web,
+                 protocol translation, nano-service, hedging, split, replay
+error.rs         facade-level aggregate Error
+supervision.rs   panic-respawn supervision (no domain imports)
+```
+
+### Dependency direction
+
+Enforced by `scripts/check_deps.py` (CI fails on violations). Authoritative
+source is the `ALLOWED` dict in that script.
+
+```
+config          <- (nothing)
+extensions      <- config
+observability   <- (nothing)
+events          <- config, observability
+snapshot        <- config, events, security
+state           <- config
+analytics       <- config, observability, extensions
+mesh            <- config
+security        <- config, state, observability, mesh
+resilience      <- config, snapshot, extensions, observability, events
+plugins         <- config
+wasm            <- config, plugins
+k8s_gateway     <- config
+cp_dp           <- config, snapshot, extensions        (ent)
+ai              <- config
+dataplane       <- all of the above
+supervision     <- (nothing)
+```
+
+Domains not yet in `ALLOWED` (`cel`, `openapi`, `aggregation`, `mcp`,
+`synthetic`, `lifecycle`) have no cross-domain imports. Add to `ALLOWED` in
+the same change if one gains a dependency.
+
+**Key rules:**
+- New code goes into the domain that owns it. If it spans two, put it in the lower one.
+- Never import upward. Move shared items DOWN into the lowest consumer.
+- Use canonical domain paths (`dwara_core::dataplane::proxy`), not legacy aliases.
+- When a domain outgrows its directory, promote to `crates/dwara-<domain>`.
+
+---
+
+## 2. Build and test commands
 
 ```sh
 cargo build --workspace
-cargo build --workspace --features ent  # Enterprise edition (license verification, Redis, CP/DP)
-cargo test --workspace            # ~1188 tests; suites spawn real servers/binaries
+cargo build --workspace --features ent
+cargo test --workspace                  # ~2700 tests
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
-cargo doc --no-deps --workspace   # must be zero-warning
-cargo run -q -p dwara-cli --bin dwara-cli -- schema   # config reference (diff vs config-reference.json)
-python3 tools/config-studio/build.py                   # rebuild Dwara Config Studio after schema changes
+cargo doc --no-deps --workspace         # zero-warning required
+cargo run -q -p dwara-cli --bin dwara-cli -- schema
+python3 tools/config-studio/build.py    # after schema changes
 ```
 
-Extras when touching those areas: `cargo test -p dwara-core --features loom --test loom`,
-`cargo bench --workspace --bench micro`, `actionlint .github/workflows/<file>`,
-`scripts/bench-macro.sh` (macro rig), `cargo fuzz run <target>` (from `fuzz/`).
+Area-specific: `cargo test -p dwara-core --features loom --test loom`,
+`cargo bench --workspace --bench micro`, `cargo bench --workspace --bench cel`,
+`actionlint .github/workflows/<file>`, `scripts/bench-macro.sh`,
+`cargo fuzz run <target>` (from `fuzz/`).
 
-## Verification gate
+**Verification gate:** all commands above must pass with zero warnings/failures
+before declaring any change done. Never weaken a command to make it pass.
 
-Before declaring any change done, the full set above must pass in order with
-zero warnings and zero failures. Never weaken a command to make it pass (no
-`--no-verify`, no scoped subsets for final checks, no clippy allows).
+CI workflow details: [`docs/agent-guide/ci.md`](docs/agent-guide/ci.md).
 
-## Layout
+---
 
-| Path | Contents |
+## 3. Code style guidelines
+
+- **No emoji** in code, comments, docs, or commit messages.
+- **Strict serde:** `deny_unknown_fields` on every config struct. Changes additive only.
+- **Ops knobs are env vars** (`DWARA_*`), topology is YAML.
+- **Frozen vocabulary:** Listener / Route / Service / Upstream / Endpoint /
+  Consumer / Credential / Policy / Plugin / Workspace / Snapshot.
+  Policy precedence: consumer > route > service > listener > global (deny-anywhere-wins).
+- **Error envelope:** gateway-generated responses use
+  `{error:{code,message,request_id}}`. Never leak upstream internals.
+- **Streaming:** dataplane buffers nothing by default. Buffering must be opt-in and size-capped.
+- **Metrics:** label cardinality must stay config-bounded (no consumer-name labels).
+  Counters survive reloads. Hot paths use atomics only.
+- **Feature flags** declared in owning crate's `Cargo.toml` with a comment.
+  Only `ent` and `loom` exist.
+- Config schema changes require regenerating `config-reference.json`
+  (`dwara-cli schema > config-reference.json`) AND rebuilding config-studio
+  (`python3 tools/config-studio/build.py`). CI fails on drift.
+
+Request pipeline order: [`docs/agent-guide/request-pipeline.md`](docs/agent-guide/request-pipeline.md).
+Config studio rules: [`docs/agent-guide/config-studio.md`](docs/agent-guide/config-studio.md).
+
+---
+
+## 4. Testing instructions
+
+- Tests live in `tests/`, not `src/`. `crates/dwara-core/tests/` has ~90
+  integration suites + `tests/unit/` (relocated unit tests, one file per
+  source module behind `main.rs`). Shared fixtures in `tests/support/mod.rs`.
+- White-box tests in `src/` are allowed ONLY for private internals that
+  cannot be tested through the public API. Each carries a justification
+  comment. Current residuals: `state/store.rs`,
+  `dataplane/{balance,upstream,proxy}.rs`, `dwara-bin`'s `listeners.rs`
+  and `otlp.rs`.
+- Integration tests spawn real servers or the real binary (`CARGO_BIN_EXE_*`).
+  Use unique ports and bounded readiness polls.
+- Zero tolerance for flakes. Re-run new timing-sensitive suites 5x.
+  Use tiny windows with generous margins. Never use sleeps as synchronization.
+- Zero-route test configs must carry `allow_empty_routes: true`.
+
+Full test map: [`docs/agent-guide/test-map.md`](docs/agent-guide/test-map.md).
+
+---
+
+## 5. Security considerations
+
+- **Secrets:** never logged, never in `Debug` output. Redaction is exhaustive.
+  Query strings excluded from logs/spans. `X-Consumer-*` stripped inbound.
+- **Dependencies:** no new deps without checking licenses against `deny.toml`
+  and flagging the addition.
+- **Credentials:** constant-time compare, peppered hashes, argon2id for
+  store-managed passwords. See [`docs/agent-guide/implementation-notes.md`](docs/agent-guide/implementation-notes.md).
+- **Request smuggling:** `hardening.rs` sniffs CL+TE; proxy rebuilds every
+  forwarded request from parsed parts.
+- **TLS trust:** per-entity trust roots, not global fallback. Never fall back
+  to public roots at runtime.
+- **Never commit** `docs-internal/` or `.sdlc/`.
+- **No issue IDs** (`DW-###`, `#123`) in end-user-facing content: root README,
+  user-facing READMEs (`quickstart/`, `packaging/`, `tools/`), `docs-site/`,
+  or operator-facing sample files. Allowed in: `CHANGELOG.md`, `docs/`,
+  `AGENTS.md`, commit messages, source comments.
+
+---
+
+## 6. Architecture decision records
+
+ADRs live in `docs/adr/`:
+
+| ADR | Topic |
 |---|---|
-| `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
-| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (OTLP trace export), `h3.rs` (HTTP/3 QUIC ingress) |
-| `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
-| `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
-| `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |
-| `quickstart/` | Runnable demos per edition: `oss/` (one-command TLS proxy compose) and `enterprise/` (CP/DP split compose); shared `gen-certs.sh` + `certs/` + demo `upstream/` at the root |
-| `packaging/` | systemd unit + packaging notes |
-| `grafana/` | Starter dashboard for the /metrics families |
-| `scripts/` | Macro bench rig + baseline gate + dependency-direction guard |
-| `tools/config-studio/` | Dwara Config Studio: single-file, offline browser config builder (see Config studio below) |
-| `config-reference.json` | Generated JSON Schema (repo root; see freshness gate) |
-| `docs/` | Contributor-facing developer documentation (internals, rationale, diagrams) — see Documentation below |
-| `docs-site/` | Published end-user (operator) documentation site, VitePress — see Documentation below |
+| [`0001-controller-persistence.md`](docs/adr/0001-controller-persistence.md) | Ent controller persistence |
+| [`0002-ebpf-hooks-research-spike.md`](docs/adr/0002-ebpf-hooks-research-spike.md) | eBPF hooks research spike |
+| [`0003-io-uring-engine.md`](docs/adr/0003-io-uring-engine.md) | io_uring engine experiment |
 
-## Code organization
+Implementation notes (hot reload, credential hashing, TLS trust, listener
+supervision, SNI passthrough, zero-downtime upgrade, concurrency testing,
+extension points): [`docs/agent-guide/implementation-notes.md`](docs/agent-guide/implementation-notes.md).
 
-The codebase follows an enterprise bounded-context layout. `dwara-core`
-is the domain library; its `src/` tree groups modules by domain with a
-facade `lib.rs` as the only intended public surface:
+---
 
-```
-crates/dwara-core/src/
-  lib.rs              facade: declares the domain modules and the
-                      aggregate error type, re-exports #[doc(hidden)]
-                      legacy top-level aliases, documents the
-                      dependency direction
-  error.rs            facade-level Error enum over the eight domain
-                      error types (boundary propagation; domains keep
-                      their typed errors for recoverable matches)
-  config/             schema types, YAML parsing, and the shared
-                      grammar everything validates against: net.rs
-                      (IP/CIDR utilities), limits.rs (schema
-                      validation bounds), credentials.rs (credential
-                      selector/hash formats), transforms.rs (RFC 6901
-                      JSON pointers + the transforms/security-headers
-                      shapes, DW-028), versioning.rs (HTTP-date and
-                      media-type grammar, DW-048)
-  snapshot/           validate -> compile -> publish pipeline; the
-                      immutable Snapshot behind ArcSwap
-  extensions/         the five swappable subsystem traits
-                      (RateLimiter, ConfigSource, CacheStore,
-                      AnalyticsSink, SecretSource) + local impls
-  observability.rs    spans, access logs, metrics registry, envelope;
-                      exposes plain setters only, depends on nothing
-  events/             the in-process event bus (DW-044) and the
-                      budget-bounded webhook deliverer; sits BELOW
-                      snapshot because the config publish pipeline and
-                      the resilience state machines both emit onto it
-  state/              SQLite store + migrations (including the
-                      DW-086 prompt_overrides table for runtime
-                      prompt-version overrides and the DW-087
-                      mcp_sessions table for MCP session management)
-  analytics/          the embedded analytics store (DW-043): its own
-                      SQLite file (raw access records + 1m/5m/1h/1d
-                      additive rollups, cursor-guarded cascade,
-                      per-granularity retention, incremental vacuum);
-                      the DW-079 ai_spend table (per-request token/cost
-                      records, schema v3) and the DW-084
-                      ai_governance_events table (model-usage audit,
-                      schema v4), and the DW-081 ai_prompt_logs table
-                      (redacted prompt/response capture, schema v5),
-                      and the DW-086 ai_experiment_assignments,
-                      ai_eval_results, and ai_feedback tables (schema
-                      v6), and the DW-087 mcp_tool_calls table (schema
-                      v7), and the DW-113 consumer_type columns on
-                      ai_spend and mcp_tool_calls (schema v8), and the
-                      DW-093 request_id and correlation_id columns on
-                      the raw table with a correlation_id index
-                      (schema v9), each with its own fire-and-forget
-                      writer; and the DW-092 live in-process sketches
-                      (sub-second-freshness per-route rolling window
-                      with counts, errors, and capped latency samples,
-                      updated synchronously in record()) and the
-                      DW-092 ML traffic insights engine
-                      (insights.rs: EWMA-based capacity forecasting +
-                      seasonal-baseline anomaly detection over the
-                      live sketch window rotations, hand-rolled with
-                      no ML crates);
-                      implements extensions::analytics::AnalyticsSink;
-                      the fire-and-forget channel writers must never
-                      block the request path (drop and count on full)
-  security/           tls, authn, authz
-  resilience/         health, retries, breaker (passive observation),
-                      adaptive (DW-089 EWMA-driven rate-limit tuning)
-  dataplane/          proxy, upstream, balance, hardening, cors,
-                      compression, ai_proxy (the DW-075 AI route
-                      action), anomaly (DW-090 statistical anomaly
-                      scoring), canary (DW-091 auto-canary analysis
-                      controller + background runner), and active.rs
-                      (probe loops drive the registry — dataplane
-                      lifecycle)
-  ai/                 the DW-075 provider-adapter pack: canonical
-                      chat types, the pure-translation
-                      ProviderAdapter trait + OpenAI/Anthropic/Gemini
-                      adapters, the OpenAI-compat facade, hand-rolled
-                      SSE framing, the compiled model-alias table
-                      (transport lives in dataplane/ai_proxy), the
-                      DW-078 token-budget engine (budget.rs), the
-                      DW-079 pricing table + cost computation (cost.rs),
-                      and the DW-084 model-governance engine
-                      (governance.rs: per-team model allowlists +
-                      shadow audit), the DW-081 prompt/response
-                      logging (redaction.rs: PII scrubbing; logging.rs:
-                      sampling + retention + per-consumer toggle), and
-                      the DW-082 guardrails engine (guardrails.rs:
-                      prompt-injection/PII/banned-content/schema
-                      enforcement, compiled RegexSet + jsonschema,
-                      policy-scoped, prompt + response phases), and
-                      the DW-083 semantic cache (semantic_cache.rs:
-                      embedding-similarity cache, external embedding
-                      service + hnsw_rs HNSW ANN, compiled into the
-                      `semantic_cache`), and the DW-085 routing
-                      policies (policy.rs: FallbackChain cheap-first
-                      escalation via external classifier + LatencyCost
-                      static config-based selection, composed over
-                      DW-076 routing), and the DW-086 prompt
-                      experimentation (experiments.rs: prompt versioning,
-                      A/B model comparison, regression evals, feedback
-                      ingestion, verdict computation, composed over
-                      DW-076 routing), and the DW-087 MCP gateway
-                      (mcp.rs: MCP server/router, tool routing to
-                      upstreams, session management, authN/authZ),
-                      and the DW-080 provider credential pools
-                      (credentials.rs: multi-key rotation with 429
-                      quarantine, round-robin/weighted pick, pool-
-                      exhaustion graceful degradation; Ent-gated at
-                      validation), and the DW-095 federated analytics
-                      (analytics.rs: edge-to-controller gRPC streaming
-                      via PublishAnalytics RPC, FederatedAnalyticsSink
-                      implements AnalyticsSink, AnalyticsCollector
-                      trait for controller-side aggregation; Ent-only)
-  plugins/           native filter trait + unified dispatch chain
-                      (DW-119): NativeFilter, NativeRegistry,
-                      PluginChain, WasmDispatch. Feature-gated behind
-                      compiled into the OSS build. The wasm domain
-                      bridges its instances in via WasmChainAdapter.
-```
+## 7. End-user documentation style
 
-Dependency direction is strictly downward and **enforced in CI** by
-`scripts/check_deps.py` (the verify job fails on any upward import):
+End-user docs live in `docs-site/` (VitePress, published to GitHub Pages).
 
-```
-config          <- everything
-extensions      <- config
-observability   <- (none)
-events          <- config, observability
-snapshot        <- config, events
-state           <- config
-analytics       <- config, observability, extensions
-security        <- config, state, observability
-resilience      <- config, snapshot, extensions, observability, events
-plugins         <- config (native filter trait + unified dispatch chain;
-                 the wasm domain bridges its instances in via a generic
-                 adapter, so plugins never imports wasm -- see DW-119)
-wasm            <- config, plugins (proxy-wasm host; the adapter
-                 implements plugins::WasmDispatch)
-ai              <- config (DW-075 pure translation: adapters + the
-                 compiled alias table; the transport is the provider's
-                 upstream, driven from dataplane/ai_proxy)
-dataplane       <- all of the above
-bin/admin/cli   <- dwara-core (presentation layer)
-```
+- **Audience:** OSS and enterprise operators.
+- **Content:** task-oriented guides (install, configure, deploy, operate) and
+  high-level architecture diagrams. Never internals or rationale.
+- **Structure:** `guide/` (task-oriented), `architecture/` (high-level
+  mermaid only), `reference/` (generated/exhaustive).
+- **Links:** always relative (`./foo`, `../guide/foo`), never absolute.
+- **Versioning:** `vitepress-versioning-plugin`. Root tracks `main`
+  (labeled `unstable`). Before tagging a release: `npm run docs:freeze --
+  <version>` from `docs-site/`, commit snapshot, then cut tag. Never
+  hand-edit `versions/`.
+- **Build:** `cd docs-site && npm install && npm run docs:build` (must
+  succeed with zero dead-link errors).
+- Publishing is automatic via `docs-site.yml` on push to `main`.
+- **Update:** Update end-user documentation as necessary after every change. 
 
-Rules for new code:
+---
 
-- **Pick the domain first.** New behavior goes into the domain
-  directory that owns it; if it spans two domains, it belongs in the
-  lower one and is consumed by the higher one.
-- **Never import upward.** `config` imports nothing from sibling
-  domains; `dataplane` may import anything. A change that forces an
-  upward import is a design smell — restructure instead. The guard
-  (`python3 scripts/check_deps.py`, wired into CI) fails the build on
-  violations; if a genuinely new dependency is needed, move the shared
-  item DOWN into the lowest consuming domain (the precedent: IP/CIDR
-  grammar, validation limits, and credential hash formats all live in
-  `config`).
-- **The facade is the API.** Public items are reachable via the domain
-  modules; the root also re-exports legacy flat aliases
-  (`dwara_core::proxy`, `dwara_core::tls`, ...) — `#[doc(hidden)]`,
-  kept for compatibility. New external code should use the canonical
-  domain paths (`dwara_core::dataplane::proxy`). For error
-  propagation across boundaries, `dwara_core::error::Error` aggregates
-  the eight domain error types via `From`.
-- **Domain promotion path.** When a domain grows an independent release
-  cadence or a heavy dependency tree (e.g. `state` pulling rusqlite),
-  promote `src/<domain>/` to `crates/dwara-<domain>` and re-export it
-  from the facade. The directory structure is the extraction seam —
-  keep domains self-contained so promotion is a `git mv` plus Cargo
-  manifest work, not a rewrite.
-- **Tests live in `tests/`, not `src/`.** `crates/dwara-core/tests/`
-  holds integration suites (`<domain>.rs`, process-level where
-  possible), the relocated unit tests (`tests/unit/`, one mod file
-  per source module behind a single `main.rs` binary to bound CI link
-  time), and `tests/support/mod.rs` — the shared fixture module
-  (config builders, gateway/backend spawn helpers, HTTP client
-  helpers). New suites `mod support;` instead of re-declaring
-  fixtures; suite-specific variants stay local. The ONLY tests allowed
-  in `src/` are white-box tests of private internals that cannot be
-  expressed through the public API — each carries a comment saying why
-  it stays (e.g. raw-SQL introspection of the store's connection).
-  Current residuals: `state/store.rs`,
-  `dataplane/{balance,upstream,proxy}.rs`, `dwara-bin`'s
-  `listeners.rs` (panic supervisor), and `dwara-bin`'s `otlp.rs`
-  (private-helper white-box tests; justification comment in source).
-  New suites must be deterministic under load: bounded polls, unique
-  ports, generous margins; see the Test map below.
-- **Feature flags** are declared in the owning crate's `Cargo.toml`
-  with a comment stating why they exist. Only two production features
-  remain: `ent` (Enterprise edition, on dwara-core and dwara-bin) and
-  `loom` (test-only concurrency model checking, on dwara-core). All
-  other capabilities are folded into the OSS default build.
+## 8. Developer documentation guidelines
 
-## Conventions
+Contributor docs live in `docs/` (plain markdown, browsed on GitHub).
 
-- **Commits:** conventional style (`feat:`, `fix:`, `ci:`, `test:`, ...),
-  subject ≤72 chars, body explains why; reference issues with `Refs #N`
+- **Audience:** dwara contributors (agents and humans).
+- **Content:** how a feature is implemented, rationale behind non-obvious
+  choices, mermaid diagrams of flows/state machines.
+- **Entry point:** [`docs/README.md`](docs/README.md) tracks what's
+  written vs scaffolded.
+- **When writing:** state what the feature does, why it's built that way
+  (cite `DW-xxx`/`#nnn` and the module's `//!` doc comment), include a
+  mermaid diagram if it clarifies a flow, link to owning source files and
+  test suites.
+- **Follow the pattern** in existing pages (`docs/architecture.md`,
+  `docs/features/`).
+- No build step. Verify by reading rendered markdown on GitHub.
+- If a change adds or materially changes a feature, update the corresponding
+  page(s) in the same change.
+
+---
+
+## 9. Code commit guidelines
+
+- **Never push or create PRs** without explicit user instruction.
+- **Conventional commits:** `feat:`, `fix:`, `ci:`, `test:`, etc.
+  Subject <=72 chars, body explains why. Reference issues with `Refs #N`
   (PR descriptions carry `Closes`).
-- **Config schema:** strict serde — `deny_unknown_fields` on every struct.
-  Changes are additive only. Parse-level checks live in `config.rs`;
-  semantic validation (refs, bounds, cross-field rules) lives in
-  `snapshot.rs::validate` and must produce `ValidationIssue`s naming the
-  offending field. Invalid regexes fail at compile in `snapshot.rs`.
-  Zero-route configs are guarded (#129): validation rejects an empty
-  `routes` list unless the additive top-level `allow_empty_routes:
-  true` flag is set — test configs that legitimately declare no routes
-  (admin-only, SNI-passthrough-only fixtures) must carry the flag.
-  After schema changes, regenerate `config-reference.json`
-  (`dwara-cli schema > config-reference.json`) — CI fails on drift — and
-  rebuild the config-studio tool in the same change
-  (`python3 tools/config-studio/build.py`, commit the rebuilt
-  `index.html`), because the tool embeds the schema at build time.
-- **Ops knobs are env vars** (`DWARA_*`), topology is YAML. Do not add
-  operational settings to the schema without discussion.
-- **Vocabulary is frozen:** Listener/Route/Service/Upstream/Endpoint/
-  Consumer/Credential/Policy/Plugin/Workspace/Snapshot. Policy precedence:
-  consumer > route > service > listener > global (deny-anywhere-wins).
-- **Request-path order** (do not reorder casually): reserved paths
-  (/healthz, /readyz, /metrics) → route resolution → route maintenance
-  (503 + Retry-After, preflight-exempt, DW-041) → route method allowlist
-  (405 + Allow, preflight-exempt like maintenance, DW-030) → WAF-lite
-  heuristic filtering (DW-051: pattern matching for SQLi/XSS/path-traversal
-  on the path, query, selected headers, and body; 403 `waf_blocked` or
-  dry-run logged, per-route opt-in) → anomaly scoring (DW-090:
-  lightweight statistical detection of abusive request shapes — header
-  entropy, header count/bytes, path length/depth, query count, body
-  size, unusual method; 403 `anomaly_blocked` or dry-run logged,
-  per-policy opt-in) → route limits (413/431) → CORS
-  preflight short-circuit (204, pre-authn) →
-  WebSocket origin gate (DW-039: a websocket upgrade on a route with a
-  non-empty `websocket.origins` list is denied 403 at the proxy action,
-  before any upstream contact) →
-  authn → authz → rate limit → gateway cap admission (priority-aware) →
-  breaker → endpoint pick → pending cap → connect (request transforms
-  run on the forward path inside the proxy action, DW-028: query ops
-  after the DW-010 path rewrite, header ops after the trusted-header
-  injection, the JSON body transform before retry buffering — matching
-  and every policy above evaluated the ORIGINAL request); responses
-  then gain field masking (DW-029: proxy actions only, union of the
-  route floor and the consumer's groups, fail-closed 502 on
-  encoded/non-JSON/over-cap/unparseable/unresolved-pointer bodies —
-  the sentinel replaces secrets before any later stage reads the
-  body) → body/header transforms (DW-028) → route compression
-  (DW-027) → versioning stamps (Vary: Accept fold +
-  Deprecation/Sunset/Link, DW-048) → CORS decoration (DW-027) →
-  security headers (DW-028, every route-matched response including
-  short-circuits) → rate headers. Unrouted traffic
-  stops at route resolution: listener- and global-attached policies
-  rate-limit the request before the 404; authn/authz never run
-  pre-route. Dry-run (DW-041) does not reorder anything: a phase with
-  a `dry_run` attachment evaluates in place and reports instead of
-  rejecting (route limits, authz, rate limits, load shedding).
-- **Gateway-generated responses** use the JSON error envelope
-  `{error:{code,message,request_id}}`; never leak upstream internals.
-- **Secrets:** never logged, never in Debug output, redaction is exhaustive
-  (query strings excluded from logs/spans; `X-Consumer-*` stripped inbound).
-- **Metrics:** label cardinality must stay config-bounded (no consumer-name
-  labels). Counters survive reloads; hot paths use atomics only.
-- **Tests:** integration tests spawn real servers or the real binary
-  (`CARGO_BIN_EXE_*`), use unique ports and bounded readiness polls.
-  Zero tolerance for flakes: re-run new timing-sensitive suites 5x.
-  Timing tests use tiny windows with generous margins; never sleeps as
-  synchronization.
-- **Streaming:** the dataplane buffers nothing by default. Any change that
-  introduces buffering must be opt-in and size-capped.
+- **No emoji** in commit messages.
+- **Verification before commit** The full verification gate must pass before committing.
+- **No Co-Authored by** Attributions necessary.
 
-## Extension points
+---
 
-Swappable subsystem traits live in `dwara-core::extensions`:
-`RateLimiter`, `ConfigSource`, `CacheStore`, `AnalyticsSink`,
-`SecretSource` (async, dyn-compatible). Local in-memory/file/env
-implementations ship in-tree; additional backends may be provided
-separately. The traits are the intended seam for plugging in alternative
-implementations without touching call sites — extend, do not break them.
-
-## Running locally
+## 10. Local development guidelines
 
 ```sh
 cargo run -p dwara-bin                        # uses crates/dwara-bin/dwara.yaml
 DWARA_CONFIG=path/to/conf.yaml cargo run -p dwara-bin
 ```
 
-The binary requires a config at startup (exit 1 with all validation issues
-if invalid). Main environment variables:
+- Rust via rustup; pinned toolchain installs automatically.
+- Optional: Docker (colima on macOS), `actionlint` (brew), nightly toolchain
+  for `cargo fuzz`, python3 for bench scripts.
+- musl/aws-lc-rs build needs cmake + C compiler.
+- **Disk space:** `target/` grows large. On `ENOSPC`, run `cargo clean` and
+  retry. `cargo clean -p <crate>` for targeted cleanup.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DWARA_CONFIG` | `./dwara.yaml` | config file path (watched for changes) |
-| `DWARA_BIND` | `127.0.0.1:8080` | override for a single cleartext listener |
-| `DWARA_STATE_DB` | unset | enable the SQLite state store |
-| `DWARA_CREDENTIAL_PEPPER` | unset | per-deployment secret peppering stored credential hashes (#124); unset = legacy-only mode |
-| `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin (dev only) |
-| `DWARA_LOG` / `DWARA_ACCESS_LOG_SAMPLE` | `dwara=info` / `1.0` | log filter / access-line sampling |
-| `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export; live when `DWARA_OTLP_ENDPOINT` is set, inert otherwise |
-| `DWARA_CONSOLE` | unset | `1` = spawn tokio-console gRPC server on 127.0.0.1:6669; live when `DWARA_CONSOLE=1` is set, inert otherwise |
-| `DWARA_HTTP1_*`, `DWARA_H2_*`, `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | protocol hardening knobs |
-| `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful drain bound |
-
-Reload: file change (debounced) or SIGHUP. Shutdown: SIGTERM/SIGINT with
-backlog flush + drain. `POST` to the admin API is live-published.
-
-## Development environment
-
-- Rust via rustup; the pinned toolchain installs automatically on first
-  cargo invocation.
-- Optional: Docker (quickstart/images; colima works on macOS),
-  `actionlint` (brew) for workflow linting, a nightly toolchain for
-  `cargo fuzz`, python3 for `scripts/bench-baseline.py`.
-- The musl/aws-lc-rs build needs cmake + a C compiler; the release
-  Dockerfiles carry these in their builder stages.
-- **Disk out of space:** this workspace's `target/` grows large (multiple
-  crates, LTO release builds, fuzz corpora). If a build/test/lint command
-  fails with a "No space left on device" (`ENOSPC`) error, run
-  `cargo clean` first (drops `target/`, forcing a full rebuild) and retry
-  before troubleshooting further. If space is still tight, `cargo clean -p
-  <crate>` targets just one crate's artifacts, and `du -sh target/*` finds
-  what's largest. Re-run the full verification gate after cleaning, since a
-  clean forces every check to rebuild from scratch.
-
-## Test map
-
-Suites live in each crate's `tests/` directory. Run a single suite with
-`cargo test -p <crate> --test <name>`.
-
-| Area | Crate | Suites |
-|---|---|---|
-| Unit (relocated from src) | dwara-core | `tests/unit/*` (one file per source module; white-box residuals stay in `src/` with justification comments) |
-| Config schema / validation | dwara-core | `config_schema`, `config_schema_extended`, `snapshot_pipeline` |
-| Routing | dwara-core | `router_golden` (golden files), `proxy_coverage` |
-| Proxy behavior | dwara-core | `proxy`, `proxy_coverage` |
-| TLS | dwara-core / dwara-bin | `tls_validation`, `trusted_ca` / `tls_listener`, `tls_edges` |
-| Upstreams / LB | dwara-core | `upstream_client`, `balancing` |
-| Health | dwara-core | `passive_health`, `active_health` |
-| Resilience | dwara-core | `retries_timeouts`, `breaker_caps`, `load_shedding`, `rate_limit` |
-| Edge policies (CORS/compression/limits) | dwara-core | `cors_compression_limits` |
-| Transforms + security headers (DW-028) | dwara-core | `transforms` (end to end), `tests/unit/transforms.rs` |
-| Response field masking (DW-029) | dwara-core | `masking` (end to end), `tests/unit/transforms.rs` (union + miss-is-the-leak cases) |
-| Response caching (DW-037) + request coalescing (DW-038) | dwara-core / dwara-admin | `caching` (end to end: headers, consumer isolation, SWR, ETag, vetoes, invalidation; coalescing single-flight, fail-open fallbacks, saturation, SWR no-deadlock), `tests/unit/response_cache.rs` (envelope/key/validator grammar), `admin_api` purge cases |
-| Maintenance + policy dry-run (DW-041) | dwara-core | `maintenance_dry_run` |
-| Embedded analytics (DW-043) | dwara-core / dwara-admin | `analytics` (e2e record path incl. custom dims), `tests/unit/analytics_store.rs` (schema, percentile math, rollup cascade exactness/idempotence/cursor-restart, retention, drop-on-full, writer drain, query layer), `admin_api` analytics cases (dashboard/top/query endpoints, closed grammar, 404 without store) |
-| Streaming analytics + ML insights (DW-092) | dwara-core / dwara-admin | `streaming_analytics` (live sketches: rolling window, percentile computation, multi-route aggregation, error counts, window expiry; insights: EWMA forecasting, seasonal baseline anomaly detection, config validation, end-to-end through gateway), `admin_api` analytics live/forecast/anomalies cases (200 with features, 404 without, 405 wrong method) |
-| GeoIP ACL (DW-050) | dwara-core | `tests/unit/geoip.rs` (reader + decision semantics over generated .mmdb fixtures), `authz` geoip e2e (country block on the effective IP, hot-reload decision swap), `config_schema_extended` geoip validation |
-| Key rotation (DW-046) | dwara-core / dwara-admin | `authn` rotation cases (dual-validity zero-failure, lazy scheduled expiry, JWKS retired-key grace + grace-0 cutoff + no-grace-extension), `store` retirement lifecycle + list view, `admin_api` credential endpoints (issue/list/retire, 404 shapes) |
-| SLO & error-budget export (DW-052) | dwara-core | `observability` (SLO e2e: config→refresh→traffic→/metrics series), `tests/unit/observability.rs` SLO cases (window math, expiry, ring wrap+reset, unconfigured/removal, empty-family safety), `config_schema_extended` slo validation matrix |
-| Protocol hardening pass 2: PROXY protocol, method allowlist, happy eyeballs (DW-030) | dwara-core / dwara-bin | `method_allowlist` (405+Allow matrix incl. preflight), `upstream_client` (happy-eyeballs dual-stack e2e), `tests/unit/proxy_proto.rs` (header policy), `tests/unit/upstream.rs` (race/order), `protocol_hardening` (real-binary PROXY v1/v2 + fail-closed) |
-| Alert/event webhooks (DW-044) | dwara-core | `webhooks` (end to end), `tests/unit/webhooks.rs` |
-| AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) + cost attribution (DW-079) + model governance (DW-084) + prompt/response logging (DW-081) + guardrails (DW-082) + semantic caching (DW-083) + routing policies (DW-085) + prompt experimentation (DW-086) + MCP gateway (DW-087) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation), `ai_cost` (pricing table, spend recording, export columns), `ai_governance` (per-team allowlist, shadow audit, deny-wins), `ai_prompt_logging` (sampling, retention, PII redaction, per-consumer toggle), `ai_guardrails` (injection block, PII redact, banned block, schema enforcement, policy scoping, log dry-run, benign-traffic corpus, validation), `ai_semantic_cache` (feature-gated: paraphrase hit, dissimilar miss, cost savings, TTL expiry, streaming bypass, disabled default, cache reset, model isolation), `ai_routing_policy` (fallback chain escalate/cheap, classifier fail-open, latency-cost cost/latency/balanced, validation matrix, cost savings), `ai_experiments` (A/B test determinism + analytics, prompt version prepend, prompt override via state, eval scorers exact/contains/regex, feedback ingestion, verdict computation, validation matrix), `ai_mcp` (JSON-RPC parsing, initialize/tools-list/tools-call/shutdown lifecycle, session id generation, upstream proxy, authz filtering, error envelopes) |
-| State | dwara-core | `store` |
-| Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
-| Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export`, `otlp_inert`, `hello_listener` |
-| Admin API | dwara-admin | `admin_api` |
-| Tooling | dwara-core / dwara-cli | `swap_stress`, `loom` (feature-gated) / `cli`, `loadgen_e2e`, `loadgen_unit` |
-
-## Reference: implementation facts
-
-Context that constrains how code is written. Read the entries for any area
-you are about to change.
-
-- **Hot reload** swaps an atomic `Snapshot` (+ upstream registry, TLS
-  material, auth state) — in-flight requests keep their old generation.
-  The listener bind set is restart-only. Counters/gauges survive reloads.
-- **State store** (opt-in via `DWARA_STATE_DB`) auto-migrates on open and
-  writes a `.bak-*` backup before migrating; schema changes go through
-  `migrations.rs` (forward-only, transactional, tracked in
-  `PRAGMA user_version`).
-- **Credential hashing.** API keys are stored as `sha256:<hex>` (legacy)
-  or, when `DWARA_CREDENTIAL_PEPPER` is set, `hmac-sha256:<hex>` (#124),
-  with sha256 selectors and constant-time compare in both modes. Legacy
-  rows re-hash to the peppered format in place on successful
-  verification; peppered rows fail closed without a pepper (401 + one
-  ERROR log). Store-managed Basic credentials should use argon2id PHC
-  hashes (pepper-independent).
-- **Request smuggling.** hyper 1.x does not reject CL+TE requests; the
-  pre-parse sniff in `hardening.rs` is the real defense (first head
-  only; the proxy rebuilds every forwarded request from parsed parts, so
-  framing cannot desync through the gateway).
-- **Outbound TLS trust** is per entity (#121): a `trusted_ca_file` PEM
-  bundle on an upstream or JWT provider REPLACES the webpki public roots
-  for that entity only. Active https health probes inherit their
-  upstream's roots. Validation owns PEM-level rejection
-  (`check_trusted_ca_file` in `snapshot/mod.rs`); the runtime fail-closed
-  paths are only a validate-vs-build race backstop, never a fallback to
-  public roots. Bundle paths are NOT file-watched (only the config file
-  and terminate cert/key files are): a rotation needs SIGHUP or a config
-  change to apply.
-- **Listener supervision** (`listeners.rs`): panicked accept loops are
-  respawned on the SAME bound socket (cap 8 per listener, process
-  lifetime), then given up on with an ERROR log — the process never
-  aborts for a dead listener. The socket stays behind a shared `Arc`, so
-  shutdown flush polls `poll_accept` with a no-op waker instead of
-  `into_std` (re-binding would race the port away).
-- **SNI passthrough** (`tls.rs`): the parser reassembles ClientHellos
-  fragmented across TLS records, bounded at 64 KiB (`MAX_HELLO_BYTES`);
-  the peek never consumes bytes, so the original hello is replayed to the
-  upstream by the splice.
-- **Concurrency testing.** arc-swap has no loom support; swap paths are
-  covered by real-thread stress tests in `tests/swap_stress.rs`. The
-  `loom` feature covers the rest of the hot paths.
-
-## CI posture (compute-conscious)
-
-- `ci.yml`: verify (fmt/clippy/build/test + config-reference freshness) and
-  supply-chain (cargo-deny + SBOM) on pushes/PRs to main, path-filtered,
-  concurrency-cancelled.
-- `bench.yml` / `fuzz.yml`: scheduled weekly + manual dispatch only —
-  never on PRs. `bench.yml` dispatches take a `job` input (`gate`
-  default, `baseline-refresh` to (re)capture the CI micro-bench
-  baseline: `gh workflow run bench.yml --ref main -f
-  job=baseline-refresh`, and `soak`); `fuzz.yml` builds on a dated
-  nightly pin (bump procedure in the workflow).
-- `release-artifacts.yml`: tag-only (`v*`), musl binaries with a 25 MB bar
-  and GHCR multi-arch images.
-- Every action ref across `.github/workflows/` is pinned to a full commit
-  SHA (with a `# pinned: <tag> @ <sha>` comment naming the source tag);
-  Dependabot (`github-actions`, weekly, `.github/dependabot.yml`) keeps
-  the pins fresh — reviewers should not accept unpinned third-party
-  actions. Dependabot also has an `npm` lane scoped to `docs-site/`
-  (separate from the Rust workspace's `deny.toml` gate).
-- `docs-site.yml`: builds and publishes `docs-site/` to GitHub Pages on
-  every push to `main` that touches `docs-site/**`.
-
-## Documentation
-
-Two documentation trees, for two different audiences — do not mix their
-content:
-
-| Tree | Audience | Content |
-|---|---|---|
-| `docs/` | dwara contributors (this repo's agents and humans) | In-depth internals: how a feature is implemented, the rationale behind non-obvious choices, mermaid diagrams of flows/state machines. Plain markdown, browsed on GitHub — not built or published separately. |
-| `docs-site/` | OSS and enterprise operators | Task-oriented guides (install, configure, deploy, operate) and high-level architecture diagrams — never internals or rationale. A VitePress site, versioned, published to GitHub Pages. |
-
-If a change adds or materially changes a feature covered in either
-tree, update the corresponding page(s) as part of the same change —
-don't let `docs/` or `docs-site/` drift from the code the way a stale
-comment would.
-
-### `docs/` (contributor docs)
-
-- Entry point: [`docs/README.md`](docs/README.md), which tracks what's
-  written vs. scaffolded (`docs/features/*.md` stubs marked
-  `> **Status: scaffold.**`).
-- When writing a page: state what the feature does, why it's built
-  that way (cite `DW-xxx`/`#nnn` markers and the module's `//!` doc
-  comment — most rationale already lives there), a mermaid diagram if
-  it clarifies a flow or state machine, and links to the owning source
-  files and test suites. Follow the pattern in the already-written
-  pages (`docs/architecture.md`, `docs/features/{tls,dataplane-proxy,
-  resilience,authn-authz}.md`).
-- No build step; verify by reading rendered markdown/mermaid on GitHub
-  (or any local markdown+mermaid previewer) and by re-checking cited
-  facts still match the source before merging.
-
-### `docs-site/` (published end-user site)
-
-- Local dev: `cd docs-site && npm install && npm run docs:dev`. Build
-  with `npm run docs:build` (must succeed with zero dead-link errors —
-  VitePress fails the build on a broken internal link by default).
-- Structure: `guide/` (task-oriented), `architecture/` (high-level
-  mermaid diagrams only, no internals), `reference/` (generated/
-  exhaustive material, e.g. links to `config-reference.json`). See
-  [`docs-site/README.md`](docs-site/README.md) for the full layout.
-- Links between pages must be relative (versioning plugin requirement)
-  — never `/guide/foo`, always `./foo` or `../guide/foo`.
-- **Versioning** (`vitepress-versioning-plugin`): the root content
-  always tracks `main` and is labeled `unstable`. Before tagging a
-  release, run `npm run docs:freeze -- <version>` (no leading `v`) from
-  `docs-site/` to snapshot the current root into `versions/<version>/`,
-  commit that snapshot, *then* cut the tag — the frozen snapshot must
-  land before the tag it documents. Never hand-edit files under
-  `versions/`; regenerate by re-running the freeze step against a
-  corrected root if a past snapshot needs fixing.
-- Publishing is automatic: `.github/workflows/docs-site.yml` builds and
-  deploys to GitHub Pages on every push to `main` touching
-  `docs-site/**`. There is no separate per-tag deploy — a frozen
-  version only appears on the published site once its snapshot is
-  committed to `main`.
-
-## Config studio
-
-`tools/config-studio/` is the Dwara Config Studio: a single-file, fully
-offline browser tool for generating, visualizing, validating, and editing
-gateway YAML (loading into dwara remains `dwara validate` + run). Rules:
-
-- **`index.html` is a build artifact** — never hand-edit it. Edit
-  `src/app.template.html`, run `python3 tools/config-studio/build.py`
-  (python3 stdlib only), and commit the rebuilt artifact together with
-  the template change.
-- **Regenerate together with the schema.** Any change that regenerates
-  `config-reference.json` must rebuild the tool in the same change; the
-  build inlines the schema (see the Config schema convention above).
-- The build scrubs internal `DW-###` references from help text at build
-  time only. Never strip them from `config-reference.json` itself — it
-  must stay byte-identical to `dwara schema` output for the CI drift
-  gate.
-- `vendor/js-yaml.min.js` is vendored (js-yaml 4.1.0, MIT; license
-  header preserved). Do not modify or upgrade casually — upgrades are a
-  deliberate license-and-size review, flagged like any dependency
-  addition.
-- The tool must stay offline and dependency-free: no CDN scripts, no
-  runtime fetches, no node build step. Docs-site links are the only
-  external references.
-- Verify tool changes by rebuilding, opening `index.html` in a browser,
-  and confirming every shipped template's exported YAML passes
-  `dwara-cli validate` (browser validation is structural only). The
-  cargo verification gate does not apply to tool-only changes; the
-  schema-sync and rebuild rules above always do.
-
-## Quickstart sanity check
-
-`quickstart/oss/` boots the gateway + a demo upstream over TLS (certs
-and upstream are shared from the quickstart root):
-`cd quickstart/oss && ../gen-certs.sh && docker compose up`, then
-`curl --cacert ../certs/server.crt https://localhost:8443/`.
-Linux hosts need `sudo chown -R 65532:65532 quickstart/certs`
-(see quickstart/README). The `quickstart/enterprise/` compose runs the
-CP/DP split topology instead (controller + edge fleet, ports
-9443/9444) and needs `vendor-licensing.sh` first.
+Full environment variable reference: [`docs/agent-guide/env-vars.md`](docs/agent-guide/env-vars.md).
+Quickstart instructions: [`docs/agent-guide/config-studio.md`](docs/agent-guide/config-studio.md).
