@@ -5,7 +5,7 @@ schemas. When enabled, responses that don't match the schema are
 flagged -- either rejected (fail-closed) or logged (dry-run mode).
 
 ::: info Status
-Response validation is a compile-time feature pack
+Response validation is a compile-time capability
 (`openapi_validation`, default OFF; see
 [Editions](./editions#compile-time-feature-packs)) and is not included
 in the published OSS binaries. The validation engine is complete and

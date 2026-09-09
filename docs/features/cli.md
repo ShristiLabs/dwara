@@ -117,8 +117,8 @@ macro workloads, selected with `--protocol` and `--workload`:
   connection, no pool), `h2` (h2c prior-knowledge over cleartext, one
   persistent HTTP/2 connection per worker with multiplexed streams),
   and `h3` (QUIC + h3, one QUIC connection per worker, one
-  bidirectional stream per request). `h3` is feature-gated behind the
-  default-off `h3` cargo feature on `dwara-cli` and has no in-process
+  bidirectional stream per request). `h3` is compiled into the
+  default build on `dwara-cli` and has no in-process
   echo upstream — `--echo` is rejected with `--protocol h3`, so it must
   point at a real h3 listener (a gateway `protocol: h3` listener);
   `--insecure` skips certificate verification for loopback targets.
@@ -159,7 +159,7 @@ full client -> gateway -> upstream -> gateway -> client path across the
 h1/h2 protocols and the throughput/pool-reuse/streaming workloads,
 emitting one `JSON:` line per workload on stdout (the human table goes
 to stderr so stdout stays a clean stream for the gate). h3 is opt-in via
-`DWARA_BENCH_H3_URL` because h3 is feature-gated and needs a TLS/QUIC
+`DWARA_BENCH_H3_URL` because h3 is compiled into the OSS build and needs a TLS/QUIC
 listener the plain rig does not provision. `scripts/bench-regression.py`
 compares the JSON output against a checked-in macro baseline
 (`scripts/bench-macro-baseline.json`) at a 10% default tolerance and
@@ -169,7 +169,7 @@ with a notice until a CI-runner baseline is captured once via the
 `baseline-refresh` dispatch. `.github/workflows/bench-nightly.yml` runs
 the macro gate nightly (best-of-3 runs to shed a single noisy sample,
 30% tolerance for CI noise) plus an `h3-compile` job that guards
-feature rot on the default-off h3 feature; h3 throughput is not in the
+feature rot on the h3 capability; h3 throughput is not in the
 nightly macro-gate (no TLS/QUIC listener rig). `scripts/bench-macro.sh`
 gains `BENCH_PROTOCOL`/`BENCH_WORKLOAD`/`BENCH_JSON` passthrough vars
 for single-workload runs.

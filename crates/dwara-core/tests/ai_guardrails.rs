@@ -294,7 +294,6 @@ async fn pii_prompt_blocked() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[cfg(feature = "openapi_validation")]
 async fn output_schema_enforcement_rejects_violation() {
     // The mock returns a non-JSON string; the schema requires an
     // object with a "result" field.
@@ -326,7 +325,6 @@ async fn output_schema_enforcement_rejects_violation() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[cfg(feature = "openapi_validation")]
 async fn output_schema_enforcement_passes_conforming() {
     // The mock returns a JSON object string matching the schema.
     let (port, _seen) = openai_mock_with_content(r#"{"result": "hello"}"#);

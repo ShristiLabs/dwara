@@ -61,7 +61,6 @@ pub(crate) enum ListenerMode {
     /// cargo feature; when the feature is off this variant is never
     /// constructed (bind_listener returns an error for `protocol: tcp`
     /// without the feature, mirroring the h3 pattern).
-    #[cfg(feature = "l4")]
     L4 {
         /// Compiled L4 proxying config (upstream, sni_routing, idle
         /// timeout).
@@ -232,28 +231,16 @@ pub(crate) async fn bind_listener(
         // UDP listeners are handled separately in main.rs (they bind
         // a UDP socket, not TCP) -- same skip pattern as H3.
         ListenerProtocol::Tcp => {
-            #[cfg(feature = "l4")]
-            {
-                let l4_cfg = l.l4.as_ref().expect("validated tcp listener has l4 block");
-                let config = Arc::new(dwara_core::dataplane::l4::L4ProxyConfig::from_config(
-                    l4_cfg,
-                ));
-                let sni_routes = l
-                    .tls
-                    .as_ref()
-                    .map(|t| t.sni_routes.clone())
-                    .unwrap_or_default();
-                ListenerMode::L4 { config, sni_routes }
-            }
-            #[cfg(not(feature = "l4"))]
-            {
-                return Err(format!(
-                    "tcp listener {} requires the `l4` cargo feature (build with --features l4); \
-                     the default build does not link the L4 dispatcher",
-                    l.name
-                )
-                .into());
-            }
+            let l4_cfg = l.l4.as_ref().expect("validated tcp listener has l4 block");
+            let config = Arc::new(dwara_core::dataplane::l4::L4ProxyConfig::from_config(
+                l4_cfg,
+            ));
+            let sni_routes = l
+                .tls
+                .as_ref()
+                .map(|t| t.sni_routes.clone())
+                .unwrap_or_default();
+            ListenerMode::L4 { config, sni_routes }
         }
         ListenerProtocol::Udp => {
             // DW-103: UDP listeners bind a UDP socket (handled in
@@ -409,7 +396,6 @@ pub(crate) async fn run_listener(
                     }
                 });
             }
-            #[cfg(feature = "l4")]
             ListenerMode::L4 { config, sni_routes } => {
                 // DW-103: L4 TCP proxying. Consult the CURRENT
                 // snapshot for the gateway (SNI route resolution +
@@ -561,7 +547,6 @@ pub(crate) async fn run_listener(
                             // DW-103: L4 backlog connections are closed
                             // (same reason as passthrough: a shutdown-
                             // time splice has no drain budget — #175).
-                            #[cfg(feature = "l4")]
                             ListenerMode::L4 { .. } => {}
                             ListenerMode::Cleartext => {
                                 if bound.proxy_protocol {

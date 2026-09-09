@@ -191,9 +191,9 @@ A plugin failure does not crash the gateway:
 
 The plugin chain (`PluginChain`, `WasmDispatch`, `ExtismDispatch`)
 and the per-runtime adapters are fully defined and compile under
-their feature flags. In this revision the main dataplane request path
+their capabilities. In this revision the main dataplane request path
 does not invoke the chain directly; the chain is reached through
-feature-gated construction. The phase model, outcome semantics, and
+compiled into the OSS build construction. The phase model, outcome semantics, and
 lifecycle described here are the contract the chain implements and
 the contract future wiring will satisfy.
 

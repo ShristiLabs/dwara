@@ -44,10 +44,8 @@ features) are not yet implemented.
 
 ```sh
 cargo build --workspace
+cargo build --workspace --features ent  # Enterprise edition (license verification, Redis, CP/DP)
 cargo test --workspace            # ~1188 tests; suites spawn real servers/binaries
-cargo test -p dwara-bin --features otlp  # +24 feature-gated on top of the default suite
-cargo build -p dwara-bin --features h3   # HTTP/3 (QUIC) ingress (default OFF)
-cargo build -p dwara-bin --features console  # tokio-console diagnostics (default OFF)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check advisories licenses bans
@@ -57,7 +55,6 @@ python3 tools/config-studio/build.py                   # rebuild Dwara Config St
 ```
 
 Extras when touching those areas: `cargo test -p dwara-core --features loom --test loom`,
-`cargo test -p dwara-bin --features otlp --test otlp_export`,
 `cargo bench --workspace --bench micro`, `actionlint .github/workflows/<file>`,
 `scripts/bench-macro.sh` (macro rig), `cargo fuzz run <target>` (from `fuzz/`).
 
@@ -72,7 +69,7 @@ zero warnings and zero failures. Never weaken a command to make it pass (no
 | Path | Contents |
 |---|---|
 | `crates/dwara-core` | The library, organized as bounded-context domain directories behind a facade `lib.rs` (see Code organization below) |
-| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (feature-gated OTLP trace export), `h3.rs` (feature-gated HTTP/3 QUIC ingress) |
+| `crates/dwara-bin` | The `dwara` gateway binary: `main.rs` (entry/shutdown), `listeners.rs` (bind/serve/TLS modes), `reload.rs` (watcher/reload/TLS refresh), `otlp.rs` (OTLP trace export), `h3.rs` (HTTP/3 QUIC ingress) |
 | `crates/dwara-admin` | mTLS-only admin API (GET/PATCH /config, /health, /stats) |
 | `crates/dwara-cli` | Operator CLI (`run`/`validate`/`fmt`/`diff`/`lint`/`schema`); the load-generator rig lives in the lib (`dwara_cli::loadgen`) behind the thin `dwara-loadgen` bin |
 | `fuzz/` | cargo-fuzz crate (its own workspace, not a member) |
@@ -181,7 +178,7 @@ crates/dwara-core/src/
                       policy-scoped, prompt + response phases), and
                       the DW-083 semantic cache (semantic_cache.rs:
                       embedding-similarity cache, external embedding
-                      service + hnsw_rs HNSW ANN, feature-gated behind
+                      service + hnsw_rs HNSW ANN, compiled into the
                       `semantic_cache`), and the DW-085 routing
                       policies (policy.rs: FallbackChain cheap-first
                       escalation via external classifier + LatencyCost
@@ -205,7 +202,7 @@ crates/dwara-core/src/
   plugins/           native filter trait + unified dispatch chain
                       (DW-119): NativeFilter, NativeRegistry,
                       PluginChain, WasmDispatch. Feature-gated behind
-                      the `plugins` cargo feature. The wasm domain
+                      compiled into the OSS build. The wasm domain
                       bridges its instances in via WasmChainAdapter.
 ```
 
@@ -278,8 +275,10 @@ Rules for new code:
   New suites must be deterministic under load: bounded polls, unique
   ports, generous margins; see the Test map below.
 - **Feature flags** are declared in the owning crate's `Cargo.toml`
-  with a comment stating why they exist (see `loom` on dwara-core,
-  `otlp` on dwara-bin). No default-on features beyond the standard set.
+  with a comment stating why they exist. Only two production features
+  remain: `ent` (Enterprise edition, on dwara-core and dwara-bin) and
+  `loom` (test-only concurrency model checking, on dwara-core). All
+  other capabilities are folded into the OSS default build.
 
 ## Conventions
 
@@ -381,8 +380,8 @@ if invalid). Main environment variables:
 | `DWARA_CREDENTIAL_PEPPER` | unset | per-deployment secret peppering stored credential hashes (#124); unset = legacy-only mode |
 | `DWARA_ADMIN_DEV` | unset | `1` = plaintext loopback admin (dev only) |
 | `DWARA_LOG` / `DWARA_ACCESS_LOG_SAMPLE` | `dwara=info` / `1.0` | log filter / access-line sampling |
-| `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export; live only in an `otlp`-feature build (`http://` endpoint), reserved-but-inert otherwise |
-| `DWARA_CONSOLE` | unset | `1` = spawn tokio-console gRPC server on 127.0.0.1:6669; live only in a `console`-feature build, inert otherwise |
+| `DWARA_OTLP_ENDPOINT` | unset | OTLP trace export; live when `DWARA_OTLP_ENDPOINT` is set, inert otherwise |
+| `DWARA_CONSOLE` | unset | `1` = spawn tokio-console gRPC server on 127.0.0.1:6669; live when `DWARA_CONSOLE=1` is set, inert otherwise |
 | `DWARA_HTTP1_*`, `DWARA_H2_*`, `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | protocol hardening knobs |
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful drain bound |
 
@@ -437,7 +436,7 @@ Suites live in each crate's `tests/` directory. Run a single suite with
 | AI provider adapters (DW-075) + routing/failover (DW-076) + streaming (DW-077) + token budgets (DW-078) + cost attribution (DW-079) + model governance (DW-084) + prompt/response logging (DW-081) + guardrails (DW-082) + semantic caching (DW-083) + routing policies (DW-085) + prompt experimentation (DW-086) + MCP gateway (DW-087) | dwara-core | `ai_adapters` (per-dialect translation against recorded wire shapes, SSE delta replay), `ai_gateway` (end to end with mock providers: three-dialect done-when, error pass-through, 404/400/502 matrix, validation, redaction), `ai_routing` (failover on 429/5xx/transport-error, exhausted-chain last-error, non-retryable no-failover, 9:1 canary split determinism + attribution, routing validation), `ai_streaming` (zero-buffer latency proof, mid-stream abort, usage accumulation, disconnect accounting), `ai_budget` (pre-check rejection, mid-stream cutoff, team scope, precedence, validation), `ai_cost` (pricing table, spend recording, export columns), `ai_governance` (per-team allowlist, shadow audit, deny-wins), `ai_prompt_logging` (sampling, retention, PII redaction, per-consumer toggle), `ai_guardrails` (injection block, PII redact, banned block, schema enforcement, policy scoping, log dry-run, benign-traffic corpus, validation), `ai_semantic_cache` (feature-gated: paraphrase hit, dissimilar miss, cost savings, TTL expiry, streaming bypass, disabled default, cache reset, model isolation), `ai_routing_policy` (fallback chain escalate/cheap, classifier fail-open, latency-cost cost/latency/balanced, validation matrix, cost savings), `ai_experiments` (A/B test determinism + analytics, prompt version prepend, prompt override via state, eval scorers exact/contains/regex, feedback ingestion, verdict computation, validation matrix), `ai_mcp` (JSON-RPC parsing, initialize/tools-list/tools-call/shutdown lifecycle, session id generation, upstream proxy, authz filtering, error envelopes) |
 | State | dwara-core | `store` |
 | Auth | dwara-core | `authn`, `authz`, `hmac_signing` |
-| Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export` (feature-gated), `otlp_inert`, `hello_listener` |
+| Ops | dwara-bin | `reload_edges`, `reload_shutdown`, `healthz_readyz`, `observability`, `protocol_hardening`, `admin_reload_coherence`, `otlp_export`, `otlp_inert`, `hello_listener` |
 | Admin API | dwara-admin | `admin_api` |
 | Tooling | dwara-core / dwara-cli | `swap_stress`, `loom` (feature-gated) / `cli`, `loadgen_e2e`, `loadgen_unit` |
 

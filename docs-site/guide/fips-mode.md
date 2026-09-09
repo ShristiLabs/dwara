@@ -21,23 +21,23 @@ broader, modern cipher set that is faster and more widely interoperable.
 
 ## Enabling
 
-FIPS mode is gated behind the `fips` cargo feature (default OFF). The
+FIPS enforcement is gated behind the `ent` cargo feature (Enterprise only). The
 feature swaps the crypto provider for a FIPS-validated backend and
 enables the startup self-test:
 
 ```sh
-cargo build -p dwara-bin --features fips
+cargo build -p dwara-bin --features ent
 ```
 
 In a default build the feature is absent and the gateway uses the
-standard crypto provider with no self-test. The `fips` feature is
-mutually exclusive with the `pq` feature -- post-quantum key exchange is
+standard crypto provider with no self-test. FIPS enforcement is
+incompatible with post-quantum TLS -- post-quantum key exchange is
 not yet part of the FIPS-approved boundary.
 
 ## Configuration
 
 FIPS mode is a build-time property, not a runtime toggle. Once the
-binary is built with `--features fips`, the approved-only cipher
+binary is built with `--features ent`, the approved-only cipher
 restrictions and self-test apply to every listener and upstream
 unconditionally. There is no per-route or per-upstream FIPS setting.
 

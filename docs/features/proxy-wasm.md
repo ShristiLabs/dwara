@@ -4,20 +4,19 @@
 
 dwara includes a proxy-wasm ABI host built on wasmtime, allowing
 community Kong/Envoy proxy-wasm filters to run unmodified. The host is
-feature-gated behind the `wasm` cargo feature (default OFF) because
-wasmtime + cranelift are significant binary size against the DW-026
-25MB budget.
+compiled into the OSS build; wasmtime + cranelift are a significant
+binary-size cost.
 
 ## Enabling
 
-Build with the `wasm` feature:
+The proxy-wasm host is compiled into the default build:
 
 ```sh
-cargo build --features wasm
+cargo build
 ```
 
-Without the feature, the `plugins` config block is accepted but inert
-(plugins are not loaded or executed).
+The `plugins` config block activates proxy-wasm filters when present.
+Without a `plugins` block, the host is inert (no filters are loaded).
 
 ## Configuration
 

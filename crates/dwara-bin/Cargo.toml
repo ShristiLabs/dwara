@@ -23,25 +23,24 @@ tracing-subscriber = { workspace = true }
 # #124: zeroizes the credential-pepper copy captured by the state-store
 # seed closure after hashing (same crate dwara-core already zeroizes with).
 zeroize = { workspace = true }
-# #126 (feature `otlp`, default OFF): OTLP trace export of the DW-021
-# span tree. Optional so none of it links into the default build; the
-# wiring lives in src/otlp.rs. async-trait/http/bytes serve the std-only
-# exporter HTTP client (opentelemetry-http's HttpClient impl).
-opentelemetry = { workspace = true, optional = true }
-opentelemetry_sdk = { workspace = true, optional = true }
-opentelemetry-http = { workspace = true, optional = true }
-opentelemetry-otlp = { workspace = true, optional = true }
-opentelemetry-proto = { workspace = true, optional = true }
-tracing-opentelemetry = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
-http = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
+# #126: OTLP trace export of the DW-021 span tree. The wiring lives in
+# src/otlp.rs. async-trait/http/bytes serve the std-only exporter HTTP
+# client (opentelemetry-http's HttpClient impl).
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-http = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-proto = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
 # DW-073: protobuf encoding for OTLP metrics export.
-prost = { workspace = true, optional = true }
+prost = { workspace = true }
 # DW-073: prometheus metric types for the OTLP metrics encoder. Already
-# a transitive dep via dwara-core; this makes it direct for the otlp
-# feature's encoder in src/otlp.rs.
-prometheus = { workspace = true, optional = true }
+# a transitive dep via dwara-core; this makes it direct for the encoder
+# in src/otlp.rs.
+prometheus = { workspace = true }
 # DW-031: Redis client for the distributed rate limiter connection
 # establishment at startup (ent feature only). Optional so OSS builds
 # never pull it in; enabled via the `ent` feature. Same workspace dep
@@ -52,81 +51,26 @@ redis = { workspace = true, optional = true }
 # SIGUSR2 hand-off window. Already in the tree transitively; this only
 # makes it a direct one. MIT OR Apache-2.0.
 socket2 = { workspace = true }
-# DW-088 (feature `h3`, default OFF): HTTP/3 (QUIC) ingress. quinn is
-# the QUIC transport, h3 is the HTTP/3 framing, h3-quinn bridges them.
-# Optional so the default build never pulls them in; the wiring lives
-# in src/h3.rs. All three are MIT-licensed (allow-listed in deny.toml).
-quinn = { workspace = true, optional = true }
-h3 = { workspace = true, optional = true }
-h3-quinn = { workspace = true, optional = true }
-# bytes is shared by the `otlp` and `h3` features (OTLP export + H3
-# body adaptation). Already in the tree transitively; this makes it a
-# direct one. The `dep:bytes` key is listed in both feature sets.
-# DW-097 (feature `console`, default OFF): tokio-console subscriber for
-# async task diagnostics. The console-subscriber layer spawns a gRPC
-# server (default 127.0.0.1:6669) that the `tokio-console` CLI connects
-# to. Optional so the default build never pulls it in; the wiring is
-# inline in main.rs (the layer is added to the tracing registry).
+# DW-088: HTTP/3 (QUIC) ingress. quinn is the QUIC transport, h3 is the
+# HTTP/3 framing, h3-quinn bridges them. The wiring lives in src/h3.rs.
+# All three are MIT-licensed (allow-listed in deny.toml).
+quinn = { workspace = true }
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
+# DW-097: tokio-console subscriber for async task diagnostics. The
+# console-subscriber layer spawns a gRPC server (default
+# 127.0.0.1:6669) that the `tokio-console` CLI connects to. The wiring
+# is inline in main.rs (the layer is added to the tracing registry).
 # MIT-licensed (allow-listed in deny.toml).
-console-subscriber = { workspace = true, optional = true }
+console-subscriber = { workspace = true }
 
 [features]
-# #126: OTLP trace export (http/protobuf) of the existing root/phase
-# spans when DWARA_OTLP_ENDPOINT is set. Default-off: the opentelemetry
-# stack measured +414,256 bytes (~405 KiB) on the local release build
-# (musl static linking may differ) against the DW-026 25MB size budget —
-# the default build keeps DWARA_OTLP_ENDPOINT reserved-but-inert
-# (dwara-core::observability documents the decision).
-otlp = [
-    "dep:opentelemetry",
-    "dep:opentelemetry_sdk",
-    "dep:opentelemetry-http",
-    "dep:opentelemetry-otlp",
-    "dep:opentelemetry-proto",
-    "dep:tracing-opentelemetry",
-    "dep:async-trait",
-    "dep:http",
-    "dep:bytes",
-    "dep:prost",
-    "dep:prometheus",
-]
 # DW-032: Enterprise edition. Forwards to dwara-core's `ent` feature so
 # the binary's license-verification startup path compiles in. Default
 # OFF: OSS builds keep the license block inert (the gate is always
 # none()). Build with `cargo build --features ent` (or
 # `--features dwara-bin/ent`) to enable license verification.
 ent = ["dwara-core/ent", "dep:redis"]
-# DW-088: HTTP/3 (QUIC) ingress. Default-off: quinn+h3 add significant
-# compile time and binary size. Build with `cargo build --features h3`
-# (or `--features dwara-bin/h3`) to enable the H3 listener. When the
-# feature is off, `protocol: h3` in config is rejected at validation
-# (the H3 module does not exist and the QUIC stack is not linked).
-h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:bytes", "dwara-core/h3"]
-# DW-097: tokio-console subscriber for async task diagnostics. Default
-# OFF: console-subscriber adds binary size and ties into the tokio
-# runtime's tracing instrumentation. Build with
-# `cargo build --features console` (or `--features dwara-bin/console`)
-# to enable the console layer. When the feature is on, set
-# DWARA_CONSOLE=1 at runtime to activate the gRPC server (default
-# 127.0.0.1:6669); unset = the layer is inert (no server spawned).
-console = ["dep:console-subscriber"]
-# DW-111: FIPS 140-3 mode (Enterprise). Forwards to dwara-core's `fips`
-# feature so the binary's startup self-test, provider install, and
-# validation paths compile in. Default OFF. Ent-only: combine with
-# `ent` for full license-gated enforcement. Build with
-# `cargo build --features fips` (or `--features fips,ent`).
-fips = ["dwara-core/fips"]
-# DW-105: Post-quantum TLS (X25519+ML-KEM hybrid key exchange).
-# EXPERIMENTAL. Forwards to dwara-core's `pq` feature so the binary's
-# PQ kx group wiring compiles in. Default OFF. Build with
-# `cargo build --features pq` (or `--features dwara-bin/pq`).
-pq = ["dwara-core/pq"]
-# DW-103: L4 TCP/UDP proxying with SNI routing reuse. Forwards to
-# dwara-core's `l4` feature so the L4 dispatcher module compiles in and
-# the listener wiring in listeners.rs spawns the L4 accept path. Flag-
-# only (no new dependencies on dwara-bin either). Default OFF. Build
-# with `cargo build --features l4` (or `--features dwara-bin/l4`).
-l4 = ["dwara-core/l4"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

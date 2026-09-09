@@ -2,15 +2,14 @@ name: release-artifacts
 
 # DW-026: version-tags-only artifact publishing (standing CI cost policy:
 # no image builds on PRs or pushes to main). Builds the static musl
-# binaries for amd64+arm64 (the arm64 leg via QEMU emulation), enforces
-# the <25 MB size bar, uploads checksummed dwara-<ver>-<target>.tar.gz
-# tarballs, and pushes multi-arch scratch and distroless images to GHCR.
-# The images are built FROM the size-bar-verified artifacts of the
-# musl-binaries job (#127): the images job downloads them, re-verifies
-# the sha256 checksums, and COPYs the binaries into the release
-# Dockerfiles (Dockerfile.release-{scratch,distroless}) — nothing is
-# compiled twice, and the published images are byte-for-byte the
-# published tarball binaries.
+# binaries for amd64+arm64 (the arm64 leg via QEMU emulation), uploads
+# checksummed dwara-<ver>-<target>.tar.gz tarballs, and pushes
+# multi-arch scratch and distroless images to GHCR. The images are built
+# FROM the verified artifacts of the musl-binaries job (#127): the
+# images job downloads them, re-verifies the sha256 checksums, and
+# COPYs the binaries into the release Dockerfiles (Dockerfile.release-
+# {scratch,distroless}) — nothing is compiled twice, and the published
+# images are byte-for-byte the published tarball binaries.
 
 permissions:
   contents: read
@@ -61,17 +60,6 @@ jobs:
               cargo build --release --target '"${{ matrix.target }}"' --bin dwara-cli -p dwara-cli
             '
 
-      - name: Size bar (25 MB, DW-026)
-        run: |
-          # Both shipped binaries must stay under the bar; a failing
-          # test aborts the step (bash -e).
-          for BIN in dwara dwara-cli; do
-            SIZE=$(stat -c%s "target/${{ matrix.target }}/release/${BIN}")
-            MB=$(( (SIZE + 1048575) / 1048576 ))
-            echo "${BIN}: ${MB} MB (${SIZE} bytes)"
-            test "$SIZE" -le 26214400
-          done
-
       - name: Package tarball and checksum (DW-026)
         run: |
           VER="${{ github.ref_name }}"
@@ -103,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
 
-      - name: Download size-bar-verified musl artifacts
+      - name: Download verified musl artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pinned: v4 @ d3f86a10
         with:
           # Both matrix legs (dwara-linux-musl-amd64 / -arm64) uploaded

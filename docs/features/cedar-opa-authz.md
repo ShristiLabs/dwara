@@ -12,14 +12,14 @@ engines:
   HTTP. A TTL-based decision cache keeps the callout inside the authz
   latency budget.
 
-Both are feature-gated behind the `cedar` cargo feature (default OFF).
+Both are compiled into the OSS build.
 
 ## Enabling
 
 Build with the `cedar` feature:
 
 ```sh
-cargo build --features cedar
+cargo build
 ```
 
 ## Cedar
@@ -163,7 +163,7 @@ latency budget rather than dialing out per request.
 
 ## Feature gate
 
-The `cedar` cargo feature must be enabled. Without it, the module is
+Cedar is compiled into the OSS build. The module is
 not compiled and config fields that reference Cedar/OPA policies are
 accepted but inert.
 

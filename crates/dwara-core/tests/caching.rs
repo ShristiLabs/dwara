@@ -201,10 +201,17 @@ consumers:
     ));
 
     // Cold: one upstream call per consumer (anonymous, partner, plain).
-    // (The masked body re-serializes sorted: floor, n, secret.)
+    // The masked body re-serializes the JSON (key order depends on
+    // serde_json's preserve_order feature, which is enabled transitively
+    // via cedar-policy; use contains-based assertions, not ends_with).
     let (_, h, b) = get(&dp, "/api/x").await;
     assert_eq!(x_cache(&h), "miss");
-    assert!(b.ends_with(&br#""secret":"***"}"#[..]));
+    assert!(
+        std::str::from_utf8(&b)
+            .unwrap()
+            .contains(r#""secret":"***""#),
+        "anonymous masks secret"
+    );
     assert!(
         std::str::from_utf8(&b).unwrap().contains(r#""floor":"f""#),
         "anonymous keeps the floor"
@@ -218,7 +225,12 @@ consumers:
             .contains(r#""floor":"***""#),
         "partner group masks floor"
     );
-    assert!(b.ends_with(&br#""secret":"***"}"#[..]));
+    assert!(
+        std::str::from_utf8(&b)
+            .unwrap()
+            .contains(r#""secret":"***""#),
+        "partner masks secret"
+    );
     let (_, h, b2) = get_with(&dp, "/api/x", &[("x-api-key", "plain-key")]).await;
     assert_eq!(x_cache(&h), "miss");
     assert!(

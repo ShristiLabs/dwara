@@ -1,53 +1,50 @@
 //! FIPS 140-3 mode (DW-111, Enterprise).
 //!
-//! When the `fips` cargo feature is compiled in, the gateway operates in
-//! FIPS 140-3 mode: the rustls process-default crypto provider is the
-//! FIPS-validated aws-lc-rs provider, TLS cipher suites are restricted to
-//! the FIPS-approved allowlist, non-approved primitives (Ed25519
+//! FIPS enforcement is an Enterprise-only capability gated behind the
+//! `ent` cargo feature. When `ent` is compiled in, the gateway operates
+//! in FIPS 140-3 mode: the rustls process-default crypto provider is the
+//! FIPS-validated aws-lc-rs provider, TLS cipher suites are restricted
+//! to the FIPS-approved allowlist, non-approved primitives (Ed25519
 //! certificates, Argon2 credential hashing) are rejected at config
 //! validation, and a startup self-test verifies the provider before the
 //! gateway accepts traffic.
 //!
-//! aws-lc-rs is already the default rustls crypto provider in every build
-//! (see [`crate::security::tls::install_aws_lc_rs_provider`]), so the
-//! FIPS-validated code path is present regardless of this feature. The
-//! `fips` feature is a FLAG: it turns ON the enforcement layer (provider
-//! self-test, cipher-suite restriction, primitive allowlist, license
-//! assertion) without adding any new dependency.
+//! aws-lc-rs is already the default rustls crypto provider in every
+//! build (see [`crate::security::tls::install_aws_lc_rs_provider`]), so
+//! the FIPS-validated code path is present regardless. The `ent` feature
+//! turns ON the enforcement layer (provider self-test, cipher-suite
+//! restriction, primitive allowlist, license assertion).
 //!
-//! # Ent-only
+//! # OSS vs Enterprise
 //!
-//! The feature compiles in OSS builds, but it is only MEANINGFUL with the
-//! `ent` cargo feature: license-gated enforcement (asserting FIPS mode is
-//! active for licenses that require it) needs the licensing gate, which is
-//! an ent-only subsystem. An OSS build with `fips` alone still installs
-//! the FIPS provider and runs the self-test, but the license assertion is
-//! inert (the gate is always `none()`).
+//! In OSS builds (no `ent` feature), FIPS enforcement is OFF:
+//! [`FipsMode`] is [`FipsMode::Disabled`], the self-test returns a
+//! Disabled attestation, and [`is_primitive_allowed`] always returns
+//! `true` (no restriction). The aws-lc-rs provider is still installed
+//! (it is the default provider), but no FIPS restrictions are enforced.
 //!
 //! # Self-test
 //!
-//! [`fips_self_test`] verifies that the process-default crypto provider is
-//! the aws-lc-rs FIPS provider and returns a [`FipsAttestation`] capturing
-//! the provider name, version, self-test result, and timestamp. The
-//! binary runs this at startup and refuses to boot (exit 1) if the
-//! self-test fails. The attestation is also surfaced on the `/healthz`
-//! endpoint so orchestrators and monitoring can confirm FIPS mode.
+//! [`fips_self_test`] verifies that the process-default crypto provider
+//! is the aws-lc-rs FIPS provider and returns a [`FipsAttestation`]
+//! capturing the provider name, version, self-test result, and
+//! timestamp. In Enterprise builds the binary runs this at startup and
+//! refuses to boot (exit 1) if the self-test fails. The attestation is
+//! also surfaced on the `/healthz` endpoint so orchestrators and
+//! monitoring can confirm FIPS mode.
 //!
 //! # Primitive allowlist
 //!
 //! [`FIPS_ALLOWED_CIPHERS`] and [`FIPS_ALLOWED_SIGNATURES`] are the
-//! FIPS-approved TLS cipher suites and signature schemes. [`is_primitive_allowed`]
-//! checks a primitive name against the allowlist. When the `fips` feature
-//! is OFF, every function in this module is inert: [`FipsMode`] is
-//! [`FipsMode::Disabled`], the self-test returns a Disabled attestation,
-//! and [`is_primitive_allowed`] always returns `true` (no restriction).
+//! FIPS-approved TLS cipher suites and signature schemes.
+//! [`is_primitive_allowed`] checks a primitive name against the
+//! allowlist. In OSS builds every function in this module is inert.
 
-#[cfg(feature = "fips")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The FIPS mode of the gateway.
 ///
-/// [`FipsMode::Enabled`] when the `fips` cargo feature is compiled in;
+/// [`FipsMode::Enabled`] when the `ent` cargo feature is compiled in;
 /// [`FipsMode::Disabled`] otherwise. This is a compile-time constant:
 /// the feature is a build-time switch, not a runtime toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +60,20 @@ pub enum FipsMode {
 
 impl FipsMode {
     /// The current FIPS mode (compile-time determined).
+    ///
+    /// FIPS enforcement (cipher-suite restriction, primitive allowlist,
+    /// certificate signature checks) is an Enterprise-only capability.
+    /// The OSS build installs the aws-lc-rs provider and runs the
+    /// self-test (so the attestation is available on /healthz), but does
+    /// NOT enforce FIPS restrictions — an OSS operator can use any
+    /// certificate signature algorithm and credential hash without
+    /// validation rejecting the config.
     pub fn current() -> Self {
-        #[cfg(feature = "fips")]
+        #[cfg(feature = "ent")]
         {
             FipsMode::Enabled
         }
-        #[cfg(not(feature = "fips"))]
+        #[cfg(not(feature = "ent"))]
         {
             FipsMode::Disabled
         }
@@ -138,11 +143,11 @@ pub const FIPS_ALLOWED_CREDENTIAL_HASHES: &[&str] = &["sha256", "hmac-sha256"];
 /// surfaced on the `/healthz` endpoint so orchestrators and monitoring
 /// can confirm FIPS mode is active and the provider self-test passed.
 ///
-/// Serializes to JSON via serde when the `fips` feature is on; the
+/// Serializes to JSON via serde when FIPS mode is enabled; the
 /// `Disabled` variant carries an inert attestation (enabled: false).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FipsAttestation {
-    /// Whether FIPS mode is enabled (the `fips` cargo feature is on).
+    /// Whether FIPS mode is enabled (FIPS mode is enabled).
     pub enabled: bool,
     /// The crypto provider name (e.g. "aws-lc-rs") when enabled; empty
     /// when disabled.
@@ -172,7 +177,7 @@ impl FipsAttestation {
 
 /// Run the FIPS startup self-test.
 ///
-/// When the `fips` feature is ON, this verifies that the process-default
+/// When FIPS mode is enabled (Enterprise), this verifies that the process-default
 /// rustls crypto provider is the aws-lc-rs FIPS provider and returns a
 /// [`FipsAttestation`] with the provider name, version, self-test result,
 /// and timestamp. The self-test SUCCEEDS when:
@@ -180,14 +185,16 @@ impl FipsAttestation {
 /// 1. A process-default crypto provider is installed.
 /// 2. The installed provider's name matches [`FIPS_PROVIDER_NAME`].
 ///
-/// When the `fips` feature is OFF, this returns
+/// When FIPS mode is disabled (OSS builds), this returns
 /// [`FipsAttestation::disabled`] (inert, no provider check).
 ///
 /// The caller (dwara-bin) installs the provider BEFORE calling this, so
 /// the test verifies the install took effect. The function is idempotent
 /// and safe to call from tests (the provider is process-global).
 pub fn fips_self_test() -> FipsAttestation {
-    #[cfg(feature = "fips")]
+    if !FipsMode::current().is_enabled() {
+        return FipsAttestation::disabled();
+    }
     {
         let provider = rustls::crypto::CryptoProvider::get_default();
         let now = SystemTime::now()
@@ -218,16 +225,11 @@ pub fn fips_self_test() -> FipsAttestation {
             },
         }
     }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        FipsAttestation::disabled()
-    }
 }
 
 /// Check whether a named primitive is allowed under FIPS mode.
 ///
-/// When the `fips` feature is ON, the primitive name is checked against
+/// When FIPS mode is enabled (Enterprise), the primitive name is checked against
 /// the relevant allowlist ([`FIPS_ALLOWED_CIPHERS`] for cipher suite
 /// names, [`FIPS_ALLOWED_SIGNATURES`] for signature scheme names,
 /// [`FIPS_ALLOWED_CREDENTIAL_HASHES`] for credential hash format
@@ -236,12 +238,14 @@ pub fn fips_self_test() -> FipsAttestation {
 /// an unknown primitive name is allowed, since the FIPS restriction
 /// targets specific known-non-approved primitives).
 ///
-/// When the `fips` feature is OFF, always returns `true` (no restriction).
+/// When FIPS mode is disabled (OSS), always returns `true` (no restriction).
 ///
 /// The `primitive` argument is matched case-insensitively against the
 /// allowlist entries.
 pub fn is_primitive_allowed(primitive: &str) -> bool {
-    #[cfg(feature = "fips")]
+    if !FipsMode::current().is_enabled() {
+        return true;
+    }
     {
         let lower = primitive.to_ascii_lowercase();
         // Check all three allowlists: a primitive that matches any is
@@ -270,30 +274,20 @@ pub fn is_primitive_allowed(primitive: &str) -> bool {
         // not a blanket deny-by-default).
         true
     }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        let _ = primitive;
-        true
-    }
 }
 
 /// True when FIPS mode is active and the given cipher suite name is NOT
 /// on the FIPS-approved allowlist. Used by snapshot validation to reject
 /// non-approved cipher suite configs.
 ///
-/// When the `fips` feature is OFF, always returns `false` (no rejection).
+/// When FIPS mode is disabled (OSS), always returns `false` (no rejection).
 pub fn is_cipher_suite_disallowed(cipher: &str) -> bool {
-    #[cfg(feature = "fips")]
+    if !FipsMode::current().is_enabled() {
+        return false;
+    }
     {
         let lower = cipher.to_ascii_lowercase();
         !FIPS_ALLOWED_CIPHERS.contains(&lower.as_str())
-    }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        let _ = cipher;
-        false
     }
 }
 
@@ -301,18 +295,14 @@ pub fn is_cipher_suite_disallowed(cipher: &str) -> bool {
 /// on the FIPS-approved allowlist. Used by snapshot validation to reject
 /// Ed25519 certificates and other non-approved signature schemes.
 ///
-/// When the `fips` feature is OFF, always returns `false` (no rejection).
+/// When FIPS mode is disabled (OSS), always returns `false` (no rejection).
 pub fn is_signature_disallowed(signature: &str) -> bool {
-    #[cfg(feature = "fips")]
+    if !FipsMode::current().is_enabled() {
+        return false;
+    }
     {
         let lower = signature.to_ascii_lowercase();
         !FIPS_ALLOWED_SIGNATURES.contains(&lower.as_str())
-    }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        let _ = signature;
-        false
     }
 }
 
@@ -321,19 +311,15 @@ pub fn is_signature_disallowed(signature: &str) -> bool {
 /// reject Argon2 credential hashing (Argon2 is not FIPS-approved).
 ///
 /// The `hash` argument is the stored-hash PREFIX before the colon (e.g.
-/// `sha256`, `hmac-sha256`, `argon2id`). When the `fips` feature is OFF,
+/// `sha256`, `hmac-sha256`, `argon2id`). When FIPS mode is disabled (OSS),
 /// always returns `false` (no rejection).
 pub fn is_credential_hash_disallowed(hash_prefix: &str) -> bool {
-    #[cfg(feature = "fips")]
+    if !FipsMode::current().is_enabled() {
+        return false;
+    }
     {
         let lower = hash_prefix.to_ascii_lowercase();
         !FIPS_ALLOWED_CREDENTIAL_HASHES.contains(&lower.as_str())
-    }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        let _ = hash_prefix;
-        false
     }
 }
 
@@ -342,10 +328,9 @@ pub fn is_credential_hash_disallowed(hash_prefix: &str) -> bool {
 /// an ignorable error afterwards (the same shape as
 /// [`crate::security::tls::install_aws_lc_rs_provider`]).
 ///
-/// When the `fips` feature is OFF, this is a no-op (the regular
+/// When FIPS mode is disabled (OSS), this is a no-op (the regular
 /// [`crate::security::tls::install_aws_lc_rs_provider`] is called by the
 /// binary regardless).
-#[cfg(feature = "fips")]
 pub fn install_fips_provider() {
     // The aws-lc-rs default provider IS the FIPS provider when aws-lc-rs
     // is built with its FIPS module. The install is the same call; the
@@ -362,13 +347,8 @@ pub fn install_fips_provider() {
 /// (by the binary) and stored on the dataplane; this function is the
 /// convenience accessor for tests and the health endpoint.
 pub fn health_attestation() -> Option<FipsAttestation> {
-    #[cfg(feature = "fips")]
-    {
-        Some(fips_self_test())
+    if !FipsMode::current().is_enabled() {
+        return None;
     }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        None
-    }
+    Some(fips_self_test())
 }

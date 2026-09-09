@@ -10,8 +10,6 @@
 //! remains a documented stub (the adapter does not own an HTTP
 //! client; the transport is the agent's upstream).
 
-#![cfg(feature = "a2a")]
-
 use dwara_core::ai::a2a::{
     handle_a2a_request, A2AAdapter, A2ASession, AgentCardParser, CompiledA2a, CompiledA2aAgent,
     TaskLifecycle, TaskStateMachine,

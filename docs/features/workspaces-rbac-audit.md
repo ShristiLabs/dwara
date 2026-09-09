@@ -4,7 +4,7 @@
 
 dwara Enterprise supports tenant namespaces (workspaces), admin RBAC
 roles, and immutable audit log shipping. This is an Enterprise
-feature, feature-gated behind the `enterprise` cargo feature.
+feature, compiled into the OSS build.
 
 ## Enabling
 
@@ -154,6 +154,6 @@ let tenant_a_log = mgr.audit_log_for_workspace("tenant-a");
 
 ## Feature gate
 
-The `enterprise` cargo feature must be enabled. Without it, the
+The `ent` cargo feature must be enabled. Without it, the
 module is not compiled and the gateway runs in single-workspace mode
 (the default OSS behavior).

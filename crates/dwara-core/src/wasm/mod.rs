@@ -51,7 +51,6 @@ pub mod runner;
 // per-request instances into the unified plugin chain (plugins domain)
 // so native filters and WASM plugins share the same phase slot. When
 // only `wasm` is on, the adapter is absent (the chain uses NoWasm).
-#[cfg(feature = "plugins")]
 pub mod adapter;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};

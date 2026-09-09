@@ -6,7 +6,7 @@ companion to [Proxy-Wasm plugins](./proxy-wasm-plugins) and [Native
 plugin filters](./native-plugins).
 
 ::: info Status
-The plugin runtime is a compile-time feature pack (`wasm` for the
+The plugin runtime is a compile-time capability (`wasm` for the
 proxy-wasm host, `plugins` for native filters; both default OFF -- see
 [Editions](./editions#compile-time-feature-packs)) and is not included
 in the published OSS binaries. The lifecycle manager, runner, and

@@ -1,6 +1,6 @@
 //! REST <-> GraphQL translation (DW-100).
 //!
-//! The [`GraphqlTranslator`] implements [`super::ProtocolTranslator`] for
+//! The [`GraphqlTranslator`] implements `super::ProtocolTranslator` for
 //! routes that front a GraphQL upstream with a REST client (or vice
 //! versa). Two directions:
 //!
@@ -29,8 +29,6 @@
 //! ## Feature gating
 //!
 //! Compiled under the `protocol_translation` cargo feature.
-
-#![cfg(feature = "protocol_translation")]
 
 use bytes::Bytes;
 use hyper::header::{HeaderMap, HeaderValue, CONTENT_TYPE};

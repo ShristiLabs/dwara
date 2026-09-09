@@ -1,7 +1,5 @@
 //! Unit tests for `mcp` (relocated from src).
 
-#![cfg(feature = "mcp")]
-
 use dwara_core::mcp::{
     AgentIdentity, McpServer, MockToolHandler, Permission, ToolCallRequest, ToolCallResponse,
     ToolDefinition,

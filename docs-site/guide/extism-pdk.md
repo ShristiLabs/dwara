@@ -25,12 +25,12 @@ gateway binary.
 
 ## Enabling
 
-Extism plugins are feature-gated behind the `extism` cargo feature
+Extism plugins are compiled into the OSS build (config-accepted, runtime stubbed)
 (default OFF), which pulls in the Extism host runtime. Combine with
 `plugins` so the unified dispatch chain can route to an Extism plugin:
 
 ```sh
-cargo build -p dwara-core --features plugins,extism
+cargo build -p dwara-core
 ```
 
 When `extism` is on but `plugins` is off, the host runtime is present but

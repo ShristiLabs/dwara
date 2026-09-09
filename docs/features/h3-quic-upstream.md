@@ -36,7 +36,7 @@ transports are decoupled.
 
 ## The dependency stack
 
-The `h3` cargo feature pulls in three crates:
+The H3 transport pulls in three crates:
 
 - **quinn** -- the QUIC transport (UDP sockets, connection management,
   congestion control). `QuicStreamPool` binds one quinn client endpoint
@@ -137,7 +137,7 @@ upstreams:
 `UpstreamProtocol::H3` is the config variant (snake_case `h3`). QUIC
 mandates TLS 1.3, so an `h3` upstream always negotiates TLS with ALPN
 `h3`; the `trusted_ca_file` field selects the trust roots. Requires
-the `h3` cargo feature on dwara-bin to actually proxy: when the
+the H3 transport on dwara-bin to actually proxy: when the
 feature is off the protocol is accepted at validation but the upstream
 is inert (every dispatch fails closed with a clear error rather than
 silently falling back to a wrong transport).

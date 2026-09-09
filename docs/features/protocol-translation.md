@@ -115,7 +115,7 @@ against anything it cannot prove well-formed), bounded by a
 convention is deterministic: a text-only element becomes a JSON scalar
 (number/bool recognized), an element with children becomes an object
 (repeated tags become an array), and attributes become `@attr` keys.
-Compiled under the separate `soap` cargo feature (which implies
+Compiled under the separate SOAP translation (which implies
 `protocol_translation`) for binary size.
 
 ## Configuration
@@ -140,7 +140,7 @@ translator and which sub-block (`graphql` or `soap`) carries the config.
 The config schema is always present so configs round-trip without the
 feature; when `protocol_translation` is off the block is accepted but
 inert (validation warns, the runtime translation does not run). The
-SOAP kinds additionally require the `soap` cargo feature. Validation
+SOAP kinds additionally require the SOAP translation. Validation
 rejects a `rest_to_graphql` without a `query_template`, a `soap_to_rest`
 without an `operation`, and a `rest_to_soap` without both.
 

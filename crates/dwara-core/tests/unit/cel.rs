@@ -1,7 +1,5 @@
 //! Unit tests for `cel` (relocated from src).
 
-#![cfg(feature = "cel")]
-
 use dwara_core::cel::{
     value_to_bool, value_to_float, value_to_int, value_to_string, CelContext, CelProgram, Value,
 };

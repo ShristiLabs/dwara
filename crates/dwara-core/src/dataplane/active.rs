@@ -258,10 +258,8 @@ pub async fn probe_once(
 /// (including connect/transport/timeout failure) = unhealthy. Mirrors
 /// [`probe_once`]'s `http` classification (the first status wins;
 /// redirects are not followed) so an H3 upstream's active-health
-/// semantics match its H1/H2 counterparts. Behind `#[cfg(feature =
-/// "h3")]` because the QUIC stack is only linked with the feature on;
-/// `respawn` never routes to this when the feature is off.
-#[cfg(feature = "h3")]
+/// semantics match its H1/H2 counterparts. The QUIC stack is always
+/// linked; `respawn` routes to this when an H3 upstream is configured.
 async fn probe_once_h3(
     tls: &Arc<rustls::ClientConfig>,
     address: &str,
@@ -421,13 +419,8 @@ async fn probe_loop(
             // feature is off `h3_tls` is never Some (respawn skips H3
             // upstreams), so the unreachable `false` arm never runs.
             let ok = if let Some(_h3_cfg) = &h3_tls {
-                #[cfg(feature = "h3")]
                 {
                     probe_once_h3(_h3_cfg, &address, port, &active.path, active.timeout).await
-                }
-                #[cfg(not(feature = "h3"))]
-                {
-                    false
                 }
             } else {
                 probe_once(
@@ -543,10 +536,7 @@ impl ActiveProbes {
                     handle.happy_eyeballs(),
                     // DW-108: H3 upstreams probe over QUIC; pass the H3
                     // TLS config when the feature is on, None otherwise.
-                    #[cfg(feature = "h3")]
                     handle.h3_handle().map(|h| Arc::clone(h.tls_config())),
-                    #[cfg(not(feature = "h3"))]
-                    None,
                 ));
             }
         }

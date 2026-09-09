@@ -461,7 +461,7 @@ features must not slow the hot path.
 - **Streaming cache size limit:** 1 MiB. Streams exceeding this cap
   are served to the client but not cached.
 - **Feature-gated:** the semantic cache is behind the `semantic_cache`
-  cargo feature. When the feature is off, the cache is not compiled.
+  capability. When disabled, the cache is not active.
 - **External embedding service:** the semantic cache requires an
   external embedding service for similarity-based lookup. The
   exact-match tier works without the embedding service.

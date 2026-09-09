@@ -508,13 +508,11 @@ pub fn publish_config(
 /// This struct holds the kube-rs client and the reconciler. The `run`
 /// method starts the watch loops and drives reconciliation on every
 /// change. Status updates are patched back via the kube-rs API.
-#[cfg(feature = "k8s")]
 pub struct Controller {
     config: ControllerConfig,
     reconciler: Reconciler,
 }
 
-#[cfg(feature = "k8s")]
 impl Controller {
     /// Create a new controller with the given configuration.
     pub fn new(config: ControllerConfig) -> Self {

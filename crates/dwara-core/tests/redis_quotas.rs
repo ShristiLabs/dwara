@@ -61,6 +61,7 @@ async fn redis_quota_checker_enforces_shared_cap() {
     let quotas = ConsumerQuotas {
         daily_requests: Some(5),
         monthly_requests: None,
+        dry_run: false,
     };
     // Use a fixed epoch that falls inside a known day window so the
     // key is deterministic.
@@ -160,6 +161,7 @@ async fn redis_quota_checker_fail_closed_denies() {
     let quotas = ConsumerQuotas {
         daily_requests: Some(1),
         monthly_requests: None,
+        dry_run: false,
     };
     let now_epoch_s = 1_787_961_600;
     let checker = RedisQuotaChecker::new(conn, false, prefix.clone());

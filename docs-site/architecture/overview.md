@@ -101,9 +101,9 @@ The key property: an edge applies a config generation through the same
 gateway, so behavior is identical whether config arrives from a file,
 the admin API, or the controller's stream.
 
-### Compile-time feature packs
+### Compile-time capabilities
 
-Both editions keep heavy optional features behind cargo feature flags
+Both editions compile every dataplane capability into the default build
 (default OFF) so the base binary stays small. These are OSS — no
 license involved. See the
 [feature reference](../guide/feature-reference) for the complete list

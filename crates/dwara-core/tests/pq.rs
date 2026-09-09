@@ -5,8 +5,6 @@
 //! OFF, the module is inert. When the feature is ON, the PQ kx group
 //! is installed and validation rejects `pq: true` + FIPS mode.
 
-#![cfg(feature = "pq")]
-
 use dwara_core::security::pq;
 
 #[test]
@@ -23,6 +21,7 @@ fn pq_install_does_not_panic() {
 
 #[test]
 fn pq_handshake_metric_label() {
-    let label = pq::pq_handshake_metric();
+    let result = pq::PqHandshakeResult::disabled();
+    let label = pq::pq_handshake_metric(&result);
     assert!(!label.is_empty());
 }

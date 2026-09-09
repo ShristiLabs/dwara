@@ -11,7 +11,7 @@ failure isolation. This builds on the DW-055 proxy-wasm host.
 Build with the `wasm` feature:
 
 ```sh
-cargo build --features wasm
+cargo build
 ```
 
 ## Failure isolation
@@ -109,5 +109,5 @@ Typed errors for loading and validation failures.
 
 ## Feature gate
 
-The `wasm` cargo feature must be enabled. Without it, the module is
+Proxy-wasm is compiled into the OSS build. The module is
 not compiled and the gateway runs without plugin support.

@@ -134,7 +134,6 @@ pub fn install_aws_lc_rs_provider() {
 /// in the allowlist that the provider does not support is silently
 /// skipped (the provider's support is the ground truth; the allowlist is
 /// the restriction).
-#[cfg(feature = "fips")]
 fn fips_provider() -> rustls::crypto::CryptoProvider {
     use crate::security::fips::FIPS_ALLOWED_CIPHERS;
 
@@ -839,7 +838,6 @@ impl TlsTermination {
         // process-default provider's suite list filtered to the
         // allowlist in `security::fips`). Non-FIPS builds use the
         // default builder (rustls's modern cipher-suite policy).
-        #[cfg(feature = "fips")]
         {
             let provider = Arc::new(fips_provider());
             let mut config = match &tls.client_ca_file {
@@ -864,30 +862,6 @@ impl TlsTermination {
                     .with_no_client_auth()
                     .with_cert_resolver(Arc::new(resolver)),
             };
-            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Ok(config)
-        }
-        #[cfg(not(feature = "fips"))]
-        {
-            let mut config = match &tls.client_ca_file {
-                Some(client_ca) => {
-                    let roots = root_store_from_pem_file(client_ca)?;
-                    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-                        .allow_unauthenticated()
-                        .build()
-                        .map_err(|e| {
-                            TlsError::ClientAuth(format!("building client verifier: {e}"))
-                        })?;
-                    ServerConfig::builder()
-                        .with_client_cert_verifier(verifier)
-                        .with_cert_resolver(Arc::new(resolver))
-                }
-                None => ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_cert_resolver(Arc::new(resolver)),
-            };
-            // ALPN advertises both; the client's choice decides HTTP/1.1 vs
-            // HTTP/2 (hyper-util's auto builder handles whichever arrives).
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             Ok(config)
         }
@@ -944,7 +918,6 @@ pub fn admin_mtls_server_config(
     // is also built with the FIPS-approved cipher suites only (the same
     // restriction as dataplane termination). Non-FIPS builds use the
     // default builder.
-    #[cfg(feature = "fips")]
     {
         let provider = Arc::new(fips_provider());
         let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
@@ -956,17 +929,6 @@ pub fn admin_mtls_server_config(
         let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_safe_default_protocol_versions()
             .map_err(TlsError::Rustls)?
-            .with_client_cert_verifier(verifier)
-            .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        Ok(config)
-    }
-    #[cfg(not(feature = "fips"))]
-    {
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|e| TlsError::ClientAuth(format!("building admin client verifier: {e}")))?;
-        let mut config = ServerConfig::builder()
             .with_client_cert_verifier(verifier)
             .with_cert_resolver(Arc::new(SingleCertResolver(certified)));
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -1372,7 +1334,6 @@ pub async fn handle_passthrough(
 /// Inbound sidecar connections act as the mTLS server (terminate the
 /// peer's SVID); outbound sidecar connections act as the mTLS client
 /// (present the local workload's SVID).
-#[cfg(feature = "mesh")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpiffeMtlsRole {
     /// The sidecar terminates the peer's mTLS (inbound): the SVID
@@ -1401,7 +1362,6 @@ pub enum SpiffeMtlsRole {
 /// identity) -- would land here when the `spiffe` crate is added. Today
 /// the function logs that the integration is stubbed and returns an
 /// error so callers fail loudly and attributably.
-#[cfg(feature = "mesh")]
 pub fn build_spiffe_mtls_config(
     role: SpiffeMtlsRole,
     svid: &crate::mesh::SpiffeSvid,
@@ -1438,7 +1398,6 @@ pub fn build_spiffe_mtls_config(
 /// (the same substrate as `spki_of_leaf`, no X.509 parser dependency)
 /// would land here when the mesh mTLS wiring is production-ready. Today
 /// the function returns None.
-#[cfg(feature = "mesh")]
 pub fn extract_spiffe_id_from_peer_cert(
     _cert: &rustls::pki_types::CertificateDer<'_>,
 ) -> Option<crate::mesh::SpiffeIdentity> {

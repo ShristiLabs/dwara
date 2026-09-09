@@ -80,7 +80,7 @@ const NANO_MAX_MEMORY: usize = 64 * 1024 * 1024;
 
 /// A compiled nano-service: the module path and the resource limits,
 /// resolved from the route's [`NanoServiceAction`]. The WASM bytes are
-/// read and compiled lazily by [`NanoServiceHandler::load`] so a
+/// read and compiled lazily by `NanoServiceHandler::load` so a
 /// missing/broken module is reported at handler construction, not at
 /// config publish time (validation already checks the file exists).
 #[derive(Clone, Debug)]
@@ -208,7 +208,7 @@ impl ResourceLimiter for NanoContext {
 
 /// The nano-service handler: holds a process-wide wasmtime engine and
 /// the linker wired with the `dwara` host imports. Cheap to clone (Arc
-/// internals). One instance per [`crate::dataplane::DataPlane`] (or per
+/// internals). One instance per `crate::dataplane::DataPlane` (or per
 /// route set); [`NanoServiceHandler::handle`] is called per request.
 #[derive(Clone)]
 pub struct NanoServiceHandler {

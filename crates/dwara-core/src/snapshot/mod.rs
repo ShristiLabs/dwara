@@ -1074,16 +1074,6 @@ fn validate_nano_service(
     nano: &crate::config::NanoServiceAction,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    #[cfg(not(feature = "nano_services"))]
-    {
-        issues.push(issue(
-            "route",
-            name,
-            "action.type",
-            "a nano_service action is accepted but inert: build with \
-             --features nano_services to enable WASM route handlers (DW-106)",
-        ));
-    }
     if nano.module.trim().is_empty() {
         issues.push(issue(
             "route",
@@ -2157,18 +2147,6 @@ fn validate_mesh(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
 
     // Feature gate: warn that the block is inert without the `mesh`
     // cargo feature (mirrors the a2a ent-gated warning pattern).
-    #[cfg(not(feature = "mesh"))]
-    {
-        issues.push(issue(
-            "gateway",
-            "(root)",
-            "mesh",
-            "the mesh block is accepted but inert: build with \
-             --features mesh to enable the service mesh mode (sidecar + \
-             SPIFFE/SPIRE mTLS identity, DW-107; the sidecar redirect and \
-             Workload API calls are stubbed pending production hardening)",
-        ));
-    }
 
     // Ent gate: warn when mesh is configured without the `ent` feature
     // (mesh is an enterprise feature; mirrors the FIPS/credential-pool
@@ -3977,17 +3955,6 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
         // Feature gate: warn that the block is inert without the
         // `a2a` cargo feature (mirrors the ent-gated credential pool
         // warning pattern).
-        #[cfg(not(feature = "a2a"))]
-        {
-            issues.push(issue(
-                "gateway",
-                "(root)",
-                "ai.a2a",
-                "the ai.a2a block is accepted but inert: build with \
-                 --features a2a to enable the A2A (agent-to-agent) surface \
-                 (DW-114; the task lifecycle is stubbed pending spec freeze)",
-            ));
-        }
         let upstream_names: std::collections::BTreeSet<&str> =
             gateway.upstreams.iter().map(|u| u.name.as_str()).collect();
         let mut agent_names = std::collections::BTreeSet::new();
@@ -4661,19 +4628,6 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                                          (Let's Encrypt requires at least one contact email)",
                                     ));
                                 }
-                                #[cfg(not(feature = "acme"))]
-                                {
-                                    if !acme.domains.is_empty() {
-                                        issues.push(issue(
-                                            "listener",
-                                            &l.name,
-                                            "tls.acme",
-                                            "acme is configured but the acme cargo feature is OFF; \
-                                             the block is inert (no certificates will be obtained). \
-                                             Build with --features acme to enable.",
-                                        ));
-                                    }
-                                }
                             }
                         }
                         TlsMode::Passthrough => {
@@ -4808,21 +4762,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
             ListenerProtocol::H3 => {
-                // DW-088: HTTP/3 (QUIC) ingress. Requires the `h3` cargo
-                // feature on dwara-bin; when the feature is off, the H3
-                // module does not exist and the QUIC stack is not linked.
-                // Validation rejects the protocol with a clear message so
-                // a config authored for an H3 build does not silently
-                // no-op on a default build.
-                if !cfg!(feature = "h3") {
-                    issues.push(issue(
-                        "listener",
-                        &l.name,
-                        "protocol",
-                        "protocol h3 requires the `h3` cargo feature on dwara-bin \
-                         (build with --features h3); the default build does not link the QUIC stack",
-                    ));
-                }
+                // DW-088: HTTP/3 (QUIC) ingress. The QUIC stack is
+                // always linked in the OSS default build.
                 match &l.tls {
                     None => issues.push(issue(
                         "listener",
@@ -4896,27 +4837,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 }
             }
             ListenerProtocol::Tcp | ListenerProtocol::Udp => {
-                // DW-103: L4 TCP/UDP proxying. Requires the `l4` cargo
-                // feature; when the feature is off, the listener is
-                // accepted but inert (validation warns, mirroring the
-                // a2a/pq feature-gate warning pattern).
-                if !cfg!(feature = "l4") {
-                    issues.push(issue(
-                        "listener",
-                        &l.name,
-                        "protocol",
-                        format!(
-                            "protocol {} is accepted but inert: build with --features l4 \
-                             to enable L4 proxying (DW-103; the default build does not \
-                             link the L4 dispatcher)",
-                            if l.protocol == ListenerProtocol::Tcp {
-                                "tcp"
-                            } else {
-                                "udp"
-                            }
-                        ),
-                    ));
-                }
+                // DW-103: L4 TCP/UDP proxying. The L4 dispatcher is
+                // always linked in the OSS default build.
                 // The `l4` block is required on tcp/udp listeners.
                 let l4_cfg = match &l.l4 {
                     None => {
@@ -6262,19 +6184,6 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
-            #[cfg(not(feature = "cert_pinning"))]
-            {
-                if tls && !cp.pins.is_empty() {
-                    issues.push(issue(
-                        "upstream",
-                        &u.name,
-                        "cert_pinning",
-                        "cert_pinning is configured but the cert_pinning cargo feature is OFF; \
-                         the block is inert (pinning will not be enforced). Build with \
-                         --features cert_pinning to enable.",
-                    ));
-                }
-            }
         }
         // SEC-03: upstream mTLS client cert validation. The block is
         // always accepted by the parser (additive-only); validation
@@ -7439,7 +7348,9 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
 /// on its own); only a parseable cert whose SPKI algorithm is Ed25519 is
 /// flagged.
 fn validate_fips(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
-    #[cfg(feature = "fips")]
+    if !crate::security::fips::FipsMode::current().is_enabled() {
+        return;
+    }
     {
         use crate::security::fips;
 
@@ -7524,13 +7435,6 @@ fn validate_fips(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 let _ = &field;
             }
         }
-    }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        // Inert: no FIPS checks when the feature is off.
-        let _ = gateway;
-        let _ = issues;
     }
 }
 
@@ -7648,7 +7552,6 @@ fn validate_pq(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
 /// the SPKI algorithm cannot be determined. Uses the same DER-walk
 /// substrate as `security::tls::spki_of_leaf` (no X.509 parser
 /// dependency).
-#[cfg(feature = "fips")]
 fn spki_algorithm_of_cert_file(path: &str) -> Option<String> {
     use rustls_pki_types::pem::PemObject;
 
@@ -7664,7 +7567,6 @@ fn spki_algorithm_of_cert_file(path: &str) -> Option<String> {
 /// algorithm OID and map it to a name. Returns "ed25519" for Ed25519,
 /// "rsa" for RSA, "ecdsa" for ECDSA P-256/P-384, or None on any
 /// structural shortcoming.
-#[cfg(feature = "fips")]
 fn spki_algorithm_of_leaf(cert: &rustls_pki_types::CertificateDer<'_>) -> Option<String> {
     // Certificate SEQUENCE -> TBSCertificate SEQUENCE.
     let (tag, cert_content, _) = der_elem_local(cert.as_ref())?;
@@ -7732,7 +7634,6 @@ fn spki_algorithm_of_leaf(cert: &rustls_pki_types::CertificateDer<'_>) -> Option
 
 /// DW-111: Encode an OID's content bytes as lowercase hex (for the
 /// "unknown" algorithm fallback).
-#[cfg(feature = "fips")]
 fn hex_oid(bytes: &[u8]) -> String {
     const TABLE: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -7748,7 +7649,6 @@ fn hex_oid(bytes: &[u8]) -> String {
 /// private to that module and `snapshot` must not import `security`
 /// internals — the dependency direction is `snapshot <- security`, not
 /// the reverse).
-#[cfg(feature = "fips")]
 fn der_elem_local(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let tag = *buf.first()?;
     let mut i = 1usize;

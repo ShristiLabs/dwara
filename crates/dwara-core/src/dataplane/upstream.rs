@@ -24,7 +24,7 @@
 //!   hyper-util's implicit default: the RFC 8305 shape is now
 //!   documented, configurable, and observable in tests. DNS resolution
 //!   on the pooled dial path runs through the shared async hickory
-//!   [`DnsCache`](crate::dataplane::discovery::DnsCache) (PERF-05/#170)
+//!   `DnsCache` (PERF-05/#170)
 //!   with TTL and negative caching, replacing the blocking-pool
 //!   `getaddrinfo` of `tokio::net::lookup_host`; IP-literal and
 //!   `/etc/hosts` endpoints skip the network. The active health probes
@@ -459,7 +459,6 @@ impl UpstreamBody {
     /// idle timer never arms). `health` is `None` for H3 today (a buffered
     /// body cannot mid-stream abort, so there is no mid-body failure to
     /// report).
-    #[cfg(feature = "h3")]
     pub fn from_buffered(body: Bytes) -> Self {
         UpstreamBody {
             inner: http_body_util::Full::new(body)
@@ -986,7 +985,6 @@ pub struct UpstreamHandle {
     /// `protocol == H3` AND the `h3` cargo feature is enabled. When
     /// `protocol == H3` and this is `None`, the feature is off and every
     /// dispatch fails closed with [`UpstreamError::H3Unavailable`].
-    #[cfg(feature = "h3")]
     h3: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>>,
 }
 
@@ -1109,7 +1107,6 @@ impl UpstreamHandle {
     /// active health probe reuses its TLS client config (trust roots +
     /// `h3` ALPN) so a probe and a proxied request trust the same roots.
     /// None for non-H3 upstreams or when the feature is off.
-    #[cfg(feature = "h3")]
     pub fn h3_handle(&self) -> Option<&Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>> {
         self.h3.as_ref()
     }
@@ -1230,7 +1227,6 @@ impl UpstreamHandle {
         if matches!(self.protocol, UpstreamProtocol::H3) {
             let issued = std::time::Instant::now();
             let outcome: Result<hyper::Response<Bytes>, UpstreamError> = {
-                #[cfg(feature = "h3")]
                 {
                     if let Some(h3) = &self.h3 {
                         // Buffer the request body (the H3 path sends it as
@@ -1265,14 +1261,6 @@ impl UpstreamHandle {
                         Err(UpstreamError::H3Unavailable)
                     }
                 }
-                #[cfg(not(feature = "h3"))]
-                {
-                    // The H3 variant exists in config but the feature is
-                    // off: inert. `dispatch` was picked, so release the
-                    // in-flight guard and record the (tiny) latency below.
-                    let _ = req;
-                    Err(UpstreamError::H3Unavailable)
-                }
             };
             // Same health classification as the legacy path: transport
             // errors and statuses >= 5xx are failures; admission/config
@@ -1290,15 +1278,7 @@ impl UpstreamHandle {
             // The H3 path returns a buffered body (UpstreamBody::from_buffered);
             // the non-H3 path returns H3Unavailable (an Err), so the map
             // only runs when the feature is on and the request succeeded.
-            #[cfg(feature = "h3")]
             return outcome.map(|resp| (resp.map(UpstreamBody::from_buffered), ()));
-            #[cfg(not(feature = "h3"))]
-            return outcome.map(|resp| {
-                (
-                    resp.map(|_| unreachable!("h3 response without h3 feature")),
-                    (),
-                )
-            });
         }
         // Held (inside `dispatch`) until the response (headers) resolves;
         // see the doc comment.
@@ -1470,7 +1450,6 @@ fn build_handle(
             // the `cert_pinning` cargo feature is ON, install the
             // SPKI pin verifier (fail-closed, no CA fallback).
             // Otherwise use the normal CA-based config.
-            #[cfg(feature = "cert_pinning")]
             if let Some(verifier) = crate::security::cert_pinning::CertPinVerifier::from_upstream(u)
             {
                 let cfg = crate::security::cert_pinning::client_config_with_pinning(
@@ -1504,33 +1483,6 @@ fn build_handle(
                     };
                 ("https", Some(Arc::new(cfg)), false, Some(root_store))
             }
-            #[cfg(not(feature = "cert_pinning"))]
-            {
-                // SEC-03: mTLS client cert when configured.
-                let cfg = match &u.mtls {
-                        Some(mtls) => crate::security::tls::https_h1_client_config_with_auth(
-                            root_store.clone(),
-                            &mtls.client_cert_file,
-                            &mtls.client_key_file,
-                        )
-                        .unwrap_or_else(|e| {
-                            tracing::error!(
-                                code = "upstream_mtls_load_failed",
-                                upstream = %u.name,
-                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
-                            );
-                            crate::security::tls::https_h1_client_config_pq(
-                                root_store.clone(),
-                                u.pq,
-                            )
-                        }),
-                        None => crate::security::tls::https_h1_client_config_pq(
-                            root_store.clone(),
-                            u.pq,
-                        ),
-                    };
-                ("https", Some(Arc::new(cfg)), false, Some(root_store))
-            }
         }
         UpstreamProtocol::Http2 => {
             // Same roots as https, but ALPN h2 and a client locked to
@@ -1538,7 +1490,6 @@ fn build_handle(
             // in to PQ hybrid key exchange (`pq: true`), prepend the
             // hybrid kx group before building the config (experimental
             // no-op when the rustls PQ API is not reachable).
-            #[cfg(feature = "cert_pinning")]
             if let Some(verifier) = crate::security::cert_pinning::CertPinVerifier::from_upstream(u)
             {
                 let cfg = crate::security::cert_pinning::client_config_with_pinning(
@@ -1547,40 +1498,6 @@ fn build_handle(
                 );
                 ("https", Some(Arc::new(cfg)), true, Some(root_store))
             } else {
-                if u.pq {
-                    let _ = crate::security::pq::install_pq_kx_group();
-                }
-                // SEC-03: mTLS client cert when configured.
-                let cfg = match &u.mtls {
-                        Some(mtls) => crate::security::tls::https_h2_client_config_with_auth(
-                            root_store.clone(),
-                            &mtls.client_cert_file,
-                            &mtls.client_key_file,
-                        )
-                        .unwrap_or_else(|e| {
-                            tracing::error!(
-                                code = "upstream_mtls_load_failed",
-                                upstream = %u.name,
-                                "upstream mtls cert/key load failed: {e}; falling back to no client auth"
-                            );
-                            let mut c = rustls::ClientConfig::builder()
-                                .with_root_certificates(root_store.clone())
-                                .with_no_client_auth();
-                            c.alpn_protocols = vec![b"h2".to_vec()];
-                            c
-                        }),
-                        None => {
-                            let mut c = rustls::ClientConfig::builder()
-                                .with_root_certificates(root_store.clone())
-                                .with_no_client_auth();
-                            c.alpn_protocols = vec![b"h2".to_vec()];
-                            c
-                        }
-                    };
-                ("https", Some(Arc::new(cfg)), true, Some(root_store))
-            }
-            #[cfg(not(feature = "cert_pinning"))]
-            {
                 if u.pq {
                     let _ = crate::security::pq::install_pq_kx_group();
                 }
@@ -1629,7 +1546,6 @@ fn build_handle(
     // torn-state the operator must see: log loudly and leave the handle
     // inert (h3 = None) so every dispatch fails closed with
     // `UpstreamError::H3Unavailable` rather than half-working.
-    #[cfg(feature = "h3")]
     let h3_handle: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>> =
         if matches!(u.protocol, UpstreamProtocol::H3) {
             match crate::dataplane::upstream_h3::H3UpstreamHandle::new(
@@ -1787,7 +1703,6 @@ fn build_handle(
         http2_only,
         tls_roots,
         protocol: u.protocol,
-        #[cfg(feature = "h3")]
         h3: h3_handle,
     })
 }

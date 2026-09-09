@@ -11,7 +11,7 @@ per-fragment fail-open/closed policies.
 Build with the `aggregation` feature:
 
 ```sh
-cargo build --features aggregation
+cargo build
 ```
 
 ## Constraint (decision 10, section 12.1)
@@ -131,5 +131,5 @@ match compose(&spec, &results) {
 
 ## Feature gate
 
-The `aggregation` cargo feature must be enabled. Without it, the
+The aggregation module is compiled into the OSS build. The
 module is not compiled.

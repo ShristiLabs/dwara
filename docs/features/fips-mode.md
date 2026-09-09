@@ -1,7 +1,7 @@
 # FIPS 140-3 mode (DW-111)
 
-> Implements issue DW-111 (Enterprise, flag-only behind the `fips`
-> cargo feature). Sources: `crates/dwara-core/src/security/fips.rs`
+> Implements issue DW-111 (Enterprise, gated behind the `ent`
+> feature). Sources: `crates/dwara-core/src/security/fips.rs`
 > (`FipsMode`, `FipsAttestation`, `fips_self_test`,
 > `is_primitive_allowed`, `is_cipher_suite_disallowed`,
 > `is_signature_disallowed`, `is_credential_hash_disallowed`,
@@ -17,7 +17,7 @@
 > [enterprise guide](../../docs-site/guide/enterprise.md) and
 > [security guide](../../docs-site/guide/security.md).
 
-When the `fips` cargo feature is compiled in, the gateway operates in
+When the `ent` cargo feature is compiled in, the gateway operates in
 FIPS 140-3 mode: the rustls process-default crypto provider is the
 FIPS-validated aws-lc-rs provider, TLS cipher suites are restricted to
 the FIPS-approved allowlist, non-approved primitives (Ed25519
@@ -32,7 +32,7 @@ feature is a FLAG: it turns ON the enforcement layer (provider
 self-test, cipher-suite restriction, primitive allowlist, license
 assertion) without adding any new dependency.
 
-## The fips cargo feature
+## The ent cargo feature (FIPS enforcement)
 
 The feature compiles in OSS builds, but it is only MEANINGFUL with the
 `ent` cargo feature: license-gated enforcement needs the licensing
@@ -117,7 +117,7 @@ When the `fips` feature is OFF, all three functions always return
 
 ## Configuration
 
-FIPS mode is a compile-time switch (the `fips` cargo feature), not a
+FIPS mode is a compile-time switch (the `ent` cargo feature), not a
 runtime config field. There is no `fips` block in the gateway config:
 the mode is determined by the build. Enforcement is automatic when the
 feature is on -- validation rejects non-approved primitives for the

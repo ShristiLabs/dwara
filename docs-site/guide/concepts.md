@@ -20,17 +20,12 @@ themselves:
    Enterprise features are the ones that span *multiple* gateway
    instances or need external infrastructure. See
    [Editions](./editions).
-2. **Feature pack** — *which optional capabilities are compiled in*.
-   Heavy OSS capabilities (proxy-wasm, CEL, Cedar/OPA, aggregation,
-   HTTP/3, ...) are cargo feature flags, **default-OFF**, so the base
-   binary stays small. No license is involved. See the
-   [feature reference](./feature-reference).
-3. **Config** — *what this particular gateway does*. A single strict
+2. **Config** — *what this particular gateway does*. A single strict
    YAML file declares the routing chain, identity, policy, and
    observability. This page is mostly about this axis.
 
 A feature that is Enterprise-only is inert-but-accepted in an OSS build
-(it parses and validates, then is ignored). A feature pack that is not
+(it parses and validates, then is ignored). A capability that is not
 compiled in is rejected at validation if its config block appears. The
 two are different failure modes — know which axis you are on.
 
@@ -134,7 +129,7 @@ consumer > route > service > listener > global
 Each level can carry allow/deny rules over consumers, groups, JWT
 scopes/claims, IP ACLs, and GeoIP gates. A `dry_run` flag turns any
 level into monitor-only. External policy engines (Cedar, OPA) plug in
-at the same levels when the `cedar` feature pack is compiled in. See
+at the same levels when the `cedar` capability is compiled in. See
 [Authorization rules](./authorization) and
 [Cedar/OPA authz](./cedar-opa-authz).
 
@@ -203,7 +198,7 @@ action and a separate taxonomy applies. See
 | **Guardrails** | Prompt-injection / PII / banned-content / schema enforcement, prompt + response phases. |
 | **Governance** | Per-team model allowlists with shadow audit. |
 | **Prompt logging** | Opt-in, redacted, sampled prompt/response capture with retention. |
-| **Semantic cache** | Embedding-similarity cache (HNSW ANN + external embedding service; feature-gated). |
+| **Semantic cache** | Embedding-similarity cache (HNSW ANN + external embedding service; compiled into the OSS build). |
 | **Experiments** | Prompt versioning, A/B model comparison, regression evals, feedback ingestion. |
 | **MCP gateway** | Model Context Protocol server/router: tool routing to upstreams, session management, auth. |
 | **A2A** | Agent-to-agent protocol support with Agent Card parsing. |
@@ -214,7 +209,7 @@ action and a separate taxonomy applies. See
 |---|---|---|
 | **Access logs** | Structured JSON logs with request IDs | [Observability](./observability) |
 | **Metrics** | Prometheus `/metrics` on every listener | [Observability](./observability) |
-| **Tracing** | Optional OTLP trace + metrics export (feature pack) | [OTel metrics export](./otel-metrics-export) |
+| **Tracing** | Optional OTLP trace + metrics export (capability) | [OTel metrics export](./otel-metrics-export) |
 | **Analytics store** | Embedded SQLite: raw access records + rollups + retention | [Analytics](./analytics) |
 | **Analytics stream** | NDJSON firehose of every completed request to an external sink | [Analytics stream](./analytics-stream) |
 | **Webhooks** | Alert/event envelopes for state changes (breaker, ejection, config) | [Alert webhooks](./webhooks) |
@@ -226,9 +221,9 @@ Three plugin families, unified under one dispatch chain:
 
 | Family | What it is | Guide |
 |---|---|---|
-| **Proxy-Wasm** | The proxy-wasm host: community Kong/Envoy filters run unmodified (feature pack `wasm`) | [Proxy-Wasm plugins](./proxy-wasm-plugins) |
-| **Native plugins** | A Rust filter trait compiled into the binary (feature pack `plugins`) | [Native plugins](./native-plugins) |
-| **Extism PDK** | Extism plugin development kit runtime (feature pack `extism`) | [Extism PDK](./extism-pdk) |
+| **Proxy-Wasm** | The proxy-wasm host: community Kong/Envoy filters run unmodified (capability `wasm`) | [Proxy-Wasm plugins](./proxy-wasm-plugins) |
+| **Native plugins** | A Rust filter trait compiled into the binary (capability `plugins`) | [Native plugins](./native-plugins) |
+| **Extism PDK** | Extism plugin development kit runtime (capability `extism`) | [Extism PDK](./extism-pdk) |
 | **Nano-services** | WASM route handlers — a route action that runs a WASM module to generate the response | [Nano-services](./nano-services) |
 
 Plugins are declared at the top level and referenced by name from
@@ -260,7 +255,7 @@ These only exist in the Enterprise edition and concern coordinating
 | **Redis backend** | Shared GCRA buckets, distributed cache, convergence state | [Redis rate limiter](./redis-rate-limiter) |
 | **Workspace** | A multi-tenant boundary with its own config, RBAC, and audit | [Workspaces, RBAC, and audit](./workspaces-rbac-audit) |
 | **Federated analytics** | Edge-to-controller analytics aggregation over gRPC | [Enterprise](./enterprise) |
-| **Service mesh** | Sidecar mode with SPIFFE/SPIRE mTLS identity (feature pack `mesh`) | [Service mesh](./service-mesh) |
+| **Service mesh** | Sidecar mode with SPIFFE/SPIRE mTLS identity (capability `mesh`) | [Service mesh](./service-mesh) |
 
 ## Where to go next
 

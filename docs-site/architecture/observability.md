@@ -167,7 +167,7 @@ flowchart TD
 
 ### OTLP export
 
-When built with the `otlp` feature, spans are exported via OTLP to a
+When the OTLP endpoint is configured, spans are exported via OTLP to a
 collector endpoint. The export is asynchronous and bounded — a slow
 or unavailable collector does not block the request path. See
 [OTLP export](../guide/observability#otlp-export) for configuration.

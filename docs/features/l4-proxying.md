@@ -96,9 +96,9 @@ every datagram batch with `Unimplemented`.
 ## Listener wiring
 
 `bind_listener` constructs `ListenerMode::L4 { config, sni_routes }`
-for a `protocol: tcp` listener when the `l4` cargo feature is on; the
+for a `protocol: tcp` listener when the L4 proxying is on; the
 compiled `L4ProxyConfig` and the listener's `tls.sni_routes` are
-captured at bind time. Without the feature, `bind_listener` returns an
+captured at bind time. Without an `l4` config block, `bind_listener` returns an
 error (the binary was not built with L4 support) -- mirroring the h3
 pattern. The accept loop spawns one task per accepted connection: it
 consults the CURRENT snapshot for the gateway (SNI route resolution +

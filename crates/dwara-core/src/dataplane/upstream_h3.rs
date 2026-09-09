@@ -15,7 +15,7 @@
 //! connections per endpoint address, hands out a cheaply cloneable
 //! [`h3::client::SendRequest`] handle per request (one stream per
 //! `send_request` call), and reaps connections idle past
-//! [`QuicStreamPool::idle_timeout`].
+//! `QuicStreamPool::idle_timeout`.
 //!
 //! ## TLS
 //!
@@ -46,10 +46,8 @@
 //! as one `DATA` frame). Streaming H3 bodies are tracked as a future
 //! improvement, not a regression: an H3 upstream is a new transport.
 //!
-//! Everything in this module is behind `#[cfg(feature = "h3")]`; when
-//! the feature is off, `protocol: h3` upstreams are accepted at
-//! validation but inert (every dispatch fails closed with
-//! [`super::upstream::UpstreamError::H3Unavailable`]).
+//! Everything in this module is compiled into the OSS build; H3
+//! upstreams are always available.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -411,7 +409,7 @@ pub async fn h3_request(
 
 /// Per-upstream H3 transport handle: a [`QuicStreamPool`] plus the
 /// per-upstream timeouts and shared stats. Stored on
-/// [`super::upstream::UpstreamHandle`] behind `#[cfg(feature = "h3")]`;
+/// [`super::upstream::UpstreamHandle`] for the H3 transport;
 /// the LB, breaker, retry, and health layers are shared with the TCP/TLS
 /// path (they operate on endpoint addresses, not the transport).
 pub struct H3UpstreamHandle {

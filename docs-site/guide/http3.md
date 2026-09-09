@@ -16,12 +16,12 @@ listeners without forcing clients to switch.
 
 ## Enabling
 
-HTTP/3 is feature-gated behind the `h3` cargo feature because it brings
+HTTP/3 is compiled into the default build. It brings
 in the `quinn` (QUIC) and `h3` crates, which add to the binary size. The
 feature is default OFF.
 
 ```sh
-cargo build -p dwara-bin --features h3
+cargo build -p dwara-bin
 ```
 
 In a default build the `h3` feature is absent and an h3 listener config

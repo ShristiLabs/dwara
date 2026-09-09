@@ -14,7 +14,7 @@
 //! ## Phase contract (section 9.3)
 //!
 //! The phases and their outcome semantics mirror the proxy-wasm host
-//! exactly (see [`wasm::runner::PhaseOutcome`] when the `wasm` feature is
+//! exactly (see `wasm::runner::PhaseOutcome` when the `wasm` feature is
 //! enabled). The four HTTP filter phases are:
 //!
 //! 1. `request_headers` -- after route resolution, before authn.
@@ -59,7 +59,6 @@ pub mod registry;
 // (ExtismHost, ExtismPlugin, ExtismDispatch) allow Extism plugins to
 // be registered alongside native and WASM plugins in the unified
 // dispatch chain. The actual extism runtime calls are STUBBED.
-#[cfg(feature = "extism")]
 pub mod extism;
 
 pub use chain::{ChainOutcome, NoWasm, PluginChain, WasmDispatch};

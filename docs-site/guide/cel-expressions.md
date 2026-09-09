@@ -21,7 +21,7 @@ CEL replaces ad-hoc template strings with a typed, sandboxed
 expression language that fails fast on type errors at compile time.
 
 ::: info Status
-The CEL engine is a compile-time feature pack (`cel`, default OFF; see
+The CEL engine is a compile-time capability (`cel`, default OFF; see
 [Editions](./editions#compile-time-feature-packs)) and is not included
 in the published OSS binaries. The engine and the shared
 `RequestContext` type are complete and test-covered as library

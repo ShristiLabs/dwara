@@ -114,7 +114,7 @@ Trace export over [OTLP](https://opentelemetry.io/docs/specs/otlp/) (OpenTelemet
 (off by default to keep the release binary small):
 
 ```sh
-cargo build -p dwara-bin --features otlp
+cargo build -p dwara-bin
 ```
 
 Point it at a collector with `DWARA_OTLP_ENDPOINT` (e.g.
@@ -180,11 +180,11 @@ connect with the `tokio-console` TUI to see live task polls, waker
 stats, and task lifetimes, which is invaluable for diagnosing stuck
 tasks, waker churn, or scheduler starvation.
 
-This is feature-gated behind the `tokio_console` cargo feature (default
+This is controlled by the `DWARA_TOKIO_CONSOLE_ADDR` environment variable (default
 OFF) and is off at runtime unless explicitly enabled:
 
 ```sh
-cargo build -p dwara-bin --features tokio_console
+cargo build -p dwara-bin
 ```
 
 Enable it at runtime with the `DWARA_TOKIO_CONSOLE_ADDR` environment
@@ -206,6 +206,6 @@ development and debugging only -- never enable it in a production build
 serving live traffic.
 :::
 
-When the `tokio_console` feature is off, `DWARA_TOKIO_CONSOLE_ADDR` is
+When `DWARA_TOKIO_CONSOLE_ADDR` is not set, `DWARA_TOKIO_CONSOLE_ADDR` is
 reserved but inert -- setting it has no effect. When the feature is on
 but the variable is unset, the console server does not bind.

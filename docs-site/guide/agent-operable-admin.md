@@ -7,7 +7,7 @@ permissions (RBAC), argument validation against each tool's JSON
 Schema, and typed error responses.
 
 ::: info Status
-The MCP server is a compile-time feature pack (`mcp`, default OFF; see
+The MCP server is a compile-time capability (`mcp`, default OFF; see
 [Editions](./editions#compile-time-feature-packs)) and is not included
 in the published OSS binaries. It is currently a library surface in
 `dwara-core`: the server, protocol types, standard tools, and RBAC
@@ -89,4 +89,4 @@ cargo build -p dwara-core --features mcp
 ```
 
 See [Admin API](./admin-api) for the underlying operator surface and
-[Editions](./editions) for how feature packs are built and licensed.
+[Editions](./editions) for how capabilities are built and licensed.

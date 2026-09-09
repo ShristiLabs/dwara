@@ -8,8 +8,6 @@
 //!
 //! Run with: `cargo bench --features cel --bench cel`
 
-#![cfg(feature = "cel")]
-
 use criterion::{criterion_group, criterion_main, Criterion};
 use dwara_core::cel::{CelContext, CelProgram};
 

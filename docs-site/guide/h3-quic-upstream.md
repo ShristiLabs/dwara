@@ -28,12 +28,12 @@ for many concurrent streams to the same upstream.
 
 ## Enabling
 
-The h3 upstream transport shares the `h3` cargo feature with HTTP/3
+The h3 upstream transport is compiled into the default build alongside HTTP/3
 ingress (default OFF), because both pull in the `quinn` (QUIC) and `h3`
 crates:
 
 ```sh
-cargo build -p dwara-bin --features h3
+cargo build -p dwara-bin
 ```
 
 In a default build the feature is absent and `upstream.protocol: h3` is

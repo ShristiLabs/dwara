@@ -8,7 +8,7 @@
 //!
 //! [`LocalResponse`] lives here (in the `plugins` domain) because it is
 //! the shared short-circuit shape both native filters and WASM plugins
-//! produce. The `wasm` host re-exports its own [`wasm::host::LocalResponse`]
+//! produce. The `wasm` host re-exports its own `wasm::host::LocalResponse`
 //! (defined before this domain existed); the two are structurally
 //! identical and converted at the dispatch boundary by the `wasm`
 //! adapter. Keeping the canonical type in the lower `plugins` domain

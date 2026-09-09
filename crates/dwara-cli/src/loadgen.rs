@@ -71,7 +71,6 @@ pub enum Protocol {
     H2,
     /// HTTP/3 (QUIC + h3). Feature-gated behind the `h3` cargo feature.
     /// No in-process echo upstream; point at a real h3 listener.
-    #[cfg(feature = "h3")]
     H3,
 }
 
@@ -81,7 +80,6 @@ impl Protocol {
         match self {
             Protocol::H1 => "h1",
             Protocol::H2 => "h2",
-            #[cfg(feature = "h3")]
             Protocol::H3 => "h3",
         }
     }
@@ -343,7 +341,6 @@ pub async fn run(args: Args) -> i32 {
         eprintln!("--connections must be >= 1");
         return 2;
     }
-    #[cfg(feature = "h3")]
     if args.protocol == Protocol::H3 && args.echo.is_some() {
         eprintln!("--echo is not supported with --protocol h3 (no in-process h3 echo; point at a real h3 listener)");
         return 2;
@@ -556,7 +553,6 @@ async fn spawn_workers(
             }
             0
         }
-        #[cfg(feature = "h3")]
         (Protocol::H3, Workload::Throughput) | (Protocol::H3, Workload::Streaming) => {
             let target = H3Target {
                 authority: authority.clone(),
@@ -632,7 +628,6 @@ async fn spawn_workers(
                 }
             }
         }
-        #[cfg(feature = "h3")]
         (Protocol::H3, Workload::PoolReuse) => {
             let target = H3Target {
                 authority: authority.clone(),
@@ -1247,7 +1242,6 @@ impl hyper::body::Body for StreamingBody {
 
 // ----- HTTP/3 (QUIC) load generation, feature-gated behind `h3`. -----
 
-#[cfg(feature = "h3")]
 mod h3 {
     use super::{acquire_permit, record_outcome, Pacer, SharedState};
     use std::sync::Arc;
@@ -1572,7 +1566,6 @@ mod h3 {
     }
 }
 
-#[cfg(feature = "h3")]
 pub use h3::{shared_h3_connection, worker_h3, worker_pooled_h3, H3Target};
 
 /// Print the human block + RESULT line (+ optional JSON line); returns

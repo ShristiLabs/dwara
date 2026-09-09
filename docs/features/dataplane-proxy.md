@@ -183,7 +183,7 @@ details worth knowing as a contributor:
 ## HTTP/3 ingress (DW-088)
 
 An h3/QUIC listener is available alongside the h1/h2 listeners,
-feature-gated behind the `h3` cargo feature on `dwara-bin` (default
+compiled into the OSS build
 off — the `quinn` + `h3` dependency tree is heavy and not needed for
 the default build). When enabled, a QUIC listener binds on the
 configured address and serves HTTP/3 requests through the SAME

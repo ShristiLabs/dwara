@@ -3,7 +3,6 @@
 mod active;
 mod adaptive;
 mod admission_queue;
-#[cfg(feature = "aggregation")]
 mod aggregation;
 mod analytics;
 mod analytics_store;
@@ -12,11 +11,8 @@ mod authz;
 mod balance;
 mod breaker;
 mod cache;
-#[cfg(feature = "cedar")]
 mod cedar;
-#[cfg(feature = "cel")]
 mod cel;
-#[cfg(feature = "cel")]
 mod cel_everywhere;
 #[cfg(feature = "ent")]
 mod cluster_sync;
@@ -29,14 +25,11 @@ mod extensions_error;
 mod geoip;
 mod hardening;
 mod health;
-#[cfg(feature = "k8s")]
 mod k8s_gateway;
-#[cfg(feature = "mcp")]
 mod mcp;
 mod migrations;
 mod oauth2_mtls;
 mod observability;
-#[cfg(feature = "openapi_validation")]
 mod openapi_validation;
 mod proxy_proto;
 mod rate_limiter;
@@ -57,7 +50,6 @@ mod upstream;
 mod vault_secrets;
 mod versioning;
 mod waf;
-#[cfg(feature = "wasm")]
 mod wasm_abi;
 mod webhooks;
 mod websocket;

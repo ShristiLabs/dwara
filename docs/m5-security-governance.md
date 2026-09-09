@@ -128,7 +128,7 @@ need to manually manage certificates.
   to avoid rate limits.
 - **State directory:** `./acme-state` (relative to the gateway working
   directory).
-- **Feature gate:** `acme` cargo feature (default OFF). The config block
+- **Feature gate:** ACME automation (default-on). The config block
   is always accepted; when the feature is OFF, validation warns that the
   block is inert.
 
@@ -195,7 +195,7 @@ listeners:
   Use `staging: true` for testing.
 - TLS-ALPN-01 requires port 443 to be directly reachable by the IdP's
   validation servers.
-- The ACME client is feature-gated (`acme` cargo feature, default OFF).
+- The ACME client is compiled into the OSS build (ACME automation, default-on).
   The scaffold provides config types and state management; the full
   client (account registration, challenge completion, certificate
   issuance) requires enabling the feature and adding an ACME client
@@ -204,7 +204,7 @@ listeners:
 
 ### Feature flags
 
-`acme` cargo feature (default OFF). When OFF, the config block is
+ACME automation (default-on). When OFF, the config block is
 accepted but inert; validation warns.
 
 ---
@@ -301,8 +301,8 @@ compromise.
 - **Multiple pins:** Allowed. Any matching pin succeeds.
 - **Empty pin list:** Invalid (validation rejects).
 - **Fail-closed:** When pinning is configured and the `cert_pinning`
-  cargo feature is ON, verification is fail-closed with no CA fallback.
-- **Feature gate:** `cert_pinning` cargo feature (default OFF). The
+  feature is enabled, verification is fail-closed with no CA fallback.
+- **Feature gate:** certificate pinning (default-on). The
   config block is always accepted; when the feature is OFF, validation
   warns that the block is inert.
 
@@ -364,7 +364,7 @@ upstreams:
 
 ### Feature flags
 
-`cert_pinning` cargo feature (default OFF). When OFF, the config block
+certificate pinning (default-on). When OFF, the config block
 is accepted but inert; validation warns.
 
 ---

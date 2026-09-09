@@ -44,8 +44,6 @@
 //! translation does not run). The SOAP translator is further gated
 //! behind the `soap` feature for binary size.
 
-#![cfg(feature = "protocol_translation")]
-
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;

@@ -20,7 +20,7 @@ Plugins run in a sandboxed WebAssembly runtime (wasmtime) with
 configurable resource limits (fuel, memory, timeout).
 
 ::: info Status
-The proxy-wasm host is a compile-time feature pack (`wasm`, default
+The proxy-wasm host is a compile-time capability (`wasm`, default
 OFF; see [Editions](./editions#compile-time-feature-packs)) and is
 not included in the published OSS binaries. The host, runner, and
 lifecycle manager are complete and test-covered as library
@@ -33,10 +33,10 @@ today.
 
 ## Enabling
 
-Proxy-wasm support is feature-gated. Build with the `wasm` feature:
+Proxy-wasm support is compiled into the OSS build:
 
 ```sh
-cargo build --features wasm
+cargo build
 ```
 
 Without the feature, plugin config blocks are accepted but inert

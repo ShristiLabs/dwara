@@ -2035,16 +2035,20 @@ impl DataPlane {
 /// them too; TLS-passthrough listeners do not (they never speak HTTP).
 fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<ProxyBody>> {
     match path {
-        // DW-111: when the `fips` cargo feature is ON, /healthz includes
-        // a `fips` field with the attestation (enabled, provider,
-        // self_test_passed). When the feature is OFF, the field is
-        // omitted (the health response is the same as before).
+        // DW-111: /healthz includes a `fips` field with the attestation
+        // (enabled, provider, self_test_passed) when FIPS mode is active
+        // (Enterprise builds). In OSS builds FIPS mode is disabled and
+        // the fips field is omitted (the health response is the same as
+        // the simple envelope).
         "/healthz" => {
-            #[cfg(feature = "fips")]
-            {
-                let attestation = crate::security::fips::fips_self_test();
+            let _ = dp;
+            if let Some(attestation) = crate::security::fips::health_attestation() {
                 let body = serde_json::json!({
-                    "status": "ok",
+                    "error": {
+                        "code": "ok",
+                        "message": "ok",
+                        "request_id": rid,
+                    },
                     "fips": {
                         "enabled": attestation.enabled,
                         "provider": attestation.provider,
@@ -2058,10 +2062,7 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
                         .body(ProxyBody::Full(Full::new(Bytes::from(body.to_string()))))
                         .expect("static healthz body is valid"),
                 )
-            }
-            #[cfg(not(feature = "fips"))]
-            {
-                let _ = dp;
+            } else {
                 Some(simple(StatusCode::OK, "ok", "ok", rid))
             }
         }
@@ -3227,7 +3228,6 @@ where
     // the config block is always present (round-trips without the
     // feature), but the runtime check compiles only with the feature.
     // Only routes with an enabled `graphql` block are inspected.
-    #[cfg(feature = "graphql")]
     if let Some(graphql_cfg) = &route.graphql {
         if let Some(checker) = crate::dataplane::graphql::GraphQLChecker::from_config(graphql_cfg) {
             let (parts, body) = req.into_parts();
@@ -6740,19 +6740,8 @@ where
             // when the feature is off the route returns 502 (the
             // config schema is always present so configs round-trip,
             // but the WASM runtime is not compiled in).
-            #[cfg(feature = "nano_services")]
             {
                 serve_nano_service(req, &route.name, nano, rid, &dp.observability_arc()).await
-            }
-            #[cfg(not(feature = "nano_services"))]
-            {
-                let _ = nano;
-                let _ = rid;
-                respond(
-                    502,
-                    Some("nano-service action not compiled in"),
-                    &std::collections::BTreeMap::new(),
-                )
             }
         }
     }
@@ -6816,7 +6805,6 @@ async fn serve_mock(
 /// The maximum request body size a nano-service route accepts (DW-106).
 /// The module receives the full request body, so it must be buffered;
 /// 1 MiB matches the default `memory_limit` and keeps buffering bounded.
-#[cfg(feature = "nano_services")]
 const NANO_SERVICE_BODY_CAP: usize = 1024 * 1024;
 
 /// Serve a nano-service response (DW-106): run the route's WASM module
@@ -6826,7 +6814,6 @@ const NANO_SERVICE_BODY_CAP: usize = 1024 * 1024;
 /// nano-service ABI. Metrics are recorded for every outcome (success,
 /// error, timeout). A module load/execution failure answers 502; a
 /// timeout answers 504; a body over the cap answers 413.
-#[cfg(feature = "nano_services")]
 async fn serve_nano_service<B>(
     req: Request<B>,
     route_name: &str,
@@ -6947,7 +6934,6 @@ where
 /// Unbuildable header name/value pairs are skipped (a misbehaving module
 /// must not panic the dataplane); the status defaults to 200 when the
 /// module set an out-of-range value.
-#[cfg(feature = "nano_services")]
 fn build_nano_service_response(
     resp: crate::dataplane::nano_service::NanoServiceResponse,
 ) -> Response<ProxyBody> {

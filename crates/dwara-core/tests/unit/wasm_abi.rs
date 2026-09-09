@@ -1,7 +1,5 @@
 //! Unit tests for `wasm::abi` (relocated from src).
 
-#![cfg(feature = "wasm")]
-
 use dwara_core::wasm::abi::{deserialize_header_map, serialize_header_map};
 
 #[test]

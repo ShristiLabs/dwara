@@ -159,7 +159,6 @@ fn spiffe_config_parses_custom_refresh_interval() {
 
 // --- SpiffeIdentity parsing and validation -------------------------------
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_identity_parses_valid_uri() {
     use dwara_core::mesh::SpiffeIdentity;
@@ -171,7 +170,6 @@ fn spiffe_identity_parses_valid_uri() {
     assert_eq!(id.to_uri(), "spiffe://example.org/ns/default/sa/my-svc");
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_identity_parse_rejects_wrong_scheme() {
     use dwara_core::mesh::SpiffeIdentity;
@@ -179,7 +177,6 @@ fn spiffe_identity_parse_rejects_wrong_scheme() {
     assert!(SpiffeIdentity::parse("spiffe://").is_none());
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_identity_parse_rejects_empty_trust_domain() {
     use dwara_core::mesh::SpiffeIdentity;
@@ -187,7 +184,6 @@ fn spiffe_identity_parse_rejects_empty_trust_domain() {
     assert!(SpiffeIdentity::parse("spiffe:///path").is_none());
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_identity_new_normalizes_path() {
     use dwara_core::mesh::SpiffeIdentity;
@@ -199,7 +195,6 @@ fn spiffe_identity_new_normalizes_path() {
     assert_eq!(id2.path, "/ns/default/sa/y");
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_identity_display_round_trips() {
     use dwara_core::mesh::SpiffeIdentity;
@@ -427,28 +422,6 @@ fn mesh_block_accepted_without_mesh_feature() {
     assert!(gateway.mesh.is_some());
 }
 
-#[cfg(not(feature = "mesh"))]
-#[test]
-fn validation_warns_mesh_inert_without_feature() {
-    let yaml = mesh_gateway_yaml(
-        "mesh:\n\
-         \x20 enabled: true\n\
-         \x20 mode: sidecar\n\
-         \x20 spiffe:\n\
-         \x20   trust_domain: example.org\n\
-         \x20   workload_api_socket: /tmp/spire-agent/public/api.sock\n",
-    );
-    let gateway = parse_gateway(&yaml).expect("parses");
-    let issues = validate(&gateway);
-    assert!(
-        issues.iter().any(|i| i.field == "mesh"
-            && i.message.contains("inert")
-            && i.message.contains("--features mesh")),
-        "expected inert-without-feature warning, got: {issues:?}"
-    );
-}
-
-#[cfg(feature = "mesh")]
 #[test]
 fn validation_does_not_warn_inert_with_feature() {
     let yaml = mesh_gateway_yaml(
@@ -521,7 +494,6 @@ fn validation_does_not_warn_ent_with_feature() {
 
 // --- Scaffold contract (mesh feature only) -------------------------------
 
-#[cfg(feature = "mesh")]
 #[test]
 fn sidecar_controller_exposes_listeners() {
     use dwara_core::mesh::{SidecarConfig, SidecarController, SidecarMode, SidecarRedirectMode};
@@ -543,7 +515,6 @@ fn sidecar_controller_exposes_listeners() {
     controller.install_redirects();
 }
 
-#[cfg(feature = "mesh")]
 #[tokio::test]
 async fn spiffe_client_fetch_svid_via_fake_transport() {
     use dwara_core::mesh::{
@@ -582,7 +553,6 @@ async fn spiffe_client_fetch_svid_via_fake_transport() {
     assert_eq!(id.path, "/ns/default/sa/svc");
 }
 
-#[cfg(feature = "mesh")]
 #[tokio::test]
 async fn spiffe_client_fetch_svid_propagates_error() {
     use dwara_core::mesh::{
@@ -607,7 +577,6 @@ async fn spiffe_client_fetch_svid_propagates_error() {
     assert!(matches!(err, SpiffeError::WorkloadApiUnreachable(_)));
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_svid_seconds_until_expiry_clamps() {
     use dwara_core::mesh::{SpiffeIdentity, SpiffeSvid};
@@ -622,7 +591,6 @@ fn spiffe_svid_seconds_until_expiry_clamps() {
     assert_eq!(svid.seconds_until_expiry(2000), 0);
 }
 
-#[cfg(feature = "mesh")]
 #[test]
 fn spiffe_config_from_config_resolves_socket_path() {
     use dwara_core::mesh::SpiffeConfig;

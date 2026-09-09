@@ -25,8 +25,8 @@
 Three concerns that span the lifetime of an API surface the gateway
 fronts, all hand-rolled over existing substrates (no new
 dependencies): the developer portal, environment profiles, and the
-journey recorder. The module is feature-gated behind the
-`api_lifecycle` cargo feature; without it, the module is not compiled
+journey recorder. The module is compiled into the OSS build
+API lifecycle; without it, the module is not compiled
 and the top-level `lifecycle` config block is accepted but inert
 (validation warns, mirroring the `a2a`/`graphql` pattern).
 

@@ -46,8 +46,6 @@
 //! the feature; when the feature is off the block is accepted but inert
 //! (validation warns, the runtime translation does not run).
 
-#![cfg(feature = "grpc_web")]
-
 use std::collections::HashMap;
 
 use base64::Engine as _;

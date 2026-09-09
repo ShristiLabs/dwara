@@ -1,7 +1,5 @@
 //! Unit tests for `security::cedar` (relocated from src).
 
-#![cfg(feature = "cedar")]
-
 use dwara_core::security::cedar::{CedarAuthorizer, CedarDecision, CedarRequest};
 
 const SIMPLE_POLICY: &str = r#"

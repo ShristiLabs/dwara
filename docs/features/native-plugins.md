@@ -20,17 +20,17 @@ sandboxed-and-hot-loaded.
 
 ## Enabling
 
-Native filters are feature-gated behind the `plugins` cargo feature
-(default OFF):
+Native filters are compiled into the OSS build
+(default-on):
 
 ```sh
-cargo build --features plugins
+cargo build
 ```
 
 Combine with `wasm` for both paths:
 
 ```sh
-cargo build --features plugins,wasm
+cargo build,wasm
 ```
 
 When `plugins` is on but `wasm` is off, only native filters work. When

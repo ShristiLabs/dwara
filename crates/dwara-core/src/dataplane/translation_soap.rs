@@ -43,8 +43,6 @@
 //! Compiled under the `soap` cargo feature (which implies
 //! `protocol_translation`).
 
-#![cfg(feature = "soap")]
-
 use bytes::Bytes;
 use hyper::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use hyper::{Method, Request, Response};

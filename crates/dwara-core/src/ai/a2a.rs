@@ -356,7 +356,7 @@ impl AgentCardParser {
     }
 
     /// Parse an Agent Card from a file path. Reads the file and parses
-    /// it as JSON, then delegates to [`parse_inline`]. Returns an
+    /// it as JSON, then delegates to `parse_inline`. Returns an
     /// error when the file cannot be read or is malformed.
     pub fn parse_path(path: &str) -> Result<AgentCard, A2AStub> {
         let bytes = std::fs::read(path).map_err(|e| {
@@ -848,12 +848,6 @@ impl CompiledA2a {
     pub fn compile(config: Option<&A2aConfig>) -> Option<Self> {
         // Feature gate: when the `a2a` cargo feature is off, the
         // block is inert (no A2A providers are wired).
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = config;
-            None
-        }
-        #[cfg(feature = "a2a")]
         {
             let cfg = config?;
             if !cfg.enabled {

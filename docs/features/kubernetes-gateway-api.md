@@ -20,10 +20,10 @@ yet adopted Gateway API.
 Build with the `k8s` feature:
 
 ```sh
-cargo build --features k8s
+cargo build
 ```
 
-The `k8s` feature is default OFF because kube-rs + k8s-openapi add
+The `k8s` feature is default-on because kube-rs + k8s-openapi add
 significant binary size. The default build is unaffected.
 
 ## Architecture
@@ -80,7 +80,7 @@ The controller filters GatewayClass by dwara's controller name
 
 ### Controller binary
 
-The `dwara-k8s-controller` binary (feature-gated behind `k8s`) reads
+The `dwara-k8s-controller` binary (compiled into the OSS build) reads
 configuration from environment variables:
 
 | Variable | Default | Purpose |
@@ -145,7 +145,7 @@ against conformance-style test vectors for each standard-channel
 feature. It is deterministic and requires no cluster:
 
 ```sh
-cargo test -p dwara-core --features k8s --test k8s_conformance
+cargo test -p dwara-core --test k8s_conformance
 ```
 
 The controller Reconciler tests
@@ -154,7 +154,7 @@ reconciliation core (feed resource sets, assert produced config + status
 conditions), no cluster:
 
 ```sh
-cargo test -p dwara-core --features k8s --test k8s_controller
+cargo test -p dwara-core --test k8s_controller
 ```
 
 ### Conformance report generator
@@ -165,7 +165,7 @@ actually supports. This is the artifact an operator submits to be listed
 on k8s.io:
 
 ```sh
-cargo run -q -p dwara-cli --features k8s --bin dwara-cli -- k8s conformance-report
+cargo run -q -p dwara-cli --bin dwara-cli -- k8s conformance-report
 ```
 
 ### Running the upstream conformance suite against a real cluster
@@ -255,5 +255,5 @@ let result = translate_ingress(&ingresses, "dwara", &endpoints)?;
 
 ## Feature gate
 
-The `k8s` cargo feature must be enabled. Without it, the module is
+Kubernetes Gateway API is compiled into the OSS build. The module is
 not compiled.

@@ -131,7 +131,6 @@ enum Command {
         config: String,
     },
     /// Kubernetes Gateway API tools (DW-064). Feature-gated behind `k8s`.
-    #[cfg(feature = "k8s")]
     K8s {
         #[command(subcommand)]
         kind: K8sKind,
@@ -139,7 +138,6 @@ enum Command {
 }
 
 /// Subcommands of `dwara k8s` (DW-064).
-#[cfg(feature = "k8s")]
 #[derive(Subcommand)]
 enum K8sKind {
     /// Generate the upstream Gateway API conformance report YAML based
@@ -527,7 +525,6 @@ fn main() {
                 }
             }
         },
-        #[cfg(feature = "k8s")]
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
@@ -709,7 +706,6 @@ fn run_tf(kind: TfKind) -> i32 {
 /// DW-064: generate the upstream Gateway API conformance report YAML.
 /// Based on the features the translator actually supports (see
 /// `dwara_core::k8s_gateway::supported_features` / `skipped_features`).
-#[cfg(feature = "k8s")]
 fn run_conformance_report(output: Option<String>) -> i32 {
     let report = dwara_cli::k8s_conformance::generate_report();
     let yaml = match serde_yaml_ng::to_string(&report) {

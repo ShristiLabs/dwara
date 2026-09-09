@@ -23,6 +23,12 @@ use async_trait::async_trait;
 use super::secrets::{Secret, SecretSource};
 use super::ExtensionsError;
 
+/// Object-safe alias over the two transports a Vault fetch can run on
+/// (`Box<dyn AsyncRead + AsyncWrite>` is not a legal trait object; an
+/// alias trait with a blanket impl is the standard shape).
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T> Io for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
 /// A Vault KV v2 secret source.
 ///
 /// Reads secrets from a Vault server's KV v2 engine via the HTTP API.
@@ -220,11 +226,11 @@ async fn fetch_vault_secret(
 ) -> Result<String, String> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let mut stream = tokio::net::TcpStream::connect(addr)
+    let stream = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect: {e}"))?;
 
-    let mut io: Box<dyn tokio::io::AsyncRead + AsyncWrite + Unpin + Send> = if use_tls {
+    let mut io: Box<dyn Io> = if use_tls {
         // Use the same rustls config as the webhook deliverer (webpki
         // roots, no client auth). A future change may support a
         // custom CA for private Vault deployments.
@@ -249,7 +255,7 @@ async fn fetch_vault_secret(
         .await
         .map_err(|e| format!("read: {e}"))?;
 
-    String::from_utf8_lossy(&response).to_string()
+    Ok(String::from_utf8_lossy(&response).to_string())
 }
 
 /// Build a rustls client config for Vault HTTPS (webpki roots, no

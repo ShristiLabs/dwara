@@ -12,7 +12,7 @@
 //! ## Storage
 //!
 //! The journey JSON document is carried on the
-//! [`AccessRecord`](crate::observability::AccessRecord)'s `custom`
+//! `AccessRecord`(crate::observability::AccessRecord)'s `custom`
 //! dimensions as a `_journey` key (the same JSON object column the
 //! DW-043 custom dimensions ride). This reuses the existing raw
 //! table's fire-and-forget write path -- no schema migration, no new
@@ -166,7 +166,7 @@ impl JourneyRecorder {
 
     /// Record a completed journey into the in-memory ring buffer. The
     /// caller is responsible for also stamping the journey onto the
-    /// [`AccessRecord`]'s custom dimensions (via [`journey_dimension`])
+    /// `AccessRecord`'s custom dimensions (via [`journey_dimension`])
     /// so the durable copy rides the raw table's write path. This
     /// method never blocks: the buffer is a short mutex over a capped
     /// `VecDeque`; when full, the oldest entry is evicted.
@@ -218,7 +218,7 @@ impl JourneyRecorder {
 }
 
 /// Build the custom-dimension entry that carries a journey on an
-/// [`AccessRecord`] into the raw table's JSON object column. The key
+/// `AccessRecord` into the raw table's JSON object column. The key
 /// is `_journey` (the leading underscore avoids collisions with
 /// operator-declared dimensions). Returns the `(key, value)` pair to
 /// push onto `AccessRecord::custom`.

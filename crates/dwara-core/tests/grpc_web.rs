@@ -6,12 +6,6 @@
 //! translation (unary and streaming), JSON <-> protobuf transcoding
 //! driven by a runtime-built FileDescriptorSet, gRPC status -> HTTP
 //! status mapping, and config-schema parsing/validation.
-//!
-//! Feature-gated behind the `grpc_web` cargo feature. The test file
-//! uses `#![cfg(feature = "grpc_web")]` so it compiles to an empty
-//! binary without the feature.
-
-#![cfg(feature = "grpc_web")]
 
 use std::collections::HashMap;
 

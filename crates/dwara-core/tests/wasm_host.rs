@@ -12,8 +12,6 @@
 //! by the host implementing the full ABI surface that such filters
 //! depend on; these tests prove each ABI method works correctly.
 
-#![cfg(feature = "wasm")]
-
 use dwara_core::wasm::{
     self, deserialize_header_map, serialize_header_map, PluginLimits, WasmEngine, ACTION_CONTINUE,
     ACTION_END_STREAM,

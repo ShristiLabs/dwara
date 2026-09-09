@@ -20,8 +20,6 @@
 //!   chain (attachment-semantics equivalence)
 //! - config round-trip (serialize -> parse -> equal)
 
-#![cfg(feature = "plugins")]
-
 use std::collections::HashMap;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, PluginConfig, PluginPhase};
@@ -813,7 +811,6 @@ fn chain_native_short_circuits_before_later_wasm() {
 // Real WasmChainAdapter combination (feature-gated behind wasm+plugins)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "wasm")]
 mod wasm_adapter {
     use super::*;
     use dwara_core::wasm::adapter::WasmChainAdapter;

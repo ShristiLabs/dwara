@@ -536,7 +536,7 @@ An embedding-similarity cache: the request prompt is embedded via an
 external embedding service, the embedding is looked up in an HNSW
 approximate-nearest-neighbor index (`hnsw_rs`), and a hit above the
 similarity threshold returns the cached response without a provider
-call. Feature-gated behind the `semantic_cache` cargo feature so the
+call. Compiled into the OSS build so the
 HNSW dependency stays out of the default build. Composes with the
 DW-037 exact-match cache (semantic cache is checked first, then the
 exact cache). Code: `crates/dwara-core/src/ai/semantic_cache.rs`.

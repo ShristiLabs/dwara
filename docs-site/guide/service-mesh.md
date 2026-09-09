@@ -9,7 +9,7 @@ through a pair of gateways (outbound from the caller, inbound at the
 callee), each enforcing policy and presenting a verifiable identity.
 
 ::: warning Implementation status
-The `mesh` feature is **config-accepted, runtime stubbed** (Enterprise
+Mesh is **config-accepted, runtime stubbed** (Enterprise
 only). The config schema (`MeshConfig`, `MeshSidecarConfig`,
 `MeshSpiffeConfig`) parses and validates, and the `SidecarController`
 and `SpiffeClient` types exist, but the runtime is scaffolded:

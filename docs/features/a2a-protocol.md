@@ -16,7 +16,7 @@
 
 The Agent-to-Agent (A2A) protocol is an emerging standard for
 inter-agent communication. DW-114 scaffolds the gateway's A2A surface
-behind the `a2a` cargo feature: the spec is NOT yet frozen, so the
+compiled into the OSS build: the spec is NOT yet frozen, so the
 task lifecycle is STUBBED (every task-state transition returns an
 `A2AStub` error explaining that the spec is not frozen), while the
 adapter translation, Agent Card parsing, session model, and config
@@ -126,7 +126,7 @@ Validation (`snapshot/mod.rs`) rejects: empty or duplicate agent names,
 non-http(s) URLs, references to unknown upstreams, an inline card that
 is not a JSON object, a card with neither inline nor path set, a
 session `ttl_secs` of 0, and a session `max_concurrent` of 0. The
-config schema is always present regardless of the `a2a` cargo feature,
+config schema is always present regardless of the A2A protocol,
 so configs round-trip across builds with and without the feature; when
 the feature is off the block is accepted but inert (validation warns,
 `CompiledA2a::compile` returns `None`, no A2A providers are wired).

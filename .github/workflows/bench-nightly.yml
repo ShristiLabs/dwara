@@ -181,10 +181,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
       - name: Compile check (h3 loadgen + h3 ingress)
-        # h3 is feature-gated and default-off; the nightly macro-gate does
-        # not drive h3 throughput (no TLS/QUIC listener rig), but this
-        # check catches feature rot on both the loadgen client and the
-        # gateway ingress at the nightly cadence.
+        # The nightly macro-gate does not drive h3 throughput (no
+        # TLS/QUIC listener rig), but this check catches feature rot on
+        # both the loadgen client and the gateway ingress at the nightly
+        # cadence.
         run: |
-          cargo build -p dwara-cli --bin dwara-loadgen --features h3
-          cargo build -p dwara-bin --features h3
+          cargo build -p dwara-cli --bin dwara-loadgen
+          cargo build -p dwara-bin

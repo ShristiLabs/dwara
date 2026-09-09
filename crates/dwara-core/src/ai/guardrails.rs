@@ -119,7 +119,6 @@ struct CompiledRule {
     /// Reuses the DW-081 Redactor for consistent PII scrubbing.
     redactor: Option<Redactor>,
     /// The compiled JSON schema validator (schema kind, feature-gated).
-    #[cfg(feature = "openapi_validation")]
     schema_validator: Option<jsonschema::Validator>,
     /// The raw schema value (schema kind, non-feature-gated builds
     /// carry it for introspection but do not validate).
@@ -252,7 +251,6 @@ impl GuardrailEngine {
             };
 
             // Compile the JSON schema validator for schema kind.
-            #[cfg(feature = "openapi_validation")]
             let schema_validator = if rule.kind == AiGuardrailKind::Schema {
                 if let Some(schema) = &rule.schema {
                     match jsonschema::Validator::new(schema) {
@@ -283,7 +281,6 @@ impl GuardrailEngine {
                 patterns,
                 pattern_strings,
                 redactor,
-                #[cfg(feature = "openapi_validation")]
                 schema_validator,
                 schema_value: rule.schema.clone(),
                 policies: rule.policies.clone(),
@@ -479,7 +476,6 @@ impl GuardrailEngine {
                     !rule.patterns.is_empty() && rule.patterns.is_match(&response_text)
                 }
                 AiGuardrailKind::Schema => {
-                    #[cfg(feature = "openapi_validation")]
                     {
                         if let Some(validator) = &rule.schema_validator {
                             // Parse the response text as JSON and
@@ -493,13 +489,6 @@ impl GuardrailEngine {
                         } else {
                             false
                         }
-                    }
-                    #[cfg(not(feature = "openapi_validation"))]
-                    {
-                        // Without the openapi_validation feature,
-                        // schema rules are inert (always allow).
-                        let _ = &rule.schema_value;
-                        false
                     }
                 }
                 AiGuardrailKind::Injection | AiGuardrailKind::Pii => {

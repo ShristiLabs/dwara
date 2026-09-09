@@ -1,7 +1,7 @@
 # Service mesh mode (DW-107)
 
-> Implements issue DW-107 (Enterprise, scaffolded behind the `mesh`
-> cargo feature). Sources: `crates/dwara-core/src/mesh/mod.rs` (the
+> Implements issue DW-107 (Enterprise, scaffolded behind the `ent`
+> feature). Sources: `crates/dwara-core/src/mesh/mod.rs` (the
 > domain module docs carry the full contract and dependency
 > direction), `crates/dwara-core/src/mesh/sidecar.rs`
 > (`SidecarController`, `SidecarConfig`, `SidecarMode`,
@@ -137,7 +137,7 @@ must be > 0. A disabled block skips all field-level checks.
 
 ## Feature gate and ent gate
 
-The `mesh` cargo feature is flag-only (no new deps). When OFF, the
+The `ent` cargo feature is flag-only (no new deps). When OFF, the
 `mesh` block is accepted but inert: validation warns, and no sidecar
 listeners or SPIFFE client are wired. When ON, the scaffold compiles;
 the iptables/Workload API wiring lands when production-ready.

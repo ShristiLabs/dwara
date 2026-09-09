@@ -6,7 +6,7 @@
 //! constants the host and plugin exchange over the ABI boundary; the
 //! host implementation (the import functions the plugin calls back to)
 //! lives in [`super::host`], and the plugin lifecycle (the exports the
-//! host calls) lives in [`super::instance`].
+//! host calls) lives in `super::instance`.
 //!
 //! Only the HTTP filter subset is implemented (dwara is an HTTP
 //! gateway, not a TCP proxy): the stream-context calls

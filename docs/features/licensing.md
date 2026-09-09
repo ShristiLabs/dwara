@@ -12,7 +12,7 @@ default, no `ent` cargo feature) compile a stub gate that is always
 
 A cargo feature (`ent`) controls whether the licensing primitives are
 linked at all — OSS builds stay clean of the BSL-1.1 `licensing-core`
-dependency. But the feature flag alone cannot answer "is THIS
+dependency. But the feature alone cannot answer "is THIS
 deployment licensed?" — a binary compiled with `ent` still needs to
 verify a license file at runtime. The `LicenseGate` is the runtime
 half: it holds the verified license (or none) and provides the check
@@ -148,4 +148,4 @@ if config.gateway.license.is_some() {
 - `crates/dwara-core/src/observability.rs` — the
   `dwara_license_status` gauge and its setter.
 - `crates/dwara-core/tests/licensing.rs` — integration tests (OSS mode
-  by default, ent-feature-gated tests with `cargo test --features ent`).
+  by default, ent-compiled into the OSS build tests with `cargo test --features ent`).

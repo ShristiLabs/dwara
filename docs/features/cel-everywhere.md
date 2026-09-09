@@ -12,7 +12,7 @@ per feature.
 Build with the `cel` feature:
 
 ```sh
-cargo build --features cel
+cargo build
 ```
 
 ## Use-sites
@@ -103,6 +103,6 @@ let result = evaluate_for(CelUseSite::RouteCondition, &program, &ctx).unwrap();
 
 ## Feature gate
 
-The `cel` cargo feature must be enabled. Without it, the module is
+CEL is compiled into the OSS build. The module is
 not compiled and config fields that reference CEL expressions are
 accepted but inert.

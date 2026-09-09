@@ -26,7 +26,7 @@
 //!
 //! - [`spiffe::SpiffeClient`]: the Workload API client is implemented
 //!   behind a transport abstraction ([`spiffe::WorkloadApiTransport`]).
-//!   The production gRPC transport ([`spiffe::grpc::GrpcWorkloadApi`])
+//!   The production gRPC transport (`spiffe::grpc::GrpcWorkloadApi`)
 //!   uses tonic over a Unix domain socket (ent-gated); a test fake
 //!   ([`spiffe::FakeWorkloadApi`]) is provided for deterministic tests.
 //!   The client fetches X.509 SVIDs and the trust bundle, and exposes
@@ -42,7 +42,7 @@
 //!   documents the redirect setup, but does NOT install iptables rules
 //!   or open sockets (that wiring lands when the sidecar bootstrap is
 //!   production-ready).
-//! - The full gRPC client wiring in [`spiffe::grpc::GrpcWorkloadApi`]:
+//! - The full gRPC client wiring in `spiffe::grpc::GrpcWorkloadApi`:
 //!   the transport abstraction and the trait-based seam are landed; the
 //!   full gRPC call (proto-generated client, codec, path) is the
 //!   remaining wiring. The `connect()` method establishes the tonic

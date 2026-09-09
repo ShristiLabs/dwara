@@ -50,9 +50,7 @@ pub mod discovery;
 // compiles only when the feature is enabled. The config schema is
 // always present (so configs round-trip without the feature), but the
 // runtime translation is feature-gated.
-#[cfg(feature = "graphql")]
 pub mod graphql;
-#[cfg(feature = "grpc_web")]
 pub mod grpc_web;
 pub mod hardening;
 // DW-106: WASM route handlers (nano-services). Feature-gated behind
@@ -61,7 +59,6 @@ pub mod hardening;
 // always present (so configs round-trip without the feature), but the
 // runtime handler is feature-gated. When the feature is off the action
 // is accepted but inert (validation warns, the route returns 502).
-#[cfg(feature = "nano_services")]
 pub mod nano_service;
 pub mod proxy;
 pub mod proxy_proto;
@@ -78,11 +75,8 @@ pub mod split;
 // round-trip without the feature), but the runtime translation is
 // feature-gated.
 pub mod transforms;
-#[cfg(feature = "protocol_translation")]
 pub mod translation;
-#[cfg(feature = "protocol_translation")]
 pub mod translation_graphql;
-#[cfg(feature = "soap")]
 pub mod translation_soap;
 // DW-103: L4 TCP/UDP proxying with SNI routing reuse. Feature-gated
 // behind the `l4` cargo feature; the module compiles only when the
@@ -90,7 +84,6 @@ pub mod translation_soap;
 // L4Config) is always present so configs round-trip without the
 // feature, but the runtime dispatcher is feature-gated. When the
 // feature is off, validation warns that the listener is inert.
-#[cfg(feature = "l4")]
 pub mod l4;
 pub mod upstream;
 // DW-108: HTTP/3 (QUIC) upstream transport. Feature-gated behind the
@@ -98,7 +91,6 @@ pub mod upstream;
 // enabled (it pulls in quinn + h3 + h3-quinn). When the feature is off,
 // `protocol: h3` upstreams are accepted at validation but inert (every
 // dispatch fails closed with UpstreamError::H3Unavailable).
-#[cfg(feature = "h3")]
 pub mod upstream_h3;
 pub mod versioning;
 pub mod waf;

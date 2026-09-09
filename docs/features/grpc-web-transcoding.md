@@ -21,7 +21,7 @@ flag + 4 bytes big-endian length). The gateway sits between a browser
 framing in both directions. With transcoding enabled, it also accepts
 plain JSON and translates it to protobuf wire bytes, so a REST or JSON
 client can call a gRPC backend without a gRPC library. The entire
-module is feature-gated behind the `grpc_web` cargo feature; the config
+module is compiled into the OSS build; the config
 schema is always present so configs round-trip without the feature.
 
 ## gRPC-Web framing
@@ -121,7 +121,7 @@ activation) and a `descriptors` list of `GrpcWebDescriptor` entries
 Validation (`snapshot/mod.rs`) rejects, when transcoding is enabled, an
 empty descriptor list and unreadable descriptor files (the
 `check_file_readable` helper). The config schema is always present
-regardless of the `grpc_web` cargo feature, so configs round-trip
+regardless of the gRPC-Web module, so configs round-trip
 across builds with and without the feature; when the feature is off the
 block is accepted but inert (validation warns, the runtime translation
 does not run).

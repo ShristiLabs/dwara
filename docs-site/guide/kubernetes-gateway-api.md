@@ -8,11 +8,11 @@ config YAML, and publishes it to a file the gateway hot-reloads.
 
 ## Enabling
 
-The Kubernetes Gateway API controller is feature-gated behind the `k8s`
-cargo feature (default OFF):
+The Kubernetes Gateway API controller is compiled into the OSS build (no `k8s` cargo feature needed)
+
 
 ```sh
-cargo build --features k8s
+cargo build
 ```
 
 ## Deployment
@@ -78,8 +78,8 @@ conformance-style test vectors. It is deterministic and requires no
 cluster:
 
 ```sh
-cargo test -p dwara-core --features k8s --test k8s_conformance
-cargo test -p dwara-core --features k8s --test k8s_controller
+cargo test -p dwara-core --test k8s_conformance
+cargo test -p dwara-core --test k8s_controller
 ```
 
 ### Conformance report

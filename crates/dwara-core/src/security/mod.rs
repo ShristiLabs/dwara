@@ -15,7 +15,6 @@ pub mod authn;
 pub mod authz;
 // DW-060: Cedar + OPA authorization. Feature-gated behind the
 // `cedar` cargo feature (default OFF).
-#[cfg(feature = "cedar")]
 pub mod cedar;
 // DW-111: FIPS 140-3 mode enforcement. The module compiles in every
 // build; when the `fips` cargo feature is OFF, all functions are inert
@@ -38,13 +37,11 @@ pub mod bot_hooks;
 // the `signed_url` cargo feature (default OFF). The verifier
 // extracts the signature from the query string, recomputes the
 // HMAC-SHA256 over the canonical request, and checks the expiry.
-#[cfg(feature = "signed_url")]
 pub mod signed_url;
 // DW-109: Upstream TLS certificate pinning (SPKI hash). Feature-gated
 // behind the `cert_pinning` cargo feature (default OFF). The verifier
 // computes SHA-256 of the upstream cert's SubjectPublicKeyInfo and
 // compares against the configured pin.
-#[cfg(feature = "cert_pinning")]
 pub mod cert_pinning;
 
 // SEC-02: ACME / Let's Encrypt automation. The config block is always

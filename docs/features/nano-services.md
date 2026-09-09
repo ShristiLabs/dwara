@@ -123,7 +123,7 @@ routes:
 
 The `nano_service` action is additive to the `RouteAction` enum. The
 config schema (`NanoServiceAction`) is always present, so configs
-round-trip without the feature; when the `nano_services` cargo feature
+round-trip without the feature; when the nano-services capability
 is off the action is accepted but inert (validation warns, the route
 returns 502). `module` must exist and be readable at config publish
 time. `memory_limit` must be positive and at most 67,108,864 (64 MiB).

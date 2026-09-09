@@ -1,7 +1,5 @@
 //! Unit tests for `openapi` validation (relocated from src).
 
-#![cfg(feature = "openapi_validation")]
-
 use dwara_core::openapi::{ResponseKey, ResponseToValidate, ResponseValidator, ValidationResult};
 use serde_json::json;
 use std::collections::HashMap;

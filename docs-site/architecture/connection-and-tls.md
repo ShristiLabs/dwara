@@ -36,9 +36,9 @@ flowchart TD
 | **Terminate** | `https` | Dwara terminates TLS (multiple certificates keyed by SNI on one listener), then serves HTTP/1.1 or HTTP/2 via ALPN negotiation |
 | **Passthrough** | `https` | Dwara never decrypts — it peeks the ClientHello's SNI (reassembling it across fragmented TLS records if needed) to pick an upstream, then splices raw bytes; the upstream terminates TLS itself |
 | **Cleartext** | `http` / `h2c` | No TLS; hyper's auto builder sniffs the h2 preface for h2c, otherwise serves HTTP/1.1 |
-| **H3/QUIC** | `h3` | A QUIC listener (feature-gated `h3`) accepts connections and serves HTTP/3 frames through the same routing and policy pipeline as h1/h2 |
-| **L4 TCP** | `tcp` | Raw TCP byte splice (feature-gated `l4`); optionally peeks SNI to select the upstream, reusing the same SNI extraction as passthrough mode |
-| **L4 UDP** | `udp` | UDP datagram relay (feature-gated `l4`); currently stubbed |
+| **H3/QUIC** | `h3` | A QUIC listener (compiled into the OSS build `h3`) accepts connections and serves HTTP/3 frames through the same routing and policy pipeline as h1/h2 |
+| **L4 TCP** | `tcp` | Raw TCP byte splice (compiled into the OSS build `l4`); optionally peeks SNI to select the upstream, reusing the same SNI extraction as passthrough mode |
+| **L4 UDP** | `udp` | UDP datagram relay (compiled into the OSS build `l4`); currently stubbed |
 
 PROXY protocol (v1 or v2) is accepted as the first bytes of any
 connection when `proxy_protocol: true` is set on the listener. The
@@ -76,7 +76,7 @@ original, untouched TLS session.
 
 Upstream TLS is independent of listener TLS: an `https` or `http2`
 upstream can use its own TLS with a configurable trusted CA file,
-mTLS client certificates, or (feature-gated) certificate pinning by
+mTLS client certificates, or (compiled into the OSS build) certificate pinning by
 SPKI hash. The gateway presents its own client certificate when
 `upstreams[].mtls` is configured, and can obtain OAuth2 tokens to
 present to the upstream as a client-credentials client.
@@ -86,8 +86,8 @@ present to the upstream as a client-credentials client.
 | `trusted_ca_file` | PEM file of CA certificates the upstream's TLS connections trust | [Security](../guide/security) |
 | `mtls` | Client certificate the gateway presents to the upstream | [OAuth2 and mTLS](../guide/oauth2-mtls) |
 | `oauth2_client_credentials` | Gateway acts as an OAuth2 client-credentials client to the upstream | [OAuth2 and mTLS](../guide/oauth2-mtls) |
-| `cert_pinning` | Pin the upstream cert by SPKI SHA-256 hash (feature-gated; https/http2 only, not h3) | [Feature reference](../guide/feature-reference) |
-| `pq` | Post-quantum hybrid key exchange for the upstream TLS connection (feature-gated, experimental) | [Post-quantum TLS](../guide/post-quantum-tls) |
+| `cert_pinning` | Pin the upstream cert by SPKI SHA-256 hash (compiled into the OSS build; https/http2 only, not h3) | [Feature reference](../guide/feature-reference) |
+| `pq` | Post-quantum hybrid key exchange for the upstream TLS connection (compiled into the OSS build, experimental) | [Post-quantum TLS](../guide/post-quantum-tls) |
 
 ## See also
 

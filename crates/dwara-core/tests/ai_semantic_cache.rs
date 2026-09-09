@@ -7,8 +7,6 @@
 //! it). Run with:
 //! `cargo test -p dwara-core --features semantic_cache --test ai_semantic_cache`.
 
-#![cfg(feature = "semantic_cache")]
-
 mod support;
 
 use bytes::Bytes;

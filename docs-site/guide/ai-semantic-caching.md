@@ -6,9 +6,9 @@ response with no provider call and no token spend. This is a
 significant cost saver for workloads with repeated or paraphrased
 prompts.
 
-Semantic caching is OFF by default and feature-gated behind the
-`semantic_cache` cargo feature (the `hnsw_rs` HNSW ANN index adds
-binary size). Build with `cargo build --features semantic_cache` to
+Semantic caching is compiled into the default build (the
+the `hnsw_rs` HNSW ANN index adds
+binary size). Build with `cargo build` to
 enable it. Without the feature, the config is accepted but the cache
 is inert (all requests hit the provider).
 

@@ -7,7 +7,7 @@ patterns, mobile API consolidation, and reducing client-side request
 chattiness.
 
 ::: info Status
-Aggregation is a compile-time feature pack (`aggregation`, default
+Aggregation is a compile-time capability (`aggregation`, default
 OFF; see [Editions](./editions#compile-time-feature-packs)) and is
 not included in the published OSS binaries. The composition core
 (specs, JSONPath shaping, fail policies, size caps) is complete and

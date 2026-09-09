@@ -27,7 +27,7 @@ feature (default OFF). The feature pulls in the ML-KEM implementation and
 adds the hybrid group to the TLS handshake:
 
 ```sh
-cargo build -p dwara-bin --features pq
+cargo build -p dwara-bin
 ```
 
 In a default build the feature is absent and `upstream.pq: true` is

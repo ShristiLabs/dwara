@@ -18,7 +18,7 @@ traffic conforms to the spec DW-047 imported, and flag drift.
 Build with the `openapi_validation` feature:
 
 ```sh
-cargo build --features openapi_validation
+cargo build
 ```
 
 ## Scope
@@ -109,7 +109,7 @@ flag-and-pass or flag-and-block).
 
 ## Feature gate
 
-The `openapi_validation` cargo feature must be enabled. Without it,
+OpenAPI validation is compiled into the OSS build. Without a validation block,
 the module is not compiled and config fields that reference OpenAPI
 response validation are accepted but inert.
 

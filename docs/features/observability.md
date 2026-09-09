@@ -1,8 +1,8 @@
 # Observability
 
 Source: `crates/dwara-core/src/observability.rs` (DW-021),
-`crates/dwara-bin/src/otlp.rs` (feature-gated OTLP exporter). Tests:
-`observability` (dwara-core); `otlp_export` (feature-gated),
+`crates/dwara-bin/src/otlp.rs` (compiled into the OSS build OTLP exporter). Tests:
+`observability` (dwara-core); `otlp_export` (compiled into the OSS build),
 `otlp_inert` (dwara-bin).
 
 The end-user-facing material (log fields, metric names, the error
@@ -53,7 +53,7 @@ exports spans downstream (currently: the JSON log formatter; behind
 the `otlp` feature: an actual trace exporter) sees a complete,
 correctly-nested picture without needing dataplane-specific knowledge.
 
-## Why OTLP is feature-gated, not default
+## Why OTLP is compiled into the OSS build, not default
 
 `opentelemetry` + `opentelemetry-otlp` were evaluated and deliberately
 **not** included in the default build: they bring their own HTTP
@@ -61,7 +61,7 @@ transport and codegen weight against the musl release binary's <25MB
 size budget (see [Installation](../../docs-site/guide/installation.md#docker-images))
 and against a compute-conscious CI posture. The span *structure* ships
 unconditionally (proven by the capture test above); only the
-*exporter* is feature-gated. Because the environment variable
+*exporter* is compiled into the OSS build. Because the environment variable
 (`DWARA_OTLP_ENDPOINT`) is a binary-level knob and the `tracing`
 subscriber the exporter must hook into lives in `dwara-bin`, the
 exporter itself lives in `dwara-bin/src/otlp.rs`, not in this module —
@@ -73,7 +73,7 @@ over HTTP/protobuf.
 
 ## OTLP metrics export (DW-073)
 
-The same `otlp` cargo feature and the same `DWARA_OTLP_ENDPOINT` env
+The same OTLP export and the same `DWARA_OTLP_ENDPOINT` env
 var additionally export metrics over OTLP (http/protobuf to
 `/v1/metrics`). This is additive to the Prometheus `/metrics` default
 (DW-021): Prometheus stays the default; OTLP metrics are opt-in for
@@ -152,7 +152,7 @@ rather than trusted to every call site that produces an error.
 An optional `console-subscriber` layer wraps the tokio runtime,
 exposing per-task diagnostics — task polls, waker stats, and task
 lifetimes — to the `tokio-console` TUI for async-task debugging. The
-subscriber is feature-gated behind the `tokio_console` cargo feature
+subscriber is compiled into the OSS build
 on `dwara-bin` (default off, because the subscriber adds per-poll
 overhead that is unacceptable on the hot path in production).
 

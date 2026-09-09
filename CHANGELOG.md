@@ -7,6 +7,27 @@ the project follows semantic versioning once 1.0 is reached.
 
 ## [Unreleased]
 
+### Changed
+
+- Build-pack simplification: consolidated all optional feature packs
+  into the OSS build. The repository now maintains only two editions:
+  **OSS** (`cargo build --release`) and **Enterprise**
+  (`cargo build --release --features ent`). All previously
+  feature-gated dataplane capabilities — H3/QUIC, L4 TCP/UDP, OTLP
+  export, proxy-wasm host, native filter chain, CEL expressions, Cedar
+  policies, OpenAPI validation, API aggregation, gRPC-Web, protocol
+  translation, SOAP, semantic cache, post-quantum TLS, GraphQL
+  awareness, A2A protocol, MCP gateway, tokio-console diagnostics, and
+  more — are compiled into the default OSS build. The only remaining
+  cargo features are `ent` (Enterprise edition) and `loom` (test-only
+  concurrency model checking). FIPS 140-3 enforcement is now
+  Enterprise-only: the aws-lc-rs provider is installed in every build,
+  but the cipher-suite restriction, primitive allowlist, startup
+  self-test, and `/healthz` attestation are gated behind `ent`. The
+  25 MB release binary-size target has been removed. End-user
+  documentation has been updated to remove references to feature packs
+  and the old multi-pack build model.
+
 ### Added
 
 - Nightly soak with RSS-ceiling and p99-drift assertions (#174,

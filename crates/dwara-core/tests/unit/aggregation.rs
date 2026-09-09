@@ -1,7 +1,5 @@
 //! Unit tests for `aggregation` (relocated from src).
 
-#![cfg(feature = "aggregation")]
-
 use dwara_core::aggregation::{
     compose, extract_jsonpath, make_error_fragment_result, make_fragment_result, shape_fragment,
     validate_spec, AggregationSpec, ComposeResult, FailPolicy, FragmentResult, FragmentSpec,

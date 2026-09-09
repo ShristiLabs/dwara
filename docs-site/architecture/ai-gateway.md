@@ -64,7 +64,7 @@ The exact order, verified against `dataplane/ai_proxy.rs::serve_ai`:
    injection, PII, banned content, and schema violations. Denials are
    403.
 5. **Semantic cache lookup** — for non-streaming requests, an
-   embedding-similarity cache is checked (feature-gated). A hit
+   embedding-similarity cache is checked (compiled into the OSS build). A hit
    returns the cached response without contacting the provider.
 6. **Alias resolution / routing** — the model alias is resolved to a
    provider target. This may involve failover chains, canary splits,

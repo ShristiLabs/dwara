@@ -1,7 +1,7 @@
 # Extism PDK plugins, bot hooks, signed URLs, cert pinning (DW-109)
 
 > Implements issue DW-109 (four security/plugin sub-features, each
-> independently feature-gated). Sources:
+> independently compiled into the OSS build). Sources:
 > `crates/dwara-core/src/plugins/extism.rs` (`ExtismHost`,
 > `ExtismPlugin`, `ExtismInstance`, `ExtismDispatch`,
 > `ExtismChainAdapter`, `NoExtism`),
@@ -22,7 +22,7 @@ security posture. The Extism PDK runtime is an alternative plugin host
 (alongside proxy-wasm from DW-055 and the native filter trait from
 DW-119). The bot hooks, signed URLs, and cert pinning are security
 features that run in the request path. Each is independently
-feature-gated so operators enable only what they need.
+compiled into the OSS build so operators enable only what they need.
 
 ## Extism PDK plugin scaffold
 
@@ -34,8 +34,8 @@ gateway. Like the proxy-wasm host (DW-055), an Extism plugin is a
 simpler -- a single `call` entry point with input/output buffers, not
 a multi-phase stream contract.
 
-The scaffold is feature-gated behind the `extism` cargo feature
-(default OFF). The actual `extism` crate is NOT a dependency yet. The
+The scaffold is compiled into the OSS build (config-accepted, runtime stubbed)
+(default-on). The actual `extism` crate is NOT a dependency yet. The
 runtime calls in `ExtismHost` are scaffolded as documented no-ops:
 `load` records the plugin definition but does not create a real Extism
 plugin; `instance` returns an `ExtismInstance` whose phase methods
@@ -85,8 +85,8 @@ hex-encoded. The verifier extracts `sig` (configurable via
 recomputes the HMAC, and compares using a constant-time comparison
 (`subtle::ConstantTimeEq`).
 
-The verifier is feature-gated behind the `signed_url` cargo feature
-(default OFF). The config schema is always present; when off, the
+The verifier is compiled into the OSS build (config-accepted, runtime stubbed)
+(default-on). The config schema is always present; when off, the
 block is accepted but inert (validation warns). Signed URL
 verification runs as an authn method, before authz -- a route with
 `signed_url.enabled: true` requires a valid signature; a missing or
@@ -147,8 +147,8 @@ flowchart TD
     Extract -->|extraction failure| Reject
 ```
 
-The implementation is feature-gated behind the `cert_pinning` cargo
-feature (default OFF). `CertPin` holds the SHA-256 hash of the SPKI
+The implementation is compiled into the OSS build
+feature (default-on). `CertPin` holds the SHA-256 hash of the SPKI
 (lowercase hex, 64 chars). `CertPinVerifier` holds the allowed SPKI
 hashes; `from_upstream` returns `None` when the upstream has no
 `cert_pinning` block (normal CA-based verification). When the feature

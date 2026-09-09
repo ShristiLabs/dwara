@@ -5,18 +5,11 @@
 //! They verify depth limit enforcement, complexity limit enforcement,
 //! persisted-query enforcement, the body-size cap, the parse-depth
 //! cap (parser DoS prevention), and that valid queries pass through.
-//!
-//! Feature-gated behind the `graphql` cargo feature. The test file
-//! uses `#![cfg(feature = "graphql")]` so it compiles to an empty
-//! binary without the feature.
-
-#![cfg(feature = "graphql")]
 
 use std::collections::HashMap;
 
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::body::Body as _;
 
 use dwara_core::config::{GraphqlPersistedQueries, RouteGraphql};
 use dwara_core::dataplane::graphql::{

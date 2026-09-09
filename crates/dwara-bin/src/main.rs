@@ -105,14 +105,12 @@ mod upgrade;
 // #126: OTLP trace export lives behind the default-off `otlp` cargo
 // feature (musl size budget; see the module docs). Feature OFF = the
 // module does not exist and DWARA_OTLP_ENDPOINT stays inert.
-#[cfg(feature = "otlp")]
 mod otlp;
 
 // DW-088: HTTP/3 (QUIC) ingress lives behind the default-off `h3`
 // cargo feature (quinn+h3 add significant compile time and binary
 // size). Feature OFF = the module does not exist and `protocol: h3`
 // is rejected at config validation.
-#[cfg(feature = "h3")]
 mod h3;
 
 use std::collections::BTreeMap;
@@ -173,13 +171,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // the `tokio-console` CLI connects to it for live async task
     // diagnostics. The console layer joins the subscriber chain the
     // same way as OTLP; feature OFF compiles the exact same subscriber.
-    #[cfg(feature = "otlp")]
     let otlp = otlp::Otlp::from_env();
     // DW-097: build the console layer when the feature is compiled in
     // AND DWARA_CONSOLE is set (unset = inert, no server spawned).
-    #[cfg(feature = "console")]
     let console_enabled = std::env::var("DWARA_CONSOLE").is_ok();
-    #[cfg(feature = "console")]
     let console_layer: Option<_> = if console_enabled {
         Some(
             console_subscriber::ConsoleLayer::builder()
@@ -194,14 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let subscriber = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().json().with_target(true));
-    #[cfg(feature = "otlp")]
     let subscriber = subscriber.with(otlp.layer());
-    #[cfg(feature = "console")]
     let subscriber = subscriber.with(console_layer);
     subscriber.init();
-    #[cfg(feature = "otlp")]
     otlp.log_status();
-    #[cfg(feature = "console")]
     if console_enabled {
         tracing::info!(
             code = "console_enabled",
@@ -210,17 +201,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     tls::install_aws_lc_rs_provider();
 
-    // DW-111: FIPS 140-3 mode startup self-test. When the `fips` cargo
-    // feature is ON, install the aws-lc-rs FIPS provider as the
-    // process-default (the same provider, but the self-test confirms the
-    // install took effect), run the self-test, and refuse to boot (exit
-    // 1) if the provider is not the FIPS-validated aws-lc-rs provider.
-    // The attestation is logged at startup and surfaced on /healthz.
-    #[cfg(feature = "fips")]
+    // DW-111: FIPS 140-3 mode startup self-test. The aws-lc-rs provider
+    // is installed as the process-default in every build (the regular
+    // install above). In Enterprise builds (the `ent` cargo feature),
+    // FIPS enforcement is active: the self-test must pass or the gateway
+    // refuses to boot. In OSS builds the self-test runs for attestation
+    // on /healthz but does not gate startup. The attestation is logged
+    // at startup and surfaced on /healthz.
     {
         dwara_core::fips::install_fips_provider();
         let attestation = dwara_core::fips::fips_self_test();
-        if !attestation.self_test_passed {
+        if dwara_core::fips::FipsMode::current().is_enabled() && !attestation.self_test_passed {
             tracing::error!(
                 code = "fips_self_test_failed",
                 provider = %attestation.provider,
@@ -230,13 +221,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             std::process::exit(1);
         }
-        tracing::info!(
-            code = "fips_mode_active",
-            provider = %attestation.provider,
-            self_test_passed = attestation.self_test_passed,
-            timestamp = attestation.timestamp,
-            "FIPS 140-3 mode active: aws-lc-rs FIPS provider installed and self-test passed"
-        );
+        if attestation.enabled {
+            tracing::info!(
+                code = "fips_mode_active",
+                provider = %attestation.provider,
+                self_test_passed = attestation.self_test_passed,
+                timestamp = attestation.timestamp,
+                "FIPS 140-3 mode active: aws-lc-rs FIPS provider installed and self-test passed"
+            );
+        }
     }
 
     let config_path = PathBuf::from(
@@ -477,7 +470,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // DW-088: H3 (QUIC) listeners are collected separately — they bind
     // UDP sockets and run a QUIC accept loop, not a TCP accept loop.
     // They reuse the TlsTermination cert material for the QUIC handshake.
-    #[cfg(feature = "h3")]
     let mut h3_listeners: Vec<(Listener, Arc<TlsTermination>)> = Vec::new();
     for l in &configured {
         // DW-103: UDP listeners bind a UDP socket (not TCP). The UDP
@@ -495,7 +487,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         // DW-088: H3 listeners are handled separately (UDP/QUIC, not
         // TCP). Skip them in the TCP bind loop.
-        #[cfg(feature = "h3")]
         if l.protocol == ListenerProtocol::H3 {
             let tls_cfg = l.tls.as_ref().expect("validated h3 listener has tls");
             let term = TlsTermination::build(tls_cfg).map_err(
@@ -530,7 +521,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ListenerMode::Cleartext => "cleartext http/1.1+h2c",
                 ListenerMode::Terminate(_) => "tls terminate",
                 ListenerMode::Passthrough => "tls passthrough",
-                #[cfg(feature = "l4")]
                 ListenerMode::L4 { .. } => "l4 tcp proxy",
             },
             config = %config_path.display().to_string(),
@@ -630,7 +620,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The exporter reads the observability registry on each tick and
     // POSTs OTLP protobuf to /v1/metrics on the collector. Same env var
     // as traces (one endpoint, two signals).
-    #[cfg(feature = "otlp")]
     let otlp_metrics = otlp::OtlpMetrics::spawn(dp.observability_arc());
 
     // DW-031: distributed Redis rate limiter (ent feature only).
@@ -1187,7 +1176,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // DW-088: Spawn H3 (QUIC) listener tasks. Each H3 listener runs its
     // own QUIC accept loop with the same shutdown signal.
-    #[cfg(feature = "h3")]
     {
         for (listener, tls) in h3_listeners {
             let dp = Arc::clone(&dp);
@@ -1300,13 +1288,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // batch and posts the remaining spans, bounded by whatever is left
     // of the drain budget (the SDK caps itself at 5s). Feature OFF or
     // endpoint unset = nothing here.
-    #[cfg(feature = "otlp")]
     otlp.shutdown(deadline.saturating_duration_since(tokio::time::Instant::now()))
         .await;
 
     // DW-073: OTLP metrics exporter shutdown — signal the periodic task
     // to stop and perform a final flush.
-    #[cfg(feature = "otlp")]
     if let Some(metrics) = otlp_metrics {
         metrics.shutdown();
     }

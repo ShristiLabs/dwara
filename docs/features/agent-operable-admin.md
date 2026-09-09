@@ -12,7 +12,7 @@ permissions before executing.
 Build with the `mcp` feature:
 
 ```sh
-cargo build --features mcp
+cargo build
 ```
 
 ## MCP tools
@@ -115,5 +115,5 @@ admin API, reading config, etc.).
 
 ## Feature gate
 
-The `mcp` cargo feature must be enabled. Without it, the module is
+MCP is compiled into the OSS build. The module is
 not compiled.

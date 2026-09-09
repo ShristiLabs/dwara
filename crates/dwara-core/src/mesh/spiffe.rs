@@ -15,7 +15,7 @@
 //! The Workload API client is implemented behind a transport
 //! abstraction ([`WorkloadApiTransport`]) so the fetch logic is
 //! testable without a real SPIRE agent. The production transport
-//! ([`GrpcWorkloadApi`]) uses tonic over a Unix domain socket and is
+//! (`GrpcWorkloadApi`) uses tonic over a Unix domain socket and is
 //! gated behind the `ent` cargo feature (which brings in tonic + prost;
 //! the mesh feature itself is flag-only). A [`FakeWorkloadApi`] is
 //! provided for tests.
@@ -173,7 +173,7 @@ impl SpiffeConfig {
 }
 
 /// The transport abstraction for the SPIRE Workload API. The
-/// production implementation ([`GrpcWorkloadApi`]) uses tonic over a
+/// production implementation (`GrpcWorkloadApi`) uses tonic over a
 /// Unix domain socket (ent-gated); tests use [`FakeWorkloadApi`].
 ///
 /// The trait is async via `async-trait` (dyn-compatible, the same
@@ -247,7 +247,7 @@ impl SvidRefreshResult {
 impl SpiffeClient {
     /// Build a client from the resolved SPIFFE config and a transport.
     /// The transport is the seam for the Workload API wire protocol:
-    /// the production gRPC transport ([`GrpcWorkloadApi`]) or a test
+    /// the production gRPC transport (`GrpcWorkloadApi`) or a test
     /// fake ([`FakeWorkloadApi`]).
     pub fn new(config: SpiffeConfig, transport: std::sync::Arc<dyn WorkloadApiTransport>) -> Self {
         SpiffeClient { config, transport }

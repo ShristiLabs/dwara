@@ -151,7 +151,7 @@ Feature areas written up so far (M1-M6 complete):
 - [Enterprise licensing gate](./features/licensing.md) — the
   `LicenseGate` runtime value that holds an optional verified license
   and gates enterprise features behind feature-claim flags; the `ent`
-  cargo feature, offline Ed25519 verification, the grace-period
+  feature, offline Ed25519 verification, the grace-period
   degradation curve, and the `dwara_license_status` metric (DW-032).
 - [CP/DP split](./features/cp-dp-split.md) — the control-plane /
   data-plane split architecture: controller-to-edge gRPC config

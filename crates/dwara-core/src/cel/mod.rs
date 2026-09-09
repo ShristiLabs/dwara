@@ -6,7 +6,7 @@
 //! - [`CelProgram`] — a compiled CEL program (parse + type-check done
 //!   at compile time, never on the request path).
 //! - [`CelContext`] — a CEL evaluation context (variable bindings).
-//! - [`CelValue`] — a CEL value (the result of evaluation).
+//! - `CelValue` — a CEL value (the result of evaluation).
 //!
 //! ## Design (decision 5; §9.3)
 //!

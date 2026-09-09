@@ -144,7 +144,7 @@ dwara-cli k8s conformance-report
 
 Emits the upstream Gateway API conformance report YAML. Feature-gated:
 requires building `dwara-cli` with the `k8s` feature
-(`cargo build -p dwara-cli --features k8s --bin dwara-cli`); the
+(`cargo build -p dwara-cli --bin dwara-cli`); the
 published OSS binaries do not include it. See
 [Kubernetes Gateway API](./kubernetes-gateway-api).
 
@@ -152,7 +152,7 @@ published OSS binaries do not include it. See
 
 `dwara-loadgen` is a separate benchmarking binary shipped alongside
 the CLI. It drives concurrent load at a target across HTTP/1.1,
-HTTP/2 (h2c), and feature-gated HTTP/3 (QUIC), and optionally runs an
+HTTP/2 (h2c), and HTTP/3 (QUIC), and optionally runs an
 in-process echo upstream:
 
 ```sh
@@ -163,8 +163,8 @@ dwara-loadgen --url http://127.0.0.1:8080/ --protocol h2 \
   --workload pool-reuse --json               # h2 pool-reuse, JSON output
 ```
 
-`--protocol h3` requires building with the `h3` cargo feature
-(`cargo build -p dwara-cli --features h3 --bin dwara-loadgen`) and
+`--protocol h3` uses the HTTP/3 transport compiled into the default build
+(`cargo build -p dwara-cli --bin dwara-loadgen`) and
 rejects `--echo` (no in-process QUIC echo — point it at a real h3
 listener); `--insecure` skips certificate verification for loopback
 targets. The three `--workload` shapes are `throughput` (default,
@@ -177,7 +177,7 @@ for the regression gate (`scripts/bench-regression.py`).
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--url` | `http://127.0.0.1:18080/` | Target URL. |
-| `--protocol` | `h1` | Wire protocol: `h1`, `h2` (h2c), or `h3` (feature-gated). |
+| `--protocol` | `h1` | Wire protocol: `h1`, `h2` (h2c), or `h3`. |
 | `--workload` | `throughput` | Macro workload: `throughput`, `pool-reuse`, or `streaming`. |
 | `--connections` | `10` | Concurrent worker connections. |
 | `--duration` | `10` | Run length in seconds. |

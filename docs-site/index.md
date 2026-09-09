@@ -77,7 +77,7 @@ features:
     linkText: Operations
   - icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2.5 20.2 7.2v9.6L12 21.5 3.8 16.8V7.2L12 2.5Z'/><circle cx='12' cy='12' r='2.2'/><path d='M12 7v2.8'/><path d='m8.2 14.6 2.4-1.4'/><path d='m15.8 14.6-2.4-1.4'/></svg>"
     title: Kubernetes Gateway API
-    details: "Translate Gateway, HTTPRoute, and Ingress resources into Dwara config and run the controller beside your cluster (a compile-time feature pack)."
+    details: "Translate Gateway, HTTPRoute, and Ingress resources into Dwara config and run the controller beside your cluster."
     link: /guide/kubernetes-gateway-api
     linkText: Kubernetes
 
@@ -91,14 +91,14 @@ editions:
     link: /guide/getting-started
     linkText: Get started
     highlight: true
-  - title: Compile-time feature packs
-    tagline: "Heavier capabilities you opt into per build -- every pack is default-OFF."
+  - title: Complete capability set
+    tagline: "Every dataplane capability compiled into the default OSS build."
     points:
       - Proxy-Wasm plugins and native filters
       - CEL expressions and Cedar/OPA authorization
       - Aggregation, protocol translation, HTTP/3
     link: /guide/feature-reference
-    linkText: Feature flags
+    linkText: Feature reference
   - title: Enterprise edition
     tagline: "Fleet-scale operation across many gateway instances."
     points:
@@ -181,24 +181,22 @@ Docker images, and systemd.
 
 The OSS core -- proxying, TLS, routing, resilience, security,
 observability, analytics -- is complete and production-shaped, and
-everything in the cards above ships in it. Heavier capabilities
+everything in the cards above ships in it. Every dataplane capability
 (Proxy-Wasm plugins, CEL expressions, Cedar/OPA authorization,
-aggregation) are compile-time feature packs, and fleet-scale features
-(CP/DP split, Redis-backed rate limiting and convergence, Vault/KMS
-secrets, workspaces) make up the enterprise edition. The
+aggregation, HTTP/3, protocol translation) is compiled into the
+default OSS build, and fleet-scale features (CP/DP split, Redis-backed
+rate limiting and convergence, Vault/KMS secrets, workspaces, FIPS
+enforcement) make up the enterprise edition. The
 [editions guide](/guide/editions) has the full comparison matrix.
 
 <HomeEditions />
 
-## Feature flags
+## Feature reference
 
-Every optional capability is a cargo feature flag, **default-OFF**. The
-default `cargo build` produces the complete OSS gateway with no optional
-packs -- each pack adds binary size or a heavy dependency, so you opt in
-per build. The chips below show every flag and its runtime maturity; the
+Every dataplane capability is compiled into the default OSS build —
+there are no optional capabilities to enable. The
 [feature reference](/guide/feature-reference) has build commands,
-dependency chains, license claims, and the full maturity table.
+enterprise-only config blocks, and the maturity matrix showing which
+capabilities are wired end to end and which are still landing.
 
 <HomeFlags />
-
-The published OSS binaries and images are built with no packs enabled.

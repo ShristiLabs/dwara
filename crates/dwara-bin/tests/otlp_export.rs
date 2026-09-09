@@ -22,8 +22,6 @@
 //! the expected span count, names, trace ids, and parent links — the
 //! exact structure a collector ingests.
 
-#![cfg(feature = "otlp")]
-
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};

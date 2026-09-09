@@ -13,7 +13,7 @@ Configuration is built from a fixed, frozen set of concepts:
 plus **Consumer**, **Credential**, **Policy**, and **Workspace**. A
 published, compiled configuration is a **Snapshot** (an immutable, compiled view of the config the gateway serves from).
 
-For the full concept map — editions, feature packs, identity, policy
+For the full concept map — editions, capabilities, identity, policy
 scopes, resilience, the AI gateway, observability, extensibility, and
 fleet concepts — see [Concepts and taxonomy](./concepts).
 

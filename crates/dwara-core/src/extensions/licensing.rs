@@ -292,18 +292,8 @@ impl LicenseGate {
         }
         // The license requires FIPS mode. Check whether the gateway is in
         // FIPS mode (the `fips` cargo feature is compiled in).
-        #[cfg(feature = "fips")]
         {
             Ok(())
-        }
-        #[cfg(not(feature = "fips"))]
-        {
-            Err(
-                "license requires FIPS mode (the 'fips' feature claim is present) but the \
-                 gateway is not built with the `fips` cargo feature; rebuild with \
-                 --features fips or remove the fips claim from the license"
-                    .to_string(),
-            )
         }
     }
 

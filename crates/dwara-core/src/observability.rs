@@ -206,8 +206,8 @@
 //! ## OTel GenAI semantic conventions (AI-07)
 //!
 //! AI request spans carry the OpenTelemetry GenAI semantic-convention
-//! `gen_ai.*` attributes (https://opentelemetry.io/docs/specs/semconv/
-//! gen-ai/): `gen_ai.system` (the provider kind), `gen_ai.request.model`
+//! `gen_ai.*` attributes (<https://opentelemetry.io/docs/specs/semconv/gen-ai/>):
+//! `gen_ai.system` (the provider kind), `gen_ai.request.model`
 //! (the client alias), `gen_ai.response.model` (the provider model that
 //! served), `gen_ai.request.{max_tokens,temperature,top_p}`, and the
 //! provider-reported `gen_ai.usage.{prompt_tokens,completion_tokens,
@@ -2810,7 +2810,7 @@ impl Observability {
 /// Record the request-side OTel GenAI semantic-convention attributes
 /// (AI-07) onto an AI span. The span MUST have been created with every
 /// `gen_ai.*` field declared as `tracing::field::Empty` (see
-/// [`gen_ai_span_fields`]); `Span::record` only fills fields the span's
+/// `gen_ai_span_fields`); `Span::record` only fills fields the span's
 /// metadata already declared. Request-side fields are always available
 /// once the canonical [`crate::ai::types::ChatRequest`] is parsed; the
 /// `system` is the serving provider's kind

@@ -226,9 +226,9 @@ summary:
 - **Upstream TLS** — separate trust store, optional mTLS client
   certificate, optional certificate pinning.
 - **FIPS** — startup provider/self-test, cipher restrictions, and
-  health attestation when built with the `fips` feature.
+  health attestation in Enterprise (ent) builds.
 - **Post-quantum TLS** — hybrid key-exchange wiring, experimental,
-  behind the `pq` feature.
+  in the default OSS build.
 
 ## See also
 

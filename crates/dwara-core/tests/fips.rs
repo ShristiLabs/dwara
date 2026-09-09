@@ -1,28 +1,36 @@
 //! Integration tests for DW-111 (FIPS 140-3 mode).
 //!
 //! These tests exercise the FIPS module's self-test, primitive allowlist,
-//! and the snapshot validation rules. When the `fips` cargo feature is
-//! OFF, the module is inert (self-test returns Disabled, no restrictions).
-//! When the feature is ON, the self-test verifies the aws-lc-rs FIPS
+//! and the snapshot validation rules. FIPS enforcement is an Enterprise-
+//! only capability: in OSS builds (the default, no `ent` cargo feature)
+//! the module is inert (self-test returns Disabled, no restrictions).
+//! In Enterprise builds the self-test verifies the aws-lc-rs FIPS
 //! provider is installed and the validation rejects non-approved
 //! primitives (Ed25519 certs, Argon2 credential hashing).
-
-#![cfg(feature = "fips")]
 
 use dwara_core::security::fips;
 
 #[test]
-fn fips_self_test_passes_with_feature_on() {
+fn fips_self_test_is_disabled_in_oss() {
     let attestation = fips::fips_self_test();
-    assert!(
-        attestation.self_test_passed,
-        "FIPS self-test should pass when the fips feature is on and aws-lc-rs is the default provider"
-    );
-    assert_eq!(attestation.enabled, fips::FipsMode::Enabled);
-    assert!(
-        !attestation.provider.is_empty(),
-        "provider name should be non-empty"
-    );
+    // In OSS builds FIPS enforcement is off; the attestation is inert.
+    if !fips::FipsMode::current().is_enabled() {
+        assert!(!attestation.enabled, "FIPS mode should be disabled in OSS");
+        assert!(
+            !attestation.self_test_passed,
+            "self-test should not pass when FIPS is disabled"
+        );
+    } else {
+        assert!(
+            attestation.self_test_passed,
+            "FIPS self-test should pass when the ent feature is on and aws-lc-rs is the default provider"
+        );
+        assert!(attestation.enabled, "FIPS mode should be enabled");
+        assert!(
+            !attestation.provider.is_empty(),
+            "provider name should be non-empty"
+        );
+    }
 }
 
 #[test]
@@ -35,6 +43,11 @@ fn fips_attestation_is_serializable() {
 
 #[test]
 fn fips_allowed_ciphers_are_restricted() {
+    // In OSS builds all primitives are allowed (no FIPS restriction).
+    if !fips::FipsMode::current().is_enabled() {
+        assert!(fips::is_primitive_allowed("CHACHA20_POLY1305_SHA256"));
+        return;
+    }
     // The FIPS-approved cipher list excludes ChaCha20-Poly1305.
     assert!(!fips::is_primitive_allowed("CHACHA20_POLY1305_SHA256"));
     // AES-GCM suites are allowed.
@@ -44,6 +57,11 @@ fn fips_allowed_ciphers_are_restricted() {
 
 #[test]
 fn fips_disallowed_signatures() {
+    // In OSS builds no signatures are disallowed.
+    if !fips::FipsMode::current().is_enabled() {
+        assert!(!fips::is_signature_disallowed("ed25519"));
+        return;
+    }
     // Ed25519 is not on the FIPS-validated list for aws-lc-rs.
     assert!(fips::is_signature_disallowed("ed25519"));
     // ECDSA P-256 is allowed.
@@ -52,6 +70,11 @@ fn fips_disallowed_signatures() {
 
 #[test]
 fn fips_disallowed_credential_hashes() {
+    // In OSS builds no credential hashes are disallowed.
+    if !fips::FipsMode::current().is_enabled() {
+        assert!(!fips::is_credential_hash_disallowed("argon2"));
+        return;
+    }
     // Argon2 is not FIPS-approved.
     assert!(fips::is_credential_hash_disallowed("argon2"));
     // PBKDF2 is FIPS-approved.
@@ -59,12 +82,19 @@ fn fips_disallowed_credential_hashes() {
 }
 
 #[test]
-fn fips_health_attestation_returns_some_when_enabled() {
+fn fips_health_attestation_reflects_mode() {
     let attestation = fips::health_attestation();
-    assert!(
-        attestation.is_some(),
-        "health attestation should be Some when fips feature is on"
-    );
-    let a = attestation.unwrap();
-    assert_eq!(a.enabled, fips::FipsMode::Enabled);
+    if !fips::FipsMode::current().is_enabled() {
+        assert!(
+            attestation.is_none(),
+            "health attestation should be None in OSS (FIPS disabled)"
+        );
+    } else {
+        assert!(
+            attestation.is_some(),
+            "health attestation should be Some when FIPS is enabled"
+        );
+        let a = attestation.unwrap();
+        assert!(a.enabled, "FIPS mode should be enabled");
+    }
 }

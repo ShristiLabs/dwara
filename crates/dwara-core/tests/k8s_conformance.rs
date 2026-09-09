@@ -4,8 +4,6 @@
 //!
 //! Feature-gated behind the `k8s` cargo feature.
 
-#![cfg(feature = "k8s")]
-
 use std::collections::HashMap;
 
 use dwara_core::config::{Endpoint as DwaraEndpoint, PathMatchKind, RouteAction, TlsMode};

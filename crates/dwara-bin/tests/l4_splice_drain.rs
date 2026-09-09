@@ -20,8 +20,6 @@
 //! (`ListenerMode::L4`), which registers splices through the same
 //! `SpliceDrain` tracker.
 
-#![cfg(feature = "l4")]
-
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

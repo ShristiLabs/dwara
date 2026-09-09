@@ -1,33 +1,33 @@
 //! Post-quantum TLS (DW-105): X25519+ML-KEM hybrid key exchange.
 //!
 //! This module wires the X25519+ML-KEM hybrid key-exchange group into
-//! rustls, behind the experimental `pq` cargo feature. The hybrid group
-//! combines a classical ECDH secret (X25519) with a post-quantum KEM
-//! secret (ML-KEM, formerly Kyber) so that the negotiated session key
-//! remains confidential even if a future quantum adversary can break
-//! ECDH. The classical X25519 share is kept as a fallback, so a client
-//! that does not support the hybrid group still completes a classical
-//! handshake (rustls's kx group list is a preference order: the first
-//! group the client supports wins, so prepending the hybrid group
-//! PREFERS it without removing the classical fallback).
+//! rustls. The hybrid group combines a classical ECDH secret (X25519)
+//! with a post-quantum KEM secret (ML-KEM, formerly Kyber) so that the
+//! negotiated session key remains confidential even if a future quantum
+//! adversary can break ECDH. The classical X25519 share is kept as a
+//! fallback, so a client that does not support the hybrid group still
+//! completes a classical handshake (rustls's kx group list is a
+//! preference order: the first group the client supports wins, so
+//! prepending the hybrid group PREFERS it without removing the
+//! classical fallback).
 //!
 //! # Experimental
 //!
 //! The rustls API for post-quantum key exchange is EXPERIMENTAL and not
 //! yet stable: the specific kx group type, its registration path, and
 //! the provider integration may change between rustls releases. This
-//! module is therefore structured so the feature gate and config schema
-//! EXIST and COMPILE regardless of whether the experimental PQ API is
-//! available in the pinned rustls version. When the `pq` feature is ON
-//! but the experimental API is not reachable, [`install_pq_kx_group`]
-//! is a documented no-op (it logs and returns [`PqMode::Disabled`]);
-//! when the API stabilizes, the real wiring lands here without touching
-//! config, validation, or metrics.
+//! module is therefore structured so the config schema EXISTS and
+//! COMPILES regardless of whether the experimental PQ API is available
+//! in the pinned rustls version. When the experimental API is not
+//! reachable, [`install_pq_kx_group`] is a documented no-op (it logs
+//! and returns [`PqMode::Disabled`]); when the API stabilizes, the real
+//! wiring lands here without touching config, validation, or metrics.
 //!
 //! # FIPS incompatibility
 //!
 //! ML-KEM is NOT on the FIPS-validated list for aws-lc-rs. Combining PQ
-//! hybrid key exchange with FIPS mode (`fips` cargo feature) is
+//! hybrid key exchange with FIPS mode (Enterprise `ent` cargo feature)
+//! is
 //! REJECTED at config validation: a listener or upstream with `pq:
 //! true` while FIPS mode is active fails validation naming the field.
 //! The two features must not combine unless both algorithms are on a
@@ -44,32 +44,26 @@
 
 /// The post-quantum TLS mode of the gateway.
 ///
-/// [`PqMode::Enabled`] when the `pq` cargo feature is compiled in;
-/// [`PqMode::Disabled`] otherwise. This is a compile-time constant:
-/// the feature is a build-time switch, not a runtime toggle (the same
-/// shape as [`crate::security::fips::FipsMode`]).
+/// [`PqMode::Enabled`] when the PQ module is compiled in (always in the
+/// OSS build); [`PqMode::Disabled`] otherwise. This is a compile-time
+/// constant (the same shape as [`crate::security::fips::FipsMode`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PqMode {
     /// Post-quantum hybrid key exchange is available: the X25519+ML-KEM
     /// kx group is prepended to the rustls provider's kx group list for
     /// listeners/upstreams that opt in via `pq: true`.
     Enabled,
-    /// Post-quantum hybrid key exchange is unavailable: the `pq` cargo
-    /// feature is off, so `pq: true` in config is inert (no kx group
-    /// manipulation, validation warns).
+    /// Post-quantum hybrid key exchange is unavailable: the experimental
+    /// rustls PQ API is not reachable, so `pq: true` in config is inert
+    /// (no kx group is prepended).
     Disabled,
 }
 
 impl PqMode {
     /// The current PQ mode (compile-time determined).
     pub fn current() -> Self {
-        #[cfg(feature = "pq")]
         {
             PqMode::Enabled
-        }
-        #[cfg(not(feature = "pq"))]
-        {
-            PqMode::Disabled
         }
     }
 
@@ -179,7 +173,6 @@ pub fn pq_handshake_metric(result: &PqHandshakeResult) -> &'static str {
 /// [`PqMode::Disabled`] when the feature is off or the experimental API
 /// is not available.
 pub fn install_pq_kx_group() -> PqMode {
-    #[cfg(feature = "pq")]
     {
         // The rustls PQ API for X25519+ML-KEM is experimental. The
         // aws-lc-rs provider does not yet expose a stable named kx
@@ -205,11 +198,6 @@ pub fn install_pq_kx_group() -> PqMode {
         );
         PqMode::Disabled
     }
-
-    #[cfg(not(feature = "pq"))]
-    {
-        PqMode::Disabled
-    }
 }
 
 /// True when the `pq` cargo feature is compiled in AND the
@@ -217,10 +205,9 @@ pub fn install_pq_kx_group() -> PqMode {
 /// distinguish "feature on but API inert" (warn) from "feature off"
 /// (warn) — both warn, but the message differs. Today this always
 /// returns `false` because the experimental API is not wired; when the
-/// API stabilizes, this returns `true` under `#[cfg(feature = "pq")]`.
+/// API stabilizes, this returns `true`.
 pub fn pq_api_available() -> bool {
     // The experimental rustls PQ API is not yet reachable in the pinned
-    // version. When it stabilizes, this becomes `true` under
-    // `#[cfg(feature = "pq")]`.
+    // version. When it stabilizes, this becomes `true`.
     false
 }

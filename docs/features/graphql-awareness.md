@@ -18,8 +18,8 @@ express an arbitrarily deep or wide query that amplifies into expensive
 upstream work. DW-099 gives the gateway a request-phase check that
 rejects abusive queries BEFORE any resource is spent on auth or rate
 limiting, exactly like the WAF-lite (DW-051) and anomaly (DW-090)
-phases it sits beside. Two defenses, both feature-gated behind the
-`graphql` cargo feature, with zero new dependencies.
+phases it sits beside. Two defenses, both compiled into the OSS build
+GraphQL module, with zero new dependencies.
 
 ## Depth and complexity limits
 
@@ -72,10 +72,10 @@ The GraphQL check runs AFTER the WAF-lite filter and anomaly scoring
 and BEFORE the route limits (DW-027): it is a content-shape filter that
 rejects abusive queries before any resource is spent on auth or rate
 limiting. It inspects the ORIGINAL request body (before transforms).
-Only routes with a `graphql` block AND the `graphql` cargo feature
+Only routes with a `graphql` block AND the GraphQL module
 compiled in are inspected; routes without the block are never checked,
 and when the feature is off the block is accepted but inert (the config
-schema is always present, the runtime check is feature-gated).
+schema is always present, the runtime check is compiled into the OSS build).
 
 `check_body` collects the body up to the cap, extracts the `query`
 field from the JSON body (via `serde_json`, already a dependency), runs
@@ -113,7 +113,7 @@ Validation (`snapshot/mod.rs`) rejects, when `enabled` is true:
 the persisted-query store, every hash must be a non-empty string and
 every query text must be non-empty. A disabled `graphql` block with
 zero limits is accepted (the block is inert). The config schema is
-always present regardless of the `graphql` cargo feature, so configs
+always present regardless of the GraphQL module, so configs
 round-trip across builds with and without the feature.
 
 The [dataplane and proxy](./dataplane-proxy.md) page covers the request

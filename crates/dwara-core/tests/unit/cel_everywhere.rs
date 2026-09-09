@@ -1,7 +1,5 @@
 //! Unit tests for `cel::everywhere` (relocated from src).
 
-#![cfg(feature = "cel")]
-
 use dwara_core::cel::everywhere::{
     compile_for, evaluate_for, CelUseSite, HeaderTransform, PolicyCondition, RateLimitKey,
     RequestContext, RouteCondition,

@@ -19,7 +19,7 @@
 > guide](../../docs-site/guide/security.md).
 
 Post-quantum TLS prepends the X25519+ML-KEM hybrid key-exchange group
-into rustls, behind the experimental `pq` cargo feature. The hybrid
+into rustls, behind the experimental post-quantum TLS. The hybrid
 group combines a classical ECDH secret (X25519) with a post-quantum KEM
 secret (ML-KEM, formerly Kyber) so that the negotiated session key
 remains confidential even if a future quantum adversary can break ECDH.
@@ -48,7 +48,7 @@ validation messaging -- today it always returns `false`.
 
 ## The kx group installation
 
-`install_pq_kx_group` is the wiring point. When the `pq` cargo feature
+`install_pq_kx_group` is the wiring point. When the post-quantum TLS
 is ON and the experimental API is reachable, it will construct the
 hybrid group, prepend it to the provider's kx_groups vector, and return
 `PqMode::Enabled`. The canonical group name is `X25519MLKEM768`
@@ -105,7 +105,7 @@ listeners:
   depth, not a bet on one algorithm.
 - **FIPS incompatibility.** ML-KEM is NOT on the FIPS-validated list
   for aws-lc-rs. Combining PQ hybrid key exchange with FIPS mode (`fips`
-  cargo feature) is REJECTED at config validation: a listener or
+  feature is enabled) is REJECTED at config validation: a listener or
   upstream with `pq: true` while FIPS mode is active fails validation
   naming the field. The two features must not combine unless both
   algorithms are on a validated list (a future NIST FIPS 203 module
@@ -114,10 +114,10 @@ listeners:
   group; the rest of the handshake (certificate chain, cipher suite,
   transcript) is unchanged. A client that does not advertise the hybrid
   group negotiates the classical X25519 group with no penalty.
-- **Inert until the API stabilizes.** Building with `--features pq` and
-  setting `pq: true` today does not activate hybrid key exchange -- it
-  logs the experimental warning and uses the classical kx group list.
-  The metric records `disabled`. Operators who want the hybrid
+- **Inert until the API stabilizes.** Setting `pq: true` today does
+  not activate hybrid key exchange -- it logs the experimental warning
+  and uses the classical kx group list. The metric records `disabled`.
+  Operators who want the hybrid
   handshake today must verify the rustls version exposes the stable
   API; the feature gate and schema are forward-compatible so no config
   change is needed when the API lands.

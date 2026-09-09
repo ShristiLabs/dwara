@@ -1,10 +1,10 @@
 # Feature reference
 
-Every optional capability in Dwara is a cargo feature flag that is
-**default-OFF**. The default `cargo build` produces the OSS edition with
-no optional packs. This page is the complete reference for all 29
-feature flags, their edition gating, build commands, and what each
-enables.
+Dwara has two editions: **OSS** (the default build) and **Enterprise**
+(built with `--features ent`). Every dataplane capability is compiled
+into the OSS build — there are no optional capabilities to enable.
+This page is the complete reference for what each edition includes,
+build commands, and feature maturity.
 
 For the high-level OSS vs Enterprise comparison, see
 [Editions](./editions). For the license verification mechanics, see
@@ -12,20 +12,17 @@ For the high-level OSS vs Enterprise comparison, see
 
 ## How features are gated
 
-There are three layers of gating, and every feature passes through the
-ones that apply to it:
+There are two layers of gating:
 
-1. **Compile time (cargo feature).** Every optional pack is a cargo
-   feature on `dwara-core` (and sometimes forwarded by `dwara-bin` or
-   `dwara-cli`). The feature must be listed in `--features` at build
-   time or the code is not compiled in.
+1. **Compile time.** The `ent` cargo feature compiles in the
+   enterprise modules (`dwara-controller`, `dwara-edge`, workspaces,
+   the Redis/Vault extensions, the license verifier, FIPS enforcement).
+   OSS builds do not contain this code at all. Every other capability
+   — H3, L4, OTLP, WASM, CEL, Cedar, GraphQL, gRPC-Web, protocol
+   translation, semantic cache, plugins, PQ, etc. — is compiled into
+   the default OSS build.
 
-2. **Enterprise compile gate (`ent`).** The `ent` cargo feature is a
-   superset that pulls in the enterprise modules and dependencies
-   (`licensing-core`, `redis`, `tonic`, `prost`, `tokio-stream`).
-   Without `ent`, enterprise modules are absent from the binary.
-
-3. **Runtime license gate (`LicenseGate`).** When `ent` is compiled
+2. **Runtime license gate (`LicenseGate`).** When `ent` is compiled
    in, the gateway verifies a signed license file at startup and
    checks feature claims before activating enterprise features. A
    missing license, an expired license past the grace period, or a
@@ -35,54 +32,49 @@ The result is a single degradation story: an expired license degrades
 to the OSS feature set, and the `dwara_license_status` metric reports
 the state.
 
-## All feature flags
+## Build commands
 
-### OSS feature packs
+### OSS (default)
 
-These packs are open-source (Apache-2.0, no license required) but
-default-OFF because each adds binary size or a heavy dependency. Enable
-them per build with `--features <name>`.
+```sh
+cargo build --release
+```
 
-| Flag | Crate | What it adds | Why default OFF |
-|---|---|---|---|
-| `wasm` | dwara-core | proxy-wasm host runtime (wasmtime) | wasmtime + cranelift are a large binary-size cost |
-| `nano_services` | dwara-core | WASM route handlers (implies `wasm`) | wasmtime dependency; opt-in extension model |
-| `plugins` | dwara-core | Native Rust filter trait + unified dispatch chain | compile-in extension path, opt-in by design |
-| `cel` | dwara-core | CEL expression evaluation in policies | cel-interpreter adds binary size |
-| `cedar` | dwara-core | Cedar policy engine + OPA HTTP callout for authorization | cedar-policy adds binary size |
-| `openapi_validation` | dwara-core | Upstream response validation against OpenAPI schemas; also used by AI guardrails schema enforcement | jsonschema adds binary size |
-| `k8s` | dwara-core, dwara-cli | Kubernetes Gateway API / Ingress translation + controller | kube-rs + k8s-openapi add significant binary size |
-| `aggregation` | dwara-core | Multi-upstream response composition (KrakenD-style) | aggregation buffers bodies (size-capped), kept off the default zero-buffering build |
-| `mcp` | dwara-core | Agent-operable administration via MCP server/tools | opt-in attack-surface reduction |
-| `semantic_cache` | dwara-core | Embedding-similarity cache for AI prompts (HNSW ANN) | hnsw_rs adds binary size; external embedding service required |
-| `h3` | dwara-core, dwara-bin | HTTP/3 (QUIC) ingress listener + upstream transport | quinn + h3 add binary size |
-| `a2a` | dwara-core | A2A (agent-to-agent) protocol support | opt-in; task lifecycle state machine implemented, network call stubbed |
-| `graphql` | dwara-core | GraphQL awareness: query depth/complexity limits, persisted-query enforcement | opt-in; only relevant for GraphQL traffic |
-| `grpc_web` | dwara-core | gRPC-Web framing + JSON-to-gRPC transcoding | prost dependency; opt-in protocol support |
-| `protocol_translation` | dwara-core | General protocol translation (REST to gRPC to GraphQL); implies `grpc_web` | prost dependency; opt-in protocol support |
-| `soap` | dwara-core | SOAP/XML translation; implies `protocol_translation` | protocol_translation dependency; opt-in legacy protocol support |
-| `pq` | dwara-core, dwara-bin | Post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | experimental; must not be combined with `fips` |
-| `l4` | dwara-core, dwara-bin | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
-| `api_lifecycle` | dwara-core | API lifecycle management: dev portal, environment profiles, journey recorder | opt-in; config-accepted, runtime partially wired |
-| `extism` | dwara-core | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
-| `cert_pinning` | dwara-core | Upstream TLS certificate pinning by SPKI SHA-256 hash (fail-closed, no CA fallback) | opt-in; verifier wired for https/http2 upstreams (not h3); validation warns when feature is OFF |
-| `signed_url` | dwara-core | Signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
-| `acme` | dwara-core | ACME certificate automation (Let's Encrypt, TLS-ALPN-01) | opt-in; flag-only scaffold, no ACME client dependency yet (config-accepted, runtime stubbed) |
-| `otlp` | dwara-bin | OTLP trace/metrics export to a collector | opentelemetry stack adds ~405 KiB |
-| `console` | dwara-bin | tokio-console diagnostics server | console-subscriber adds binary size |
+Every dataplane capability is included. This is the published OSS
+binary.
 
-### Enterprise features
+### Enterprise
+
+```sh
+# Enterprise build (license required at runtime)
+cargo build --release --features ent
+```
+
+### Diagnostics
+
+```sh
+# tokio-console diagnostics server (development)
+DWARA_CONSOLE=1 cargo run -- -p dwara-bin --config config.yaml
+```
+
+### Loom (concurrency model checking, test-only)
+
+```sh
+cargo test -p dwara-core --features loom --test loom
+```
+
+## Enterprise-only features
 
 These require the `ent` cargo feature at build time AND a valid
 license with the matching claim at runtime. Without `ent`, the code is
 not compiled in. With `ent` but no license (or an expired license past
 grace), the config is accepted but the feature is inert.
 
-| Flag | Crate | What it adds | License claim |
-|---|---|---|---|
-| `ent` | dwara-core, dwara-bin, dwara-cli | Enterprise edition: license verification, Redis rate limiter/cache/convergence, CP/DP gRPC, workspaces, Vault/KMS, federated analytics, AI credential pools | (enables the license gate itself) |
-| `fips` | dwara-core, dwara-bin | FIPS 140-3 mode: aws-lc-rs FIPS provider, self-test, restricted cipher suites | `fips` claim required; binary refuses to start if the claim is present but the `fips` feature is not compiled |
-| `mesh` | dwara-core | Service mesh mode: sidecar controller + SPIFFE/SPIRE mTLS identity | `mesh` claim; validation warns when `mesh` is configured without `ent` (config-accepted, runtime stubbed) |
+| Feature | What it adds | License claim |
+|---|---|---|
+| `ent` | Enterprise edition: license verification, Redis rate limiter/cache/convergence, CP/DP gRPC, workspaces, Vault/KMS, federated analytics, AI credential pools | (enables the license gate itself) |
+| FIPS 140-3 mode | aws-lc-rs FIPS provider enforcement, self-test, restricted cipher suites, primitive allowlist | `fips` claim required |
+| Service mesh | Sidecar controller + SPIFFE/SPIRE mTLS identity | `mesh` claim; validation warns when configured without `ent` |
 
 The `ent` feature pulls in these enterprise-only modules (all
 `#[cfg(feature = "ent")]`):
@@ -97,19 +89,6 @@ The `ent` feature pulls in these enterprise-only modules (all
 | `workspace` | Multi-tenant config partitioning + RBAC + audit |
 | `cp_dp` | Control plane / data plane split (controller + edge) |
 | `dataplane::convergence` | Runtime convergence coordinator |
-
-## Feature dependency chains
-
-Some features imply others. Cargo resolves these automatically when
-you list the top-level feature:
-
-```
-soap -> protocol_translation -> grpc_web -> prost
-nano_services -> wasm
-```
-
-For example, `--features soap` enables `protocol_translation` and
-`grpc_web` transitively. You do not need to list them explicitly.
 
 ## Enterprise-only config blocks
 
@@ -160,86 +139,25 @@ falls back to OSS behavior. The gateway never crashes on a missing
 claim.
 
 The FIPS claim has an additional rule: if the license claims `fips`
-but the binary was not built with the `fips` cargo feature, the gateway
+but the binary was not built with the `ent` cargo feature, the gateway
 **refuses to start** (exit 1). This prevents an operator from
 accidentally running a non-FIPS binary in an environment that expects
 FIPS compliance.
-
-## Build recipes
-
-### OSS (default)
-
-```sh
-cargo build --release
-```
-
-No optional packs. This is the published OSS binary.
-
-### OSS with common packs
-
-```sh
-# Add proxy-wasm filters and OpenAPI validation
-cargo build --release --features wasm,openapi_validation
-
-# Add HTTP/3 ingress and OTLP export
-cargo build --release --features h3,otlp -p dwara-bin
-
-# Add protocol translation (gRPC-Web, REST-to-gRPC, SOAP)
-cargo build --release --features soap
-
-# Add post-quantum TLS
-cargo build --release --features pq -p dwara-bin
-
-# Add L4 TCP/UDP proxying
-cargo build --release --features l4 -p dwara-bin
-```
-
-### Enterprise
-
-```sh
-# Enterprise build (license required at runtime)
-cargo build --release --features ent
-
-# Enterprise + FIPS 140-3 mode
-cargo build --release --features ent,fips
-
-# Enterprise + proxy-wasm + HTTP/3
-cargo build --release --features ent,wasm,h3 -p dwara-bin
-
-# Enterprise + all protocol packs
-cargo build --release --features ent,soap,h3,l4,pq -p dwara-bin
-```
-
-### Diagnostics
-
-```sh
-# tokio-console diagnostics server (development)
-cargo build --features console -p dwara-bin
-DWARA_CONSOLE=1 ./target/debug/dwara run --config config.yaml
-```
-
-### Loom (concurrency model checking, test-only)
-
-```sh
-cargo test -p dwara-core --features loom --test loom
-```
 
 ## Incompatible feature combinations
 
 | Combination | Status |
 |---|---|
-| `fips` + `pq` | **Incompatible.** FIPS mode restricts cipher suites to FIPS-approved primitives; post-quantum hybrid key exchange (ML-KEM) is not FIPS-approved. Do not combine. |
+| FIPS + PQ | **Incompatible.** FIPS mode restricts cipher suites to FIPS-approved primitives; post-quantum hybrid key exchange (ML-KEM) is not FIPS-approved. Do not combine. |
 
 ## Feature maturity
 
-Some feature packs ship as library-complete components with their
-gateway wiring still landing. Each pack's guide page carries a status
-note saying exactly what is wired today.
+Some capabilities ship as library-complete components with their
+gateway wiring still landing. Each capability's guide page carries a
+status note saying exactly what is wired today.
 
-| Status | Features |
+| Status | Capabilities |
 |---|---|
-| Wired end to end | `ent`, `fips`, `otlp`, `console`, `k8s`, `wasm`, `plugins`, `cel`, `cedar`, `openapi_validation`, `aggregation`, `h3`, `grpc_web`, `protocol_translation`, `semantic_cache`, `nano_services`, `pq` |
-| Config-accepted, runtime partially wired | `l4`, `graphql`, `api_lifecycle`, `a2a`, `cert_pinning`, `soap` |
-| Config-accepted, runtime stubbed | `mcp`, `mesh`, `extism`, `signed_url`, `acme` |
-
-The published OSS binaries and images are built with no packs enabled.
+| Wired end to end | OTLP export, console diagnostics, Kubernetes Gateway API, proxy-wasm host, native filter chain, CEL expressions, Cedar policies, OpenAPI validation, API aggregation, HTTP/3, gRPC-Web, protocol translation, semantic cache, nano-services, post-quantum TLS |
+| Config-accepted, runtime partially wired | L4 TCP/UDP proxying, GraphQL awareness, API lifecycle, A2A protocol, certificate pinning, SOAP translation |
+| Config-accepted, runtime stubbed | MCP gateway, service mesh, Extism PDK, signed URL auth, ACME automation |

@@ -20,8 +20,8 @@ One module owns everything TLS-shaped in the gateway:
   passthrough.
 - ACME certificate automation (SEC-02, #155) — automated issuance and
   renewal from [ACME](https://en.wikipedia.org/wiki/Automated_Certificate_Management_Environment)-compatible certificate authorities like
-  [Let's Encrypt](https://letsencrypt.org/), feature-gated behind the
-  `acme` cargo feature.
+  [Let's Encrypt](https://letsencrypt.org/), compiled into the OSS build
+  compiled into the OSS build (config-accepted, runtime stubbed).
 
 ## Terminate: multi-SNI
 
@@ -139,7 +139,7 @@ negotiates all of that directly with the CA over HTTPS — and renews
 the certificate before it expires, with no human intervention.
 
 The implementation lives in `crates/dwara-core/src/security/acme.rs`
-and is feature-gated behind the `acme` cargo feature (default OFF). The
+and is compiled into the OSS build (config-accepted, runtime stubbed) (default-on). The
 config block (`listeners[].tls.acme`) is always accepted by the parser;
 when the feature is OFF, validation warns that the block is inert.
 

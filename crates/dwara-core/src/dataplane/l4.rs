@@ -45,12 +45,11 @@
 //! [`UdpDispatcher::dispatch`] so the listener wiring can close the
 //! socket cleanly. The config schema is present so configs round-trip.
 //!
-//! ## Feature gate
+//! ## Availability
 //!
-//! The entire module is behind `#[cfg(feature = "l4")]`. The config
+//! The entire module is compiled into the OSS build. The config
 //! schema (`ListenerProtocol::Tcp`/`Udp` + `L4Config`) is always
-//! present so configs round-trip without the feature; when the feature
-//! is off, validation warns that the listener is inert.
+//! present so configs round-trip; L4 proxying is always available.
 
 use std::time::Duration;
 

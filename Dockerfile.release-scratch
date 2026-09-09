@@ -1,10 +1,10 @@
 # Dockerfile.release-scratch (#127): release-image variant that COPYs
-# the size-bar-verified static musl binary produced by the
-# musl-binaries job of .github/workflows/release-artifacts.yml instead
-# of recompiling from source, so the published image is byte-for-byte
-# the binary that passed the 25 MB bar and whose tarball + sha256 were
-# published alongside it. Local from-source builds keep using
-# Dockerfile.scratch; this file expects a workflow-staged context:
+# the verified static musl binary produced by the musl-binaries job of
+# .github/workflows/release-artifacts.yml instead of recompiling from
+# source, so the published image is byte-for-byte the binary whose
+# tarball + sha256 were published alongside it. Local from-source builds
+# keep using Dockerfile.scratch; this file expects a workflow-staged
+# context:
 #
 #   staged/amd64/dwara   (x86_64-unknown-linux-musl)
 #   staged/arm64/dwara   (aarch64-unknown-linux-musl)

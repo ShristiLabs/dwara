@@ -18,7 +18,7 @@ contract. Only the implementation differs -- compiled-in vs
 sandboxed-and-hot-loaded.
 
 ::: info Status
-Native filters are a compile-time feature pack (`plugins`, default
+Native filters are a compile-time capability (`plugins`, default
 OFF; see [Editions](./editions#compile-time-feature-packs)) and are
 not included in the published OSS binaries. The `NativeFilter` trait,
 registry, and unified `PluginChain` are complete and test-covered as
@@ -41,17 +41,17 @@ filters run unmodified) or hot-loading without a rebuild.
 
 ## Enabling
 
-Native filters are feature-gated behind the `plugins` cargo feature
+Native filters are compiled into the OSS build
 (default OFF):
 
 ```sh
-cargo build -p dwara-core --features plugins
+cargo build -p dwara-core
 ```
 
 Combine with `wasm` for both paths:
 
 ```sh
-cargo build -p dwara-core --features plugins,wasm
+cargo build -p dwara-core,wasm
 ```
 
 When `plugins` is on but `wasm` is off, only native filters work. When

@@ -53,7 +53,6 @@
 // Feature-gated implementation (the `semantic_cache` cargo feature).
 // -------------------------------------------------------------------------
 
-#[cfg(feature = "semantic_cache")]
 mod enabled {
     use crate::config::ai::{AiConfig, SemanticCacheConfig};
     use bytes::Bytes;
@@ -119,7 +118,7 @@ mod enabled {
     /// The semantic cache engine (DW-083). Constructed once at
     /// startup and stored on the dataplane (persists across reloads
     /// — the HNSW index and cached entries survive config refreshes).
-    /// Config is updated in place via [`update_config`].
+    /// Config is updated in place via `update_config`.
     pub struct SemanticCacheEngine {
         /// The current config (updated on refresh via RwLock).
         config: RwLock<SemanticCacheConfig>,
@@ -286,7 +285,7 @@ mod enabled {
             let mut entries = self.entries.write().unwrap();
             let entry = entries.get_mut(&id)?;
             // TTL check.
-            if now.saturating_sub(entry.stored_at_ms) > cfg.ttl_secs as u64 * 1000 {
+            if now.saturating_sub(entry.stored_at_ms) > cfg.ttl_secs * 1000 {
                 return None;
             }
             // Model match (the cache is per-model).
@@ -512,78 +511,4 @@ mod enabled {
     }
 }
 
-#[cfg(feature = "semantic_cache")]
 pub use enabled::{CachedResponse, SemanticCacheEngine};
-
-// -------------------------------------------------------------------------
-// Inert stub (no `semantic_cache` feature): the config is accepted
-// but the cache is a no-op. compile() always returns None.
-// -------------------------------------------------------------------------
-
-#[cfg(not(feature = "semantic_cache"))]
-mod disabled {
-    use crate::config::ai::{AiConfig, SemanticCacheConfig};
-
-    /// Inert placeholder for the cached response type (no
-    /// `semantic_cache` feature). Never constructed — `lookup` always
-    /// returns None — but present so the call site compiles.
-    #[derive(Clone)]
-    pub enum CachedResponse {
-        Json(serde_json::Value),
-        Frames(Vec<String>),
-    }
-
-    /// Inert placeholder (no `semantic_cache` feature). The config
-    /// is accepted but the cache is a no-op.
-    pub struct SemanticCacheEngine;
-
-    impl SemanticCacheEngine {
-        /// Always None (the feature is off).
-        pub fn compile(_cfg: Option<&AiConfig>) -> Option<Self> {
-            None
-        }
-        /// Always None (the feature is off). Mirrors the enabled
-        /// module's signature so the dataplane refresh path compiles
-        /// without the feature.
-        pub fn config_of(_cfg: Option<&AiConfig>) -> Option<SemanticCacheConfig> {
-            None
-        }
-        /// Unreachable without the feature (compile always returns
-        /// None). Present so the dataplane refresh path compiles.
-        pub fn new(_config: SemanticCacheConfig) -> Self {
-            SemanticCacheEngine
-        }
-        /// Always false (the feature is off).
-        pub fn is_enabled(&self) -> bool {
-            false
-        }
-        /// No-op (the feature is off).
-        pub fn update_config(&self, _config: SemanticCacheConfig) {}
-        /// Always None (the feature is off). Async so the call site
-        /// compiles unchanged with or without the feature.
-        pub async fn lookup(&self, _prompt_text: &str, _model: &str) -> Option<CachedResponse> {
-            None
-        }
-        /// No-op (the feature is off). Async so the call site
-        /// compiles unchanged with or without the feature.
-        pub async fn store(
-            &self,
-            _prompt_text: &str,
-            _response_json: &serde_json::Value,
-            _model: &str,
-        ) {
-        }
-        /// No-op (the feature is off). Mirrors the enabled module's
-        /// streaming store signature.
-        pub async fn store_streaming(
-            &self,
-            _prompt_text: &str,
-            _frames: Vec<String>,
-            _model: &str,
-        ) {
-        }
-    }
-}
-
-#[cfg(not(feature = "semantic_cache"))]
-pub use disabled::{CachedResponse, SemanticCacheEngine};

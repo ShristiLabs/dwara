@@ -6,7 +6,7 @@
 |---|---|---|
 | scratch image | `Dockerfile.scratch` (repo root) | static musl binary on `FROM scratch` |
 | distroless image | `Dockerfile.distroless` (repo root) | same binary on `gcr.io/distroless/cc-debian12:nonroot` |
-| release scratch image | `Dockerfile.release-scratch` (repo root) | workflow-only: COPYs the size-bar-verified musl binary (no compile; expects the workflow's staged context) |
+| release scratch image | `Dockerfile.release-scratch` (repo root) | workflow-only: COPYs the verified musl binary (no compile; expects the workflow's staged context) |
 | release distroless image | `Dockerfile.release-distroless` (repo root) | same, on the distroless nonroot base |
 | quickstart (OSS) | `quickstart/oss/` | one-command TLS-proxy compose (shared certs + demo upstream at `quickstart/` root) |
 | quickstart (Enterprise) | `quickstart/enterprise/` | CP/DP split compose: controller + edge/gateway fleet |
@@ -15,21 +15,19 @@
 
 ## Binary size
 
-The <25 MB bar is met by the release profile in the workspace
-`Cargo.toml`: `lto = true` (fat LTO) plus `strip = true`.
-`panic` deliberately stays `unwind` — `panic = "abort"` would
-shrink further but changes error semantics. `opt-level = z` was measured
-as unnecessary once stripping is on (and costs codegen speed); revisit
-only if the bar regresses. The static musl binary is larger than a gnu
-build of the same code (musl's static libc + bundled SQLite + aws-lc-rs
-C code all land in the file), but it is the price of a `FROM scratch`
+The release profile in the workspace `Cargo.toml` uses `lto = true`
+(fat LTO) plus `strip = true`. `panic` deliberately stays `unwind` —
+`panic = "abort"` would shrink further but changes error semantics.
+`opt-level = z` was measured as unnecessary once stripping is on (and
+costs codegen speed). The static musl binary is larger than a gnu build
+of the same code (musl's static libc + bundled SQLite + aws-lc-rs C
+code all land in the file), but it is the price of a `FROM scratch`
 runtime: the IMAGE ends up smaller than any gnu-based one.
 
 Measured (aarch64 musl, local verification): `dwara` binary
 11,564,624 bytes (~11.0 MB); `dwara:scratch` image 17.6 MB; the
-distroless variant is 65.2 MB (its Debian base dominates). The release
-workflow re-checks the bar per arch (build fails if the stripped musl
-binary exceeds 25 MB); amd64 is typically a few MB larger than aarch64.
+distroless variant is 65.2 MB (its Debian base dominates). amd64 is
+typically a few MB larger than aarch64.
 
 ## musl vs gnu
 
@@ -57,12 +55,12 @@ binary exceeds 25 MB); amd64 is typically a few MB larger than aarch64.
 
 `.github/workflows/release-artifacts.yml` runs ONLY on `v*` tag push
 (per the project's standing version-tags-only image publishing policy):
-cross-builds amd64+arm64 musl binaries, checks the 25 MB bar, and pushes
-multi-arch images to GHCR. The images are built FROM the size-bar-
-verified binaries, not recompiled (#127): the images job downloads the
-musl-binaries job's checksummed artifacts, re-verifies the sha256s, and
-COPYs them into `Dockerfile.release-{scratch,distroless}` (no RUN step,
-so the foreign-arch leg needs no QEMU), making a published image
-byte-for-byte the published tarball binary. Local from-source builds
-keep using `Dockerfile.scratch` / `Dockerfile.distroless`. Nothing
-builds on PRs or pushes to main.
+cross-builds amd64+arm64 musl binaries and pushes multi-arch images to
+GHCR. The images are built FROM the verified binaries, not recompiled
+(#127): the images job downloads the musl-binaries job's checksummed
+artifacts, re-verifies the sha256s, and COPYs them into
+`Dockerfile.release-{scratch,distroless}` (no RUN step, so the
+foreign-arch leg needs no QEMU), making a published image byte-for-byte
+the published tarball binary. Local from-source builds keep using
+`Dockerfile.scratch` / `Dockerfile.distroless`. Nothing builds on PRs
+or pushes to main.

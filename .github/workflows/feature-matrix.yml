@@ -1,24 +1,18 @@
 name: feature-matrix
 
 # Build the dwara binary for Linux ARM64 (aarch64-unknown-linux-gnu)
-# with cargo feature flags. Two modes:
+# for the two supported editions:
 #
-# 1. full-matrix (default, also runs on push to main): builds every
-#    feature individually (29 entries) plus key combinations (default,
-#    all-oss, enterprise, all-with-fips, all-with-pq) -- 33 jobs total.
-#
-# 2. custom (workflow_dispatch only): builds one OSS variant and one
-#    enterprise variant with user-specified features. The operator
-#    provides comma-separated feature names (without the dwara-core/
-#    prefix); the workflow auto-prefixes core features and adds ent
-#    to the enterprise variant automatically.
+# 1. oss (default): the standard build with all folded capabilities.
+# 2. enterprise: the OSS build plus the `ent` feature (license
+#    verification, Redis rate limiter, CP/DP split, etc.).
 #
 # The ent feature requires the LICENSING_TOKEN secret to fetch the
 # private ShristiLabs/licensing repo. Without the secret, ent builds
-# fail; all other builds succeed (fail-fast: false).
+# fail; the OSS build succeeds (fail-fast: false).
 #
 # loom is excluded (test-only, not a build artifact).
-# Artifacts are retained for 3 days by default (configurable in custom mode).
+# Artifacts are retained for 3 days by default.
 
 permissions:
   contents: read
@@ -26,23 +20,8 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      build_mode:
-        description: 'full-matrix: all 32 combinations. custom: user-specified features (OSS + enterprise).'
-        type: choice
-        options:
-          - full-matrix
-          - custom
-        default: full-matrix
-      oss_features:
-        description: 'OSS build features (comma-separated, no prefix): h3,l4,wasm,cel,cedar,k8s,... Ent is NOT included. Only used in custom mode.'
-        type: string
-        default: ''
-      enterprise_features:
-        description: 'Enterprise build features (comma-separated, no prefix): fips,mesh,h3,... Ent is added automatically. Only used in custom mode.'
-        type: string
-        default: ''
       retention_days:
-        description: 'Artifact retention in days (custom mode only).'
+        description: 'Artifact retention in days.'
         type: string
         default: '3'
   push:
@@ -62,128 +41,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Full matrix: 32 builds (28 individual features + 4 combinations).
-  # Runs on push to main and on workflow_dispatch with build_mode=full-matrix.
-  # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.build_mode != 'custom')
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- Baseline (no features) ---
-          - name: default
+          # --- OSS edition (default build, all folded capabilities) ---
+          - name: oss
             features: ""
             cli_features: ""
-          # --- Individual dwara-bin features ---
-          - name: otlp
-            features: "otlp"
-            cli_features: ""
-          - name: ent
+          # --- Enterprise edition (OSS + ent) ---
+          - name: enterprise
             features: "ent"
             cli_features: "ent"
-          - name: h3
-            features: "h3"
-            cli_features: ""
-          - name: console
-            features: "console"
-            cli_features: ""
-          - name: fips
-            features: "fips"
-            cli_features: ""
-          - name: pq
-            features: "pq"
-            cli_features: ""
-          - name: l4
-            features: "l4"
-            cli_features: ""
-          # --- Individual dwara-core features ---
-          - name: wasm
-            features: "dwara-core/wasm"
-            cli_features: ""
-          - name: nano_services
-            features: "dwara-core/nano_services"
-            cli_features: ""
-          - name: plugins
-            features: "dwara-core/plugins"
-            cli_features: ""
-          - name: cel
-            features: "dwara-core/cel"
-            cli_features: ""
-          - name: cedar
-            features: "dwara-core/cedar"
-            cli_features: ""
-          - name: openapi_validation
-            features: "dwara-core/openapi_validation"
-            cli_features: ""
-          - name: k8s
-            features: "dwara-core/k8s"
-            cli_features: "k8s"
-          - name: aggregation
-            features: "dwara-core/aggregation"
-            cli_features: ""
-          - name: mcp
-            features: "dwara-core/mcp"
-            cli_features: ""
-          - name: semantic_cache
-            features: "dwara-core/semantic_cache"
-            cli_features: ""
-          - name: a2a
-            features: "dwara-core/a2a"
-            cli_features: ""
-          - name: graphql
-            features: "dwara-core/graphql"
-            cli_features: ""
-          - name: grpc_web
-            features: "dwara-core/grpc_web"
-            cli_features: ""
-          - name: protocol_translation
-            features: "dwara-core/protocol_translation"
-            cli_features: ""
-          - name: soap
-            features: "dwara-core/soap"
-            cli_features: ""
-          - name: mesh
-            features: "dwara-core/mesh"
-            cli_features: ""
-          - name: api_lifecycle
-            features: "dwara-core/api_lifecycle"
-            cli_features: ""
-          - name: extism
-            features: "dwara-core/extism"
-            cli_features: ""
-          - name: cert_pinning
-            features: "dwara-core/cert_pinning"
-            cli_features: ""
-          - name: signed_url
-            features: "dwara-core/signed_url"
-            cli_features: ""
-          - name: acme
-            features: "dwara-core/acme"
-            cli_features: ""
-          # --- Combinations ---
-          # All OSS packs (no ent, no fips, no pq incompatibility)
-          - name: all-oss
-            features: "otlp,h3,l4,console,pq,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
-            cli_features: "k8s"
-          # Enterprise core (ent + fips + mesh)
-          - name: enterprise
-            features: "ent,fips,dwara-core/mesh"
-            cli_features: "ent"
-          # Everything with fips (excludes pq -- fips+pq incompatible)
-          - name: all-with-fips
-            features: "ent,fips,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
-            cli_features: "ent,k8s"
-          # Everything with pq (excludes fips -- fips+pq incompatible)
-          - name: all-with-pq
-            features: "ent,pq,otlp,h3,l4,console,dwara-core/wasm,dwara-core/nano_services,dwara-core/plugins,dwara-core/cel,dwara-core/cedar,dwara-core/openapi_validation,dwara-core/k8s,dwara-core/aggregation,dwara-core/mcp,dwara-core/semantic_cache,dwara-core/a2a,dwara-core/graphql,dwara-core/grpc_web,dwara-core/protocol_translation,dwara-core/soap,dwara-core/mesh,dwara-core/api_lifecycle,dwara-core/extism,dwara-core/cert_pinning,dwara-core/signed_url,dwara-core/acme"
-            cli_features: "ent,k8s"
 
     steps:
       # Checkout must run before referencing a local composite action.
@@ -194,132 +67,6 @@ jobs:
           features: ${{ matrix.features }}
           cli_features: ${{ matrix.cli_features }}
           artifact_name: dwara-arm64-${{ matrix.name }}
-          retention_days: 3
-          cache_key: ${{ matrix.name }}
-          licensing_token: ${{ secrets.LICENSING_TOKEN }}
-
-  # ---------------------------------------------------------------------------
-  # Custom build: one OSS variant + one enterprise variant with
-  # user-specified features. Runs only on workflow_dispatch with
-  # build_mode=custom.
-  #
-  # The operator provides bare feature names (e.g. "h3,l4,wasm,cel").
-  # The prepare job auto-prefixes core features with dwara-core/ and
-  # adds ent to the enterprise variant. The build job consumes the
-  # generated matrix.
-  # ---------------------------------------------------------------------------
-  prepare-custom:
-    name: Prepare custom matrix
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' && github.event.inputs.build_mode == 'custom'
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-      retention: ${{ steps.gen.outputs.retention }}
-    steps:
-      - id: gen
-        shell: bash
-        env:
-          OSS_IN: ${{ github.event.inputs.oss_features }}
-          ENT_IN: ${{ github.event.inputs.enterprise_features }}
-          RETENTION: ${{ github.event.inputs.retention_days }}
-        run: |
-          # Features that live on dwara-bin (stay bare, no prefix).
-          # Everything else is a dwara-core feature and gets the
-          # dwara-core/ prefix added automatically.
-          BIN_FEATS="otlp ent h3 console fips pq l4"
-
-          # Transform a bare comma-separated feature list into a
-          # cargo feature string with dwara-core/ prefixes added
-          # to core features. Also detect k8s for the CLI features.
-          transform_features() {
-            local input="$1"
-            local result=""
-            local has_k8s="false"
-            for f in $(echo "$input" | tr ',' ' '); do
-              # Skip empty tokens
-              [ -z "$f" ] && continue
-              if echo "$BIN_FEATS" | grep -qw "$f"; then
-                result="${result},${f}"
-              else
-                result="${result},dwara-core/${f}"
-              fi
-              [ "$f" = "k8s" ] && has_k8s="true"
-            done
-            # Strip leading comma
-            result="${result#,}"
-            echo "$result"
-            echo "$has_k8s" >&2
-          }
-
-          # --- OSS variant (no ent) ---
-          OSS_FEATS=$(transform_features "$OSS_IN" 2>/tmp/oss_k8s)
-          OSS_HAS_K8S=$(cat /tmp/oss_k8s)
-          if [ "$OSS_HAS_K8S" = "true" ]; then
-            OSS_CLI="k8s"
-          else
-            OSS_CLI=""
-          fi
-
-          # --- Enterprise variant (ent added automatically) ---
-          ENT_FEATS_RAW=$(transform_features "$ENT_IN" 2>/tmp/ent_k8s)
-          ENT_HAS_K8S=$(cat /tmp/ent_k8s)
-          if [ -n "$ENT_FEATS_RAW" ]; then
-            ENT_FEATS="ent,${ENT_FEATS_RAW}"
-          else
-            ENT_FEATS="ent"
-          fi
-          if [ "$ENT_HAS_K8S" = "true" ]; then
-            ENT_CLI="ent,k8s"
-          else
-            ENT_CLI="ent"
-          fi
-
-          # Build the matrix JSON. Only include a variant if its
-          # feature input was non-empty (so an operator can build
-          # just OSS, just enterprise, or both).
-          MATRIX="[]"
-          if [ -n "$OSS_IN" ]; then
-            MATRIX=$(echo "$MATRIX" | jq --arg f "$OSS_FEATS" --arg c "$OSS_CLI" \
-              '. + [{name: "custom-oss", features: $f, cli_features: $c}]')
-          fi
-          if [ -n "$ENT_IN" ]; then
-            MATRIX=$(echo "$MATRIX" | jq --arg f "$ENT_FEATS" --arg c "$ENT_CLI" \
-              '. + [{name: "custom-enterprise", features: $f, cli_features: $c}]')
-          fi
-
-          # If both inputs were empty, build the default (no features)
-          # for both editions so the run is never a no-op.
-          if [ "$MATRIX" = "[]" ]; then
-            MATRIX=$(jq -n \
-              '[{name: "custom-oss", features: "", cli_features: ""},
-                {name: "custom-enterprise", features: "ent", cli_features: "ent"}]')
-          fi
-
-          echo "Generated matrix:"
-          echo "$MATRIX" | jq .
-
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "retention=${RETENTION:-3}" >> "$GITHUB_OUTPUT"
-
-  custom-build:
-    name: ${{ matrix.name }}
-    needs: prepare-custom
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare-custom.outputs.matrix) }}
-    steps:
-      # Checkout must run before referencing a local composite action.
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5
-
-      - uses: ./.github/actions/build-dwara-arm64
-        with:
-          features: ${{ matrix.features }}
-          cli_features: ${{ matrix.cli_features }}
-          artifact_name: dwara-arm64-${{ matrix.name }}
-          retention_days: ${{ needs.prepare-custom.outputs.retention }}
+          retention_days: ${{ github.event.inputs.retention_days || '3' }}
           cache_key: ${{ matrix.name }}
           licensing_token: ${{ secrets.LICENSING_TOKEN }}

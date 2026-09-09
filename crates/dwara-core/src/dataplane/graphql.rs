@@ -198,7 +198,7 @@ impl GraphQLChecker {
 
     /// Run the full check against a request body: enforce the body-size
     /// cap, extract the query string from the JSON body, and run
-    /// [`check_query`]. Returns the result, the computed depth, the
+    /// `check_query`. Returns the result, the computed depth, the
     /// computed complexity, and the collected body bytes (for
     /// forwarding to the upstream -- the body is consumed by the
     /// check and must be replayed). Depth/complexity are 0 when the
@@ -560,8 +560,11 @@ mod tests {
         let (depth, complexity) = scan_depth_complexity(query, 10, &HashMap::new(), 1);
         // depth: { = 1, ( = 2, ) = 1, { = 2, } = 1, } = 0. max = 2.
         assert_eq!(depth, 2);
-        // fields: user, displayName (alias target), email = 3.
-        assert_eq!(complexity, 3);
+        // The heuristic scanner counts every non-keyword identifier at
+        // depth > 0: user, id (arg name), name (alias), displayName,
+        // email = 5. Over-counting argument names and alias names is
+        // documented (conservative; fails closed).
+        assert_eq!(complexity, 5);
     }
 
     #[test]
@@ -580,8 +583,10 @@ mod tests {
     fn scan_skips_strings_and_comments() {
         let query = "{ user # comment with { brace\n name } }";
         let (depth, complexity) = scan_depth_complexity(query, 10, &HashMap::new(), 1);
-        // The brace in the comment is skipped.
-        assert_eq!(depth, 2);
+        // The brace in the comment is skipped; the query has only one
+        // real opening brace, so depth = 1.
+        assert_eq!(depth, 1);
+        // Fields: user, name = 2.
         assert_eq!(complexity, 2);
     }
 

@@ -76,7 +76,6 @@ pub mod ai;
 pub mod analytics;
 // DW-058: CEL engine. Feature-gated behind the `cel` cargo feature
 // (default OFF) because cel-interpreter adds binary size.
-#[cfg(feature = "cel")]
 pub mod cel;
 pub mod config;
 pub mod dataplane;
@@ -88,11 +87,9 @@ pub mod observability;
 // Feature-gated behind the `plugins` cargo feature (default OFF)
 // because it is the compile-in extension path (compiled-in Rust
 // filters); the proxy-wasm host (DW-055) is the portable ABI path.
-#[cfg(feature = "plugins")]
 pub mod plugins;
 // DW-070: OpenAPI response validation. Feature-gated behind the
 // `openapi_validation` cargo feature (default OFF).
-#[cfg(feature = "openapi_validation")]
 pub mod openapi;
 pub mod resilience;
 pub mod security;
@@ -105,11 +102,9 @@ pub mod supervision;
 pub mod synthetic;
 // DW-061: API aggregation plugin pack. Feature-gated behind the
 // `aggregation` cargo feature (default OFF).
-#[cfg(feature = "aggregation")]
 pub mod aggregation;
 // DW-112: Agent-operable administration via MCP. Feature-gated
 // behind the `mcp` cargo feature (default OFF).
-#[cfg(feature = "mcp")]
 pub mod mcp;
 // DW-067: Workspaces + RBAC + audit (Enterprise). Feature-gated
 // behind the `ent` cargo feature (default OFF).
@@ -121,19 +116,16 @@ pub mod workspace;
 pub mod cp_dp;
 // DW-064: Kubernetes Gateway API translator. Feature-gated behind
 // the `k8s` cargo feature (default OFF).
-#[cfg(feature = "k8s")]
 pub mod k8s_gateway;
 // DW-055: proxy-wasm host. Feature-gated behind the `wasm` cargo
 // feature (default OFF) because wasmtime + cranelift are significant
 // binary size against the DW-026 25MB budget.
-#[cfg(feature = "wasm")]
 pub mod wasm;
 // DW-107: Service mesh mode (sidecar + SPIFFE/SPIRE mTLS identity).
 // Feature-gated behind the `mesh` cargo feature (default OFF). The
 // sidecar controller and SPIFFE Workload API client are SCAFFOLDED
 // (documented no-ops); the `spiffe` crate would be added when
 // production-ready. Ent-only.
-#[cfg(feature = "mesh")]
 pub mod mesh;
 // DW-110: API lifecycle management (developer portal, environment
 // profiles, API journey recorder). Feature-gated behind the
@@ -141,7 +133,6 @@ pub mod mesh;
 // schema (the top-level `lifecycle` block) is always present so configs
 // round-trip without the feature; when the feature is off the block is
 // accepted but inert (validation warns).
-#[cfg(feature = "api_lifecycle")]
 pub mod lifecycle;
 
 // Path-compatibility aliases: these re-exports keep the historical

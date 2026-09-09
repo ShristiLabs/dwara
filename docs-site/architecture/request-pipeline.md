@@ -60,7 +60,7 @@ flowchart TD
     DA -->|redirect| RED[3xx with built Location]
     DA -->|respond| RES[Fixed status / body / headers]
     DA -->|ai| AI[AI adapter translation\n+ provider forward]
-    DA -->|nano-service| NS[WASM handler\nfeature-gated]
+    DA -->|nano-service| NS[WASM handler\ncompiled into the OSS build]
 ```
 
 ## Phase 2: proxy and response

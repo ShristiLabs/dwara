@@ -2,11 +2,11 @@
 
 Dwara is [open-core](https://en.wikipedia.org/wiki/Open-core_model): one
 codebase, two editions. The **OSS edition** (the default build,
-Apache-2.0) is a complete, production-grade API gateway. The
-**Enterprise edition** adds the features that span multiple gateway
-instances or require external infrastructure — fleet coordination,
-shared state, multi-tenant management, and integrations — behind a
-commercial license.
+Apache-2.0) is a complete, production-grade API gateway with every
+dataplane capability compiled in. The **Enterprise edition** adds the
+features that span multiple gateway instances or require external
+infrastructure — fleet coordination, shared state, multi-tenant
+management, and integrations — behind a commercial license.
 
 The split is deliberate: everything a *single* gateway needs to serve
 production traffic is OSS. Enterprise features are the ones that only
@@ -43,10 +43,8 @@ period, and the `dwara_license_status` metric.
 
 ## Feature comparison
 
-Legend: **OSS** — in the default build. **Pack** — OSS but behind a
-default-OFF compile-time flag (no license; see
-[compile-time feature packs](#compile-time-feature-packs)).
-**Ent** — enterprise edition, requires the `ent` build and a license.
+Legend: **OSS** — in the default build. **Ent** — enterprise edition,
+requires the `ent` build and a license.
 
 ### Core gateway (proxying and routing)
 
@@ -64,9 +62,11 @@ default-OFF compile-time flag (no license; see
 | gRPC and WebSocket proxying | OSS | — |
 | CORS, compression, request limits | OSS | — |
 | Dynamic upstream discovery (DNS) | OSS | — |
-| API aggregation (multi-upstream composition) | Pack | — |
-| OpenAPI import, mock mode, response validation | Pack | — |
-| Kubernetes Gateway API / Ingress translation | Pack | — |
+| API aggregation (multi-upstream composition) | OSS | — |
+| OpenAPI import, mock mode, response validation | OSS | — |
+| Kubernetes Gateway API / Ingress translation | OSS | — |
+| HTTP/3 (QUIC) ingress and upstream | OSS | — |
+| L4 TCP/UDP proxying with SNI routing reuse | OSS | — |
 
 ### Traffic policy and resilience
 
@@ -96,7 +96,10 @@ default-OFF compile-time flag (no license; see
 | Authorization chain (consumer/route/service/listener/global, IP ACL) | OSS | — |
 | Secrets via `${...}` references (env, file, static) | OSS | — |
 | HashiCorp Vault and KMS secret resolution | — | Ent |
-| Cedar policy / OPA authorization | Pack | — |
+| Cedar policy / OPA authorization | OSS | — |
+| CEL expressions in policies | OSS | — |
+| FIPS 140-3 mode (cipher-suite restriction, primitive allowlist) | — | Ent |
+| Post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | OSS | — |
 | Workspaces (multi-tenant config partitioning) | — | Ent |
 | Admin RBAC (roles, permissions scoped to workspaces) | — | Ent |
 | Append-only audit log of admin changes | — | Ent |
@@ -115,15 +118,14 @@ default-OFF compile-time flag (no license; see
 | CP/DP split (`dwara-controller` / `dwara-edge` fleet) | — | Ent |
 | Web console v2 (CRUD + fleet) | — | Ent |
 | Fleet operations (version skew, rolling upgrades) | — | Ent |
-| HTTP/3 ingress | Pack | — |
-| tokio-console integration | Pack | — |
+| tokio-console diagnostics integration | OSS | — |
 
 ### Observability and analytics
 
 | Feature | OSS | Enterprise |
 |---|---|---|
 | Structured logs, access logs, spans, `/metrics` | OSS | — |
-| OTel metrics export | Pack | — |
+| OTel metrics export | OSS | — |
 | Embedded analytics (request records, rollups, bounded disk) | OSS | — |
 | Analytics stream (NDJSON firehose to external sinks) | OSS | — |
 | Alert and event webhooks | OSS | — |
@@ -154,71 +156,25 @@ default-OFF compile-time flag (no license; see
 | Provider credential pools | — | Ent |
 | Prompt/response logging | OSS | — |
 | Guardrails pack | OSS | — |
-| Semantic caching | Pack | — |
+| Semantic caching | OSS | — |
 | Model governance | OSS | — |
 | Fallback chains & routing policy | OSS | — |
 | Prompt experimentation | OSS | — |
-| MCP gateway | Pack | — |
+| MCP gateway | OSS | — |
 | Agent principals & governance | OSS | — |
+| A2A (agent-to-agent) protocol support | OSS | — |
 
 ### Extensibility
 
 | Feature | OSS | Enterprise |
 |---|---|---|
-| proxy-wasm host (community Kong/Envoy filters) | Pack | — |
-| Native Rust filter chain | Pack | — |
-| CEL expressions in policies | Pack | — |
-| Agent-operable administration (MCP) | Pack | — |
+| proxy-wasm host (community Kong/Envoy filters) | OSS | — |
+| Native Rust filter chain | OSS | — |
 | Extension traits (RateLimiter, ConfigSource, CacheStore, AnalyticsSink, SecretSource) | OSS | — |
+| Agent-operable administration (MCP) | OSS | — |
 
 The extension traits are OSS in both editions — enterprise backends
 (Redis, Vault) are simply additional implementations of the same seams.
-
-## Compile-time feature packs
-
-These optional packs are OSS (no license) but default OFF because each
-adds binary size or a heavy dependency. Enable them per build. See
-[Feature reference](./feature-reference) for the complete list of all
-29 feature flags with build commands, dependency chains, and maturity
-status.
-
-| Flag | What it adds | Why default OFF |
-|---|---|---|
-| `otlp` | OTLP trace/metrics export to a collector (build with `-p dwara-bin`) | the opentelemetry stack adds ~405 KiB to the binary |
-| `wasm` | proxy-wasm host | wasmtime + cranelift are a large binary-size cost |
-| `nano_services` | WASM route handlers (implies `wasm`) | wasmtime dependency; opt-in extension model |
-| `plugins` | native Rust filter chain | the compile-in extension path, opt-in by design |
-| `cel` | CEL expression evaluation | cel-interpreter adds binary size |
-| `cedar` | Cedar policies + OPA callout authorization | cedar-policy adds binary size |
-| `openapi_validation` | upstream response validation against OpenAPI schemas | jsonschema adds binary size |
-| `k8s` | Kubernetes Gateway API / Ingress translation + controller | kube-rs + k8s-openapi add significant binary size |
-| `aggregation` | multi-upstream response composition | aggregation buffers bodies (size-capped), kept off the default zero-buffering build |
-| `mcp` | agent-operable administration via MCP | opt-in attack-surface reduction |
-| `semantic_cache` | embedding-similarity AI prompt cache (HNSW ANN) | hnsw_rs adds binary size; external embedding service required |
-| `h3` | HTTP/3 (QUIC) ingress + upstream transport | quinn + h3 add binary size |
-| `graphql` | GraphQL awareness (depth/complexity limits, persisted queries) | opt-in; only relevant for GraphQL traffic |
-| `grpc_web` | gRPC-Web framing + JSON-to-gRPC transcoding | prost dependency; opt-in protocol support |
-| `protocol_translation` | general protocol translation (REST/gRPC/GraphQL); implies `grpc_web` | prost dependency; opt-in protocol support |
-| `soap` | SOAP/XML translation; implies `protocol_translation` | opt-in legacy protocol support |
-| `pq` | post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | experimental; incompatible with `fips` |
-| `l4` | L4 TCP/UDP proxying with SNI routing reuse | opt-in; TCP splicing implemented, UDP stubbed |
-| `a2a` | A2A (agent-to-agent) protocol support | opt-in; task lifecycle implemented, network call stubbed |
-| `api_lifecycle` | API lifecycle: dev portal, environment profiles, journey recorder | opt-in; config-accepted, partially wired |
-| `extism` | Extism PDK plugin runtime | opt-in; config-accepted, runtime stubbed |
-| `cert_pinning` | upstream TLS certificate pinning by SPKI hash | opt-in; verifier wired for https/http2 (not h3) |
-| `signed_url` | signed URL request authentication (HMAC-SHA256) | opt-in; scaffolded |
-| `console` | tokio-console diagnostics server (build with `-p dwara-bin`) | console-subscriber adds binary size |
-
-Enterprise builds can enable any of these packs alongside `ent` -- for
-example `--features ent,wasm` for an enterprise fleet running
-proxy-wasm filters.
-
-Packs ship iteratively. See the [feature reference](./feature-reference#feature-maturity)
-for the current maturity matrix — which packs are wired end to end,
-which are config-accepted with runtime partially wired, and which are
-config-accepted with runtime stubbed. Each pack's guide page carries
-a status note saying exactly what is wired today. The published OSS
-binaries and images are built with no packs enabled.
 
 ## How gating works
 
@@ -226,8 +182,8 @@ There are two gates, and every enterprise feature passes both:
 
 1. **Compile time.** The `ent` cargo feature compiles in the
    enterprise modules (`dwara-controller`, `dwara-edge`, workspaces,
-   the Redis/Vault extensions, the license verifier). OSS builds do
-   not contain this code at all.
+   the Redis/Vault extensions, the license verifier, FIPS enforcement).
+   OSS builds do not contain this code at all.
 2. **Runtime.** The license gate (`LicenseGate`) verifies the signed
    license at startup and checks each feature's claim before the
    feature engages. A missing block, an OSS build, or an expired
@@ -253,3 +209,5 @@ which state you are in. See [Enterprise licensing](./licensing).
   slices of gateway config with per-workspace RBAC and an audit trail
   — enterprise.
 - **Enterprise secret infrastructure** (Vault, KMS) — enterprise.
+- **FIPS 140-3 compliance** — enterprise (the enforcement layer is
+  `ent`-gated; the aws-lc-rs FIPS provider is installed in every build).

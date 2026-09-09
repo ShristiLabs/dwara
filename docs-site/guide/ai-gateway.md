@@ -446,7 +446,7 @@ kinds, actions, policy scoping, and false-positive guidance.
 Semantic caching caches AI responses by prompt embedding similarity:
 a paraphrased prompt within the similarity threshold returns the
 cached response with no provider call and no token spend. Feature-gated
-behind the `semantic_cache` cargo feature.
+in the default OSS build.
 
 See [AI semantic caching](./ai-semantic-caching) for the full
 configuration, how it works, limitations, and cost savings analysis.

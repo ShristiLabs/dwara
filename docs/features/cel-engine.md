@@ -7,7 +7,7 @@ and evaluates CEL expressions. CEL is a lightweight, non-Turing-complete
 expression language designed for evaluating conditions and
 transformations in policy and configuration systems.
 
-The engine is feature-gated behind the `cel` cargo feature (default
+The engine is compiled into the OSS build (the
 OFF) because the `cel-interpreter` crate adds binary size.
 
 ## Enabling
@@ -15,10 +15,10 @@ OFF) because the `cel-interpreter` crate adds binary size.
 Build with the `cel` feature:
 
 ```sh
-cargo build --features cel
+cargo build
 ```
 
-Without the feature, config fields that reference CEL expressions are
+Without a `cel` config block, config fields that reference CEL expressions are
 accepted but inert.
 
 ## Design (decision 5; section 9.3)
@@ -98,7 +98,7 @@ The `cel` benchmark measures evaluator throughput for representative
 expressions:
 
 ```sh
-cargo bench --features cel --bench cel
+cargo bench --bench cel
 ```
 
 Benchmark groups:
@@ -123,7 +123,7 @@ or JIT-compiled code, and `evaluate` would dispatch accordingly.
 
 ## Feature gate
 
-The `cel` cargo feature must be enabled. Without it, the module is not
+CEL is compiled into the OSS build. The module is
 compiled and config fields that reference CEL expressions are accepted
 but inert.
 

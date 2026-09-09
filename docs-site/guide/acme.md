@@ -6,7 +6,7 @@ authorities like [Let's Encrypt](https://letsencrypt.org/), so
 operators do not need to manually provision and rotate certificates.
 
 ::: warning Implementation status
-The `acme` feature is **config-accepted, runtime stubbed**. The config
+ACME is **config-accepted, runtime stubbed**. The config
 schema (`AcmeConfig`) parses and validates, and validation warns when
 the feature is off, but the ACME client itself is not yet implemented.
 No account registration, challenge completion, certificate issuance,
@@ -27,12 +27,12 @@ where the gateway terminates TLS directly on port 443.
 
 ## Enabling
 
-ACME is feature-gated behind the `acme` cargo feature (default OFF).
+ACME is compiled into the OSS build (config-accepted, runtime stubbed).
 The config block is always accepted by the parser; when the feature is
 OFF, validation warns that the block is inert.
 
 ```sh
-cargo build --features acme -p dwara-bin
+cargo build -p dwara-bin
 ```
 
 ## Configuration
