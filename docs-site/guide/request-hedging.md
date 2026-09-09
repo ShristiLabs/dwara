@@ -81,3 +81,10 @@ upstreams:
 
 A request that times out the hedge may still be retried if the final
 response is an error.
+
+## Runnable demo
+
+Race a hedge against a slow upstream: `demos/03-resilience/` (test
+script: `test-05-hedging.sh`) in the repository hedges a request to
+a 300 ms-slow pool and asserts the echo hedge answers 200 in under
+300 ms. The category README covers prerequisites and teardown.

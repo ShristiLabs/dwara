@@ -146,3 +146,12 @@ check, not an authorization rule, and is never muted by `dry_run`.
   The body is generic on purpose: which list matched or which claim
   was absent is server-side information, logged, not told to the
   client.
+
+## Runnable demo
+
+Watch rules decide on a live gateway: `demos/04-security-auth/`
+(test scripts: `test-08-authorization-chain.sh`,
+`test-09-ip-acl.sh`) in the repository checks route-level consumer
+allow/deny (the wrong credential gets 403, the right one 200) and
+the IP ACL passing an allowed client. The category README covers
+prerequisites and teardown.

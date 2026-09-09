@@ -192,3 +192,12 @@ The exact field shapes are in the
 [configuration schema](../reference/configuration-schema); consumer
 and credential configuration is covered in
 [Configuration](./configuration).
+
+## Runnable demo
+
+Probe the auth gate: `demos/04-security-auth/` (test script:
+`test-05-hmac-signing.sh`) in the repository asserts that requests
+with a missing or bogus signature answer 401 -- computing a valid
+signature is left to the client, and the script header documents
+the signing algorithm. The category README covers prerequisites and
+teardown.

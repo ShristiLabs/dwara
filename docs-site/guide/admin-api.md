@@ -227,3 +227,10 @@ count as UNKNOWN: deny lists pass them, allow lists reject them. The
 database hot-reloads — replace the file and the watcher swaps the
 reader within a couple of seconds, no restart. Geo rules require the
 `geoip` block; validation rejects the predicate without one.
+
+## Runnable demo
+
+Run the mTLS admin API against a live gateway: `demos/09-operations/`
+in the repository (test script: `test-02-admin-api.sh` -- `/health`,
+`/config`, and `/stats` over mTLS, plus a handshake failure without a
+client cert). The category README covers prerequisites and teardown.

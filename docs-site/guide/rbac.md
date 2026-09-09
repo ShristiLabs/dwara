@@ -95,3 +95,10 @@ Cross-workspace access is denied by default: a writer for
 Allowed and denied administrative actions alike are visible after
 the fact through the [audit log](./audit-log); see
 [Workspaces](./workspaces) for the isolation boundary itself.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository documents
+workspace RBAC and verifies the admin API's mTLS surface, the OSS
+admin boundary (test script: `test-06-workspace-rb.sh`). The
+category README covers prerequisites and teardown.

@@ -107,3 +107,10 @@ an enterprise build with Redis configured, both tiers are active.
 If Redis is unavailable, the cache degrades gracefully to
 local-only mode (the local tier continues to work; Redis reads/writes
 fail silently with a log warning).
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository documents the
+distributed cache and verifies the proxy path over the local
+in-memory store (test script: `test-03-distributed-cache.sh`). The
+category README covers prerequisites and teardown.

@@ -50,3 +50,10 @@ lever here is applied by reloading config, with no restart.
 For the runtime view -- the state machines, the layering, and how the
 pieces compose -- see
 [Resilience architecture](../architecture/resilience).
+
+## Runnable demo
+
+The `demos/03-resilience/` directory in the repository runs a live
+stack -- a gateway against deliberately flaky, slow, and healthy
+upstreams -- for the resilience features in this section; its README
+covers prerequisites, test scripts, and teardown.

@@ -82,6 +82,13 @@ The response is marked as `{"streamed": true}` -- the full streamed
 content is not reassembled for logging (that would require buffering
 the entire stream, contradicting the zero-buffer design).
 
+## Runnable demo
+
+Run prompt logging against a live gateway: `demos/07-ai-gateway/` in
+the repository (test script: `test-08-prompt-logging.sh`, which
+queries captured rows via the mTLS admin API). The category README
+covers prerequisites and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

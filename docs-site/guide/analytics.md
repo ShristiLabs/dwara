@@ -297,3 +297,16 @@ API queries return fleet-wide numbers.
 
 This is an enterprise feature, gated behind the `ent` cargo feature and
 a valid license. In an OSS build the `FederatedAnalyticsSink` is inert.
+
+## Runnable demo
+
+Query a live analytics store: `demos/06-observability/` in the
+repository. Test scripts exercise the mTLS admin dashboard query
+(`test-04-analytics-query.sh`) and a custom-dimension rollup keyed on
+the `X-API-Version` request header (`test-05-analytics-dimensions.sh`).
+The category README covers prerequisites and teardown.
+
+Federated analytics specifically: `demos/11-enterprise/` in the
+repository (test script: `test-07-federated-analytics.sh`) documents
+the enterprise edge-to-controller streaming and verifies the embedded
+local analytics store.

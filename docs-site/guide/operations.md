@@ -112,3 +112,10 @@ desync through the gateway on later keep-alive requests.
 ## Environment variables reference
 
 See the full [environment variables reference](../reference/environment-variables).
+
+## Runnable demo
+
+Run hot config reload against a live gateway: `demos/09-operations/`
+in the repository (test script: `test-01-hot-reload.sh` -- touch the
+mounted config and the gateway keeps answering while it re-reads and
+re-publishes). The category README covers prerequisites and teardown.

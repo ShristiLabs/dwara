@@ -104,3 +104,11 @@ connection (one TCP connection carrying many logical requests) that clones cheap
 automatically on failure. The connection is established once at
 startup and cloned per-rule at engine compile time. Reloads recompile
 the rate-limit engine with the same connection.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository includes the
+`redis_rate_limiter` block (inert in the OSS build, which uses the
+local GCRA limiter) and verifies the proxy path (test script:
+`test-04-redis-limiters.sh`). The category README covers
+prerequisites and teardown.

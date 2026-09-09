@@ -103,6 +103,13 @@ down when an upstream signals overload (EWMA latency/error tracking
 and `Retry-After`-driven backoff). See
 [Distributed Redis rate limiter](./redis-rate-limiter).
 
+## Runnable demo
+
+Hit the limit on a live gateway: `demos/04-security-auth/` (test
+script: `test-11-rate-limiting.sh`) in the repository fires rapid
+requests at a rate-limited route and asserts the sixth answers 429.
+The category README covers prerequisites and teardown.
+
 ## See also
 
 - [Consumer quotas](./quotas) -- daily/monthly budgets, not rates.

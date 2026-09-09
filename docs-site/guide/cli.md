@@ -191,3 +191,11 @@ for the regression gate (`scripts/bench-regression.py`).
 | `--timeout-ms` | `10000` | Per-request timeout. |
 | `--json` | off | Emit a machine-parseable `JSON:` line (for the regression gate). |
 | `--insecure` | off | (h3 only) Skip server certificate verification; loopback targets only. |
+
+## Runnable demo
+
+Run config validation against a live gateway: `demos/09-operations/`
+in the repository (test script: `test-03-cli-validate.sh`). The demo
+image ships only the gateway binary, so the script documents
+`dwara-cli validate` and proves the config through the gateway's
+startup validation; the README covers running the CLI on the host.

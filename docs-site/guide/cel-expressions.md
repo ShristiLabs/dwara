@@ -180,3 +180,11 @@ request.method + " " + request.path
 
 See the [CEL spec](https://cel.dev/docs/spec) for the full language
 reference.
+
+## Runnable demo
+
+Run the demo stack: `demos/08-extensibility/` in the repository (test
+script: `test-03-cel-expressions.sh`). The `cel` cargo feature is off
+in the default demo image, so the script documents the CEL surface
+and verifies the proxy path; the README covers prerequisites, custom
+builds, and teardown.

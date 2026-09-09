@@ -209,3 +209,13 @@ serving live traffic.
 When `DWARA_TOKIO_CONSOLE_ADDR` is not set, `DWARA_TOKIO_CONSOLE_ADDR` is
 reserved but inert -- setting it has no effect. When the feature is on
 but the variable is unset, the console server does not bind.
+
+## Runnable demo
+
+Run the signals against a live gateway: `demos/06-observability/` in
+the repository. Test scripts assert the `/metrics` request counter
+(`test-01-metrics.sh`), `X-Request-Id` echoed on every response
+(`test-02-request-id.sh`), access logs landing in the gateway's
+container output (`test-03-access-logs.sh`), and `dwara_slo_*`
+gauges for a route carrying an SLO (`test-11-slo.sh`). The category
+README covers prerequisites and teardown.

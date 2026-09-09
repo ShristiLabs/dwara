@@ -91,6 +91,13 @@ ai:
 - `dwara_ai_routing_policy_latency_cost_selections_total{policy}` --
   LatencyCost selections.
 
+## Runnable demo
+
+Failover chains and weighted model canaries run against a live
+gateway: `demos/07-ai-gateway/` in the repository (test scripts:
+`test-03-failover-chain.sh`, `test-04-model-canary.sh`). The category
+README covers prerequisites and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

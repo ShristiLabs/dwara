@@ -37,3 +37,12 @@ covers the optional route blocks that go on top.
   endpoint discovery for autoscaling upstreams.
 - [OpenAPI import and mock mode](./openapi-import) - scaffold a config
   from an OpenAPI spec and mock endpoints with no backend yet.
+
+## Runnable demo
+
+Run these features against a live gateway: `demos/01-routing/` in the
+repository. The test scripts cover the exact, prefix, and regex match
+types (`test-01` through `test-03`), redirects, direct responses,
+mock responses, path rewrites, method allowlists, and host-header
+matches (`test-04` through `test-08` and `test-10`). The category
+README covers prerequisites and teardown.

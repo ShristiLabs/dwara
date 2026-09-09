@@ -20,3 +20,9 @@ state changes (breaker trips, endpoint ejections, config publishes).
   to an external HTTP collector, fire-and-forget end to end.
 - [Alert and event webhooks](./webhooks) - POST JSON notifications on
   gateway state changes to your incident tool or collector.
+
+## Runnable demo
+
+The `demos/06-observability/` directory in the repository runs a live
+stack for the features in this section; its README covers
+prerequisites, test scripts, and teardown.

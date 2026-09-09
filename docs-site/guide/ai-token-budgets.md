@@ -179,6 +179,14 @@ and cost per model for the window. CSV is RFC 4180 compliant;
 Parquet is deferred to a future release (the seam is documented for
 billing pipelines that need columnar output).
 
+## Runnable demo
+
+The `demos/07-ai-gateway/` stack in the repository configures
+per-consumer and per-policy token budgets and per-model pricing in
+its `dwara.yaml` (consumer `demo-user`, policy `ai-budget`); there
+is no dedicated test script. The category README covers the config,
+prerequisites, and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

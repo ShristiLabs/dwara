@@ -137,6 +137,13 @@ on. Use the block-level dry-run to test the entire guardrails
 configuration; use per-rule `action: log` to dry-run individual rules
 while others enforce.
 
+## Runnable demo
+
+Run guardrails against a live gateway: `demos/07-ai-gateway/` in the
+repository (test script: `test-07-guardrails.sh` -- an injection
+prompt is blocked with 400, a benign one passes). The category README
+covers prerequisites and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

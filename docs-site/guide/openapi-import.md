@@ -108,3 +108,11 @@ A mismatch answers `400 validation_failed`; a match proceeds to the
 action. The supported [JSON Schema](https://json-schema.org/) (a standard for describing a JSON document's shape) keywords are: `type`, `required`,
 `properties`, `items`, `enum`, `minimum`, `maximum`, `minLength`,
 `maxLength`, and `additionalProperties`.
+
+## Runnable demo
+
+The mock action runs against a live gateway in `demos/01-routing/`
+(test script: `test-06-mock-response.sh`) in the repository: a mock
+route answers `200` with a canned body and a simulated delay. The
+OpenAPI import flow itself is not exercised. The category README
+covers prerequisites and teardown.

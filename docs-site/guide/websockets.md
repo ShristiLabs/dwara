@@ -85,3 +85,12 @@ WebSocket policy decisions are observable in
 
 For request-level limits on HTTP traffic, see
 [Rate limiting](./rate-limiting).
+
+## Runnable demo
+
+A WebSocket echo upstream is proxied in `demos/05-request-response/`
+(test script: `test-09-websocket.sh`) in the repository, behind a
+route with an origin check and a frame-rate cap. The script verifies
+the `/ws` route is reachable (a plain GET draws a 400/426, not a
+404); a manual `websocat ws://localhost:8080/ws` session exercises
+the echo. The category README covers prerequisites and teardown.

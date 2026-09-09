@@ -58,3 +58,10 @@ access resources in another.
 
 Who may act inside a workspace is governed by [RBAC](./rbac), and
 every administrative action is captured in the [audit log](./audit-log).
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository documents
+workspace RBAC and verifies the admin API's mTLS surface, the OSS
+admin boundary (test script: `test-06-workspace-rb.sh`). The
+category README covers prerequisites and teardown.

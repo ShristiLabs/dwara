@@ -88,3 +88,11 @@ Three families in [`/metrics`](./observability):
 | `dwara_access_records_streamed_total{outcome}` | records per batch outcome: `delivered`, `failed` (tried, not taken), or `dropped` (over the per-record size cap, or a queued tail when the stream was disabled) |
 | `dwara_access_records_offered_total` | records offered at request completion |
 | `dwara_access_records_dropped_total` | records dropped because the queue was full — the honest loss counter for an overloaded collector; raise `buffer` or fix the collector when it grows |
+
+## Runnable demo
+
+Run the stream against a live gateway: `demos/06-observability/`
+(test script: `test-09-analytics-stream.sh`) in the repository. The
+demo fires NDJSON batches at a collector container and the test
+asserts the records arrive. The category README covers prerequisites
+and teardown.

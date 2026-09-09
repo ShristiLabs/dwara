@@ -38,3 +38,10 @@ your config files entirely.
 - [Post-quantum TLS](./post-quantum-tls) - hybrid key exchange for
   forward secrecy against future quantum attacks.
 - [FIPS mode](./fips-mode) - FIPS 140-3 validated cryptography.
+
+## Runnable demo
+
+The `demos/04-security-auth/` directory in the repository runs a
+live stack for several features in this section -- API key, Basic,
+mTLS, and HMAC credentials, authorization rules, and IP ACLs; its
+README covers prerequisites, test scripts, and teardown.

@@ -190,3 +190,13 @@ a rejected config never replaces the running one, empty transform
 blocks are rejected as authoring mistakes, and every issue is
 reported at once. The exhaustive field list is the generated
 [configuration schema](../reference/configuration-schema).
+
+## Runnable demo
+
+Run header and query transforms against a live gateway:
+`demos/05-request-response/` (test scripts:
+`test-01-header-transforms.sh`, `test-02-query-transforms.sh`) in the
+repository. The tests verify request header set/add/remove, a query
+parameter added before forwarding, and a response header stamp,
+through an echo upstream; JSON body transforms are not exercised.
+The category README covers prerequisites and teardown.

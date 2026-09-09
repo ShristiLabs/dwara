@@ -21,3 +21,9 @@ is already built or downloaded.
   diffing, and linting configs without standing up a gateway.
 - [Admin API](./admin-api) - the mTLS-only operator surface for live
   config inspection and patching.
+
+## Runnable demo
+
+The `demos/09-operations/` directory in the repository runs a live
+stack for the features in this section; its README covers
+prerequisites, test scripts, and teardown.

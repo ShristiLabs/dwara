@@ -116,3 +116,10 @@ Mesh decisions surface in [`/metrics`](./observability) as
 for east-west authorization. The SPIFFE IDs of caller and callee are added
 to the access log, so east-west traffic is attributable to workloads, not
 just IP addresses -- the foundation of zero-trust service-to-service calls.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository documents
+service mesh mode and verifies the reverse-proxy baseline (test
+script: `test-09-service-mesh.sh`). The category README covers
+prerequisites and teardown.

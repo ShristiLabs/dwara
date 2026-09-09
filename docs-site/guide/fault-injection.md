@@ -76,3 +76,10 @@ Fault injection can be combined with [mirroring](./mirroring) on
 the same route. Mirroring happens before fault injection, so the
 mirror upstream receives the request regardless of whether the
 primary is faulted.
+
+## Runnable demo
+
+Feel an injected fault: `demos/03-resilience/` (test script:
+`test-10-fault-injection.sh`) in the repository calls a route with
+a 100 ms delay fault and asserts the 200 arrives late. The category
+README covers prerequisites and teardown.

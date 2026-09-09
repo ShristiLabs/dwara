@@ -158,6 +158,14 @@ In dry-run mode, would-be denials are:
 Once you are satisfied with the false-positive rate, switch to
 `dry_run: false` (or remove the field) to enforce.
 
+## Runnable demo
+
+Run a team model allowlist against a live gateway:
+`demos/07-ai-gateway/` in the repository (test script:
+`test-13-model-governance.sh` -- a model outside the allowlist gets
+403 before routing). The category README covers prerequisites and
+teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

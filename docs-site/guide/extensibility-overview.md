@@ -29,6 +29,12 @@ filter, and an Extism filter in sequence.
   that let you replace entire subsystems with a custom or enterprise
   backend.
 
+## Runnable demo
+
+The `demos/08-extensibility/` directory in the repository runs a live
+stack for the features in this section; its README covers
+prerequisites, test scripts, and teardown.
+
 ## Where to go next
 
 - [Architecture: plugins and extensibility](../architecture/plugins-and-extensibility)

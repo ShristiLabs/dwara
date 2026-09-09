@@ -133,3 +133,11 @@ v1 ships a Redis backend (`RedisConvergenceBackend`). The
 `ConfigConvergenceBackend` trait is the seam for alternative backends
 -- etcd and Consul implementations are deferred and will plug into the
 same `backend` config field when available.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository includes the
+`config_convergence` block (inert in the OSS build) and verifies hot
+reload via the local file watcher (test script:
+`test-02-convergence.sh`). The category README covers prerequisites
+and teardown.

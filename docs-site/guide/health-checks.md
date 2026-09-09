@@ -117,6 +117,13 @@ transforms preserves the observed health. A flapping upstream
 therefore cannot look healthy for one request cycle after every
 reload.
 
+## Runnable demo
+
+Run both checks against a live gateway with flaky and healthy
+upstreams: `demos/03-resilience/` (test scripts:
+`test-01-passive-health.sh`, `test-02-active-health.sh`) in the
+repository. The category README covers prerequisites and teardown.
+
 ## See also
 
 - [Circuit breaking](./circuit-breaking) -- the per-upstream layer

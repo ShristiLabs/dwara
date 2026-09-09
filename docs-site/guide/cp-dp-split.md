@@ -148,3 +148,11 @@ The repository ships a runnable CP/DP topology under
 one controller and a fleet of two edges/gateways on a docker network,
 with a documented walkthrough of fleet convergence (edit one file,
 watch every data plane reload) and controller-outage survival.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository documents the
+CP/DP split and verifies the single-node OSS baseline (test script:
+`test-01-cp-dp-split.sh`); the controller and edge binaries need the
+`ent` build shown in the quickstarts above. The category README
+covers prerequisites and teardown.

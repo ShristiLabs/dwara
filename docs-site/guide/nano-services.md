@@ -100,3 +100,11 @@ Nano-service execution surfaces in [`/metrics`](./observability) as
 for the in-process call latency. A module that returns an invalid response
 (missing status, oversized body) is logged as `module_error` and the client
 receives `502` -- the gateway treats a broken module like a broken upstream.
+
+## Runnable demo
+
+Run the demo stack: `demos/08-extensibility/` in the repository (test
+script: `test-04-nano-services.sh`). The default demo image builds
+without the `nano_services` cargo feature, so the script documents
+the route action and verifies the composed echo + static services;
+the README covers prerequisites, custom builds, and teardown.

@@ -124,3 +124,10 @@ endpoint:
   been sent). Correlate with the request's access log line via
   `request_id` — the access line shows the real (allowed) outcome,
   the policy event shows what WOULD have happened.
+
+## Runnable demo
+
+Take a route down gracefully: `demos/03-resilience/` (test script:
+`test-12-maintenance-mode.sh`) in the repository requests a
+maintenance route and asserts the 503 with `Retry-After: 60`. The
+category README covers prerequisites and teardown.

@@ -58,3 +58,10 @@ Mirroring can be combined with [fault injection](./fault-injection)
 on the same route. Mirroring happens before fault injection, so the
 mirror upstream receives the request regardless of whether the
 primary is faulted.
+
+## Runnable demo
+
+Shadow traffic on a live gateway: `demos/03-resilience/` (test
+script: `test-11-mirroring.sh`) in the repository mirrors 100% of a
+test route to a shadow upstream and asserts the primary still
+answers 200. The category README covers prerequisites and teardown.

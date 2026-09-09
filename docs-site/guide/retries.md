@@ -99,6 +99,13 @@ retries:
 with `timeouts.read_ms: 3000` means at most three 3-second attempts
 (including backoff) inside a 10-second envelope.
 
+## Runnable demo
+
+Watch a retry recover a request: `demos/03-resilience/` (test
+script: `test-04-retries.sh`) in the repository retries against a
+50%-flaky pool until the healthy echo endpoint answers 200. The
+category README covers prerequisites and teardown.
+
 ## See also
 
 - [Timeouts](./timeouts) -- the per-attempt bounds.

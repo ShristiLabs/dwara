@@ -87,3 +87,13 @@ Validation follows the standard [config pipeline](./configuration):
 a rejected config never replaces the running one, and every issue is
 reported at once. The exhaustive field list is the generated
 [configuration schema](../reference/configuration-schema).
+
+## Runnable demo
+
+Run security-header injection against a live gateway:
+`demos/05-request-response/` (test script:
+`test-04-security-headers.sh`) in the repository. The test asserts
+HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, and CSP
+on a hardened route; the demo listener is plaintext HTTP, so the HSTS
+assertion is best-effort (the demo README notes this). The category
+README covers prerequisites and teardown.

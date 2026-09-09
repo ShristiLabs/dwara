@@ -186,3 +186,11 @@ itself (typically JSON or YAML).
 
 Both share the same phase slot on a route, selected by config, with no
 dataplane-visible difference in attachment semantics.
+
+## Runnable demo
+
+Run the demo stack: `demos/08-extensibility/` in the repository (test
+script: `test-01-native-plugins.sh`). The default demo image builds
+without the `plugins` cargo feature, so the script documents the
+native-filter config shape and verifies the proxy path; the README
+covers prerequisites, custom builds, and teardown.

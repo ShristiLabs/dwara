@@ -143,3 +143,12 @@ remove `DWARA_CREDENTIAL_PEPPER_PREVIOUS` and restart.
 Pepper rotation requires a restart to pick up the new environment
 variables (the pepper is resolved at startup). The previous pepper is
 kept in memory for the process lifetime and zeroized on shutdown.
+
+## Runnable demo
+
+Run env and file secret references against a live gateway:
+`demos/09-operations/` in the repository (test script:
+`test-08-secrets.sh`). The demo shows a `${DEMO_SECRET}` credential
+resolving, unset references failing closed, and the redacted admin
+`/config` echo; the category README covers prerequisites and
+teardown.

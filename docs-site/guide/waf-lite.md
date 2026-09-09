@@ -139,3 +139,11 @@ ORIGINAL request (before path rewrite or transforms).
 - The WAF does not replace authentication, authorization, or input
   validation in your upstream — it is a first-line defense that reduces
   the attack surface reaching your backend.
+
+## Runnable demo
+
+Throw attack payloads at a live gateway: `demos/04-security-auth/`
+(test script: `test-13-waf-lite.sh`) in the repository sends SQLi,
+XSS, and path-traversal inputs (asserting 403) alongside a clean
+request (200). The category README covers prerequisites and
+teardown.

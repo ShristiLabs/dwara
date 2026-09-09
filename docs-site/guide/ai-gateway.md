@@ -549,3 +549,11 @@ Inline auth values are replaced by a redaction placeholder in every
 config echo (admin API, config dumps). Prefer `${...}` references so
 the secret never appears in the config file at all; see
 [Secrets](./secrets).
+
+## Runnable demo
+
+Run provider adapters, model aliasing, and streaming against a live
+gateway: `demos/07-ai-gateway/` in the repository (test scripts:
+`test-01-provider-adapters.sh`, `test-02-model-alias.sh`,
+`test-14-streaming-sse.sh`). The category README covers prerequisites
+and teardown.

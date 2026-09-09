@@ -186,6 +186,15 @@ the custom pinning verifier with client auth.
   table is config-declared and identical across instances, but the
   mapping is only as current as the config reload.
 
+## Runnable demo
+
+Present a client certificate to a live gateway:
+`demos/04-security-auth/` (test scripts: `test-04-mtls-auth.sh`,
+`test-16-mtls-forward-headers.sh`) in the repository verifies a
+cert mapped to a consumer by subject CN and checks that
+`X-Client-Cert-*` headers reach the upstream. The category README
+covers prerequisites and teardown.
+
 ## Where to go next
 
 - [OAuth2](./oauth2) - the gateway as an OAuth2 client-credentials

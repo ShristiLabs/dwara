@@ -101,3 +101,10 @@ cargo build --release --features ent
 
 The `ent` feature pulls in `licensing-core` ([BSL-1.1](https://en.wikipedia.org/wiki/Business_Source_License), Business Source License — a source-available license that converts to open source after a delay). OSS builds never
 link it.
+
+## Runnable demo
+
+The `demos/11-enterprise/` directory in the repository includes the
+`license` block and verifies the OSS stub path, where the gate is
+always `LicenseGate::none()` (test script: `test-10-licensing.sh`).
+The category README covers prerequisites and teardown.

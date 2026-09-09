@@ -237,3 +237,11 @@ a path that browsers reach with simple/actual requests only, or
 version browser-facing APIs by path instead of media type. See
 [CORS](./cors) for the CORS
 rules themselves.
+
+## Runnable demo
+
+See the deprecation headers on a live route: `demos/01-routing/`
+(test script: `test-09-api-versioning.sh`) in the repository. The
+demo's `versioned-api` route emits `Deprecation` and `Sunset` on
+every response; the four versioning patterns themselves are not
+exercised. The category README covers prerequisites and teardown.

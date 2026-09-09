@@ -81,6 +81,13 @@ The `dwara_breaker_state` gauge exposes `0 = closed, 1 = open,
 a `breaker_opened` / `breaker_closed` event on the gateway event bus
 (see [Alert and event webhooks](./webhooks)).
 
+## Runnable demo
+
+Trip a breaker on a live gateway: `demos/03-resilience/` (test
+script: `test-03-circuit-breaker.sh`) in the repository floods a
+flaky upstream until the breaker opens and responses come back
+502/503. The category README covers prerequisites and teardown.
+
 ## See also
 
 - [Health checks](./health-checks) -- the per-endpoint counterpart:

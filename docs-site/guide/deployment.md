@@ -83,3 +83,13 @@ If you maintain your own tooling against Dwara's config shape (editors,
 linters, generators), this is the schema to consume — CI fails a pull
 request whose committed schema drifts from what the current code
 generates, so it never goes stale.
+
+## Runnable demo
+
+Run TLS transport against a live gateway: `demos/10-tls-transport/`
+in the repository. `test-01-tls-terminate.sh` and
+`test-02-multi-sni.sh` exercise TLS termination and multi-SNI
+certificate selection; SNI passthrough is configuration-only -- the
+demo's plaintext upstreams cannot complete a passthrough handshake,
+so that live test is skipped. The category README covers
+prerequisites and teardown.

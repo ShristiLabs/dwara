@@ -28,6 +28,12 @@ attachments.
   Accept-header versioning with HTTP-date Deprecation and Sunset
   signaling.
 
+## Runnable demo
+
+The `demos/05-request-response/` directory in the repository runs a
+live stack for the features in this section; its README covers
+prerequisites, test scripts, and teardown.
+
 ## Where to go next
 
 - [Protocol translation and API management](./protocol-translation) -

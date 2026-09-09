@@ -95,3 +95,11 @@ action, and finally the response gains compression and CORS headers.
 See the [request pipeline](../architecture/overview#request-pipeline)
 for the full picture. The `compression` block reloads live with the
 rest of the config -- an atomic snapshot swap, no restart.
+
+## Runnable demo
+
+Run compression against a live gateway: `demos/05-request-response/`
+(test script: `test-06-compression.sh`) in the repository. The script
+requests a JSON file with `Accept-Encoding: gzip` and asserts a
+`Content-Encoding: gzip` response. The category README covers
+prerequisites and teardown.

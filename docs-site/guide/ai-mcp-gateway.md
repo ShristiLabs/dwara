@@ -149,6 +149,13 @@ written fire-and-forget (never blocks the request path).
   (authz check through upstream response), by tool (config-bounded
   label).
 
+## Runnable demo
+
+Run the MCP gateway against a live gateway: `demos/07-ai-gateway/`
+in the repository (test script: `test-11-mcp-gateway.sh` --
+`tools/list` over `/mcp`). The category README covers prerequisites
+and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

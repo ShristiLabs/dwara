@@ -104,3 +104,13 @@ admits it over the cap instead. The request still waits up to
 `queue_timeout_ms` in the queue, but no 503 is sent. This lets you
 observe what enforcement would shed (and at which priorities) before
 turning it on. See [Maintenance and dry-run](./maintenance#dry-run).
+
+## Runnable demo
+
+Fire a 50-request burst at a live gateway: `demos/03-resilience/`
+(test script: `test-07-load-shedding.sh`) in the repository asserts
+the basic requests survive; the demo ships a high
+`max_concurrent_requests` cap, and the README explains how to lower
+it and flood the gateway to watch requests shed or queue up to
+`queue_timeout_ms`. The README also covers prerequisites and
+teardown.

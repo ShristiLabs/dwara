@@ -124,3 +124,12 @@ the response gains [compression](./compression) and CORS headers. See
 the [request pipeline](../architecture/overview#request-pipeline)
 for the full picture. The `cors` block reloads live with the rest of
 the config -- an atomic snapshot swap, no restart.
+
+## Runnable demo
+
+Run CORS against a live gateway: `demos/05-request-response/` (test
+script: `test-05-cors.sh`) in the repository. The script sends an
+`OPTIONS` preflight with an `Origin` and an
+`Access-Control-Request-Method`, then asserts the
+`Access-Control-Allow-Origin` headers come back. The category README
+covers prerequisites and teardown.

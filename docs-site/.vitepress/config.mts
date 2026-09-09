@@ -110,6 +110,7 @@ export default withMermaid(
             {
               text: "Getting started",
               link: "/guide/getting-started",
+              collapsed: true,
               items: [
                 { text: "Getting started", link: "/guide/getting-started" },
                 { text: "Installation", link: "/guide/installation" },
@@ -124,7 +125,7 @@ export default withMermaid(
             {
               text: "Proxying and transport",
               link: "/guide/proxying-transport",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/proxying-transport" },
                 {
@@ -160,7 +161,7 @@ export default withMermaid(
             {
               text: "Request and response control",
               link: "/guide/request-response-control",
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: "Overview",
@@ -188,7 +189,7 @@ export default withMermaid(
             {
               text: "Protocol translation and API management",
               link: "/guide/protocol-translation",
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: "Overview",
@@ -229,7 +230,7 @@ export default withMermaid(
             {
               text: "Traffic policy and resilience",
               link: "/guide/traffic-policy",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/traffic-policy" },
                 { text: "Timeouts", link: "/guide/timeouts" },
@@ -255,7 +256,7 @@ export default withMermaid(
             {
               text: "Security and identity",
               link: "/guide/security",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/security" },
                 {
@@ -297,7 +298,7 @@ export default withMermaid(
             {
               text: "AI gateway",
               link: "/guide/ai-gateway",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/ai-gateway" },
                 {
@@ -343,7 +344,7 @@ export default withMermaid(
             {
               text: "Extensibility and plugins",
               link: "/guide/extensibility-overview",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/extensibility-overview" },
                 {
@@ -380,7 +381,7 @@ export default withMermaid(
             {
               text: "Observability and analytics",
               link: "/guide/observability-analytics",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/observability-analytics" },
                 { text: "Observability", link: "/guide/observability" },
@@ -406,7 +407,7 @@ export default withMermaid(
             {
               text: "Operations and management",
               link: "/guide/deployment-operations",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/deployment-operations" },
                 { text: "Deployment", link: "/guide/deployment" },
@@ -446,7 +447,7 @@ export default withMermaid(
             {
               text: "Enterprise and fleet",
               link: "/guide/enterprise",
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: "Overview", link: "/guide/enterprise" },
                 {
