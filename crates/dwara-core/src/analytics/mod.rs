@@ -34,9 +34,13 @@
 //! DW-121's raw-record firehose is NOT an implementation of this
 //! contract — it streams the completion-time access record (which
 //! carries `request_id` and the redacted path the extension event
-//! deliberately omits) through its own sink seam in `events::stream`;
-//! the federated analytics pipeline (DW-095) remains a future sibling
-//! implementation of THIS contract.
+//! deliberately omits) through its own sink seam in `events::stream`.
+//! The federated analytics pipeline (DW-095, SCALE-07 #186) IS an
+//! implementation of this contract: `cp_dp::analytics::FederatedAnalyticsSink`
+//! batches events on the edge and ships them to the controller over
+//! gRPC; the controller's `EmbeddedCollector` forwards them to the
+//! aggregate `EmbeddedAnalytics` store, tagging each event with the
+//! originating `edge_id` for fleet-wide query filtering.
 //!
 //! # Custom dimensions
 //!
@@ -334,6 +338,14 @@ impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
     fn from_event(event: &crate::extensions::analytics::Event) -> Self {
+        // SCALE-07 (#186): include edge_id as a dimension so fleet-wide
+        // queries can filter by edge without a schema migration. The
+        // dims column is a JSON object string; the edge_id dimension
+        // is queryable alongside the config-declared custom dimensions.
+        let mut attrs = event.attributes.clone();
+        if let Some(ref edge_id) = event.edge_id {
+            attrs.push(("edge_id".to_string(), edge_id.clone()));
+        }
         RawRecord {
             ts_ms: event.timestamp_ms as i64,
             request_id: String::new(),
@@ -357,7 +369,7 @@ impl RawRecord {
             rate_limited: event.rate_limited,
             broken: event.broken,
             shed: event.shed,
-            dims: dims_json(&event.attributes),
+            dims: dims_json(&attrs),
             request_headers_redacted: None,
             auth_identity: None,
         }

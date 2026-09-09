@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::analytics::FederatedAnalyticsSink;
 use super::transport::{default_backoff, EdgeClient, EdgeClientError};
 use super::{ConfigUpdate, EdgeState};
 use tokio_stream::StreamExt;
@@ -60,6 +61,9 @@ impl EdgeConfig {
 pub struct EdgeRuntime {
     config: EdgeConfig,
     state: Arc<EdgeState>,
+    /// SCALE-07 (#186): optional federated analytics sink. When set,
+    /// the edge ships analytics batches to the controller over gRPC.
+    analytics_sink: Option<Arc<FederatedAnalyticsSink>>,
 }
 
 impl EdgeRuntime {
@@ -67,7 +71,39 @@ impl EdgeRuntime {
     pub fn new(config: EdgeConfig) -> Self {
         let state = Arc::new(EdgeState::new(&config.edge_id, &config.version));
         state.set_controller_endpoint(&config.controller_endpoint);
-        Self { config, state }
+        Self {
+            config,
+            state,
+            analytics_sink: None,
+        }
+    }
+
+    /// SCALE-07 (#186): attach a federated analytics sink. The sink
+    /// batches events and pushes them to the controller over the
+    /// `PublishAnalytics` gRPC RPC. The edge's dataplane should use
+    /// this sink as its `AnalyticsSink` implementation so all local
+    /// analytics are shipped to the controller for fleet-wide
+    /// aggregation.
+    pub fn with_federated_analytics(
+        mut self,
+        client: super::transport::EdgeClient,
+        batch_size: usize,
+        flush_interval_ms: u64,
+    ) -> Self {
+        let sink = Arc::new(FederatedAnalyticsSink::spawn(
+            self.config.edge_id.clone(),
+            client,
+            batch_size,
+            flush_interval_ms,
+        ));
+        self.analytics_sink = Some(Arc::clone(&sink));
+        self
+    }
+
+    /// SCALE-07 (#186): the federated analytics sink (if attached).
+    /// The dataplane uses this as its `AnalyticsSink` implementation.
+    pub fn analytics_sink(&self) -> Option<Arc<FederatedAnalyticsSink>> {
+        self.analytics_sink.clone()
     }
 
     /// The edge state (for inspection / testing).

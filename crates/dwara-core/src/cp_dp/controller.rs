@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use super::analytics::AnalyticsCollector;
 use super::leader_election::{election_loop, LeaderElector};
 use super::transport::{serve_controller, ControllerServer};
 use super::{ConfigUpdate, ControllerState};
@@ -81,6 +82,10 @@ pub struct ControllerRuntime {
     elector: Option<Arc<dyn LeaderElector>>,
     /// The instance ID for leader election.
     instance_id: String,
+    /// SCALE-07 (#186): optional analytics collector for federated
+    /// analytics. When set, the gRPC server forwards edge analytics
+    /// batches to this collector.
+    analytics_collector: Option<Arc<dyn AnalyticsCollector>>,
 }
 
 impl ControllerRuntime {
@@ -96,6 +101,7 @@ impl ControllerRuntime {
             server,
             elector: None,
             instance_id,
+            analytics_collector: None,
         }
     }
 
@@ -105,6 +111,16 @@ impl ControllerRuntime {
     /// flag.
     pub fn with_elector(mut self, elector: Arc<dyn LeaderElector>) -> Self {
         self.elector = Some(elector);
+        self
+    }
+
+    /// SCALE-07 (#186): attach an analytics collector for federated
+    /// analytics. When set, the gRPC server forwards edge analytics
+    /// batches to this collector, enabling fleet-wide dashboards and
+    /// spend reports.
+    pub fn with_analytics_collector(mut self, collector: Arc<dyn AnalyticsCollector>) -> Self {
+        self.analytics_collector = Some(Arc::clone(&collector));
+        self.server = self.server.with_analytics_collector(collector);
         self
     }
 

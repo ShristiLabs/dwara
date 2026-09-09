@@ -83,6 +83,19 @@ the project follows semantic versioning once 1.0 is reached.
   `load_generation_counter`) survives controller restarts so the
   generation counter does not reset to 1. The `cp_dp` domain may now
   depend on `state` for lease persistence.
+- Federated analytics edge-to-controller rollup (#186, SCALE-07,
+  ent): completes the federated analytics gRPC pipeline (DW-095).
+  The `ControllerRuntime` now supports `with_analytics_collector` to
+  attach an `AnalyticsCollector` that receives edge analytics batches
+  via the `PublishAnalytics` RPC. The `EdgeRuntime` supports
+  `with_federated_analytics` to attach a `FederatedAnalyticsSink`
+  that batches events and ships them to the controller. The
+  `EmbeddedCollector` tags each event with the originating `edge_id`
+  so fleet-wide queries can filter by edge. The `Event` struct gained
+  an `edge_id` field; the wire protocol (`PbAnalyticsRecord`) gained
+  a `edge_id` tag. The `from_event` conversion stores `edge_id` as a
+  dimension in the `dims` JSON column for queryability without a
+  schema migration.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,
