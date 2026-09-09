@@ -135,6 +135,38 @@ enum Command {
         #[command(subcommand)]
         kind: K8sKind,
     },
+    /// Show the running gateway's status (generation, health, breakers).
+    Status {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019). Defaults to
+        /// `DWARA_ADMIN` or http://127.0.0.1:2019.
+        #[arg(long)]
+        admin: Option<String>,
+    },
+    /// Live view of upstream load-balancer state and shedding. Refreshes
+    /// until interrupted (Ctrl-C).
+    Top {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019). Defaults to
+        /// `DWARA_ADMIN` or http://127.0.0.1:2019.
+        #[arg(long)]
+        admin: Option<String>,
+        /// Refresh interval in milliseconds (default 1000).
+        #[arg(long, default_value_t = 1000)]
+        interval: u64,
+    },
+    /// Generate shell completion scripts (bash/zsh/fish/PowerShell).
+    Completions {
+        /// The target shell.
+        shell: CompletionShell,
+    },
+}
+
+/// Supported shells for `dwara completions` (USA-02, #179).
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
 }
 
 /// Subcommands of `dwara k8s` (DW-064).
@@ -528,6 +560,9 @@ fn main() {
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
+        Command::Status { admin } => run_status(admin),
+        Command::Top { admin, interval } => run_top(admin, interval),
+        Command::Completions { shell } => run_completions(shell),
         Command::Replay {
             recording,
             from,
@@ -859,4 +894,66 @@ fn build_recording_from_store(
         requests,
     };
     serde_json::to_string(&recording).map_err(|e| format!("cannot serialize recording: {e}"))
+}
+
+/// USA-02 (#179): `dwara status` — one-shot snapshot of the running
+/// gateway over the admin API. Exit 0 on success, 1 on error.
+fn run_status(admin: Option<String>) -> i32 {
+    let admin_url = dwara_cli::status::resolve_admin(admin.as_deref());
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("status: cannot start tokio runtime: {e}");
+            return 1;
+        }
+    };
+    match rt.block_on(dwara_cli::status::status(&admin_url)) {
+        Ok(out) => {
+            print!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("status: {e}");
+            1
+        }
+    }
+}
+
+/// USA-02 (#179): `dwara top` — live, refreshing view of upstream
+/// load-balancer state. Runs until interrupted (Ctrl-C). Exit 0 on
+/// interrupt, 1 on error.
+fn run_top(admin: Option<String>, interval: u64) -> i32 {
+    let admin_url = dwara_cli::status::resolve_admin(admin.as_deref());
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("top: cannot start tokio runtime: {e}");
+            return 1;
+        }
+    };
+    match rt.block_on(dwara_cli::status::top(&admin_url, interval)) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("top: {e}");
+            1
+        }
+    }
+}
+
+/// USA-02 (#179): `dwara completions <shell>` — generate a shell
+/// completion script for the dwara-cli command model and print it to
+/// stdout. Install per the clap_complete docs, e.g. for bash:
+/// `dwara completions bash > /etc/bash_completion.d/dwara`.
+fn run_completions(shell: CompletionShell) -> i32 {
+    use clap::CommandFactory as _;
+    let cmd = Cli::command();
+    let shell = match shell {
+        CompletionShell::Bash => clap_complete::Shell::Bash,
+        CompletionShell::Zsh => clap_complete::Shell::Zsh,
+        CompletionShell::Fish => clap_complete::Shell::Fish,
+        CompletionShell::Powershell => clap_complete::Shell::PowerShell,
+    };
+    let bin = "dwara-cli";
+    clap_complete::generate(shell, &mut cmd.clone(), bin, &mut std::io::stdout());
+    0
 }

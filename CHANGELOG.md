@@ -30,6 +30,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- `dwara status` / `dwara top` + shell completions (#179, USA-02):
+  three new `dwara-cli` subcommands. `status` prints a one-shot
+  snapshot of the running gateway over the admin API (version, uptime,
+  readiness, config generation + hash, per-upstream endpoint health,
+  circuit-breaker states, active requests, cache stats). `top` renders
+  a live, refreshing table of upstream load-balancer state (algorithm,
+  scheme, connections, requests, breaker state, per-endpoint health +
+  inflight) polling `/clusters` and `/stats` every second until
+  interrupted. `completions <shell>` generates bash/zsh/fish/PowerShell
+  completion scripts from the clap command model via `clap_complete`
+  (new workspace dependency, MIT OR Apache-2.0, allow-listed). The admin
+  URL defaults to `DWARA_ADMIN` or `http://127.0.0.1:2019`. No config or
+  schema changes.
 - Helm chart + Kustomize overlays + complete K8s object set (#178,
   USA-01): a Helm chart at `deploy/helm/dwara/` renders the full
   Kubernetes object set — Deployment, Service, HorizontalPodAutoscaler,

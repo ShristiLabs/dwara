@@ -9,6 +9,10 @@ rust-version.workspace = true
 [dependencies]
 dwara-core = { path = "../dwara-core" }
 clap = { workspace = true }
+# USA-02 (#179): shell-completion generation (bash/zsh/fish/PowerShell)
+# via clap_complete. Already a workspace dependency (MIT OR Apache-2.0);
+# no new external crate enters the tree.
+clap_complete = { workspace = true }
 # Lint rule "regex shadowed by exact" compiles route regexes (DW-022);
 # already a workspace dependency (route matching).
 regex = { workspace = true }
