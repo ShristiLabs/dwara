@@ -30,6 +30,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Admin entity CRUD + optimistic concurrency (#181, CFG-02):
+  per-entity endpoints for routes, services, upstreams, consumers, and
+  policies. Each entity type supports GET (list/get), POST (create,
+  409 on duplicate), PUT (replace, 404 if not found), and DELETE (404
+  if not found). All GET responses carry an ETag header (the config
+  content hash); all mutating requests (POST/PUT/DELETE and PATCH
+  /config) support If-Match optimistic concurrency (412 Precondition
+  Failed on mismatch). Mutations go through the same pipeline as
+  PATCH /config: parse, dry-run validate, write atomically,
+  compile-and-publish. 12 unit tests cover ETag format, If-Match
+  checking (absent/wildcard/exact/mismatch), entity kind dispatch,
+  find/add/replace/remove, and list JSON.
 - Config includes and profile files (#180, CFG-01): a config document
   may carry a top-level `includes:` key listing file paths, directories,
   or globs (relative to the config file's directory). Each is read,

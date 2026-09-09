@@ -91,6 +91,8 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod entity_crud;
+
 use bytes::Bytes;
 use dwara_core::config::{gateway_to_yaml, parse_gateway, AdminConfig, Gateway};
 use dwara_core::observability::{envelope_body, resolve_request_id};
@@ -1959,6 +1961,15 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             &request_id,
         );
     }
+    // CFG-02 (#181): entity-level CRUD (routes, services, upstreams,
+    // consumers, policies) with ETag/If-Match optimistic concurrency.
+    // try_crud returns Some(response) when the path matches an entity
+    // CRUD route, None otherwise (fall through to the existing routes).
+    if entity_crud::is_crud_path(&path) {
+        return entity_crud::try_crud(Arc::clone(&ctx), req, method.as_str(), &path, &request_id)
+            .await
+            .unwrap_or_else(|| envelope(404, "not_found", "entity not found", &request_id));
+    }
     match (method.as_str(), path.as_str()) {
         // GET /config (the config-dump surface, DW-045): the TYPED-redacted
         // copy of the published gateway — inline api-key values become
@@ -1968,7 +1979,8 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         ("GET", "/config") => {
             let snapshot = ctx.state.snapshot();
             let body = gateway_to_yaml(&snapshot.gateway().redacted()).unwrap_or_default();
-            generation_headers(
+            let etag_val = entity_crud::etag(snapshot.content_hash());
+            let mut resp = generation_headers(
                 Response::builder()
                     .status(200)
                     .header("content-type", "application/yaml")
@@ -1976,9 +1988,25 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
                     .expect("static response parts"),
                 snapshot.generation(),
                 snapshot.content_hash(),
-            )
+            );
+            resp.headers_mut().insert(
+                hyper::header::ETAG,
+                etag_val.parse().expect("etag is valid ASCII"),
+            );
+            resp
         }
         ("PATCH", "/config") => {
+            // CFG-02 (#181): If-Match optimistic concurrency check.
+            let snapshot = ctx.state.snapshot();
+            let current_etag = entity_crud::etag(snapshot.content_hash());
+            if let Err(()) = entity_crud::check_if_match(req.headers(), &current_etag) {
+                return envelope(
+                    412,
+                    "precondition_failed",
+                    "If-Match does not match the current config ETag",
+                    &request_id,
+                );
+            }
             // The size cap is enforced DURING collection, not after: a
             // cert-holding client streaming an unbounded body is cut off
             // at MAX_PATCH_BODY and never buffered whole in memory.
@@ -2047,11 +2075,17 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // structured dump; the existing GET /config returns YAML).
         ("GET", "/config_dump") => {
             let snapshot = ctx.state.snapshot();
-            generation_headers(
+            let etag_val = entity_crud::etag(snapshot.content_hash());
+            let mut resp = generation_headers(
                 json_response(200, config_dump_body(&ctx)),
                 snapshot.generation(),
                 snapshot.content_hash(),
-            )
+            );
+            resp.headers_mut().insert(
+                hyper::header::ETAG,
+                etag_val.parse().expect("etag is valid ASCII"),
+            );
+            resp
         }
         // GET /runtime_info (DW-072): process-level runtime information —
         // version, uptime, config generation, and readiness.
