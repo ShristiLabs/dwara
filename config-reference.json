@@ -5106,7 +5106,7 @@
       ]
     },
     "AnalyticsStreamSink": {
-      "description": "The access-record stream's sink (DW-121,\n`gateway.analytics_stream.sink`). Closed set, internally tagged\n(`type: webhook`): `webhook` ships today. A Kafka producer is the\ndocumented second slot, deliberately not shipped in v1 (the\nlean-deps rule — the same decision that deferred Parquet to the\nDW-156 backlog): a sink slot that pulls a client library must earn\nits dependency weight. The variant payloads carry their own\n`deny_unknown_fields`, so a misspelled knob inside a sink is still\na rejected config.",
+      "description": "The access-record stream's sink (DW-121,\n`gateway.analytics_stream.sink`). Closed set, internally tagged\n(`type: webhook` or `type: kafka`): `webhook` ships today; `kafka`\n(SCALE-08, #187) produces NDJSON batches to a Kafka topic via a\nKafka REST Proxy (HTTP-based, no native client dependency). The\nvariant payloads carry their own `deny_unknown_fields`, so a\nmisspelled knob inside a sink is still a rejected config.",
       "oneOf": [
         {
           "description": "POST each flushed batch as one NDJSON body (one JSON object per\nline, one line per record) to the configured URL, reusing the\nDW-044 webhook delivery engine's retry/budget shape — one\ndelivery (with its retries) per batch.",
@@ -5156,6 +5156,56 @@
           "required": [
             "type",
             "url"
+          ]
+        },
+        {
+          "description": "Produce each flushed batch as NDJSON messages to a Kafka topic\nvia a Kafka REST Proxy (SCALE-08, #187). The REST Proxy\nendpoint receives the batch as an HTTP POST with the\n`Content-Type: application/vnd.kafka.binary.v2+json` media\ntype; each NDJSON line becomes a Kafka message value (base64\nencoded per the REST Proxy spec). TLS is via `https://`; SASL\nauth is via headers. This avoids the native `rdkafka`\ndependency while providing a production-usable Kafka\nintegration.",
+          "type": "object",
+          "properties": {
+            "rest_proxy_url": {
+              "description": "Absolute `http://` or `https://` URL of the Kafka REST Proxy\nendpoint for producing to the topic, e.g.\n`https://kafka-rest:8082/topics/<topic>`. `https://` verifies\nagainst the public webpki root set.",
+              "type": "string"
+            },
+            "headers": {
+              "description": "Headers sent on every batch delivery (e.g. the REST Proxy's\nauth token, `Authorization: Basic ...` for SASL). Values may\nbe inline or `${ENV_NAME}` / `${file:/path}` secret references\n(DW-045), resolved at config-compile time; inline values are\nredacted in every config echo.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "timeout_ms": {
+              "description": "TOTAL budget for one batch delivery (all retry attempts share\nit), in milliseconds. Default 5000. Validation enforces\n1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's\nbound).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "max_attempts": {
+              "description": "Max delivery attempts per batch. Default 3.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "backoff_base_ms": {
+              "description": "First backoff between batch attempts, doubling per retry up to\n`backoff_cap_ms`. Default 250.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "backoff_cap_ms": {
+              "description": "Upper bound on the computed backoff. Default 4000; must be >=\n`backoff_base_ms`.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "kafka"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "rest_proxy_url"
           ]
         }
       ]

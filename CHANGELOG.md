@@ -96,6 +96,16 @@ the project follows semantic versioning once 1.0 is reached.
   a `edge_id` tag. The `from_event` conversion stores `edge_id` as a
   dimension in the `dims` JSON column for queryability without a
   schema migration.
+- Kafka analytics sink (#187, SCALE-08): adds a `kafka` variant to
+  `analytics_stream.sink` that produces NDJSON batches to a Kafka
+  topic via a Kafka REST Proxy (HTTP-based, no native client
+  dependency). The `KafkaRecordSink` implements `RecordSink` by
+  encoding each NDJSON line as a base64 message value in the
+  Confluent REST Proxy v2+json format. TLS is via `https://`; SASL
+  auth is via headers. Reuses the DW-044 webhook delivery engine's
+  retry/budget shape. Config validation enforces the same URL,
+  header, timeout, attempts, and backoff bounds as the webhook sink.
+  Config reference and config-studio rebuilt.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

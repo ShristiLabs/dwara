@@ -2621,6 +2621,55 @@ fn validate_analytics_stream(gateway: &Gateway, issues: &mut Vec<ValidationIssue
                 ));
             }
         }
+        crate::config::AnalyticsStreamSink::Kafka(k) => {
+            validate_delivery_url(
+                "analytics_stream.sink.kafka.rest_proxy_url",
+                &k.rest_proxy_url,
+                issues,
+            );
+            validate_delivery_headers("analytics_stream.sink.kafka", &k.headers, issues);
+            if k.timeout_ms == 0 || k.timeout_ms > crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.timeout_ms",
+                    format!(
+                        "timeout_ms must be in 1..={} (one total budget per batch \
+                         delivery, shared by every retry attempt — the shared \
+                         webhook engine's bound)",
+                        crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS
+                    ),
+                ));
+            }
+            if k.max_attempts == 0 || k.max_attempts > crate::config::limits::MAX_WEBHOOK_ATTEMPTS {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.max_attempts",
+                    format!(
+                        "max_attempts must be in 1..={} (total attempts per batch \
+                         delivery)",
+                        crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+                    ),
+                ));
+            }
+            if k.backoff_base_ms == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.backoff_base_ms",
+                    "backoff_base_ms must be > 0",
+                ));
+            }
+            if k.backoff_cap_ms < k.backoff_base_ms {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.backoff_cap_ms",
+                    "backoff_cap_ms must be >= backoff_base_ms",
+                ));
+            }
+        }
     }
     if let Some(buffer) = cfg.buffer {
         if !(crate::config::limits::MIN_STREAM_BUFFER..=crate::config::limits::MAX_STREAM_BUFFER)

@@ -1731,13 +1731,11 @@ pub struct AnalyticsStreamConfig {
 
 /// The access-record stream's sink (DW-121,
 /// `gateway.analytics_stream.sink`). Closed set, internally tagged
-/// (`type: webhook`): `webhook` ships today. A Kafka producer is the
-/// documented second slot, deliberately not shipped in v1 (the
-/// lean-deps rule — the same decision that deferred Parquet to the
-/// DW-156 backlog): a sink slot that pulls a client library must earn
-/// its dependency weight. The variant payloads carry their own
-/// `deny_unknown_fields`, so a misspelled knob inside a sink is still
-/// a rejected config.
+/// (`type: webhook` or `type: kafka`): `webhook` ships today; `kafka`
+/// (SCALE-08, #187) produces NDJSON batches to a Kafka topic via a
+/// Kafka REST Proxy (HTTP-based, no native client dependency). The
+/// variant payloads carry their own `deny_unknown_fields`, so a
+/// misspelled knob inside a sink is still a rejected config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AnalyticsStreamSink {
@@ -1746,6 +1744,16 @@ pub enum AnalyticsStreamSink {
     /// DW-044 webhook delivery engine's retry/budget shape — one
     /// delivery (with its retries) per batch.
     Webhook(AnalyticsStreamWebhook),
+    /// Produce each flushed batch as NDJSON messages to a Kafka topic
+    /// via a Kafka REST Proxy (SCALE-08, #187). The REST Proxy
+    /// endpoint receives the batch as an HTTP POST with the
+    /// `Content-Type: application/vnd.kafka.binary.v2+json` media
+    /// type; each NDJSON line becomes a Kafka message value (base64
+    /// encoded per the REST Proxy spec). TLS is via `https://`; SASL
+    /// auth is via headers. This avoids the native `rdkafka`
+    /// dependency while providing a production-usable Kafka
+    /// integration.
+    Kafka(AnalyticsStreamKafka),
 }
 
 /// The webhook batch sink (DW-121,
@@ -1793,6 +1801,61 @@ pub struct AnalyticsStreamWebhook {
     /// `backoff_cap_ms` (a `Retry-After` answer replaces the computed
     /// value for that wait). Default 250 — a batch retry is heavier
     /// than an alert retry, so it starts slower.
+    #[serde(
+        default = "default_stream_webhook_backoff_base_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_base_ms"
+    )]
+    pub backoff_base_ms: u64,
+    /// Upper bound on the computed backoff. Default 4000; must be >=
+    /// `backoff_base_ms`.
+    #[serde(
+        default = "default_stream_webhook_backoff_cap_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_cap_ms"
+    )]
+    pub backoff_cap_ms: u64,
+}
+
+/// The Kafka batch sink (SCALE-08, #187,
+/// `gateway.analytics_stream.sink.kafka`). Produces each flushed
+/// batch as NDJSON messages to a Kafka topic via a Kafka REST Proxy
+/// (HTTP-based, no native client dependency). The REST Proxy
+/// endpoint receives the batch as an HTTP POST with the
+/// `Content-Type: application/vnd.kafka.binary.v2+json` media type;
+/// each NDJSON line becomes a Kafka message value (base64 encoded
+/// per the REST Proxy spec). TLS is via `https://`; SASL auth is via
+/// headers (e.g. `Authorization: Basic ...`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsStreamKafka {
+    /// Absolute `http://` or `https://` URL of the Kafka REST Proxy
+    /// endpoint for producing to the topic, e.g.
+    /// `https://kafka-rest:8082/topics/<topic>`. `https://` verifies
+    /// against the public webpki root set.
+    pub rest_proxy_url: String,
+    /// Headers sent on every batch delivery (e.g. the REST Proxy's
+    /// auth token, `Authorization: Basic ...` for SASL). Values may
+    /// be inline or `${ENV_NAME}` / `${file:/path}` secret references
+    /// (DW-045), resolved at config-compile time; inline values are
+    /// redacted in every config echo.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// TOTAL budget for one batch delivery (all retry attempts share
+    /// it), in milliseconds. Default 5000. Validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's
+    /// bound).
+    #[serde(
+        default = "default_stream_webhook_timeout_ms",
+        skip_serializing_if = "is_default_stream_webhook_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+    /// Max delivery attempts per batch. Default 3.
+    #[serde(
+        default = "default_stream_webhook_attempts",
+        skip_serializing_if = "is_default_stream_webhook_attempts"
+    )]
+    pub max_attempts: u32,
+    /// First backoff between batch attempts, doubling per retry up to
+    /// `backoff_cap_ms`. Default 250.
     #[serde(
         default = "default_stream_webhook_backoff_base_ms",
         skip_serializing_if = "is_default_stream_webhook_backoff_base_ms"
