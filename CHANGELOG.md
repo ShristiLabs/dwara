@@ -161,6 +161,15 @@ the project follows semantic versioning once 1.0 is reached.
   `dwara plugin install` commands (downloads via curl, verifies
   SHA-256 digest with sha2). Config reference and config-studio
   rebuilt.
+- True Terraform provider (#193, CFG-08): adds `dwara tf apply-crud`
+  subcommand that uses the admin API's per-entity CRUD endpoints
+  (POST/PUT/DELETE for routes, services, upstreams, consumers,
+  policies) instead of full-document PATCH /config. Each resource is
+  managed independently — the same behavior a real Terraform provider
+  would exhibit. The existing `dwara tf apply` (full-document PATCH)
+  is retained for backward compatibility. AdminClient gains
+  list_entities, get_entity, create_entity, replace_entity, and
+  delete_entity methods.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

@@ -322,6 +322,22 @@ enum TfKind {
         #[arg(long)]
         ca: Option<String>,
     },
+    /// SCALE-12 (#193): Apply the desired state to the gateway using
+    /// per-entity CRUD operations (true provider behavior). Each
+    /// resource is managed independently via POST/PUT/DELETE against
+    /// the admin API's entity CRUD endpoints, instead of full-document
+    /// PATCH /config.
+    ApplyCrud {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019).
+        #[arg(long)]
+        admin: String,
+        /// Path to the local tfstate JSON file.
+        #[arg(long)]
+        state: String,
+        /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
+        #[arg(long)]
+        ca: Option<String>,
+    },
 }
 
 fn read(path: &str) -> Result<String, String> {
@@ -835,6 +851,20 @@ fn run_tf(kind: TfKind) -> i32 {
                 }
             }
         }
+        TfKind::ApplyCrud {
+            admin,
+            state,
+            ca: _,
+        } => match rt.block_on(dwara_cli::tf::apply_crud(&admin, &state)) {
+            Ok(summary) => {
+                println!("tf apply-crud: {summary}");
+                0
+            }
+            Err(e) => {
+                eprintln!("tf apply-crud: {e}");
+                1
+            }
+        },
     }
 }
 
