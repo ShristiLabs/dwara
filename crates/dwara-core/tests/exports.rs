@@ -136,7 +136,9 @@ fn statement_matches_the_query_api_exactly() {
                     to_ms: 86_400_000,
                     gran: 2,
                     group_by: vec!["consumer".to_string()],
+                    dim_group_by: None,
                     filters: query::FiltersBody::default(),
+                    dim_filters: Default::default(),
                     limit: Some(100),
                 },
             )
@@ -715,7 +717,9 @@ fn monthly_statement_spans_days_on_one_day_rows() {
                     to_ms: 31 * 86_400_000,
                     gran: 3,
                     group_by: vec!["consumer".to_string()],
+                    dim_group_by: None,
                     filters: query::FiltersBody::default(),
+                    dim_filters: Default::default(),
                     limit: Some(100),
                 },
             )

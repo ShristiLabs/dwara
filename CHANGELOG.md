@@ -130,6 +130,18 @@ the project follows semantic versioning once 1.0 is reached.
   method spawns best-effort background HEAD requests; failures are
   logged and silently ignored. Config reference and config-studio
   rebuilt.
+- Analytics query and export breadth (#190, SCALE-12): opens ad-hoc
+  grouping/filtering over captured custom dimensions via
+  `dim_group_by` and `dim_filters` on the structured query endpoint.
+  When `dim_group_by` is set, the query reads from `rollup_dim`
+  instead of `rollup_fixed`, grouping by the dimension's values.
+  `dim_filters` apply as semi-join subqueries against `rollup_dim`.
+  Adds `parquet_csv` export format (CSV with Parquet-compatible JSON
+  metadata header; the operator converts to true Parquet using an
+  external tool like `duckdb`). Adds `ai.logging.external_sink`
+  configuration for syncing prompt/response logs to S3/GCS via an
+  external command (lean-dependency alternative to embedding S3/GCS
+  SDKs). Config reference and config-studio rebuilt.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

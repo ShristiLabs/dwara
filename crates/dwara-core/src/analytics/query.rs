@@ -317,6 +317,11 @@ pub fn top(
 
 /// The structured query endpoint's request body (DW-043): a closed
 /// grammar translated to SQL — never SQL text from the caller.
+///
+/// SCALE-10 (#190): `dim_group_by` opens ad-hoc grouping over a
+/// captured custom dimension (bounded cardinality). When set, the
+/// query reads from `rollup_dim` instead of `rollup_fixed`, grouping
+/// by the dimension's values.
 #[derive(Debug, Deserialize)]
 pub struct StructuredQuery {
     pub from_ms: i64,
@@ -327,9 +332,20 @@ pub struct StructuredQuery {
     /// row).
     #[serde(default)]
     pub group_by: Vec<String>,
+    /// SCALE-12 (#190): custom dimension name to group by. When set,
+    /// the query reads from `rollup_dim` grouped by the dimension's
+    /// values. Bounded to the configured custom dimensions'
+    /// cardinality (the rollup_dim table's primary key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim_group_by: Option<String>,
     /// Equality filters on dimension columns.
     #[serde(default)]
     pub filters: FiltersBody,
+    /// SCALE-12 (#190): equality filters on custom dimensions. The
+    /// key is the dimension name, the value is the required value.
+    /// Applied as a semi-join against `rollup_dim`.
+    #[serde(default)]
+    pub dim_filters: std::collections::BTreeMap<String, String>,
     /// Maximum returned rows (default 1000, hard cap 10 000).
     #[serde(default)]
     pub limit: Option<usize>,
@@ -352,6 +368,10 @@ pub enum QueryError {
     UnknownGroupBy(String),
     BadGranularity(usize),
     BadRange,
+    /// SCALE-12 (#190): the dim_group_by name is empty or exceeds the
+    /// maximum length (64 chars). Dimension names are config-bounded;
+    /// this is a safety cap against abuse.
+    BadDimGroupBy(String),
 }
 
 impl std::fmt::Display for QueryError {
@@ -366,11 +386,17 @@ impl std::fmt::Display for QueryError {
                 write!(f, "gran must be 0..=3 (1m/5m/1h/1d), got {g}")
             }
             QueryError::BadRange => write!(f, "from_ms must be < to_ms"),
+            QueryError::BadDimGroupBy(g) => {
+                write!(f, "dim_group_by '{g}' is empty or exceeds 64 characters")
+            }
         }
     }
 }
 
 impl std::error::Error for QueryError {}
+
+/// Maximum length of a custom dimension name for dim_group_by.
+const MAX_DIM_NAME_LEN: usize = 64;
 
 impl StructuredQuery {
     /// Reject anything outside the closed grammar.
@@ -384,6 +410,16 @@ impl StructuredQuery {
         for g in &self.group_by {
             if !DIM_COLUMNS.contains(&g.as_str()) {
                 return Err(QueryError::UnknownGroupBy(g.clone()));
+            }
+        }
+        if let Some(d) = &self.dim_group_by {
+            if d.is_empty() || d.len() > MAX_DIM_NAME_LEN {
+                return Err(QueryError::BadDimGroupBy(d.clone()));
+            }
+        }
+        for k in self.dim_filters.keys() {
+            if k.is_empty() || k.len() > MAX_DIM_NAME_LEN {
+                return Err(QueryError::BadDimGroupBy(k.clone()));
             }
         }
         Ok(())
@@ -409,7 +445,16 @@ pub struct QueryRow {
 /// Execute a validated structured query. Range-aggregate shape: the
 /// window column is NOT grouped (per-window series is the dashboard
 /// endpoint's job); rows order by request volume descending.
+///
+/// SCALE-12 (#190): when `dim_group_by` is set, the query reads from
+/// `rollup_dim` instead of `rollup_fixed`, grouping by the custom
+/// dimension's values. When `dim_filters` are set, they are applied
+/// as semi-join subqueries against `rollup_dim`.
 pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Vec<QueryRow>> {
+    // SCALE-12 (#190): custom dimension grouping path.
+    if let Some(dim_name) = &q.dim_group_by {
+        return structured_dim(conn, q, dim_name);
+    }
     let key_len = q.group_by.len();
     let key_sel = if key_len == 0 {
         String::new()
@@ -425,6 +470,8 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
         status_class: q.filters.status_class.clone(),
     };
     let (filter_sql, bind) = filters.clauses();
+    // SCALE-12 (#190): dim_filters semi-join against rollup_dim.
+    let (dim_filter_sql, dim_bind) = dim_filter_clauses(&q.dim_filters);
     let sql = format!(
         "SELECT {key_sel}
                 SUM(requests), SUM(errors), SUM(rate_limited), SUM(shed),
@@ -433,7 +480,7 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
                 SUM(b6), SUM(b7), SUM(b8), SUM(b9), SUM(b10), SUM(b11),
                 SUM(b12)
          FROM rollup_fixed
-         WHERE gran = ? AND window_start >= ? AND window_start < ?{filter_sql}
+         WHERE gran = ? AND window_start >= ? AND window_start < ?{filter_sql}{dim_filter_sql}
          {group_all}
          ORDER BY SUM(requests) DESC
          LIMIT ?",
@@ -455,6 +502,7 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
         Box::new(q.to_ms),
     ];
     all.extend(bind);
+    all.extend(dim_bind);
     all.push(Box::new(limit as i64));
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(all.iter().map(|p| p.as_ref())))?;
@@ -473,6 +521,93 @@ pub fn structured(conn: &Connection, q: &StructuredQuery) -> rusqlite::Result<Ve
             error_rate,
             rate_limited: rate_limited as i64,
             shed: shed as i64,
+            avg_ms,
+            p50_ms: p50,
+            p95_ms: p95,
+            p99_ms: p99,
+        });
+    }
+    Ok(out)
+}
+
+/// SCALE-12 (#190): Build WHERE clauses for custom dimension filters.
+/// Each filter becomes a semi-join: the window_start must appear in
+/// the set of windows where the dimension equals the required value.
+/// Returns (SQL fragment, bind values).
+fn dim_filter_clauses(
+    dim_filters: &std::collections::BTreeMap<String, String>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    if dim_filters.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let mut sql = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    for (dim, value) in dim_filters {
+        // Semi-join: window_start must appear in the set of windows
+        // where this dimension has this value. Uses EXISTS for clarity.
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM rollup_dim d{idx} \
+             WHERE d{idx}.gran = rollup_fixed.gran \
+             AND d{idx}.window_start = rollup_fixed.window_start \
+             AND d{idx}.dim = ? AND d{idx}.value = ?)",
+            idx = params.len() / 2
+        ));
+        params.push(Box::new(dim.clone()));
+        params.push(Box::new(value.clone()));
+    }
+    (sql, params)
+}
+
+/// SCALE-12 (#190): Execute a structured query grouped by a custom
+/// dimension. Reads from `rollup_dim` instead of `rollup_fixed`,
+/// grouping by the dimension's values. The `rollup_dim` table does
+/// not carry `rate_limited` or `shed` columns (custom dimensions
+/// aggregate every request carrying the dimension, not split by fixed
+/// dimensions), so those fields are zero in the result.
+fn structured_dim(
+    conn: &Connection,
+    q: &StructuredQuery,
+    dim_name: &str,
+) -> rusqlite::Result<Vec<QueryRow>> {
+    let limit = q.limit.unwrap_or(1000).min(10_000);
+    let (filter_sql, bind) = dim_filter_clauses(&q.dim_filters);
+    // The rollup_dim table does not have rate_limited or shed columns.
+    let sql = format!(
+        "SELECT value,
+                SUM(requests), SUM(errors), 0, 0,
+                SUM(duration_sum_ms),
+                SUM(b0), SUM(b1), SUM(b2), SUM(b3), SUM(b4), SUM(b5),
+                SUM(b6), SUM(b7), SUM(b8), SUM(b9), SUM(b10), SUM(b11),
+                SUM(b12)
+         FROM rollup_dim
+         WHERE gran = ? AND window_start >= ? AND window_start < ?
+         AND dim = ?{filter_sql}
+         GROUP BY value
+         ORDER BY SUM(requests) DESC
+         LIMIT ?"
+    );
+    let mut all: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(q.gran as i64),
+        Box::new(q.from_ms),
+        Box::new(q.to_ms),
+        Box::new(dim_name.to_string()),
+    ];
+    all.extend(bind);
+    all.push(Box::new(limit as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(all.iter().map(|p| p.as_ref())))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let key = vec![row.get::<_, String>(0)?];
+        let agg = read_agg(row, 1)?;
+        let (error_rate, _rate_limited, _shed, avg_ms, p50, p95, p99) = metrics_of(&agg);
+        out.push(QueryRow {
+            key,
+            requests: agg.requests,
+            errors: agg.errors,
+            error_rate,
+            rate_limited: 0,
+            shed: 0,
             avg_ms,
             p50_ms: p50,
             p95_ms: p95,

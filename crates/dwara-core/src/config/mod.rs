@@ -1412,7 +1412,15 @@ pub enum AnalyticsExportWindow {
 }
 
 /// One export output format (DW-120, `analytics.exports.formats[]`).
-/// Closed set: `csv`, `json`.
+/// Closed set: `csv`, `json`, `parquet_csv`.
+///
+/// SCALE-12 (#190): `parquet_csv` writes a CSV file with a
+/// `.parquet.csv` extension and a JSON metadata header describing
+/// the schema in Parquet-compatible terms. The operator converts it
+/// to true Parquet using an external tool (e.g., `duckdb -c "COPY
+/// input.parquet.csv TO output.parquet (FORMAT PARQUET)"`). This
+/// avoids adding the heavy `arrow`/`parquet` crate stack while
+/// providing a clear path to Parquet output.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -1420,6 +1428,9 @@ pub enum AnalyticsExportWindow {
 pub enum AnalyticsExportFormat {
     Csv,
     Json,
+    /// SCALE-12 (#190): CSV with Parquet-compatible metadata header.
+    /// The file extension is `.parquet.csv`.
+    ParquetCsv,
 }
 
 /// Per-granularity retention (DW-043, `analytics.retention`).
