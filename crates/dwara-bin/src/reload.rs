@@ -15,10 +15,15 @@
 //!   watched; a change rebuilds the `ServerConfig` behind an `ArcSwap`
 //!   WITHOUT dropping connections. New handshakes use the new material;
 //!   in-flight sessions keep the configuration they negotiated.
-//! - Documented v1 limitation: the LISTENER BIND SET is taken from the
-//!   startup snapshot; adding/removing listeners or changing
-//!   address/port/proxy_protocol takes effect on restart. Only
-//!   route/config changes and certificate material reload live.
+//! - SCALE-03 (#182): listener hot-reload. On a successful reload, the
+//!   listener set is diffed: added listeners are bound, removed
+//!   listeners are drained, changed listeners are restarted. The
+//!   `ListenerManager` lives in the reload driver task and is applied
+//!   after every successful publish. The bind identity (address, port,
+//!   protocol, proxy_protocol, TLS mode) determines whether a listener
+//!   needs a restart; everything else (policies, authorization, alt_svc,
+//!   TLS cert material) is read from the live snapshot at request time
+//!   and needs no restart.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,6 +36,8 @@ use dwara_core::snapshot::{ConfigState, Snapshot};
 use dwara_core::tls::TlsTermination;
 use notify::Watcher;
 use tokio::sync::mpsc;
+
+use crate::listener_manager::ListenerManager;
 
 /// One reload attempt: re-read from disk, validate, publish atomically.
 /// Never fatal: on any failure the published snapshot is untouched and the
@@ -50,6 +57,8 @@ pub(crate) async fn reload(
     discovery: &mut dwara_core::dataplane::discovery::DiscoveryTasks,
     dns_resolver: &Arc<dwara_core::dataplane::discovery::DnsResolver>,
     obs: &Arc<Observability>,
+    listener_manager: &mut ListenerManager,
+    tls_states_mut: &mut BTreeMap<String, Arc<TlsTermination>>,
 ) {
     let old = state.snapshot();
     match source.load().await {
@@ -114,6 +123,13 @@ pub(crate) async fn reload(
                         Arc::clone(dns_resolver),
                         Arc::clone(obs),
                     );
+                    // SCALE-03 (#182): listener hot-reload. Diff the
+                    // new listener set against the currently bound set
+                    // and apply changes (add/remove/restart). Pass the
+                    // mutable tls_states so the manager can register
+                    // new terminate listeners for cert watching.
+                    let configured = crate::configured_listeners(&state.snapshot());
+                    listener_manager.apply(&configured, tls_states_mut).await;
                 }
                 Err(err) => {
                     // CompileError::Validation's Display lists every issue.

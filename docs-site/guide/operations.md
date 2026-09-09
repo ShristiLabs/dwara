@@ -31,11 +31,13 @@ watcher fails to start, `SIGHUP` reload still works.
 
 The route table and upstream connection pools hot-swap together in one
 atomic publish, so a new route table is never paired with stale pools.
-The listener bind set (addresses/ports, and each listener's
-`proxy_protocol` flag) is fixed at startup — adding, removing, or
-moving listeners — or toggling [PROXY protocol](https://www.haproxy.org/download/2.4/doc/proxy-protocol.txt) (a protocol that conveys the real client IP through a load balancer) acceptance — requires a
-restart; only route/policy content and certificate material reload
-live.
+The listener bind set (addresses/ports, protocol, `proxy_protocol` flag,
+and TLS mode) is hot-reloaded: adding, removing, or changing a TCP
+listener takes effect on the next config reload without a restart.
+Removed listeners drain in-flight connections before dropping; changed
+listeners are drained and re-bound. H3 (QUIC) and UDP listeners remain
+restart-only (they bind UDP sockets, not TCP). Certificate material on
+terminate listeners reloads live via the cert watcher (see below).
 
 ## Certificate hot-reload
 

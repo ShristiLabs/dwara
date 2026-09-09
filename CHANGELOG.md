@@ -30,6 +30,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Listener hot-reload (#182, SCALE-03): the listener bind set is now
+  diffed on every config reload. Added listeners are bound and spawned
+  without restart; removed listeners are drained (per-listener shutdown
+  watch + bounded drain timeout) and dropped; changed listeners
+  (address, port, protocol, proxy_protocol, or TLS mode) are drained
+  and re-bound. Unchanged listeners keep running — their TLS cert
+  material is refreshed separately by the cert watcher. This eliminates
+  downtime for listener changes: adding a new port, enabling H3,
+  changing TLS config, or removing a listener all take effect on
+  reload. H3 (QUIC) and UDP listeners remain restart-only (they bind
+  UDP, not TCP, and are managed separately). The
+  `DWARA_BIND` override is respected on reload so the listener manager
+  always diffs the same set.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

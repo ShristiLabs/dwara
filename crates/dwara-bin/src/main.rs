@@ -98,6 +98,7 @@
 //! `DWARA_UPGRADE_BINARY` (new binary path; default current exe),
 //! `DWARA_UPGRADE_READY_TIMEOUT_SECS` (READY wait budget, default 30).
 
+mod listener_manager;
 mod listeners;
 mod reload;
 mod upgrade;
@@ -127,7 +128,7 @@ use dwara_core::snapshot::ConfigState;
 use dwara_core::store::{sync_consumers_from_config, StateStore};
 use dwara_core::tls::{self, TlsTermination};
 use hyper_util::server::graceful::GracefulShutdown;
-use listeners::{bind_listener, run_listener_supervised, ListenerMode, SpliceDrain};
+use listeners::SpliceDrain;
 use reload::{refresh_tls_states, reload, spawn_file_watcher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
@@ -432,43 +433,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // Listener set: DWARA_BIND overrides with one cleartext listener;
-    // otherwise bind every configured listener (fixed at startup).
-    let env_bind = std::env::var("DWARA_BIND").ok();
-    let configured: Vec<Listener> = match &env_bind {
-        Some(addr) => {
-            let addr = if addr.contains(':') {
-                addr.clone()
-            } else {
-                format!("{addr}:{DEFAULT_BIND_PORT}")
-            };
-            let (address, port) = addr
-                .rsplit_once(':')
-                .and_then(|(a, p)| Some((a.to_string(), p.parse().ok()?)))
-                .unwrap_or_else(|| (DEFAULT_BIND.to_string(), DEFAULT_BIND_PORT));
-            vec![Listener {
-                name: "env-bind".into(),
-                address,
-                port,
-                protocol: ListenerProtocol::Http,
-                tls: None,
-                policies: Vec::new(),
-                authorization: None,
-                proxy_protocol: false,
-                alt_svc: None,
-                l4: None,
-            }]
-        }
-        None => state.snapshot().gateway().listeners.clone(),
-    };
+    // otherwise bind every configured listener. SCALE-03 (#182): the
+    // same derivation runs on reload so the listener manager diffs the
+    // same set.
+    let configured: Vec<Listener> = configured_listeners(&state.snapshot());
     if configured.is_empty() {
         tracing::error!("config defines no listeners and DWARA_BIND is unset; nothing to serve");
         std::process::exit(1);
     }
 
     let mut tls_states: BTreeMap<String, Arc<TlsTermination>> = BTreeMap::new();
-    let mut bound_listeners = Vec::new();
-    // DW-088: H3 (QUIC) listeners are collected separately — they bind
-    // UDP sockets and run a QUIC accept loop, not a TCP accept loop.
+    // SCALE-03 (#182): TCP listeners (http, https, tcp) are bound and
+    // managed by the ListenerManager, which hot-reloads them on config
+    // changes. H3 (QUIC) listeners are collected separately here — they
+    // bind UDP sockets and run a QUIC accept loop, not a TCP accept loop.
     // They reuse the TlsTermination cert material for the QUIC handshake.
     let mut h3_listeners: Vec<(Listener, Arc<TlsTermination>)> = Vec::new();
     for l in &configured {
@@ -509,26 +487,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             continue;
         }
-        let (tcp, bound) = bind_listener(l).await?;
-        if let ListenerMode::Terminate(term) = &bound.mode {
-            tls_states.insert(bound.name.clone(), Arc::clone(term));
-        }
-        tracing::info!(
-            code = "listening",
-            addr = %bound.addr,
-            listener = %bound.name,
-            mode = match bound.mode {
-                ListenerMode::Cleartext => "cleartext http/1.1+h2c",
-                ListenerMode::Terminate(_) => "tls terminate",
-                ListenerMode::Passthrough => "tls passthrough",
-                ListenerMode::L4 { .. } => "l4 tcp proxy",
-            },
-            config = %config_path.display().to_string(),
-            generation = info.generation,
-            routes = info.route_count,
-            "dwara listening"
-        );
-        bound_listeners.push((bound, tcp));
+        // TCP listeners (http, https, tcp) are bound by the
+        // ListenerManager after the graceful shutdown / hardening
+        // handles are created below.
     }
 
     // Config watcher (DW-006 pattern).
@@ -543,36 +504,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(err) => {
             tracing::warn!("config file watch unavailable ({err}); SIGHUP reload still active");
             mpsc::unbounded_channel().1
-        }
-    };
-
-    // Certificate watcher: one watcher over every parent directory of a
-    // terminate listener's cert/key files.
-    let mut cert_dirs: Vec<PathBuf> = Vec::new();
-    let mut cert_names: Vec<std::ffi::OsString> = Vec::new();
-    for term in tls_states.values() {
-        for p in &term.watched_paths {
-            if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
-                if !cert_dirs.contains(&dir.to_path_buf()) {
-                    cert_dirs.push(dir.to_path_buf());
-                }
-                if !cert_names.contains(&name.to_owned()) {
-                    cert_names.push(name.to_owned());
-                }
-            }
-        }
-    }
-    let cert_rx = if cert_dirs.is_empty() {
-        mpsc::unbounded_channel().1
-    } else {
-        match spawn_file_watcher(cert_dirs, cert_names) {
-            Ok(rx) => rx,
-            Err(err) => {
-                tracing::warn!(
-                    "certificate watch unavailable ({err}); config reload still refreshes TLS"
-                );
-                mpsc::unbounded_channel().1
-            }
         }
     };
 
@@ -1034,6 +965,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         })
     });
+    // SCALE-03 (#182): Listener hot-reload. The ListenerManager owns the
+    // TCP listener tasks and hot-reloads them on config changes. It is
+    // wrapped in an Arc<Mutex> so the reload driver task can call apply()
+    // and the main shutdown path can call join_all().
+    let timeout = shutdown_timeout();
+    let hardening = Arc::new(HttpHardening::from_env());
+    tracing::info!(
+        code = "protocol_hardening",
+        http1_max_headers = hardening.http1_max_headers,
+        http1_max_buf_bytes = hardening.http1_max_buf_size,
+        http1_header_timeout_ms = hardening.http1_header_read_timeout.as_millis() as u64,
+        h2_max_concurrent_streams = hardening.h2_max_concurrent_streams,
+        request_body_gap_ms = hardening
+            .request_body_gap
+            .map(|g| g.as_millis() as u64)
+            .unwrap_or(0),
+        "protocol hardening enabled (DW-023)"
+    );
+    let mut listener_manager = listener_manager::ListenerManager::new(
+        Arc::clone(&state),
+        Arc::clone(&dp),
+        Arc::clone(&graceful),
+        Arc::clone(&hardening),
+        Arc::clone(&splice_drain),
+        shutdown_rx.clone(),
+        timeout,
+    );
+    // Bind the initial TCP listeners (http, https, tcp). H3 listeners
+    // are already bound above and managed separately.
+    listener_manager.apply(&configured, &mut tls_states).await;
+
+    // Certificate watcher: one watcher over every parent directory of a
+    // terminate listener's cert/key files. SCALE-03 (#182): set up AFTER
+    // the ListenerManager binds the initial listeners so TCP terminate
+    // listeners' cert paths are included.
+    let mut cert_dirs: Vec<PathBuf> = Vec::new();
+    let mut cert_names: Vec<std::ffi::OsString> = Vec::new();
+    for term in tls_states.values() {
+        for p in &term.watched_paths {
+            if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
+                if !cert_dirs.contains(&dir.to_path_buf()) {
+                    cert_dirs.push(dir.to_path_buf());
+                }
+                if !cert_names.contains(&name.to_owned()) {
+                    cert_names.push(name.to_owned());
+                }
+            }
+        }
+    }
+    let cert_rx = if cert_dirs.is_empty() {
+        mpsc::unbounded_channel().1
+    } else {
+        match spawn_file_watcher(cert_dirs, cert_names) {
+            Ok(rx) => rx,
+            Err(err) => {
+                tracing::warn!(
+                    "certificate watch unavailable ({err}); config reload still refreshes TLS"
+                );
+                mpsc::unbounded_channel().1
+            }
+        }
+    };
+
+    let listener_manager = Arc::new(tokio::sync::Mutex::new(listener_manager));
+
+    let reload_listener_manager = Arc::clone(&listener_manager);
+    let mut reload_tls_states = tls_states.clone();
     let reload_task = tokio::spawn(async move {
         let mut probes = dwara_core::active::ActiveProbes::new();
         probes.respawn(&reload_dp.registry(), &reload_state.snapshot());
@@ -1057,7 +1055,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
             tokio::select! {
                 _ = sighup.recv() => {
-                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs).await;
+                    let mut lm = reload_listener_manager.lock().await;
+                    reload(&reload_state, &reload_dp, &source, "sighup", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs, &mut lm, &mut reload_tls_states).await;
                 }
                 maybe_event = watcher_rx.recv() => {
                     let Some(()) = maybe_event else { break };
@@ -1066,7 +1065,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         _ = shutting_down.changed() => return,
                     }
                     while watcher_rx.try_recv().is_ok() {}
-                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs).await;
+                    let mut lm = reload_listener_manager.lock().await;
+                    reload(&reload_state, &reload_dp, &source, "file-watch", &reload_tls, &mut probes, &mut discovery, &dns_resolver, &reload_obs, &mut lm, &mut reload_tls_states).await;
                 }
                 _ = shutting_down.changed() => return,
             }
@@ -1132,55 +1132,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    // One accept task per listener; each runs its own backlog flush.
-    let timeout = shutdown_timeout();
-    // Protocol hardening (DW-023): read once, shared by every serving
-    // surface (data-plane listeners; the admin listener reads the same
-    // env knobs itself — see the dwara-admin serve path).
-    let hardening = Arc::new(HttpHardening::from_env());
-    tracing::info!(
-        code = "protocol_hardening",
-        http1_max_headers = hardening.http1_max_headers,
-        http1_max_buf_bytes = hardening.http1_max_buf_size,
-        http1_header_timeout_ms = hardening.http1_header_read_timeout.as_millis() as u64,
-        h2_max_concurrent_streams = hardening.h2_max_concurrent_streams,
-        request_body_gap_ms = hardening
-            .request_body_gap
-            .map(|g| g.as_millis() as u64)
-            .unwrap_or(0),
-        "protocol hardening enabled (DW-023)"
-    );
-    let mut tasks = Vec::new();
-    for (bound, tcp) in bound_listeners {
-        let state = Arc::clone(&state);
-        let dp = Arc::clone(&dp);
-        let graceful = Arc::clone(&graceful);
-        let rx = shutdown_rx.clone();
-        let hardening = Arc::clone(&hardening);
-        let splice_drain = Arc::clone(&splice_drain);
-        // #120: each accept task runs under panic supervision — a
-        // panicked accept loop is respawned (bounded) on the same bound
-        // socket instead of silently killing its listener.
-        tasks.push(tokio::spawn(run_listener_supervised(
-            bound,
-            Arc::new(tcp),
-            state,
-            dp,
-            graceful,
-            rx,
-            timeout,
-            hardening,
-            splice_drain,
-        )));
-    }
+    // SCALE-03 (#182): TCP listener accept tasks are spawned by the
+    // ListenerManager (above). H3 listener tasks are spawned separately
+    // below. The per-listener shutdown watches cascade from the
+    // process-wide shutdown watch via the manager.
 
     // DW-088: Spawn H3 (QUIC) listener tasks. Each H3 listener runs its
     // own QUIC accept loop with the same shutdown signal.
+    let mut h3_tasks = Vec::new();
     {
         for (listener, tls) in h3_listeners {
             let dp = Arc::clone(&dp);
             let rx = shutdown_rx.clone();
-            tasks.push(tokio::spawn(async move {
+            h3_tasks.push(tokio::spawn(async move {
                 if let Err(err) = h3::run_h3_listener(&listener, dp, tls, rx).await {
                     tracing::error!(
                         code = "h3_listener_failed",
@@ -1218,9 +1182,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut main_shutdown = shutdown_rx.clone();
     let _ = main_shutdown.changed().await;
     let shutdown_deadline = tokio::time::Instant::now() + timeout;
-    for t in tasks {
+    // SCALE-03 (#182): drain all TCP listener tasks via the manager.
+    // H3 tasks are drained below via the h3_tasks Vec.
+    {
+        let mut lm = listener_manager.lock().await;
+        lm.signal_all();
+        lm.join_all().await;
+    }
+    // Drain H3 listener tasks.
+    for t in h3_tasks {
         if let Err(err) = t.await {
-            tracing::warn!("listener task ended with an error: {err}");
+            tracing::warn!("h3 listener task ended with an error: {err}");
         }
     }
 
@@ -1231,7 +1203,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "graceful shutdown"
     );
     reload_task.abort();
+    let _ = reload_task.await;
     cert_task.abort();
+    let _ = cert_task.await;
     webhook_task.abort();
     export_task.abort();
     // DW-054: the convergence task self-exits on the shutdown watch
@@ -1264,6 +1238,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // deadline for a clean exit; whichever is still running at the
     // deadline is force-closed by process exit.
     let deadline = shutdown_deadline;
+    // SCALE-03 (#182): drop the ListenerManager so its Arc clones of
+    // graceful/splice_drain/hardening are released before try_unwrap.
+    drop(listener_manager);
     let graceful =
         Arc::try_unwrap(graceful).expect("all listener tasks joined; no Arc clones remain");
     let hyper_drain = graceful.shutdown();
@@ -1298,6 +1275,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     std::process::exit(0);
+}
+
+/// Derive the configured listener set, respecting `DWARA_BIND` (which
+/// overrides the config's listeners with a single cleartext listener).
+/// Used both at startup and on reload so the listener manager always
+/// diffs the same set (SCALE-03, #182).
+pub(crate) fn configured_listeners(snapshot: &dwara_core::snapshot::Snapshot) -> Vec<Listener> {
+    match std::env::var("DWARA_BIND").ok() {
+        Some(addr) => {
+            let addr = if addr.contains(':') {
+                addr
+            } else {
+                format!("{addr}:{DEFAULT_BIND_PORT}")
+            };
+            let (address, port) = addr
+                .rsplit_once(':')
+                .and_then(|(a, p)| Some((a.to_string(), p.parse().ok()?)))
+                .unwrap_or_else(|| (DEFAULT_BIND.to_string(), DEFAULT_BIND_PORT));
+            vec![Listener {
+                name: "env-bind".into(),
+                address,
+                port,
+                protocol: ListenerProtocol::Http,
+                tls: None,
+                policies: Vec::new(),
+                authorization: None,
+                proxy_protocol: false,
+                alt_svc: None,
+                l4: None,
+            }]
+        }
+        None => snapshot.gateway().listeners.clone(),
+    }
 }
 
 const DEFAULT_BIND_PORT: u16 = 8080;
