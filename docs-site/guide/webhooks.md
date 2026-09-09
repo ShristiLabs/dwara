@@ -147,7 +147,8 @@ When enabled, the filter:
   webhook/OPA delivery is aborted rather than allowed through).
 
 The filter applies to both webhook deliveries and OPA callouts (see
-[Cedar and OPA authorization](./cedar-opa-authz)). Header secrets are
+[Cedar authorization](./cedar-authz) and [OPA
+authorization](./opa-authz)). Header secrets are
 never disclosed: the filter runs before the connection is opened.
 
 ## Metrics

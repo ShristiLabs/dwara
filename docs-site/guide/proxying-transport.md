@@ -23,8 +23,10 @@ passed through to a backend that terminates its own TLS.
 - [Dynamic upstream discovery](./dynamic-discovery) - DNS-based
   endpoint discovery so upstream pools track changing backends without
   a reload.
-- [gRPC and WebSockets](./grpc-websockets) - gRPC over h2 and managed
-  WebSocket tunnels with an origin allowlist and frame-rate policing.
+- [gRPC proxying](./grpc) - native gRPC over h2 with trailer
+  passthrough and deadline handling.
+- [WebSockets](./websockets) - managed tunnels with an origin
+  allowlist and frame-rate policing.
 - [HTTP/3 ingress](./http3) - h3 over QUIC listeners with 0-RTT early
   data policy and Alt-Svc advertisement.
 - [H3/QUIC upstream transport](./h3-quic-upstream) - dial upstreams

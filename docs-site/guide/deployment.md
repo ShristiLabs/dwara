@@ -14,13 +14,16 @@ curl --cacert ../certs/server.crt https://localhost:8443/
 
 The `curl` prints the demo page: the client negotiated TLS with Dwara,
 which routed `/` to the nginx upstream and proxied the response back.
-See `quickstart/oss/README.md` in the repository for teardown and details.
+See the [OSS quickstart demo](../demos/oss-quickstart) for the full
+feature walkthrough, or `quickstart/oss/README.md` in the repository
+for teardown and details.
 Linux hosts need `sudo chown -R 65532:65532 quickstart/certs` before
 `docker compose up`
 (the distroless image runs as UID 65532).
 
 The sibling `quickstart/enterprise/` directory runs the Enterprise
-edition's CP/DP split topology instead (controller + edge fleet).
+edition's CP/DP split topology instead (controller + edge fleet); see
+the [Enterprise quickstart demo](../demos/enterprise-quickstart).
 
 ## Docker
 

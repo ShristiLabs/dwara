@@ -116,9 +116,8 @@ the enterprise edition swaps in Redis-backed and Vault-backed
 implementations behind the same traits.
 
 See [Enterprise](../guide/enterprise) for the enterprise extension
-implementations and the [developer docs on extension
-points](https://github.com/shristilabs/dwara/tree/main/docs/features/extension-points.md)
-for the trait contracts.
+implementations and [Extension traits](../guide/extension-traits) for
+the trait contracts.
 
 ## See also
 

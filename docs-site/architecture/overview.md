@@ -2,10 +2,6 @@
 
 This page is a high-level map of how Dwara handles a request and how it
 manages its own state, for anyone deploying or operating the gateway.
-For internals aimed at contributors (crate/module layout, dependency
-rules, implementation rationale), see the
-[developer documentation](https://github.com/shristilabs/dwara/tree/main/docs)
-in the repository.
 
 ## Editions at a glance
 

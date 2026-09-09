@@ -75,5 +75,7 @@ with `Ctrl-C` — it drains in-flight requests before exiting (see
 - [Configuration](./configuration) — the shape of the YAML config and the
   concepts (Listener/Route/Service/Upstream/...) it's built from.
 - [Deployment](./deployment) — TLS termination, Docker images, systemd.
+- [OSS quickstart demo](../demos/oss-quickstart) — a comprehensive,
+  feature-complete demo of every OSS capability in one `docker compose up`.
 - [Architecture overview](../architecture/overview) — how a request flows
   through the gateway, and how hot reload works.

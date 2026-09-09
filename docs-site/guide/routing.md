@@ -13,10 +13,14 @@ covers the optional route blocks that go on top.
 
 ## In this section
 
-- [CORS, compression, and request limits](./edge-policies) - the three
-  edge blocks that answer browsers, shrink bodies, and cap request size.
-- [Transforms and security headers](./transforms) - rewrite headers,
-  query strings, and JSON bodies; stamp security headers on responses.
+- [CORS](./cors) - the edge block that answers browsers.
+- [Compression](./compression) - shrink response bodies.
+- [Request limits and validation](./request-limits) - cap request
+  size and shape, with JSON Schema validation.
+- [Transforms](./transforms) - rewrite headers, query strings, and
+  JSON bodies.
+- [Security headers](./security-headers) - stamp security headers on
+  responses.
 - [Response field masking](./masking) - redact named fields per consumer
   group before anything else touches the body.
 - [Response caching](./caching) - replay identical GET responses to cut
@@ -25,8 +29,10 @@ covers the optional route blocks that go on top.
   match on `Accept`, and deprecate a version with standard headers.
 - [Traffic splitting and sticky sessions](./traffic-splitting) - weighted
   canary/blue-green splits plus a sticky-session cookie.
-- [gRPC and WebSockets](./grpc-websockets) - proxying both protocols on
-  the same listeners, and the one WebSocket origin gate.
+- [gRPC proxying](./grpc) - native gRPC over h2 on the same
+  listeners.
+- [WebSockets](./websockets) - managed tunnels with the one
+  WebSocket origin gate.
 - [Dynamic upstream discovery](./dynamic-discovery) - DNS-based live
   endpoint discovery for autoscaling upstreams.
 - [OpenAPI import and mock mode](./openapi-import) - scaffold a config

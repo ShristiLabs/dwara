@@ -59,7 +59,8 @@ domains:
       - { name: Rewrites and redirects, desc: "Strip/replace/regex, direct responses", link: /guide/routing }
       - { name: Load balancing and splitting, desc: "Canary, blue-green, sticky sessions", link: /guide/traffic-splitting }
       - { name: Dynamic discovery, desc: "DNS A/SRV pools, TTL refresh", link: /guide/dynamic-discovery }
-      - { name: gRPC and WebSockets, desc: "Trailers, timeouts, managed tunnels", link: /guide/grpc-websockets }
+      - { name: gRPC proxying, desc: "Native gRPC over HTTP/2, trailers", link: /guide/grpc }
+      - { name: WebSockets, desc: "Upgrade handling, managed tunnels", link: /guide/websockets }
       - { name: HTTP/3 ingress, desc: "QUIC listeners with Alt-Svc", link: /guide/http3 }
       - { name: H3/QUIC upstream, desc: "Gateway-to-upstream over QUIC", link: /guide/h3-quic-upstream }
       - { name: L4 TCP/UDP proxying, desc: "Raw listeners with SNI routing", link: /guide/l4-proxying, badge: partial }
@@ -70,11 +71,11 @@ domains:
     blurb: "Application-level shaping once a route has matched -- each of these is a small optional block on the route itself."
     icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 15h16'/><circle cx='14' cy='7' r='2.2'/><circle cx='9' cy='15' r='2.2'/></svg>"
     items:
-      - { name: CORS, desc: "Cross-origin policy with preflights", link: /guide/edge-policies }
-      - { name: Compression, desc: "Response compression at the edge", link: /guide/edge-policies }
-      - { name: Request limits and validation, desc: "Size caps + JSON Schema bodies", link: /guide/edge-policies }
+      - { name: CORS, desc: "Cross-origin policy with preflights", link: /guide/cors }
+      - { name: Compression, desc: "Response compression at the edge", link: /guide/compression }
+      - { name: Request limits and validation, desc: "Size caps + JSON Schema bodies", link: /guide/request-limits }
       - { name: Transforms, desc: "Header, query, and JSON-body rewrites", link: /guide/transforms }
-      - { name: Security headers, desc: "HSTS, nosniff, CSP", link: /guide/transforms }
+      - { name: Security headers, desc: "HSTS, nosniff, CSP", link: /guide/security-headers }
       - { name: Response field masking, desc: "Per-consumer redaction, fail-closed", link: /guide/masking }
       - { name: Response caching, desc: "TTL, SWR, coalescing, tag purge", link: /guide/caching }
       - { name: API versioning, desc: "Path/header/Accept + Deprecation/Sunset", link: /guide/api-versioning }
@@ -97,15 +98,18 @@ domains:
     blurb: "Bounded failure and predictable load under stress -- retries, breaking, shedding, and budgets."
     icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M5.5 18.5a6.5 6.5 0 1 1 13 0'/><path d='m12 18.5 3.6-5'/><circle cx='12' cy='18.5' r='1.4'/></svg>"
     items:
-      - { name: Retries and timeout budgets, desc: "Bounded attempts, timeout budgets", link: /guide/traffic-policy }
-      - { name: Circuit breaking and health, desc: "Passive + active checks, ejection", link: /guide/traffic-policy }
-      - { name: Rate limiting, desc: "GCRA and stacked windows, five scopes", link: /guide/traffic-policy }
+      - { name: Timeouts, desc: "Dial, headers, and body-idle bounds", link: /guide/timeouts }
+      - { name: Retries, desc: "Budgeted attempts, jitter backoff", link: /guide/retries }
+      - { name: Circuit breaking, desc: "Fail fast, half-open probes", link: /guide/circuit-breaking }
+      - { name: Health checks, desc: "Passive + active checks, ejection", link: /guide/health-checks }
+      - { name: Rate limiting, desc: "GCRA and stacked windows, five scopes", link: /guide/rate-limiting }
       - { name: Request hedging, desc: "Speculative duplicates, race-and-cancel", link: /guide/request-hedging }
       - { name: Admission queues, desc: "Bounded queues, per-priority", link: /guide/admission-queue }
       - { name: Consumer quotas, desc: "Daily/monthly request budgets", link: /guide/quotas }
       - { name: WAF-lite filtering, desc: "SQLi/XSS/traversal heuristics, dry-run", link: /guide/waf-lite }
       - { name: Maintenance and dry-run, desc: "Per-route 503; policy monitor mode", link: /guide/maintenance }
-      - { name: Mirroring and fault injection, desc: "Shadow traffic, abort/delay", link: /guide/mirroring-fault-injection }
+      - { name: Mirroring, desc: "Shadow traffic to a test upstream", link: /guide/mirroring }
+      - { name: Fault injection, desc: "Aborts and delays for testing", link: /guide/fault-injection }
   - title: Security and identity
     link: /guide/security
     visual: security
@@ -114,10 +118,12 @@ domains:
     items:
       - { name: Authentication methods, desc: "API keys, Basic, JWT, mTLS, HMAC", link: /guide/authentication-methods }
       - { name: HMAC request signing, desc: "HMAC-SHA256, replay protection", link: /guide/hmac-signing }
-      - { name: OAuth2 and mTLS, desc: "Client credentials, upstream mTLS", link: /guide/oauth2-mtls }
+      - { name: OAuth2, desc: "Client-credentials token fetch, caching", link: /guide/oauth2 }
+      - { name: mTLS, desc: "Client certs, upstream mutual TLS", link: /guide/mtls }
       - { name: OpenID Connect, desc: "Introspection, PKCE, token exchange", link: /guide/oidc }
       - { name: Authorization rules, desc: "ACLs, JWT claims, IP, GeoIP; monitor mode", link: /guide/authorization }
-      - { name: Cedar and OPA authz, desc: "In-process Cedar or OPA callout", link: /guide/cedar-opa-authz }
+      - { name: Cedar authorization, desc: "In-process Cedar policy engine", link: /guide/cedar-authz }
+      - { name: OPA authorization, desc: "OPA callout, Rego policies", link: /guide/opa-authz }
       - { name: CEL expressions, desc: "Sandboxed policy expressions", link: /guide/cel-expressions }
       - { name: Secrets, desc: "Reference resolution, redaction", link: /guide/secrets }
       - { name: ACME certificates, desc: "Let's Encrypt over TLS-ALPN-01", link: /guide/acme, badge: experimental }
@@ -192,8 +198,10 @@ domains:
       - { name: Cluster sync, desc: "Redis convergence, split-brain guards", link: /guide/cluster-sync }
       - { name: Distributed rate limiting, desc: "Shared GCRA buckets in Redis", link: /guide/redis-rate-limiter }
       - { name: Distributed cache, desc: "Two-tier cache, fleet invalidation", link: /guide/distributed-cache }
-      - { name: Vault and KMS secrets, desc: "External sources, fail-closed", link: /guide/vault-kms-secrets }
-      - { name: Workspaces and RBAC, desc: "Multi-tenant isolation, audit log", link: /guide/workspaces-rbac-audit }
+      - { name: Vault secrets, desc: "HashiCorp Vault source, fail-closed", link: /guide/vault-secrets }
+      - { name: KMS secrets, desc: "Cloud KMS source, fail-closed", link: /guide/kms-secrets }
+      - { name: Workspaces, desc: "Multi-tenant isolation", link: /guide/workspaces }
+      - { name: RBAC and audit log, desc: "Role-based access, audit trail", link: /guide/rbac }
       - { name: Federated analytics, desc: "Per-edge analytics, rolled up", link: /guide/analytics }
       - { name: Controller persistence, desc: "PostgreSQL controller state", link: /guide/ent-controller-persistence }
       - { name: Service mesh, desc: "Sidecars, SPIFFE/SPIRE identity", link: /guide/service-mesh, badge: experimental }
@@ -289,8 +297,10 @@ before the process exits.
 
 A released binary works the same way: point `DWARA_CONFIG` at your
 YAML. [Getting started](/guide/getting-started) walks through a first
-config, and [Installation](/guide/installation) covers binaries,
-Docker images, and systemd.
+config, [Installation](/guide/installation) covers binaries,
+Docker images, and systemd, and the [OSS quickstart demo](/demos/oss-quickstart)
+is a comprehensive, feature-complete walkthrough of every OSS capability
+in one `docker compose up`.
 
 ## By scenario
 

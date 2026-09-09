@@ -235,5 +235,5 @@ doesn't match and the browser sees a `404` before any CORS logic
 runs. Practical arrangements: put the versioned media-type contract on
 a path that browsers reach with simple/actual requests only, or
 version browser-facing APIs by path instead of media type. See
-[CORS, compression, and request limits](./edge-policies) for the CORS
+[CORS](./cors) for the CORS
 rules themselves.

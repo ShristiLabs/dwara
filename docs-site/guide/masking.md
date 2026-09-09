@@ -78,7 +78,7 @@ only to proxied responses — bodies Dwara itself authors (`respond` /
 
 `max_bytes` must be at least 1 and has no upper bound — it is the
 route's memory budget, like a [body transform](./transforms) cap.
-Dwara's own [compression](./edge-policies) runs AFTER masking, so a
+Dwara's own [compression](./compression) runs AFTER masking, so a
 masked response still compresses; only responses that arrive from the
 upstream already encoded are refused. The forwarded `Content-Length`
 is rewritten to the masked length.
@@ -95,7 +95,7 @@ and counts only — masked values never appear in logs. See
 ## Ordering
 
 Masking runs FIRST in Dwara's response pipeline — before [body
-transforms](./transforms), before [compression](./edge-policies),
+transforms](./transforms), before [compression](./compression),
 before [versioning stamps](./api-versioning) and CORS decoration.
 Once a field is masked the original value exists nowhere in the
 gateway, so no later stage can re-emit it.

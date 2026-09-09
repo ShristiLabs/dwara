@@ -1,0 +1,60 @@
+# Mirroring
+
+Mirroring sends a fire-and-forget duplicate of each request to a
+separate mirror upstream -- the mirror response is discarded and
+never impacts the client. The primary response is what the client
+receives, so mirroring is safe to run against live traffic.
+
+Because the mirror sees real production requests, it is the most
+realistic way to validate a candidate upstream before you shift any
+traffic to it.
+
+## When to use this
+
+Use mirroring to test a new upstream with real traffic before
+cutting over. Send a copy of every request (or a sample) to the new
+upstream and watch for errors without affecting users. Once the
+mirror looks healthy, shift live traffic over gradually with
+[traffic splitting](./traffic-splitting).
+
+## Configuration
+
+Configure `mirror` on a route to send a percentage of requests to a
+mirror upstream:
+
+```yaml
+routes:
+  - name: api
+    service: api-service
+    match:
+      path: { type: prefix, value: /api }
+    action: { type: proxy }
+    mirror:
+      upstream: api-canary
+      percentage: 100
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `upstream` | (required) | Name of the upstream to receive mirrored (shadow) requests. |
+| `percentage` | `0` | Percentage of requests to mirror (0-100). `0` mirrors nothing; `100` mirrors every request. |
+
+## How it works
+
+The mirror upstream is separate from the route's service upstream.
+The mirror request is sent in parallel with the primary; the mirror
+response is discarded. The primary response is what the client
+receives.
+
+::: tip
+Mirroring does not buffer the request body by default. The mirror
+copy is sent with an empty body. If you need the body mirrored,
+configure body buffering on the route.
+:::
+
+## Combining with fault injection
+
+Mirroring can be combined with [fault injection](./fault-injection)
+on the same route. Mirroring happens before fault injection, so the
+mirror upstream receives the request regardless of whether the
+primary is faulted.

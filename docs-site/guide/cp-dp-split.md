@@ -10,6 +10,9 @@ first-class.
 
 This is an Enterprise feature, gated behind the `ent` cargo feature.
 
+For a runnable demonstration of the CP/DP split on one Docker network,
+see the [Enterprise quickstart demo](../demos/enterprise-quickstart).
+
 ## Enabling
 
 Build with the `ent` feature:

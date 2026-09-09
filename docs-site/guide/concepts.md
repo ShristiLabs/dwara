@@ -109,7 +109,7 @@ How a consumer proves identity. Each is a credential family:
 | API key | a shared secret in a header/query | [Security](./security) |
 | HTTP Basic | RFC 7617 username/password | [Security](./security) |
 | JWT (JWKS) | a Bearer token verified against a JWKS endpoint | [Security](./security) |
-| mTLS client cert | a verified client certificate mapped to a consumer | [OAuth2 and mTLS](./oauth2-mtls) |
+| mTLS client cert | a verified client certificate mapped to a consumer | [mTLS](./mtls) |
 | HMAC request signing | per-request HMAC-SHA256 signature | [HMAC signing](./hmac-signing) |
 | OIDC | Bearer introspection (RFC 7662) or browser login + PKCE | [OpenID Connect](./oidc) |
 
@@ -130,8 +130,8 @@ Each level can carry allow/deny rules over consumers, groups, JWT
 scopes/claims, IP ACLs, and GeoIP gates. A `dry_run` flag turns any
 level into monitor-only. External policy engines (Cedar, OPA) plug in
 at the same levels when the `cedar` capability is compiled in. See
-[Authorization rules](./authorization) and
-[Cedar/OPA authz](./cedar-opa-authz).
+[Authorization rules](./authorization), [Cedar
+authz](./cedar-authz), and [OPA authz](./opa-authz).
 
 ## Policy
 
@@ -253,7 +253,7 @@ These only exist in the Enterprise edition and concern coordinating
 | **Data plane** (`dwara-edge`) | A gateway instance fed by the controller; caches the last generation | [CP/DP split](./cp-dp-split) |
 | **Config convergence** | Fleet-wide consistent config state, backed by Redis | [Config convergence](./config-convergence) |
 | **Redis backend** | Shared GCRA buckets, distributed cache, convergence state | [Redis rate limiter](./redis-rate-limiter) |
-| **Workspace** | A multi-tenant boundary with its own config, RBAC, and audit | [Workspaces, RBAC, and audit](./workspaces-rbac-audit) |
+| **Workspace** | A multi-tenant boundary with its own config, RBAC, and audit | [Workspaces](./workspaces) |
 | **Federated analytics** | Edge-to-controller analytics aggregation over gRPC | [Enterprise](./enterprise) |
 | **Service mesh** | Sidecar mode with SPIFFE/SPIRE mTLS identity (capability `mesh`) | [Service mesh](./service-mesh) |
 

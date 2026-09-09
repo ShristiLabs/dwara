@@ -31,13 +31,18 @@ infrastructure for fleet-wide state):
   with a shared Redis backend across all instances.
 - [Config convergence](./config-convergence) - share config generation
   state across instances via a backend so a reload converges everywhere.
-- [Vault and KMS secrets](./vault-kms-secrets) - resolve secrets at
-  request time from HashiCorp Vault or a KMS provider.
+- [Vault secrets](./vault-secrets) - resolve secrets at
+  request time from HashiCorp Vault.
+- [KMS secrets](./kms-secrets) - resolve secrets at request time
+  from a cloud KMS provider.
 
 **Multi-tenant management:**
 
-- [Workspaces, RBAC, and audit](./workspaces-rbac-audit) - multi-tenant
-  isolation with role-based access control and an append-only audit log.
+- [Workspaces](./workspaces) - multi-tenant isolation: each workspace
+  owns its config subtree and consumers.
+- [RBAC](./rbac) - role-based access control over gateway resources.
+- [Audit log](./audit-log) - the append-only record of admin and API
+  activity.
 
 **Fleet and control plane** (multi-instance coordination):
 
@@ -60,3 +65,10 @@ infrastructure for fleet-wide state):
 - [Fleet operations](./cluster-sync#fleet-operations) - version skew policy, fleet status, and rolling upgrade orchestration.
 - [Web console v2](./web-console#console-v2) - CRUD operations, fleet views, config editor, and workspace switcher.
 - [AI credential pools](./ai-gateway#credential-pools) - multi-key rotation with 429 quarantine for AI providers.
+
+**Runnable demo:**
+
+- [Enterprise quickstart](../demos/enterprise-quickstart) - a CP/DP
+  split topology on one Docker network: a controller broadcasting config
+  to two edge/gateway data planes. One `docker compose up`, one config
+  file, watch the fleet converge.

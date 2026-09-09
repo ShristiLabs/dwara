@@ -65,7 +65,7 @@ convention driven by the `google.api.http` annotations in the service's
 
 Browsers enforce CORS on the gRPC-Web call, so a browser-facing route
 typically needs a CORS policy. The `cors` block inside `grpc_web` is the same
-shape as the route-level [CORS](./edge-policies) config but is scoped to the
+shape as the route-level [CORS](./cors) config but is scoped to the
 gRPC-Web handshake, so preflight responses carry the right
 `Access-Control-Allow-Headers` for gRPC-Web (`x-grpc-web`, `x-user-agent`,
 `grpc-status`, `grpc-message`) automatically. Set `credentials: true` only

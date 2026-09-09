@@ -8,12 +8,15 @@ attachments.
 
 ## In this section
 
-- [CORS, compression, and request limits](./edge-policies) - the
-  edge-level controls: cross-origin policy, body compression, and
-  request size and header count limits.
-- [Transforms and security headers](./transforms) - RFC 6901 JSON
-  pointer-based request and response transforms, plus the security
-  headers block (HSTS, X-Content-Type-Options, CSP, and friends).
+- [CORS](./cors) - cross-origin policy with preflight handling.
+- [Compression](./compression) - response body compression at the
+  edge.
+- [Request limits and validation](./request-limits) - request size
+  and header count limits, plus JSON Schema body validation.
+- [Transforms](./transforms) - RFC 6901 JSON pointer-based request
+  and response transforms over headers, query, and JSON bodies.
+- [Security headers](./security-headers) - the security headers
+  block (HSTS, X-Content-Type-Options, CSP, and friends).
 - [Response field masking](./masking) - fail-closed, per-consumer-group
   redaction of response fields so secrets never leak to callers who
   should not see them.

@@ -6,7 +6,8 @@ scopes and claims, IP ACLs, and GeoIP gates -- all built in, no
 external engine required. (Authentication -- proving who the caller
 is -- is covered in [Security](./security); for delegating decisions
 to Cedar or OPA instead, see
-[Cedar and OPA authorization](./cedar-opa-authz).)
+[Cedar authorization](./cedar-authz) and
+[OPA authorization](./opa-authz).)
 
 Authorization runs on every request that resolved a route; unrouted
 404s never reach the rules.

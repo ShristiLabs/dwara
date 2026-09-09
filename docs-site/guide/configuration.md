@@ -152,8 +152,10 @@ monitor flags — on request limits, on request body validation, on any `authori
 rate-limit policy bundle, on AI governance, on AI guardrails, on consumer quotas, and on load shedding — are likewise
 route/gateway-level blocks; see
 [Maintenance and dry-run](./maintenance),
-[CORS, compression, and request limits](./edge-policies),
-[Transforms and security headers](./transforms),
+[CORS](./cors), [compression](./compression), and
+[request limits](./request-limits),
+[Transforms](./transforms) and
+[security headers](./security-headers),
 [Response field masking](./masking),
 [Response caching](./caching), and
 [API versioning](./api-versioning).

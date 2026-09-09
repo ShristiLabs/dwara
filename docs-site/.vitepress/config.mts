@@ -96,12 +96,9 @@ export default withMermaid(
         logo: "/mark-icon.svg",
         nav: [
           { text: "Guide", link: "/guide/getting-started" },
+          { text: "Demos", link: "/demos/oss-quickstart" },
           { text: "Architecture", link: "/architecture/overview" },
           { text: "Reference", link: "/reference/environment-variables" },
-          {
-            text: "Developer docs",
-            link: "https://github.com/shristilabs/dwara/tree/main/docs",
-          },
           // The plugin injects the version switcher into the nav array at
           // build time; no explicit entry is needed here (versionSwitcher
           // defaults to enabled). See .vitepress/theme/index.ts for the
@@ -142,10 +139,8 @@ export default withMermaid(
                   text: "Dynamic upstream discovery",
                   link: "/guide/dynamic-discovery",
                 },
-                {
-                  text: "gRPC and WebSockets",
-                  link: "/guide/grpc-websockets",
-                },
+                { text: "gRPC proxying", link: "/guide/grpc" },
+                { text: "WebSockets", link: "/guide/websockets" },
                 { text: "HTTP/3 ingress", link: "/guide/http3" },
                 {
                   text: "H3/QUIC upstream transport",
@@ -171,13 +166,16 @@ export default withMermaid(
                   text: "Overview",
                   link: "/guide/request-response-control",
                 },
+                { text: "CORS", link: "/guide/cors" },
+                { text: "Compression", link: "/guide/compression" },
                 {
-                  text: "CORS, compression, and request limits",
-                  link: "/guide/edge-policies",
+                  text: "Request limits and validation",
+                  link: "/guide/request-limits",
                 },
+                { text: "Transforms", link: "/guide/transforms" },
                 {
-                  text: "Transforms and security headers",
-                  link: "/guide/transforms",
+                  text: "Security headers",
+                  link: "/guide/security-headers",
                 },
                 {
                   text: "Response field masking",
@@ -234,21 +232,24 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: "Overview", link: "/guide/traffic-policy" },
-                {
-                  text: "Maintenance mode and dry-run",
-                  link: "/guide/maintenance",
-                },
+                { text: "Timeouts", link: "/guide/timeouts" },
+                { text: "Retries", link: "/guide/retries" },
+                { text: "Circuit breaking", link: "/guide/circuit-breaking" },
+                { text: "Health checks", link: "/guide/health-checks" },
+                { text: "Rate limiting", link: "/guide/rate-limiting" },
                 { text: "Admission queues", link: "/guide/admission-queue" },
-                { text: "WAF-lite filtering", link: "/guide/waf-lite" },
-                { text: "Consumer quotas", link: "/guide/quotas" },
                 {
                   text: "Request hedging",
                   link: "/guide/request-hedging",
                 },
+                { text: "Consumer quotas", link: "/guide/quotas" },
+                { text: "WAF-lite filtering", link: "/guide/waf-lite" },
                 {
-                  text: "Mirroring and fault injection",
-                  link: "/guide/mirroring-fault-injection",
+                  text: "Maintenance mode and dry-run",
+                  link: "/guide/maintenance",
                 },
+                { text: "Mirroring", link: "/guide/mirroring" },
+                { text: "Fault injection", link: "/guide/fault-injection" },
               ],
             },
             {
@@ -265,12 +266,17 @@ export default withMermaid(
                   text: "HMAC request signing",
                   link: "/guide/hmac-signing",
                 },
-                { text: "OAuth2 and mTLS", link: "/guide/oauth2-mtls" },
+                { text: "OAuth2", link: "/guide/oauth2" },
+                { text: "mTLS", link: "/guide/mtls" },
                 { text: "OpenID Connect", link: "/guide/oidc" },
                 { text: "Authorization rules", link: "/guide/authorization" },
                 {
-                  text: "Cedar and OPA authorization",
-                  link: "/guide/cedar-opa-authz",
+                  text: "Cedar authorization",
+                  link: "/guide/cedar-authz",
+                },
+                {
+                  text: "OPA authorization",
+                  link: "/guide/opa-authz",
                 },
                 {
                   text: "CEL expressions",
@@ -468,13 +474,16 @@ export default withMermaid(
                   link: "/guide/config-convergence",
                 },
                 {
-                  text: "Vault and KMS secrets",
-                  link: "/guide/vault-kms-secrets",
+                  text: "Vault secrets",
+                  link: "/guide/vault-secrets",
                 },
                 {
-                  text: "Workspaces, RBAC, and audit",
-                  link: "/guide/workspaces-rbac-audit",
+                  text: "KMS secrets",
+                  link: "/guide/kms-secrets",
                 },
+                { text: "Workspaces", link: "/guide/workspaces" },
+                { text: "RBAC", link: "/guide/rbac" },
+                { text: "Audit log", link: "/guide/audit-log" },
                 {
                   text: "CP/DP split",
                   link: "/guide/cp-dp-split",
@@ -561,6 +570,21 @@ export default withMermaid(
                 {
                   text: "Configuration schema",
                   link: "/reference/configuration-schema",
+                },
+              ],
+            },
+          ],
+          "/demos/": [
+            {
+              text: "Demos",
+              items: [
+                {
+                  text: "OSS quickstart",
+                  link: "/demos/oss-quickstart",
+                },
+                {
+                  text: "Enterprise quickstart",
+                  link: "/demos/enterprise-quickstart",
                 },
               ],
             },

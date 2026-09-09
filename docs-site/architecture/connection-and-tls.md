@@ -84,8 +84,8 @@ present to the upstream as a client-credentials client.
 | Upstream TLS option | What it does | Guide |
 |---|---|---|
 | `trusted_ca_file` | PEM file of CA certificates the upstream's TLS connections trust | [Security](../guide/security) |
-| `mtls` | Client certificate the gateway presents to the upstream | [OAuth2 and mTLS](../guide/oauth2-mtls) |
-| `oauth2_client_credentials` | Gateway acts as an OAuth2 client-credentials client to the upstream | [OAuth2 and mTLS](../guide/oauth2-mtls) |
+| `mtls` | Client certificate the gateway presents to the upstream | [mTLS](../guide/mtls) |
+| `oauth2_client_credentials` | Gateway acts as an OAuth2 client-credentials client to the upstream | [OAuth2](../guide/oauth2) |
 | `cert_pinning` | Pin the upstream cert by SPKI SHA-256 hash (compiled into the OSS build; https/http2 only, not h3) | [Feature reference](../guide/feature-reference) |
 | `pq` | Post-quantum hybrid key exchange for the upstream TLS connection (compiled into the OSS build, experimental) | [Post-quantum TLS](../guide/post-quantum-tls) |
 

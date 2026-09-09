@@ -63,5 +63,8 @@ systemctl daemon-reload && systemctl enable --now dwara
 ## Next steps
 
 [Getting started](./getting-started) walks through running the binary
-against a first config, and [Deployment](./deployment) covers the
-one-command TLS demo in `quickstart/oss/`.
+against a first config, [Deployment](./deployment) covers the
+one-command TLS demo in `quickstart/oss/`, and the
+[OSS quickstart demo](../demos/oss-quickstart) is a comprehensive,
+feature-complete walkthrough of every OSS capability in one
+`docker compose up`.

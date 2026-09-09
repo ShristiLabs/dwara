@@ -5,6 +5,11 @@ names the config blocks and guide pages you need and points at a
 minimal shape to start from. Read [Concepts and taxonomy](./concepts)
 first if the vocabulary is new.
 
+For runnable, end-to-end demonstrations of these scenarios in Docker,
+see the [OSS quickstart demo](../demos/oss-quickstart) (single gateway,
+every OSS feature) and the [Enterprise quickstart demo](../demos/enterprise-quickstart)
+(CP/DP split fleet).
+
 ## Protect a public API
 
 Goal: expose an internal service to the internet with rate limiting,
@@ -90,7 +95,7 @@ What you need (enterprise edition):
   GCRA buckets.
 - [Config convergence](./config-convergence): fleet-wide consistent
   config state.
-- [Workspaces](./workspaces-rbac-audit): multi-tenant config
+- [Workspaces](./workspaces): multi-tenant config
   partitioning with RBAC and an audit trail.
 
 Guides: [Enterprise and fleet](./enterprise), [Editions](./editions).

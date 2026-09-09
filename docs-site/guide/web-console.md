@@ -154,7 +154,8 @@ editor offers two actions:
 ### Workspace switcher
 
 For multi-tenant deployments (see
-[Workspaces, RBAC, and audit](./workspaces-rbac-audit)), the v2 console
+[Workspaces](./workspaces), [RBAC](./rbac), and [audit
+log](./audit-log)), the v2 console
 adds a workspace switcher. `GET /workspaces` lists the workspaces the
 authenticated admin principal can access; selecting one scopes every
 view and CRUD operation to that workspace.

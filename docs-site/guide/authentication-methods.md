@@ -16,7 +16,7 @@ authn -- see [Security and identity](./security).
 | API key | a shared secret in a header or query parameter | simple service-to-service, internal APIs | [Security](./security) |
 | HTTP Basic | RFC 7617 username/password | legacy clients, quick prototypes | [Security](./security) |
 | JWT (JWKS) | a Bearer token verified against a JWKS endpoint | stateless auth, OAuth2 resource servers | [Security](./security) |
-| mTLS client cert | a verified client certificate mapped to a consumer | zero-trust internal mesh, high-assurance | [OAuth2 and mTLS](./oauth2-mtls) |
+| mTLS client cert | a verified client certificate mapped to a consumer | zero-trust internal mesh, high-assurance | [mTLS](./mtls) |
 | HMAC request signing | per-request HMAC-SHA256 over a canonical request | machine-to-machine integrity, replay protection | [HMAC signing](./hmac-signing) |
 | OIDC | Bearer introspection (RFC 7662) or browser login + PKCE | user-facing apps, delegated access | [OpenID Connect](./oidc) |
 
@@ -44,7 +44,7 @@ shift traffic, then remove the old.
 Separately from consumer authn, the gateway can authenticate *itself*
 to an upstream as an OAuth2 client-credentials client, or present an
 mTLS client certificate. That is upstream authn, not consumer authn;
-see [OAuth2 and mTLS](./oauth2-mtls).
+see [OAuth2](./oauth2) and [mTLS](./mtls).
 
 ## Where to go next
 
