@@ -130,6 +130,12 @@ The `dwara_ai_semantic_cache_hits_total{model}` and
 hit rate; combine with `dwara_ai_cost_micros_total` to measure the
 dollar savings.
 
+## Runnable demo
+
+Run this feature against a live gateway: `demos/07-ai-gateway/` (test
+script: `test-05-semantic-caching.sh`) in the repository.
+The category README covers prerequisites and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

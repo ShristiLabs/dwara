@@ -85,3 +85,10 @@ release without a deprecation cycle. Enable it for evaluation and
 harvest-now-decrypt-later hardening, not as a substitute for a validated
 post-quantum TLS product.
 :::
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-09-pq-tls.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

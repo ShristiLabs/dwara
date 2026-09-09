@@ -144,3 +144,9 @@ large upstream response from exhausting gateway memory.
 All fragments are fetched in parallel. The gateway waits for all
 fragments (or their failures) before composing the response. The
 total latency is the maximum of the fragment latencies, not the sum.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+script: `test-05-api-aggregation.sh`) in the repository.
+The category README covers prerequisites and teardown.

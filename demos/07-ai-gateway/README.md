@@ -2,8 +2,9 @@
 
 Demonstrates dwara's AI gateway capabilities using the default OSS build:
 provider adapters, model aliasing, failover, canary splits, pricing,
-token budgets, model governance, guardrails, prompt logging, streaming,
-and the MCP gateway.
+token budgets, model governance, guardrails, prompt logging, semantic
+caching, prompt experimentation (A/B splits), streaming, the MCP gateway,
+and the A2A protocol (wired subset).
 
 ## What it covers
 
@@ -22,8 +23,15 @@ and the MCP gateway.
 - **Guardrails** — prompt-injection block + PII redaction (DW-082)
 - **Prompt logging** — opt-in capture with redaction (DW-081), queried
   via the mTLS admin API
+- **Semantic caching** — paraphrased prompts within the cosine threshold
+  return the cached response with no provider call (DW-083); hit/miss
+  rate observable as `dwara_ai_semantic_cache_*` metrics
+- **Prompt experimentation** — prompt versioning + A/B variant splits
+  with per-variant selection metrics (DW-086)
 - **MCP gateway** — JSON-RPC tools/list over `/mcp` (DW-087)
 - **Streaming SSE** — Server-Sent Events re-framing for `stream: true`
+- **A2A protocol** — agent-to-agent task routing through the A2A
+  provider adapter (DW-114, wired subset — see below)
 
 ## Architecture
 
@@ -40,9 +48,15 @@ and the MCP gateway.
 - **admin** (0.0.0.0:2019) — mTLS-only admin API (prompt-logs query)
 - **ai-mock** — OpenAI-compatible mock provider (the `openai` adapter
   upstream); returns canned responses by model name, 429 for
-  `rate-limit-test`, 500 for `error-test`, SSE for `stream: true`
+  `rate-limit-test`, 500 for `error-test`, SSE for `stream: true`.
+  Also serves `POST /v1/embeddings` with DETERMINISTIC, semantically
+  similar vectors (token-set hashing: paraphrases that share content
+  words land at cosine ~0.99, unrelated prompts near 0) for the
+  semantic-cache demo, and `POST /tasks/submit` (A2A JSON-RPC task
+  endpoint) for the A2A demo.
 - **ai-mock-2** — second OpenAI-compatible mock provider (the
-  `anthropic` adapter upstream); the failover and canary target
+  `anthropic` adapter upstream and the A2A agent's transport); the
+  failover, canary, and A2A target
 
 ## Prerequisites
 
@@ -70,11 +84,14 @@ docker compose up -d
 ./test-02-model-alias.sh
 ./test-03-failover-chain.sh
 ./test-04-model-canary.sh
+./test-05-semantic-caching.sh
+./test-06-prompt-experimentation.sh
 ./test-07-guardrails.sh
 ./test-08-prompt-logging.sh
 ./test-11-mcp-gateway.sh
 ./test-13-model-governance.sh
 ./test-14-streaming-sse.sh
+./test-15-a2a.sh
 
 # Tear down.
 docker compose down -v
@@ -88,11 +105,14 @@ docker compose down -v
 | `test-02-model-alias.sh` | Model aliasing | response `model` field is `gpt-4o-mini` |
 | `test-03-failover-chain.sh` | Failover chain | `rate-limit-test` (primary 429) failovers to anthropic: 200 |
 | `test-04-model-canary.sh` | Weighted canary | both stable (`gpt-4o`) and canary (`claude-sonnet-4-5`) observed |
+| `test-05-semantic-caching.sh` | Semantic cache | identical repeat + paraphrase return the cached response body (same id); `dwara_ai_semantic_cache_hits_total{model}` +2, misses +1 on `/metrics` |
+| `test-06-prompt-experimentation.sh` | A/B experiment | both `ab-chat` variants observed (control `gpt-4o-mini` + `greeting/v1`, treatment `gpt-4o` + `greeting/v2`); `dwara_ai_experiment_variant_selections_total{experiment,variant}` series exported |
 | `test-07-guardrails.sh` | Guardrails | injection prompt blocked (400); benign prompt: 200 |
 | `test-08-prompt-logging.sh` | Prompt logging | admin `/analytics/prompt-logs` returns >= 1 captured row |
 | `test-11-mcp-gateway.sh` | MCP gateway | `tools/list` over `/mcp`: 200, includes `search_docs` + `get_status` |
 | `test-13-model-governance.sh` | Model governance | `claude-sonnet-4-5` (not in allowlist): 403; `gpt-4o-mini`: 200 |
 | `test-14-streaming-sse.sh` | Streaming SSE | response contains `data:` lines and `data: [DONE]` |
+| `test-15-a2a.sh` | A2A (wired subset) | `a2a-echo` chat request round-trips through the JSON-RPC `tasks/submit` adapter (200, "A2A mock agent reply to: ...", `finish_reason: stop`); agent-card discovery endpoint 404s (documented limitation) |
 
 ## Configuration
 
@@ -106,13 +126,47 @@ See `dwara.yaml` for the full gateway config. Key sections:
   (upstream ai-secondary)
 - **Models** — `gpt-4o-mini` (simple), `gpt-4o` (failover to anthropic),
   `gpt-4o-canary` (90/10 canary split), `rate-limit-test` (failover
-  under 429)
+  under 429), `ab-chat` (A/B experiment alias), `a2a-echo` (A2A alias)
 - **Consumer** — `demo-user` (API key `demo-ai-key`) with a per-consumer
   token budget and prompt logging opted in
 - **Policy** — `ai-budget` with a policy-level token budget and a team
-  allowlist (`gpt-4o-mini`, `gpt-4o`, `gpt-4o-canary`, `rate-limit-test`)
+  allowlist (`gpt-4o-mini`, `gpt-4o`, `gpt-4o-canary`, `rate-limit-test`,
+  `ab-chat`, `a2a-echo`)
 - **Guardrails** — `block-injection` (block) and `redact-pii` (redact)
+- **Semantic cache** — `ai.semantic_cache` pointed at the ai-mock's
+  `/v1/embeddings` (deterministic token-set-hashed vectors), threshold
+  0.85, TTL 1h; the exact-match fast tier serves identical repeats
+  without an embedding call
+- **Experiments** — `ai.experiments` declares the `greeting` prompt
+  (versions v1/v2) and the `prompt-test` A/B split (50/50 across
+  control/treatment); assignments land in the
+  `ai_experiment_assignments` analytics table
+- **A2A** — `ai.a2a` declares the `mock-agent` agent (inline Agent Card,
+  transport `ai-secondary`); a matching `kind: a2a` provider entry lets
+  the `a2a-echo` alias route to it
 - **MCP** — `/mcp` with `search_docs` and `get_status` tools
+
+## A2A: what is wired vs. documented limitations
+
+A2A (DW-114) is PARTIAL in this build. The wired surface is the **A2A
+provider adapter**: a chat request for an alias whose provider is an
+`ai.a2a` agent is folded into an A2A JSON-RPC 2.0 `tasks/submit` body,
+POSTed to the agent's upstream, and the task response
+(`result.message` / `result.state` / usage) is parsed back into the
+OpenAI chat shape. The Agent Card is inline JSON in `dwara.yaml`,
+parsed and validated at config-compile time.
+
+Not wired (documented limitations, asserted as such in `test-15-a2a.sh`):
+
+- **Agent Card discovery** — the guide's gateway-served
+  `/.well-known/agent-card.json?id=<agent-id>` endpoint does not exist
+  in this build (cards are config assets only); the endpoint 404s.
+- **Task lifecycle over the wire** — the task state machine
+  (submitted/working/completed/failed/canceled with legal-transition
+  enforcement) is implemented in the adapter library, but the gateway
+  does not expose long-running task negotiation, cancellation, or
+  per-task status endpoints; the demo exercises the synchronous
+  submit/complete path only.
 
 ## Authentication
 

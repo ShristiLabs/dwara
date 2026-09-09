@@ -78,3 +78,10 @@ confirms the module is in its approved mode; it does not itself
 constitute the validation. Consult your security team and the crypto
 module's security policy before claiming a FIPS compliance posture.
 :::
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-11-fips.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

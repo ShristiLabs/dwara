@@ -47,3 +47,10 @@ The store is accessed only by the controller; data-plane instances never
 touch the database directly. They receive config and report heartbeats
 over the cluster-sync protocol, and the controller translates those
 interactions into database rows.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/11-enterprise/` (test
+script: `test-14-ent-controller-persistence.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

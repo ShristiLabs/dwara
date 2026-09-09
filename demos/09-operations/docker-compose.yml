@@ -4,13 +4,16 @@
 # mTLS-only admin API on 2019, plus two upstreams:
 #   - echo   (dwara-demo/echo)   reflects the request as JSON
 #   - static (dwara-demo/static) serves demo HTML + JSON files
+# and an OpenTelemetry collector the gateway exports traces + metrics
+# to over OTLP (test-04-otlp-export.sh):
+#   - otel-collector (otel/opentelemetry-collector) receives on :4318
 #
-# All three services share a single docker network so the gateway can
-# reach the upstreams by service name. The gateway config is mounted
-# read-only at /etc/dwara/dwara.yaml; the shared certs (server/client
-# CA + client cert for the admin API's mTLS) are mounted from
-# ../_shared/certs. A local ./data directory backs the SQLite state DB
-# so consumer/credential seeding survives restarts.
+# All services share a single docker network so the gateway can
+# reach the upstreams (and the collector) by service name. The gateway
+# config is mounted read-only at /etc/dwara/dwara.yaml; the shared
+# certs (server/client CA + client cert for the admin API's mTLS) are
+# mounted from ../_shared/certs. A local ./data directory backs the
+# SQLite state DB so consumer/credential seeding survives restarts.
 #
 #   docker compose up -d
 #   ./test-01-hot-reload.sh   (and the other test-NN-*.sh scripts)
@@ -31,6 +34,13 @@ services:
       # grammar (DW-045). Unset/empty fails closed, so the gateway
       # refuses to start without it. See test-08-secrets.sh.
       DEMO_SECRET: ops-secret-key-123
+      # OTLP export (#126 / DW-073): one BASE endpoint, two signals —
+      # the trace exporter appends /v1/traces and the periodic metrics
+      # exporter appends /v1/metrics. Unset = inert. The interval
+      # override shortens the default 15s so the demo test observes an
+      # export quickly. See test-04-otlp-export.sh.
+      DWARA_OTLP_ENDPOINT: http://otel-collector:4318
+      DWARA_OTLP_METRICS_INTERVAL_SECS: "2"
     volumes:
       - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
       - ../_shared/certs:/etc/dwara/certs:ro
@@ -41,6 +51,7 @@ services:
     depends_on:
       - echo
       - static
+      - otel-collector
     networks:
       - ops-net
 
@@ -54,6 +65,19 @@ services:
 
   static:
     image: dwara-demo/static
+    networks:
+      - ops-net
+
+  # OTLP receiver for the gateway's trace + metrics export (test-04).
+  # Pinned to 0.96.0: that release still ships the `logging` exporter
+  # (renamed to `debug` in later versions), which is what the demo's
+  # collector config uses. No host ports are published — only the
+  # gateway (on ops-net) talks to it.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.96.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./fixtures/otel-collector.yaml:/etc/otelcol/config.yaml:ro
     networks:
       - ops-net
 

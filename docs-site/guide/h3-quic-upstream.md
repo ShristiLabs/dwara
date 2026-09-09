@@ -88,3 +88,10 @@ separately per listener and per upstream.
   across many concurrent request streams. The pool settings
   (`max_connections_per_host`, idle timeout) apply to QUIC connections
   the same way they apply to TCP connections for h1/h2 upstreams.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-07-http3.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

@@ -178,6 +178,42 @@ routes:
         - "https://app.example.com"
       max_frames_per_sec: 100
 
+  # --- Request limits + body validation: per-route caps on request
+  #     size (413 / 431) and a JSON Schema the request body must
+  #     satisfy (400 validation_failed) -- both enforced before the
+  #     route action runs, so oversized or malformed requests never
+  #     reach the echo upstream.
+  - name: limits-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/limits/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    limits:
+      max_body_bytes: 1024
+      max_header_count: 10
+      max_header_bytes: 4096
+    request_validation:
+      body_schema:
+        type: object
+        required:
+          - name
+        properties:
+          name:
+            type: string
+            minLength: 1
+            maxLength: 50
+          age:
+            type: integer
+            minimum: 0
+            maximum: 150
+        additionalProperties: false
+      dry_run: false
+
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------

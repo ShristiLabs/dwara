@@ -110,3 +110,10 @@ headers and bodies are never recorded, only the route sequence and timing.
 - The developer portal catalog is read-only; publishing a route still happens
   via the config pipeline. The portal reflects what is published, it does not
   publish.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+script: `test-08-api-lifecycle.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

@@ -191,3 +191,10 @@ converge for the GA gate to pass.
   (`dwara-controller`/`dwara-edge`, gRPC watch).
 - **M4** (this): GA hardening pass on the M3 control plane --
   conflict resolution, split-brain guards, version skew tolerance.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/11-enterprise/` (test
+script: `test-13-cluster-sync.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

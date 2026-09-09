@@ -1,0 +1,93 @@
+# Category 12: Protocol Translation.
+#
+# Starts the dwara gateway plus the upstreams that exercise the
+# protocol-translation family:
+#   - dwara  (dwara:demo)      gateway, HTTP :8080 + TLS/ALPN-h2 :8443
+#   - grpc   (dwara-demo/grpc) native gRPC upstream dwdemo.DemoService,
+#                              plaintext :8080 AND TLS :8443 (quickstart
+#                              certs mounted at /certs)
+#   - static (dwara-demo/static) serves /api/users.json, /api/products.json
+#   - echo   (dwara-demo/echo) reflects requests as JSON
+#
+#   docker compose up -d --build
+#   ./test-01-grpc-web-framing.sh   (and the other test-*.sh scripts)
+#
+# The gateway image (dwara:demo) is prebuilt from Dockerfile.scratch; a
+# build: fallback is included. The grpc image is rebuilt from
+# ../_shared/upstreams/grpc so the optional TLS listener in server.py
+# is current (the build is a no-op cache hit when unchanged).
+#
+# Relative config paths (certs/, protos/, data/) resolve against the
+# gateway's working_dir /etc/dwara; the same paths exist on the host, so
+# `dwara-cli validate dwara.yaml` works from this directory.
+services:
+  dwara:
+    image: dwara:demo
+    build:
+      context: ../..
+      dockerfile: Dockerfile.scratch
+    user: "65532:65532"
+    working_dir: /etc/dwara
+    environment:
+      DWARA_CONFIG: /etc/dwara/dwara.yaml
+      # State store: SQLite DB for runtime state.
+      DWARA_STATE_DB: /var/lib/dwara/state.db
+    volumes:
+      - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
+      # Same relative layout as the host, for the config's relative paths.
+      - ../_shared/certs:/etc/dwara/certs:ro
+      - ./protos:/etc/dwara/protos:ro
+      - ./openapi.yaml:/etc/dwara/openapi.yaml:ro
+      # SQLite state (writable; data/ is gitignored runtime state).
+      - ./data:/var/lib/dwara
+    ports:
+      # Plaintext HTTP entry point (REST-shaped tests).
+      - "8080:8080"
+      # TLS + ALPN h2 entry point (native gRPC clients, e.g. grpcurl).
+      - "8443:8443"
+    depends_on:
+      - grpc
+      - static
+      - echo
+    networks:
+      - proto-net
+
+  # Native gRPC upstream: dwdemo.DemoService (SayHello, ToUpper,
+  # Count) with reflection + grpc health. Plaintext on :8080; TLS on
+  # :8443 using the quickstart cert pair (the gateway's `http2`
+  # upstream protocol dials TLS + ALPN h2 -- plaintext h2c upstreams
+  # are not supported).
+  grpc:
+    image: dwara-demo/grpc
+    build:
+      context: ../_shared/upstreams/grpc
+    environment:
+      PORT: "8080"
+      TLS_PORT: "8443"
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+    volumes:
+      - ../_shared/certs:/certs:ro
+    networks:
+      - proto-net
+
+  # Static JSON upstream: /api/users.json, /api/products.json, /healthz.
+  static:
+    image: dwara-demo/static
+    build:
+      context: ../_shared/upstreams/static
+    networks:
+      - proto-net
+
+  # Echo upstream: reflects the request as JSON (stands in for the
+  # GraphQL server and the translation target).
+  echo:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo
+    networks:
+      - proto-net
+
+networks:
+  proto-net:
+    driver: bridge

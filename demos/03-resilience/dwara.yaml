@@ -139,6 +139,24 @@ routes:
       retry_after_secs: 60
       message: "Under maintenance"
 
+  # Consumer request quotas (DW-033): this route requires
+  # authentication, so every request resolves to a consumer whose
+  # `quotas` budget applies. The quota-user consumer below gets a
+  # 5-request daily budget; the over-budget request answers 429 with
+  # Retry-After (seconds until UTC midnight). Requires the state
+  # store (DWARA_STATE_DB, set in docker-compose.yml).
+  - name: quota
+    service: main-service
+    match:
+      path:
+        type: prefix
+        value: /quota/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
@@ -275,6 +293,35 @@ upstreams:
     endpoints:
       - address: mirror
         port: 8080
+
+# ---------------------------------------------------------------------------
+# Consumers (authentication identities)
+# ---------------------------------------------------------------------------
+
+consumers:
+  # Quota demo consumer: API-key authenticated with a tiny request
+  # budget. test-13 sends budget+1 requests and asserts the last one
+  # is over budget (429 + Retry-After). Counters are per UTC calendar
+  # day and live in the SQLite state store (./data bind mount); to
+  # reset mid-day: docker compose down && rm -f data/state.db.
+  - name: quota-user
+    type: user
+    credentials:
+      - type: api_key
+        key: quota-demo-key
+    quotas:
+      daily_requests: 5
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only) -- serves GET /quotas/usage for test-13
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
 
 # ---------------------------------------------------------------------------
 # Gateway-level global settings

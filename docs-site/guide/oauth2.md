@@ -128,6 +128,12 @@ leak the token endpoint's body or headers.
   A multi-instance fleet would re-fetch tokens per instance; a shared
   token cache is the enterprise/Redis seam, not this feature.
 
+## Runnable demo
+
+Run this feature against a live gateway: `demos/04-security-auth/` (test
+script: `test-19-oauth2-client-credentials.sh`) in the repository.
+The category README covers prerequisites and teardown.
+
 ## Where to go next
 
 - [mTLS](./mtls) - client-certificate authentication at the gateway,

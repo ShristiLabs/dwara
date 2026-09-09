@@ -25,11 +25,16 @@ assert_status() {
 }
 
 # assert_contains <haystack> <needle> <description>
+#
+# Uses a herestring instead of `echo | grep -q`: grep -q exits at the
+# first match, so with a large haystack (gateway logs) the echo writer
+# can take a SIGPIPE — with `set -o pipefail` that flips a successful
+# match into a pipeline failure. A herestring has no pipe to break.
 assert_contains() {
   local haystack="$1"
   local needle="$2"
   local desc="$3"
-  if echo "$haystack" | grep -q "$needle"; then
+  if grep -q "$needle" <<< "$haystack"; then
     echo -e "${GREEN}PASS${NC}: $desc"
     PASS=$((PASS + 1))
   else
@@ -43,7 +48,7 @@ assert_not_contains() {
   local haystack="$1"
   local needle="$2"
   local desc="$3"
-  if echo "$haystack" | grep -q "$needle"; then
+  if grep -q "$needle" <<< "$haystack"; then
     echo -e "${RED}FAIL${NC}: $desc (expected NOT to contain '$needle')"
     FAIL=$((FAIL + 1))
   else

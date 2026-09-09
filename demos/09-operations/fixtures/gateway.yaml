@@ -1,0 +1,32 @@
+# Kubernetes Gateway API manifests for test-12-kubernetes-gateway-api.sh.
+#
+# These are the resources the dwara controller (dwara-k8s-controller,
+# DW-064) watches and translates into gateway config. The manifest
+# shape follows Gateway API v1 (standard channel) and maps to the
+# translator's resource structs in crates/dwara-core/src/k8s_gateway/:
+#
+#   Gateway.listeners[]  {name, port, protocol}      -> dwara Listener
+#   HTTPRoute.rules[].matches[].path                 -> dwara Route match
+#   HTTPRoute.rules[].backendRefs[]                  -> Service+Upstream
+#
+# GatewayClass first: it names the controller
+# (shristilabs.com/dwara — DWARA_K8S_CONTROLLER_NAME) and must be
+# Accepted before Gateways referencing it become Programmed.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: dwara
+spec:
+  controllerName: shristilabs.com/dwara
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: demo-gateway
+  namespace: dwara-demo
+spec:
+  gatewayClassName: dwara
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP

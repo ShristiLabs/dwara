@@ -26,9 +26,13 @@ services:
     volumes:
       - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
       - ./data:/var/lib/dwara
+      # Admin API certs (mTLS): GET /quotas/usage for the quota test.
+      - ../_shared/certs:/etc/dwara/certs:ro
     ports:
       # Plaintext HTTP entry point (all demo test scripts hit this).
       - "8080:8080"
+      # mTLS-only admin API (quota usage query in test-13).
+      - "2019:2019"
     depends_on:
       - echo
       - echo2

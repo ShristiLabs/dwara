@@ -113,3 +113,9 @@ to the upgrade signal.
   requires a full restart.
 - `SO_REUSEPORT` is available on Linux and macOS. The hand-off is
   portable across both; Linux's load-balancing is more even.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-09-zero-downtime-upgrade.sh`) in the repository.
+The category README covers prerequisites and teardown.

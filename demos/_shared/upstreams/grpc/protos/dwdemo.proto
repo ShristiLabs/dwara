@@ -1,0 +1,59 @@
+// Demo gRPC service for the dwara demo suite.
+//
+// The google.api.http annotations drive JSON transcoding demos: the
+// gateway can map REST calls onto these RPCs per the gRPC HTTP/JSON
+// transcoding convention. Kept deliberately tiny -- one GET with a
+// path parameter, one POST with a body, one server-streaming RPC.
+syntax = "proto3";
+
+package dwdemo;
+
+import "google/api/annotations.proto";
+
+service DemoService {
+  // GET /v1/hello/{name} -> HelloReply
+  rpc SayHello(HelloRequest) returns (HelloReply) {
+    option (google.api.http) = {
+      get: "/v1/hello/{name}"
+    };
+  }
+
+  // POST /v1/upper with body {"text": "..."} -> UpperReply
+  rpc ToUpper(UpperRequest) returns (UpperReply) {
+    option (google.api.http) = {
+      post: "/v1/upper"
+      body: "*"
+    };
+  }
+
+  // GET /v1/count/{to}: server-streaming countdown, for streaming demos.
+  rpc Count(CountRequest) returns (stream CountReply) {
+    option (google.api.http) = {
+      get: "/v1/count/{to}"
+    };
+  }
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string greeting = 1;
+}
+
+message UpperRequest {
+  string text = 1;
+}
+
+message UpperReply {
+  string text = 1;
+}
+
+message CountRequest {
+  int32 to = 1;
+}
+
+message CountReply {
+  int32 value = 1;
+}

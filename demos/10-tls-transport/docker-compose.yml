@@ -1,17 +1,26 @@
 # Category 10: TLS & Transport.
 #
-# Starts the dwara gateway with three data-plane listeners plus the
+# Starts the dwara gateway with five data-plane listeners plus the
 # mTLS-only admin API:
-#   - 8080  edge-http        plaintext HTTP (local tests / health checks)
-#   - 8443  edge-https      TLS terminate (multi-SNI + optional mTLS)
+#   - 8080  edge-http        plaintext HTTP (h1 + h2c; gRPC clients use this)
+#   - 8443  edge-https      TLS terminate (multi-SNI + optional mTLS,
+#                           pq: true, Alt-Svc advertisement for h3,
+#                           acme block — config-accepted, runtime stubbed)
 #   - 8444  edge-passthrough TLS SNI passthrough (see dwara.yaml note)
+#   - 8445  edge-h3          HTTP/3 (QUIC, UDP) — see dwara.yaml note
+#   - 8446  edge-l4-tcp      L4 TCP proxy (byte splice to echo-upstream)
 #   - 2019  admin            mTLS-only admin API
 #
-# Two upstreams share the default bridge network:
+# Upstreams on the shared bridge network:
 #   - echo   (dwara-demo/echo)   reflects the request as JSON (HTTP only)
 #   - static (dwara-demo/static) serves demo HTML + JSON files (HTTP only)
+#   - grpc   (dwara-demo/grpc)   dwdemo.DemoService: plaintext :8080 +
+#                                TLS+h2 :8443 (grpc-certs mounted; the
+#                                gateway's http2 upstream verifies it via
+#                                trusted_ca_file)
 #
-# Certs are mounted read-only from ../_shared/certs.
+# Certs are mounted read-only from ../_shared/certs (gateway edge TLS)
+# and ./grpc-certs (gRPC upstream TLS; regenerate with gen-grpc-certs.sh).
 #
 #   docker compose up -d
 #   ./test-01-tls-terminate.sh   (and the other test-NN-*.sh scripts)
@@ -33,15 +42,19 @@ services:
     volumes:
       - ./dwara.yaml:/etc/dwara/dwara.yaml:ro
       - ../_shared/certs:/etc/dwara/certs:ro
+      - ./grpc-certs:/etc/dwara/grpc-certs:ro
       - ./data:/var/lib/dwara
     ports:
       - "8080:8080"
       - "8443:8443"
       - "8444:8444"
+      - "8445:8445/udp"
+      - "8446:8446"
       - "2019:2019"
     depends_on:
       - echo
       - static
+      - grpc
     networks:
       - tls-net
 
@@ -55,6 +68,33 @@ services:
 
   static:
     image: dwara-demo/static
+    networks:
+      - tls-net
+
+  # Native gRPC upstream. The gateway's http2 upstream transport dials
+  # TLS with h2 ALPN, so the demo cert pair (SAN DNS:grpc) is mounted
+  # at the server.py defaults (/certs/server.crt|key). The plaintext
+  # :8080 listener stays up for direct grpcurl checks on 19010.
+  grpc:
+    image: dwara-demo/grpc
+    environment:
+      TLS_PORT: "8443"
+    volumes:
+      - ./grpc-certs:/certs:ro
+    ports:
+      - "19010:8080"
+      - "19012:8443"
+    networks:
+      - tls-net
+
+  # HTTP/3 test client (aioquic GET). Tools profile: built on demand
+  # (`docker compose --profile tools build h3-client`) and never
+  # started with `up -d`; the test script runs it one-shot.
+  h3-client:
+    image: dwara-demo/h3-client
+    build: ./h3-client
+    profiles:
+      - tools
     networks:
       - tls-net
 

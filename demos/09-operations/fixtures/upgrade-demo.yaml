@@ -1,0 +1,52 @@
+# Host-side gateway config for test-09-zero-downtime-upgrade.sh.
+#
+# This config is used by the HOST binary (target/debug/dwara), not the
+# compose stack: the zero-downtime upgrade demo runs two OS processes
+# binding the SAME port via SO_REUSEPORT, which cannot be shown inside
+# a single container. It is deliberately self-contained:
+#
+# - one listener on 127.0.0.1:18099 (a port no demo category uses on
+#   the host, so the test never collides with the compose stacks);
+# - one direct-respond route (/healthz) so the load loop needs no
+#   upstream; the service/upstream pair exists only because every
+#   route references a service (the endpoint is never dialed by a
+#   respond route).
+#
+# The upgrade flow (DW-049): start instance A with DWARA_PID_FILE set,
+# curl /healthz in a loop, send SIGUSR2 (via `dwara-cli upgrade
+# --pid-file` or `kill -USR2`); A spawns a new copy of the same binary
+# which binds 127.0.0.1:18099 again (SO_REUSEPORT), signals READY over
+# a Unix socket, and A drains and exits — with zero failed requests.
+listeners:
+  - name: upgrade-http
+    address: 127.0.0.1
+    port: 18099
+    protocol: http
+
+routes:
+  - name: healthz
+    service: upgrade-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+
+services:
+  - name: upgrade-service
+    upstream: upgrade-upstream
+
+# Never dialed (the only route is a direct respond); exists to satisfy
+# the route -> service -> upstream reference chain.
+upstreams:
+  - name: upgrade-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 1

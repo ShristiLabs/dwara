@@ -114,3 +114,10 @@ L4 listeners surface in [`/metrics`](./observability) as
 log -- L4 has no requests, only connections and bytes -- but connection
 teardowns record the upstream, the byte count, and the close reason (clean,
 upstream reset, idle timeout).
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-08-l4-proxying.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

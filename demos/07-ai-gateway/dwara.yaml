@@ -161,6 +161,14 @@ ai:
       auth:
         header: x-api-key
         value: "sk-demo-key"
+    # A2A provider (DW-114): the same name as the ai.a2a.agents entry
+    # below, so the a2a-echo model alias can route to it. The runtime
+    # wires each enabled ai.a2a agent into the provider pool with
+    # kind a2a; declaring it here as well satisfies config validation
+    # (model aliases must reference a known provider name).
+    - name: mock-agent
+      kind: a2a
+      upstream: ai-secondary
 
   # Model alias table: the `model` value in a client request maps to
   # a provider + provider's own model identifier.
@@ -199,6 +207,22 @@ ai:
       failover:
         - provider: anthropic
           provider_model: gpt-4o-mini
+    # A/B experiment alias (DW-086): served by the prompt-test A/B
+    # test below -- a deterministic 50/50 split by request id across
+    # two variants (control: gpt-4o-mini + prompt greeting/v1,
+    # treatment: gpt-4o + prompt greeting/v2). The provider pair is
+    # required by the schema but unused: an experiment alias composes
+    # over the variants' own aliases.
+    ab-chat:
+      provider: openai
+      provider_model: gpt-4o-mini
+      ab_test: prompt-test
+    # A2A alias (DW-114): routes through the A2A provider adapter,
+    # which folds the chat request into a JSON-RPC tasks/submit body
+    # POSTed to the mock agent's upstream (ai-secondary).
+    a2a-echo:
+      provider: mock-agent
+      provider_model: a2a-demo-model
 
   # Per-model pricing table: micro-USD per 1K tokens (DW-079).
   pricing:
@@ -227,6 +251,8 @@ ai:
         - gpt-4o
         - gpt-4o-canary
         - rate-limit-test
+        - ab-chat
+        - a2a-echo
 
   # Guardrails: prompt-injection / PII checks (DW-082). A `block` action
   # rejects the request with 400 `guardrail_blocked`; a `redact` action
@@ -255,6 +281,80 @@ ai:
       patterns:
         - "[0-9]{16}"
       replacement: "[REDACTED]"
+
+  # Semantic cache (DW-083): caches responses by prompt-embedding
+  # cosine similarity. The embedding service is the ai-mock's
+  # /v1/embeddings endpoint, whose vectors are deterministic and map
+  # paraphrases to near-identical vectors (token-set hashing with
+  # stopword down-weighting). With the default 0.85 threshold, an
+  # identical repeat (exact-match fast tier) and a close paraphrase
+  # both return the cached response with no provider call; the hit
+  # rate is observable as dwara_ai_semantic_cache_hits_total{model}
+  # on /metrics.
+  semantic_cache:
+    enabled: true
+    embedding_url: http://ai-mock:8080/v1/embeddings
+    embedding_model: mock-embed
+    embedding_dim: 128
+    threshold: 0.85
+    ttl_secs: 3600
+    max_entries: 1000
+    embedding_timeout_ms: 5000
+
+  # Prompt experimentation (DW-086): the `greeting` prompt declares
+  # two versions; the prompt-test A/B test splits ab-chat traffic
+  # 50/50 across control (gpt-4o-mini + greeting/v1) and treatment
+  # (gpt-4o + greeting/v2). Each variant selection is counted in
+  # dwara_ai_experiment_variant_selections_total{experiment,variant}
+  # and recorded in the ai_experiment_assignments analytics table.
+  # The variant's system message is prepended to the request before
+  # the provider call.
+  experiments:
+    prompts:
+      greeting:
+        versions:
+          v1:
+            system: "You are a helpful assistant."
+          v2:
+            system: "You are a concise assistant. Answer in one sentence."
+        active: v1
+    ab_tests:
+      prompt-test:
+        variants:
+          - name: control
+            model: gpt-4o-mini
+            prompt: greeting/v1
+            weight: 5
+          - name: treatment
+            model: gpt-4o
+            prompt: greeting/v2
+            weight: 5
+
+  # A2A (agent-to-agent) protocol support (DW-114). PARTIAL: the
+  # wired surface is the A2A provider adapter -- a chat request for
+  # the a2a-echo alias is folded into a JSON-RPC tasks/submit body
+  # POSTed to the agent's upstream (ai-secondary) and the task
+  # response is parsed back into the canonical chat shape. The Agent
+  # Card is parsed from the inline JSON at compile time. Gateway-
+  # served Agent Card discovery (/.well-known/agent-card.json) is NOT
+  # wired in this build; see test-15-a2a.sh and the README.
+  a2a:
+    enabled: true
+    agents:
+      - name: mock-agent
+        url: http://ai-mock-2:8080/
+        card:
+          inline:
+            name: mock-agent
+            description: Demo A2A agent backed by the OpenAI-compatible mock provider
+            url: http://ai-mock-2:8080/
+            version: "1.0.0"
+            capabilities:
+              streaming: true
+        upstream: ai-secondary
+    sessions:
+      ttl_secs: 3600
+      max_concurrent: 1000
 
   # MCP gateway (DW-087): turns dwara into an MCP server that routes
   # tool calls to upstreams. The tool table maps tool names to

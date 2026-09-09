@@ -117,3 +117,9 @@ resolved address.
   follow-up (`system-config` feature).
 - **Consul watch and Kubernetes EndpointSlice watch**: deferred to a
   future milestone. DNS is the first discovery source.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/02-load-balancing/` (test
+script: `test-07-dynamic-discovery.sh`) in the repository.
+The category README covers prerequisites and teardown.

@@ -144,3 +144,10 @@ to the PDK as a host function) and hashes the SubjectPublicKeyInfo.
 
 All three share the same phase slot on a route, selected by config, with
 no dataplane-visible difference in attachment semantics.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/08-extensibility/` (test
+script: `test-05-extism-pdk.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

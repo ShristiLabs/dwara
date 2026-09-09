@@ -7,6 +7,11 @@
 # (data: {...}\n\n ... data: [DONE]\n\n). The gateway re-frames the
 # SSE stream back to the client. Asserts the response contains
 # `data:` SSE lines and the terminating `data: [DONE]` sentinel.
+#
+# The prompt is unique to this test: the demo config enables the AI
+# semantic cache (test-05), and the non-streaming tests cache their
+# "Hello" responses for the same alias -- a cache hit would replay the
+# cached JSON body instead of streaming.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../_shared/helpers.sh"
@@ -22,7 +27,7 @@ body=$(curl -sN "$GATEWAY/v1/chat/completions" \
   -X POST \
   -H 'X-API-Key: demo-ai-key' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Hello"}]}')
+  -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Write a streaming story about the sea"}]}')
 echo "  response:"
 echo "$body" | sed 's/^/    /'
 

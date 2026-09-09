@@ -129,3 +129,9 @@ impl PluginConfig for MyPlugin {
 The scaffolded plugin can be tested with the gateway's integration
 test suite. See [Plugin lifecycle](./plugin-lifecycle) for how
 plugins are loaded and validated.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/08-extensibility/` (test
+script: `test-07-plugin-sdk.sh`) in the repository.
+The category README covers prerequisites and teardown.

@@ -7,6 +7,16 @@ features using the default OSS build.
 
 - **API key authentication** — `X-API-Key` header credential
 - **Basic authentication** — `Authorization: Basic` credential
+- **JWT authentication (JWKS)** — `Authorization: Bearer` RS256 tokens
+  verified against a JWKS endpoint, consumer mapped by issuer
+- **OIDC introspection** — opaque Bearer tokens validated by RFC 7662
+  introspection at the IdP (discovery-configured)
+- **OAuth2 client credentials** — the gateway obtains its own access
+  token for an upstream and forwards it as `Authorization: Bearer`
+- **OPA authorization** — an OPA policy server with a Rego policy
+  (target `authz: opa:` wiring documented; see limitations below)
+- **Cedar authorization** — an in-process Cedar policy set (target
+  `authz: cedar:` wiring documented; see limitations below)
 - **mTLS client-certificate authentication** — client cert mapped to
   a consumer by subject CN
 - **HMAC request signing** — shared-secret signature verification
@@ -21,19 +31,28 @@ features using the default OSS build.
 
 ```
                     +-----------+
-  HTTP :8080 ------>|           |
-                    |  dwara    |----> echo:8080 (echo upstream)
-  HTTPS :8443 ----->| gateway   |
-  (mTLS)            |           |
-  Admin :2019 ----->| (mTLS)    |
-                    +-----------+
+  HTTP :8080 ------>|           |----> echo:8080 (echo upstream)
+                    |  dwara    |----> echo:8080 (oauth2 upstream: gateway
+  HTTPS :8443 ----->| gateway   |         obtains a Bearer token first)
+  (mTLS)            |           |<---- idp-mock:8080 (JWKS / OIDC
+  Admin :2019 ----->| (mTLS)    |         introspection / OAuth2 token
+                    +-----------+         endpoint)
+
+  OPA :8181 --------> Rego policy decisions (demo policy)
 ```
 
 - **edge-http** (0.0.0.0:8080) — plaintext HTTP for API-key / Basic /
-  HMAC / public / IP-ACL / rate-limit / WAF tests
+  HMAC / JWT / OIDC / OAuth2 / public / IP-ACL / rate-limit / WAF tests
 - **edge-https** (0.0.0.0:8443) — TLS terminate with mTLS client-cert
   verification (client CA: `client-ca.crt`)
 - **admin** (0.0.0.0:2019) — mTLS-only admin API
+- **idp-mock** (0.0.0.0:19011) — mock identity provider
+  (`../_shared/upstreams/idp-mock`): generates an RSA keypair at
+  container start, serves `/jwks.json` and OIDC discovery, mints
+  signed RS256 JWTs on `/issue`, and answers `/introspect`
+  (RFC 7662) and `/token` (client credentials). Test scripts mint
+  tokens through it so the host needs no crypto tooling.
+- **opa** (0.0.0.0:8181) — Open Policy Agent serving `policies/demo.rego`
 
 ## Prerequisites
 
@@ -42,6 +61,7 @@ The shared infrastructure must be built first:
 ```sh
 # Build the demo upstream images (from the repo root).
 docker build -t dwara-demo/echo demos/_shared/upstreams/echo/
+docker build -t dwara-demo/idp-mock demos/_shared/upstreams/idp-mock/
 
 # Build the gateway image (from the repo root).
 docker build -f Dockerfile.scratch -t dwara:demo .
@@ -53,7 +73,7 @@ ls demos/_shared/certs/server.crt demos/_shared/certs/client-ca.crt
 ## Running
 
 ```sh
-# Start the gateway + echo upstream.
+# Start the gateway + echo + idp-mock + opa.
 docker compose up -d
 
 # Wait for the gateway to be ready, then run tests:
@@ -66,6 +86,11 @@ docker compose up -d
 ./test-11-rate-limiting.sh
 ./test-13-waf-lite.sh
 ./test-16-mtls-forward-headers.sh
+./test-17-jwt-jwks.sh          # mints tokens at idp-mock (:19011)
+./test-18-oidc.sh
+./test-19-oauth2-client-credentials.sh
+./test-20-opa-authz.sh
+./test-21-cedar-authz.sh
 
 # Tear down.
 docker compose down -v
@@ -84,19 +109,52 @@ docker compose down -v
 | `test-11-rate-limiting.sh` | Rate limiting | 6th rapid request: 429 |
 | `test-13-waf-lite.sh` | WAF-lite | SQLi/XSS/traversal: 403; clean: 200 |
 | `test-16-mtls-forward-headers.sh` | mTLS forward headers | echo response contains `X-Client-Cert-*` |
+| `test-17-jwt-jwks.sh` | JWT via JWKS | valid RS256 token: 200; missing/garbage/tampered: 401; `X-Consumer-Name: jwt-user` |
+| `test-18-oidc.sh` | OIDC introspection | active opaque token: 200; unknown token: 401; `X-Consumer-Name: oidc-user`; introspection counters move |
+| `test-19-oauth2-client-credentials.sh` | OAuth2 upstream authn | upstream sees `Bearer mock-token-N` matching the IdP's `/last-token`; client `Authorization` replaced |
+| `test-20-opa-authz.sh` | OPA authz | OPA allows `/v1` paths and `opa-user` (true/false decisions); built-in allow-list 200/403; target config rejected by schema |
+| `test-21-cedar-authz.sh` | Cedar authz | scope rule: token with `demo:read` 200, without 403, anonymous 401; target config rejected by schema |
 
 > **Note:** `test-02-basic-auth.sh` calls `seed-basic-auth.sh` first to
 > insert the Basic credential (`admin:secret123`) into the gateway's
 > state DB. Basic auth credentials are store-managed in dwara (not
 > config-declared); the seed script is idempotent.
 
+### Documented limitations (OPA and Cedar)
+
+The OPA HTTP client and the in-process Cedar authorizer are complete
+and test-covered as library components
+(`crates/dwara-core/src/security/cedar/`), but their **config wiring
+has not landed**: the OSS config schema has no `authz:` key, so the
+gateway cannot yet be pointed at an OPA server or a Cedar policy set
+in a loadable config (see the Status notes in
+`docs-site/guide/opa-authz.md` and `cedar-authz.md`).
+
+`test-20` / `test-21` therefore verify everything that exists today:
+
+1. The policy engines answer decisions (OPA live over HTTP with the
+   documented input format; the Cedar policy set is authored in
+   `policies/demo.cedar`).
+2. The built-in authorization layer the engines compose after
+   (consumer allow-lists, JWT scope rules) enforces allow 200 /
+   deny 403 on the demo routes.
+3. The target configs (`policies/target-opa-authz.yaml`,
+   `policies/target-cedar-authz.yaml`) are rejected by
+   `dwara-cli validate` with an unknown-field error — the limitation
+   is pinned live and flips loudly the day the wiring lands.
+
 ## Configuration
 
 See `dwara.yaml` for the full gateway config. Key sections:
 
-- **Consumers** — three identities: `mobile-app` (API key + HMAC),
-  `partner-mtls` (mTLS cert), `basic-user` (Basic auth)
-- **Routes** — nine routes covering each auth/authz scenario
+- **Consumers** — five identities: `mobile-app` (API key + HMAC),
+  `partner-mtls` (mTLS cert), `basic-user` (Basic auth), `jwt-user`
+  (JWT issuer binding), `oidc-user` (introspection binding)
+- **Routes** — fourteen routes covering each auth/authz scenario
+- **jwt_providers** — idp-mock JWKS (RS256; the algorithm allowlist
+  rejects `none` and all `HS*`, so the mock signs with RSA)
+- **oidc_providers** — idp-mock issuer, discovery-configured
+  introspection, explicit `consumer` binding
 - **Policies** — `demo-rate-limit` (5 req/10s) and `demo-quota`
   (3 req/60s)
 - **mTLS mapping** — subject CN `dwara-admin-client` maps to the

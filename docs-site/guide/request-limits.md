@@ -172,3 +172,9 @@ and before the route action. See the
 [request pipeline](../architecture/overview#request-pipeline) for
 the full picture. Both blocks reload live with the rest of the
 config -- an atomic snapshot swap, no restart.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/05-request-response/` (test
+script: `test-10-request-limits.sh`) in the repository.
+The category README covers prerequisites and teardown.

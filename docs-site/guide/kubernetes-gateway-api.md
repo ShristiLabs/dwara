@@ -105,3 +105,10 @@ go test ./conformance -ginkgo.focus="Core" \
 
 Submit the resulting report to the Gateway API implementations page to
 be listed on k8s.io.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-12-kubernetes-gateway-api.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

@@ -1,8 +1,8 @@
 #!/bin/bash
 # Test 04: Weighted model canary.
 #
-# Sends 20 chat-completions requests for the gpt-4o-canary alias. The
-# alias splits traffic 90/10: the stable version (openai/gpt-4o) and
+# Sends up to 40 chat-completions requests for the gpt-4o-canary alias.
+# The alias splits traffic 90/10: the stable version (openai/gpt-4o) and
 # the canary version (anthropic/claude-sonnet-4-5). The gateway rewrites
 # the response `model` field back to the alias, but the mock's response
 # content text echoes the provider model it received (e.g. "Mock
@@ -28,12 +28,22 @@ canary_model="claude-sonnet-4-5"
 saw_stable=0
 saw_canary=0
 
-for i in $(seq 1 40); do
+# 40 distinct single-token topics. The demo config now enables the AI
+# semantic cache (test-05); an identical prompt repeated on the same
+# alias would return the FIRST response from the cache and freeze the
+# split on whichever version served it. Distinct prompts make every
+# request a cache miss, so each one traverses the canary split.
+topics=(alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon
+        aleph beth gimel daleth he waw zayin heth teth yod kaf lamed mem nun samekh ayin pe tsade qoph resh shin tav
+        one two three four five six seven eight nine ten eleven twelve)
+
+for i in $(seq 0 39); do
+  topic=${topics[$i]}
   body=$(http_body "$GATEWAY/v1/chat/completions" \
     -X POST \
     -H 'X-API-Key: demo-ai-key' \
     -H 'Content-Type: application/json' \
-    -d '{"model":"gpt-4o-canary","messages":[{"role":"user","content":"Hello"}]}')
+    -d "{\"model\":\"gpt-4o-canary\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello, tell me about $topic\"}]}")
   # The gateway rewrites the response model field to the alias; the
   # mock's content text echoes the provider model it received.
   content=$(echo "$body" | grep -o '"content": *"[^"]*"' | sed 's/.*"content": *"//;s/"$//' | head -1)

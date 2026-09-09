@@ -2,9 +2,13 @@
 #
 # Exercises every OSS authentication and authorization capability:
 # API key, Basic, HMAC request signing, mTLS client-cert mapping,
-# the consumer > route > service > listener > global authorization
-# chain, IP ACLs, rate limiting, quotas, and WAF-lite heuristic
-# filtering (SQLi/XSS/path-traversal).
+# JWT via JWKS (RS256, tokens minted by the idp-mock upstream), OIDC
+# Bearer introspection (RFC 7662, discovery + introspection at
+# idp-mock), OAuth2 client-credentials upstream authn (gateway
+# obtains its own token from idp-mock /token), the consumer > route >
+# service > listener > global authorization chain, IP ACLs, rate
+# limiting, quotas, and WAF-lite heuristic filtering
+# (SQLi/XSS/path-traversal).
 #
 # Two listeners:
 #   - edge-http  (0.0.0.0:8080)  plaintext HTTP for local tests
@@ -179,6 +183,91 @@ routes:
     policies:
       - demo-quota
 
+  # JWT-authenticated route: Bearer tokens are verified against the
+  # idp-mock JWKS (RS256) and mapped to a consumer by the token's
+  # `iss` claim matching the jwt-user consumer's jwt credential.
+  - name: jwt-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/jwt/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+  # OIDC-introspected route: Bearer tokens that do not verify as JWTs
+  # are introspected (RFC 7662) at idp-mock; an active result resolves
+  # the oidc-user consumer via the provider's `consumer` binding.
+  - name: oidc-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/oidc/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+  # OAuth2 client-credentials route: no client authn — the gateway
+  # obtains its own access token from idp-mock's token endpoint and
+  # forwards it upstream as `Authorization: Bearer mock-token-N`
+  # (replacing whatever the client sent).
+  - name: oauth2-route
+    service: oauth2-echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/oauth2/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: false
+
+  # OPA demo route: the built-in consumer allow-list is the live half
+  # of the OPA story (external policy engines compose AFTER the
+  # built-in authz). The target `authz: opa:` block — the gateway
+  # querying the OPA server at request time — is documented in
+  # policies/target-opa-authz.yaml; its config wiring has not landed yet.
+  - name: opa-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/opa/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+    authorization:
+      allowed_consumers:
+        - mobile-app
+
+  # Cedar demo route: scope-based fine-grained authorization (the
+  # built-in analog of Cedar's ABAC). The target `authz: cedar:`
+  # in-process policy block is documented in
+  # policies/target-cedar-authz.yaml; its config wiring has not landed yet.
+  - name: cedar-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/cedar/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+    authorization:
+      required_scopes:
+        - demo:read
+
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
@@ -186,6 +275,11 @@ routes:
 services:
   - name: echo-service
     upstream: echo-upstream
+
+  # Same echo upstream, but reached with a gateway-obtained OAuth2
+  # client-credentials token (see oauth2-echo-upstream below).
+  - name: oauth2-echo-service
+    upstream: oauth2-echo-upstream
 
 # ---------------------------------------------------------------------------
 # Upstreams
@@ -198,6 +292,23 @@ upstreams:
     endpoints:
       - address: echo
         port: 8080
+
+  # Echo upstream with OAuth2 client-credentials (RFC 6749 section
+  # 4.4): before forwarding, the gateway POSTs to idp-mock's token
+  # endpoint (HTTP Basic auth with client_id/client_secret) and sends
+  # the resulting token upstream as `Authorization: Bearer <token>`,
+  # replacing any client-supplied Authorization header. Tokens are
+  # cached per upstream (min(expires_in - 60s, token_cache_ttl_s)).
+  - name: oauth2-echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+    oauth2_client_credentials:
+      token_endpoint: http://idp-mock:8080/token
+      client_id: demo-oauth-client
+      client_secret: demo-oauth-client-secret
 
 # ---------------------------------------------------------------------------
 # Consumers (authentication identities)
@@ -236,6 +347,27 @@ consumers:
   - name: basic-user
     type: user
 
+  # JWT consumer: tokens whose `iss` matches this credential's issuer
+  # (the idp-mock) map to this consumer. The signature itself is
+  # verified against the jwt_providers[].jwks_url key set — the
+  # credential only binds issuer (and optionally audiences) to a
+  # consumer.
+  - name: jwt-user
+    type: user
+    groups:
+      - internal
+    credentials:
+      - type: jwt
+        issuer: http://idp-mock:8080
+
+  # OIDC consumer: every token that introspects active at the
+  # idp-mock-oidc provider resolves here (the provider's explicit
+  # `consumer` binding, above the `sub`-claim default).
+  - name: oidc-user
+    type: user
+    groups:
+      - internal
+
 # ---------------------------------------------------------------------------
 # Policies (reusable rule bundles)
 # ---------------------------------------------------------------------------
@@ -256,6 +388,30 @@ policies:
 # ---------------------------------------------------------------------------
 # Authentication providers / settings
 # ---------------------------------------------------------------------------
+
+# JWT verification providers: Bearer tokens are verified against the
+# idp-mock JWKS. RS256 only — the algorithm allowlist rejects `none`
+# and all HS* (symmetric) algorithms outright, which is why the mock
+# IdP signs with an RSA key. No `consumer` binding here: tokens map
+# to a consumer by their `iss` claim matching the jwt-user consumer's
+# jwt credential above.
+jwt_providers:
+  - name: idp-mock
+    jwks_url: http://idp-mock:8080/jwks.json
+    issuer: http://idp-mock:8080
+
+# OIDC providers: Bearer tokens that fail JWT verification are
+# introspected (RFC 7662) at the discovery-discovered endpoint of
+# this issuer. `active: true` resolves the oidc-user consumer (the
+# explicit binding); `active: false` is always 401 (fail-closed is
+# the default for IdP failures too).
+oidc_providers:
+  - name: idp-mock-oidc
+    issuer: http://idp-mock:8080
+    client_id: dwara-gateway
+    client_secret: demo-oidc-client-secret
+    consumer: oidc-user
+    introspection_cache_ttl_s: 60
 
 # HMAC request-signing verification.
 hmac_auth:

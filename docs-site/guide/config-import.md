@@ -109,3 +109,9 @@ All importers append unsupported-construct warnings as YAML comments at
 the end of the generated config. The generated config is always valid
 (it passes `dwara-cli validate`); the warnings are advisory, telling you
 what to review and handle manually.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-11-config-import.sh`) in the repository.
+The category README covers prerequisites and teardown.

@@ -87,3 +87,9 @@ gRPC-Web decisions surface in [`/metrics`](./observability) as
 `transcoded`, and `rejected`. The underlying gRPC status from the upstream is
 preserved in the gRPC-Web trailer frame, so a failed RPC surfaces as
 `UNAVAILABLE` or `DEADLINE_EXCEEDED` in the browser, not a proxy error.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+scripts: `test-01-grpc-web-framing.sh`, `test-02-json-transcoding.sh`) in the repository.
+The category README covers prerequisites and teardown.

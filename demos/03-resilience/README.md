@@ -3,7 +3,9 @@
 Demonstrates dwara's resilience mechanisms against deliberately
 unreliable upstreams: a **flaky** server (configurable error rate), a
 **slow** server (configurable latency), and two healthy **echo**
-endpoints. Each mechanism is exercised by a focused `test-*.sh` script.
+endpoints -- plus **consumer request quotas** (a durable per-UTC-day
+budget rather than a burst rate). Each mechanism is exercised by a
+focused `test-*.sh` script.
 
 ## Shared infrastructure
 
@@ -26,7 +28,8 @@ docker compose -f ../_shared/docker-compose.yml build
 ```
 03-resilience/
   docker-compose.yml   gateway + echo, echo2, flaky, slow, mirror
-  dwara.yaml           one HTTP listener, seven upstream pools, ten routes
+  dwara.yaml           one HTTP listener, seven upstream pools, ten routes,
+                       one quota consumer, mTLS admin API
   test-01-passive-health.sh
   test-02-active-health.sh
   test-03-circuit-breaker.sh
@@ -37,6 +40,7 @@ docker compose -f ../_shared/docker-compose.yml build
   test-10-fault-injection.sh
   test-11-mirroring.sh
   test-12-maintenance-mode.sh
+  test-13-quotas.sh
 ```
 
 ## Running
@@ -80,6 +84,7 @@ upstreams unchanged:
 | `/mirror-test/` | main-service | `mirror: { upstream: mirror-pool, percentage: 100 }` |
 | `/fault/` | main-service | `fault_injection: { delay: { percentage: 100, fixed_ms: 100 } }` |
 | `/maint/` | main-service | `maintenance: { retry_after_secs: 60, message: "Under maintenance" }` |
+| `/quota/` | main-service | `auth_required: true`; consumer `quota-user` (API key `quota-demo-key`) carries `quotas: { daily_requests: 5 }` |
 
 For example, `GET /flaky/flaky/80` strips `/flaky/` and forwards
 `/flaky/80` to the flaky-pool (80% error rate).
@@ -113,6 +118,31 @@ queued up to `queue_timeout_ms`.
 | 10 fault injection | `/fault/` returns 200 with latency >= 100ms (delay injected) |
 | 11 mirroring | `/mirror-test/` returns 200 from main-service |
 | 12 maintenance mode | `/maint/` returns 503 with `Retry-After: 60` |
+| 13 quotas | anonymous `/quota/` -> 401; 5 authenticated requests -> 200; the 6th -> 429 `rate_limit_exceeded` with `Retry-After` >= 1 and `X-RateLimit-Limit: 5` / `Remaining: 0`; admin `GET /quotas/usage` reports 5/5 used; `dwara_quota_denied_total{budget="daily",consumer="quota-user"}` on `/metrics` |
+
+## Quotas (test-13)
+
+Quotas are **budgets, not rates**: the `quota-user` consumer
+(API key `quota-demo-key`) may make at most 5 requests per UTC calendar
+day; the counter never replenishes inside the window. The over-budget
+request answers `429` with `Retry-After` (seconds until UTC midnight)
+and the `X-RateLimit-*` family, and the usage is readable on the mTLS
+admin API:
+
+```sh
+curl --cacert ../_shared/certs/server.crt \
+     --cert ../_shared/certs/client.crt \
+     --key ../_shared/certs/client.key \
+     'https://localhost:2019/quotas/usage?consumer=quota-user'
+```
+
+Enforcement needs the durable state store (`DWARA_STATE_DB`, already
+set in docker-compose.yml). Counters are per instance (local SQLite
+truth) and survive restarts; to reset the demo mid-day:
+
+```sh
+docker compose down && rm -f data/state.db && docker compose up -d
+```
 
 ## Notes
 
@@ -123,3 +153,6 @@ queued up to `queue_timeout_ms`.
 - State is persisted in the `./data` bind mount (SQLite). On Linux the
   directory must be writable by UID 65532:
   `sudo chown -R 65532:65532 data`.
+- The gateway also exposes the mTLS-only admin API on `:2019`
+  (`../_shared/certs` is mounted read-only) for the `/quotas/usage`
+  read in test-13.

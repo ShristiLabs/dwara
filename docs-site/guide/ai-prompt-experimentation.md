@@ -204,6 +204,12 @@ per-variant average latencies:
   name; `variant` is the selected variant name. Both labels are
   config-bounded. No consumer label (cardinality rule).
 
+## Runnable demo
+
+Run this feature against a live gateway: `demos/07-ai-gateway/` (test
+script: `test-06-prompt-experimentation.sh`) in the repository.
+The category README covers prerequisites and teardown.
+
 ## See also
 
 - [AI gateway](./ai-gateway)

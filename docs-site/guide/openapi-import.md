@@ -111,8 +111,8 @@ action. The supported [JSON Schema](https://json-schema.org/) (a standard for de
 
 ## Runnable demo
 
-The mock action runs against a live gateway in `demos/01-routing/`
-(test script: `test-06-mock-response.sh`) in the repository: a mock
-route answers `200` with a canned body and a simulated delay. The
-OpenAPI import flow itself is not exercised. The category README
-covers prerequisites and teardown.
+Run the import flow end to end: `demos/12-protocol-translation/`
+(test scripts: `test-06-openapi-import.sh` for the import flow,
+`test-06-mock-response.sh` in `demos/01-routing/` for mock routes) in
+the repository. The category READMEs cover prerequisites and teardown.
+

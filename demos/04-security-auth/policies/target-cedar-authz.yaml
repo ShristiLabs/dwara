@@ -1,0 +1,67 @@
+# TARGET SURFACE (not a loadable config) — Cedar authorization.
+#
+# Documents the planned `authz: cedar:` block exactly as specified in
+# docs-site/guide/cedar-authz.md: the gateway would compile the inline
+# policy set (data/demo.cedar) and evaluate it in-process with
+# principal = the consumer, action = method (read/write), resource =
+# the route name; Deny -> 403, engine error -> fail_closed.
+#
+# The OSS config schema has no `authz` key yet — the in-process Cedar
+# authorizer is complete as a library component
+# (crates/dwara-core/src/security/cedar/) but the config wiring has
+# not landed. `dwara-cli validate` therefore REJECTS this file with
+# an unknown-field error, which test-21-cedar-authz.sh asserts live
+# (the documented limitation).
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+routes:
+  - name: cedar-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/cedar/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+authz:
+  cedar:
+    policies: |
+      permit(
+        principal == User::"jwt-user",
+        action == Action::"read",
+        resource == Resource::"cedar-route"
+      );
+
+      forbid(
+        principal == User::"jwt-user",
+        action == Action::"delete",
+        resource == Resource::"cedar-route"
+      );
+    schema: |
+      {
+        "entities": {
+          "User": {},
+          "Action": {},
+          "Resource": {}
+        }
+      }

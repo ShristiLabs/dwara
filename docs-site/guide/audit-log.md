@@ -52,3 +52,10 @@ curl --cert admin.crt --key admin.key \
 The log is append-only: entries cannot be modified or deleted. The
 sequence number is monotonically increasing and gap-free within a
 gateway lifetime.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/11-enterprise/` (test
+script: `test-12-audit-log.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

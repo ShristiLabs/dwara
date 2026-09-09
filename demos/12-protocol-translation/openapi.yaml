@@ -1,0 +1,70 @@
+# Demo OpenAPI 3.0 spec for the protocol-translation category.
+#
+# Consumed by:
+#   - test-06-openapi-import.sh:
+#       dwara-cli import openapi openapi.yaml --output data/imported-dwara.yaml
+#     scaffolds a Dwara config with one route per unique path, named
+#     after the first operation's operationId.
+#   - test-07-openapi-response-validation.sh: the spec describes the
+#     static upstream's responses (the schema a wired
+#     `openapi_validation` block would enforce; see that test).
+openapi: 3.0.3
+info:
+  title: dwara demo API
+  version: 1.0.0
+  description: >
+    Tiny catalog/user API served by the static upstream (nginx) in this
+    demo category.
+paths:
+  /api/users.json:
+    get:
+      operationId: listUsers
+      summary: List users
+      tags: [users]
+      responses:
+        "200":
+          description: The user list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, email]
+                  properties:
+                    id:
+                      type: integer
+                    name:
+                      type: string
+                    email:
+                      type: string
+  /api/products.json:
+    get:
+      operationId: listProducts
+      summary: List products
+      tags: [products]
+      responses:
+        "200":
+          description: The product list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, price]
+                  properties:
+                    id:
+                      type: integer
+                    name:
+                      type: string
+                    price:
+                      type: number
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: Static upstream health
+      tags: [ops]
+      responses:
+        "200":
+          description: OK

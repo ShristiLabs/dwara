@@ -50,3 +50,21 @@ services:
     image: dwara-demo/webhook-receiver
     ports:
       - "19006:8080"
+
+  grpc:
+    build: ./upstreams/grpc
+    image: dwara-demo/grpc
+    ports:
+      - "19010:8080"
+
+  # Mock identity provider: mints RS256 JWTs (openssl-backed), serves a
+  # JWKS + OIDC discovery, and answers RFC 7662 introspection and RFC
+  # 6749 client-credentials token requests. Used by the security demo
+  # category (JWT / OIDC / OAuth2 upstream authn tests).
+  idp-mock:
+    build: ./upstreams/idp-mock
+    image: dwara-demo/idp-mock
+    ports:
+      - "19011:8080"
+    environment:
+      ISSUER: http://localhost:19011

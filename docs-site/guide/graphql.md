@@ -81,3 +81,9 @@ GraphQL decisions surface in [`/metrics`](./observability) as
 operation name, when present, is added to the access log entry for the
 request, so analytics can group traffic by operation rather than by the
 single `/graphql` path.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+script: `test-04-graphql-awareness.sh`) in the repository.
+The category README covers prerequisites and teardown.

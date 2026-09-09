@@ -128,3 +128,10 @@ pass both:
 2. Cedar/OPA (if configured).
 
 If either denies, the request is rejected with 403.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/04-security-auth/` (test
+script: `test-20-opa-authz.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

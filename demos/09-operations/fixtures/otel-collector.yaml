@@ -1,0 +1,31 @@
+# OpenTelemetry collector config for test-04-otlp-export.sh.
+#
+# Receives OTLP over http/protobuf on :4318 (the collector default for
+# OTLP/http) and logs everything it receives with the `logging`
+# exporter at detailed verbosity, which prints span names, metric
+# names, and resource attributes — so `docker compose logs
+# otel-collector` is the demo's assertion surface for "the gateway
+# exported dwara spans/metrics".
+#
+# Pinned to otel/opentelemetry-collector:0.96.0 (see
+# docker-compose.yml): 0.96.0 is the last release line that ships the
+# `logging` exporter under that name (it was renamed to `debug` in
+# newer releases).
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  logging:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [logging]
+    metrics:
+      receivers: [otlp]
+      exporters: [logging]

@@ -90,3 +90,10 @@ cargo build -p dwara-core --features mcp
 
 See [Admin API](./admin-api) for the underlying operator surface and
 [Editions](./editions) for how capabilities are built and licensed.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-13-agent-operable-admin.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

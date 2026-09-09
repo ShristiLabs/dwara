@@ -1,9 +1,10 @@
 # Category 02: Load Balancing & Upstream Management
 
-This demo exercises dwara's upstream load-balancing strategies and
-traffic-splitting capabilities. A single gateway fronts three echo
-upstreams (`echo-a`, `echo-b`, `echo-c`) and one slow upstream, wired
-into five load-balancer pools and one weighted traffic-split service,
+This demo exercises dwara's upstream load-balancing strategies,
+traffic-splitting, and dynamic-discovery capabilities. A single gateway
+fronts three echo upstreams (`echo-a`, `echo-b`, `echo-c`), one slow
+upstream, and one DNS-discovered echo, wired into five load-balancer
+pools, one weighted traffic-split service, and one discovery pool,
 each exposed on its own `/lb/<strategy>/` prefix.
 
 ## What it covers
@@ -16,10 +17,12 @@ each exposed on its own `/lb/<strategy>/` prefix.
 | Peak-EWMA | `/lb/ewma/` | `ewma-pool` | echo-a (fast), slow (~200ms delay) |
 | Sticky sessions | `/lb/sticky/` | `sticky-pool` | echo-a, echo-b (cookie affinity) |
 | Traffic split | `/lb/split/` | `split-service` | 90% rr-pool, 10% lr-pool |
+| Dynamic discovery | `/lb/dns/` | `dns-pool` | none static — resolved from DNS (`echo-dns`) |
 
 The echo upstream returns JSON with an `instance` field naming the
-backend that handled the request (`echo-a`, `echo-b`, `echo-c`, or
-`slow`), so test scripts can verify which endpoint was selected.
+backend that handled the request (`echo-a`, `echo-b`, `echo-c`,
+`slow`, or `echo-dns`), so test scripts can verify which endpoint was
+selected.
 
 ## Prerequisites
 
@@ -55,6 +58,7 @@ cd demos/02-load-balancing
 ./test-04-peak-ewma.sh
 ./test-05-sticky-sessions.sh
 ./test-06-traffic-split.sh
+./test-07-dynamic-discovery.sh
 
 # 4. Tear down.
 docker compose -f ../02-load-balancing/docker-compose.yml down
@@ -93,11 +97,35 @@ The test asserts both responses name the same `instance`.
 test asserts at least 2 distinct instances are observed (proving the
 split is distributing traffic rather than pinning to one backend).
 
+### test-07-dynamic-discovery.sh
+The `dns-pool` upstream has NO static endpoints: a background
+discovery task resolves the `echo-dns` compose service name via
+docker's embedded DNS (A record) and hot-swaps the resolved addresses
+into the balancer's endpoint set, re-resolving every
+`refresh_interval_s` (5 s in the demo config; the cadence is
+`min(refresh_interval_s, record_ttl)`). A request to `/lb/dns/test`
+that returns `200` naming `echo-dns` proves the whole chain — resolve,
+endpoint-set swap, route. The test also scrapes the reserved
+`/metrics` path and asserts:
+
+- `dwara_dns_discovery_endpoints{upstream="dns-pool"} >= 1` (resolved
+  endpoint count),
+- `dwara_dns_discovery_refresh_total{upstream="dns-pool"}` advanced
+  across one refresh interval (the TTL/refresh cadence is live),
+- `dwara_dns_discovery_refresh_failures_total` stayed `0`,
+- the `dns_discovery_refreshed` log line fired.
+
+Docker DNS answers a single A record per service here, so the demo
+asserts resolve-and-route rather than fan-out; scale `echo-dns`
+replicas up to watch the gauge and the balancer update live. On DNS
+failure the pool keeps the last resolved set (`fail_open: true`) and
+the `min_endpoints: 1` floor prevents shrinking below one endpoint.
+
 ## Files
 
 ```
 02-load-balancing/
-  docker-compose.yml      gateway + 3x echo + slow on one network
+  docker-compose.yml      gateway + 3x echo + slow + echo-dns on one network
   dwara.yaml              listeners, routes, services, upstreams
   test-01-round-robin.sh
   test-02-least-requests.sh
@@ -105,5 +133,6 @@ split is distributing traffic rather than pinning to one backend).
   test-04-peak-ewma.sh
   test-05-sticky-sessions.sh
   test-06-traffic-split.sh
+  test-07-dynamic-discovery.sh
   README.md               this file
 ```

@@ -49,9 +49,9 @@ see [OAuth2](./oauth2) and [mTLS](./mtls).
 ## Runnable demo
 
 Check credentials against a live gateway: `demos/04-security-auth/`
-(test scripts: `test-01-api-key-auth.sh`, `test-02-basic-auth.sh`)
-in the repository exercises API key and Basic auth, with mTLS and
-HMAC demos in the same stack; JWT and OIDC have no demo. The
+(test scripts: `test-01-api-key-auth.sh`, `test-02-basic-auth.sh`,
+`test-04-mtls-auth.sh`, `test-05-hmac-signing.sh`,
+`test-17-jwt-jwks.sh`, `test-18-oidc.sh`) in the repository. The
 category README covers prerequisites and teardown.
 
 ## Where to go next

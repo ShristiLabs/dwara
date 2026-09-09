@@ -96,3 +96,10 @@ order: by phase first (`request_headers` before `request_body`, etc.),
 then by the order plugins are listed on the route. The order is not
 load-order-dependent -- reordering the route's `plugins` list changes
 execution order.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/08-extensibility/` (test
+script: `test-06-plugin-lifecycle.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

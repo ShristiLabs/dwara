@@ -1,0 +1,262 @@
+# Category 12: Protocol Translation.
+#
+# Fronts a native gRPC upstream (dwara-demo/grpc, TLS + ALPN h2 on
+# :8443), the static JSON upstream, and the echo upstream to exercise
+# the protocol-translation family of surfaces:
+#
+#   - gRPC-Web framing block      (routes[].grpc_web)
+#   - JSON-to-gRPC transcoding    (routes[].grpc_web.transcoding)
+#   - protocol translation block   (routes[].translation)
+#   - GraphQL awareness           (routes[].graphql)  -- fully wired
+#   - API lifecycle block         (top-level lifecycle)
+#
+# MATURITY (see README.md): the GraphQL block is enforced at runtime.
+# The grpc_web / translation / lifecycle blocks validate and the gateway
+# boots with them, but the runtime translation paths are not dispatched
+# from the proxy yet (library components); the routes below demonstrate
+# the config shape and the tests document the current behavior.
+#
+# File paths (certs/, protos/, data/) are RELATIVE so the same config
+# validates on the host (`dwara-cli validate dwara.yaml` run from this
+# directory) and inside the container (compose sets working_dir:
+# /etc/dwara and mounts each path at the same relative location).
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  # Plaintext HTTP entry point (all REST-shaped tests).
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+  # TLS entry point with ALPN h2: native gRPC clients (grpcurl) connect
+  # here; the gateway then dials the gRPC upstream over its own TLS+h2
+  # connection (protocol: http2 below).
+  - name: edge-https
+    address: 0.0.0.0
+    port: 8443
+    protocol: https
+    tls:
+      mode: terminate
+      cert_file: certs/server.crt
+      key_file: certs/server.key
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # Health check: answered by the gateway directly (wait_for target).
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+
+  # Native gRPC passthrough (no grpc_web block): a route without the
+  # block proxies native gRPC unchanged. grpcurl hits
+  # POST /dwdemo.DemoService/SayHello over TLS+h2; the prefix match on
+  # the method path keeps the upstream path identical.
+  - name: grpc-native
+    service: grpc-service
+    match:
+      path:
+        type: prefix
+        value: /dwdemo.
+    action:
+      type: proxy
+
+  # gRPC-Web framing (DW-101): the grpc_web block opts the route into
+  # gRPC-Web <-> native gRPC framing translation. The browser-shaped
+  # POST (Content-Type application/grpc-web+proto, 5-byte-framed body)
+  # arrives on the plaintext listener and is fronted at grpc-tls.
+  - name: grpc-web-rpc
+    service: grpc-service
+    match:
+      path:
+        type: prefix
+        value: /rpc/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    grpc_web:
+      enabled: true
+
+  # JSON transcoding (DW-101): transcoding enabled + the compiled
+  # FileDescriptorSet for dwdemo.DemoService (the google.api.http
+  # annotations in the .proto describe the REST surface:
+  # GET /v1/hello/{name}, POST /v1/upper, GET /v1/count/{to}).
+  - name: grpc-transcode
+    service: grpc-service
+    match:
+      path:
+        type: prefix
+        value: /t/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    grpc_web:
+      enabled: true
+      transcoding:
+        enabled: true
+        descriptors:
+          - file: protos/dwdemo.pb
+            package: dwdemo
+            service: DemoService
+
+  # Protocol translation (DW-100): REST/JSON -> GraphQL direction. The
+  # query template is the contract: $name resolves from the REST body's
+  # top-level fields. The echo upstream stands in for the GraphQL
+  # server (it reflects the translated request; see test-03 for what is
+  # and is not dispatched today).
+  - name: rest-to-graphql
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /translate/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    translation:
+      kind: rest_to_graphql
+      graphql:
+        query_template: "query { hello(name: $name) { greeting } }"
+
+  # GraphQL awareness (DW-099) -- fully wired at runtime: depth and
+  # complexity limits are enforced BEFORE the request reaches the
+  # upstream; passing queries are proxied to the echo upstream.
+  - name: graphql
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /graphql
+      methods: [POST]
+    action:
+      type: proxy
+    graphql:
+      enabled: true
+      depth_limit: 4
+      complexity_limit: 12
+
+  # Persisted-query enforcement (Apollo APQ variant): the SHA-256 of
+  # the query text must be a key in the inline store. The key below is
+  # sha256("{ hello }") -- test-04 sends exactly that query text.
+  - name: graphql-apq
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /graphql-apq
+      methods: [POST]
+    action:
+      type: proxy
+    graphql:
+      enabled: true
+      depth_limit: 4
+      complexity_limit: 12
+      persisted_queries:
+        enabled: true
+        store:
+          001c3174e099bd72b729d0c0a529ba9f5a740c446e2a6e1d71b283cb84ec3065: "{ hello }"
+
+  # Static JSON API upstream (aggregation fragments + the endpoints the
+  # OpenAPI spec in openapi.yaml describes).
+  - name: api
+    service: static-service
+    match:
+      path:
+        type: prefix
+        value: /api/
+    action:
+      type: proxy
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+  - name: static-service
+    upstream: static-upstream
+
+  - name: grpc-service
+    upstream: grpc-tls
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+  - name: static-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: static
+        port: 80
+
+  # Native gRPC upstream: protocol http2 = TLS + ALPN h2 (plaintext h2c
+  # is not an upstream protocol in dwara), so the grpc container serves
+  # TLS on :8443 with the quickstart certificate pair. The quickstart
+  # cert's SAN is localhost/127.0.0.1, which cannot match the in-network
+  # hostname `grpc` -- so instead of CA+hostname verification the
+  # upstream pins the certificate's SPKI SHA-256 (SEC-04 / DW-109,
+  # fail-closed, no CA fallback). Regenerating the quickstart certs
+  # changes this hash; recompute it with:
+  #   openssl x509 -in certs/server.crt -pubkey -noout \
+  #     | openssl pkey -pubin -outform DER \
+  #     | openssl dgst -sha256
+  - name: grpc-tls
+    load_balancer: round_robin
+    protocol: http2
+    cert_pinning:
+      pins:
+        - spki_sha256: 74e25f635e412eaa71cbac2013ccaac1b68f49b8b475759682205dda55b9d065
+    endpoints:
+      - address: grpc
+        port: 8443
+
+# ---------------------------------------------------------------------------
+# API lifecycle (DW-110) -- config shape only
+# ---------------------------------------------------------------------------
+
+# The lifecycle block is accepted by the schema and the gateway boots
+# with it, but the portal renderer / profile overlay / journey recorder
+# are not dispatched from the server binary yet (see README). The
+# portal points at the same OpenAPI spec used by test-06.
+lifecycle:
+  portal:
+    enabled: true
+    path: /portal
+    specs:
+      - file: openapi.yaml
+        name: dwara-demo-api
+  profiles:
+    base_config: "max_concurrent_requests: 10000\n"
+    profile_overrides:
+      dev: "max_concurrent_requests: 1000\n"
+      prod: "max_concurrent_requests: 10000\n"
+  journey:
+    enabled: true
+    retention_hours: 24

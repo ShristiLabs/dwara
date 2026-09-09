@@ -65,3 +65,9 @@ on an h1 listener matches the same request on an h3 listener.
   only in builds that serve h3 traffic.
 - An h3 listener cannot fall back to cleartext; QUIC is always
   encrypted, so the `tls` block is required.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-07-http3.sh`) in the repository.
+The category README covers prerequisites and teardown.

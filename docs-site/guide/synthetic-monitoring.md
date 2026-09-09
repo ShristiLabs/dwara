@@ -85,3 +85,10 @@ Synthetic monitoring is distinct from active health checks:
   gateway) and feeds alerting/analytics.
 
 Both can run simultaneously; they serve different purposes.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-05-synthetic-monitoring.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

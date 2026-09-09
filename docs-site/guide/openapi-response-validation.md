@@ -97,3 +97,9 @@ response body size and the schema complexity.
 
 For large response bodies, consider validating only a subset of
 fields by narrowing the schema to the fields you care about.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+script: `test-07-openapi-response-validation.sh`) in the repository.
+The category README covers prerequisites and teardown.

@@ -64,3 +64,9 @@ The tf tool targets the dev admin (plaintext loopback,
 `DWARA_ADMIN_DEV=1`). The `--ca`, `--client-cert`, and `--client-key`
 flags are reserved for mTLS to a production admin (a documented
 follow-up).
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-10-terraform-state.sh`) in the repository.
+The category README covers prerequisites and teardown.

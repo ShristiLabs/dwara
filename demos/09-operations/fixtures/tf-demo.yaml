@@ -1,0 +1,79 @@
+# Host-side gateway config for test-10-terraform-state.sh.
+#
+# The `dwara-cli tf` tool speaks PLAINTEXT http to the admin API: the
+# mTLS admin is a documented follow-up (--ca/--client-cert/--client-key
+# are reserved flags), so the tool's primary target is the dev admin —
+# the loopback-only plaintext admin enabled by DWARA_ADMIN_DEV=1. That
+# dev mode refuses non-loopback binds, which also rules out pointing
+# the tool at the compose gateway (its admin binds 0.0.0.0:2019 with
+# mTLS).
+#
+# So this test runs a small host gateway with:
+# - a listener on 127.0.0.1:18080 (host ports no demo category uses);
+# - the admin API bound to 127.0.0.1:20190 WITHOUT a tls block (dev
+#   plaintext), then runs `dwara-cli tf export` against it.
+#
+# The routes mirror the demo config (echo-route prefix + healthz
+# respond) so the exported tfstate/HCL name a known route.
+#
+# NOTE: the test PATCHes /config to inject drift, and PATCH persists
+# the published config back to THIS file (normalized, comments
+# dropped) — the test snapshots and restores it around the drift step.
+listeners:
+  - name: tf-http
+    address: 127.0.0.1
+    port: 18080
+    protocol: http
+
+routes:
+  - name: echo-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/echo/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+      headers:
+        Content-Type: text/plain
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+# Never dialed by this test (it only reads /config over the admin
+# API and hits the respond route); exists to satisfy the
+# route -> service -> upstream reference chain.
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+
+# Dev (plaintext, loopback-only) admin for the tf tool. Started with
+# DWARA_ADMIN_DEV=1 on the host. NOTE: config validation requires the
+# admin tls block to be present (all three files), but DEV MODE NEVER
+# READS IT — ListenMode::dev only checks the bind is loopback; the
+# certs below are the shared demo certs, referenced relatively to the
+# directory the gateway runs from (the test's cwd, 09-operations/).
+admin:
+  bind: 127.0.0.1:20190
+  tls:
+    cert_file: ../_shared/certs/server.crt
+    key_file: ../_shared/certs/server.key
+    client_ca_file: ../_shared/certs/client-ca.crt

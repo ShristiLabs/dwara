@@ -2,9 +2,10 @@
 
 This demo documents dwara's extensibility surface: native plugin filters,
 Proxy-Wasm (WebAssembly) plugins, CEL (Common Expression Language) expressions,
-and the nano-services pattern. It verifies the gateway starts and proxies
-correctly with the default build, and documents how to enable each
-extensibility mechanism via custom builds.
+the nano-services pattern, the Extism PDK plugin runtime, plugin lifecycle
+management, and the plugin SDK scaffolding CLI. It verifies the gateway
+starts and proxies correctly with the default build, and documents how to
+enable each extensibility mechanism via custom builds.
 
 ## What the demo covers
 
@@ -94,6 +95,119 @@ functions runtime.
 **Build:** `cargo build --release --features nano_services`
 (nano_services pulls in `wasm`)
 
+### Extism PDK plugin runtime (DW-109, STUBBED)
+
+Extism is the third plugin implementation path alongside Proxy-Wasm
+and native filters: plugins written against the [Extism](https://extism.org/)
+Plugin Development Kit. The PDK provides language SDKs for Rust, Go,
+Python, JavaScript, and others, plus a higher-level host-function ABI
+than proxy-wasm's raw stream contract (typed input/output buffers,
+JSON config parsing, HTTP calls from inside the plugin). An Extism
+plugin is designed to be an entry in the top-level `plugins` list,
+referenced by name from routes, hooking the same four phase slots with
+the same short-circuit semantics.
+
+**Status: STUBBED.** The runtime scaffold lives at
+`crates/dwara-core/src/plugins/extism.rs` behind the `extism` cargo
+feature (default OFF). The actual `extism` crate is NOT a dependency
+yet -- the host's runtime calls are documented no-ops returning
+`FilterOutcome::Continue` with the input unchanged. The config schema
+does not accept the `extism:` selector either: `PluginConfig` accepts
+`wasm`/`native` only, so an `extism:` block is **rejected by
+validation** as an unknown field (fail-closed, not silently ignored).
+The schema, validation, and dispatch trait were designed so the real
+wiring lands without touching the rest of the gateway. Until then, the
+`extism:` examples in the guide (bot detection, signed-URL
+verification, certificate pinning) do not validate. `test-05` verifies
+exactly this state: the `wasm:` plugins-block shape validates, the
+`extism:` selector is rejected with an unknown-field error, and the
+default gateway is unaffected.
+
+**Build (when it lands):** `cargo build --release --features extism,plugins`
+
+### Plugin lifecycle (DW-056)
+
+The plugin lifecycle manager owns how plugins are loaded, hot-swapped,
+and health-tracked (see `crates/dwara-core/src/wasm/lifecycle.rs` and
+the [plugin lifecycle guide](../../docs-site/guide/plugin-lifecycle.md)):
+
+- **Loading:** read the `.wasm` file, compute a SHA-256 checksum,
+  compile with wasmtime, validate the proxy-wasm ABI (`proxy_on_vm_start`
+  export at minimum, exported linear memory, no unknown host imports),
+  instantiate with the configured limits. A module that cannot be read
+  or compiled **fails the load** -- the operator knows up front.
+- **Hot swap on reload:** plugins are re-evaluated by comparing
+  checksums. Unchanged: the loaded instance and health state are kept
+  (no recompilation). Changed: the old module is replaced and health
+  resets to `Healthy`. Removed: the entry is dropped. The swap is
+  atomic (new table and runner are built first, then swapped in).
+- **Health tracking:** `Healthy` / `Crashed { error, crash_count }` /
+  `Disabled { reason }`. Crashes call `mark_crashed` (the counter
+  accumulates); successful invocations and checksum changes call
+  `mark_healthy`; the circuit breaker can disable a plugin. Health
+  lives in the lifecycle manager -- there is **no `/plugins` admin
+  endpoint yet** (documented follow-up).
+- **Failure isolation:** the manager keeps a route-to-plugins map;
+  routes referencing a crashed plugin **fail closed with 500**, other
+  routes are unaffected. Phase ordering across multiple plugins is
+  deterministic (phase first, then the route's plugin-list order).
+
+The lifecycle manager is a complete, test-covered library component
+behind the `wasm` feature (default OFF) -- the default `dwara:demo`
+image exposes no live plugin surface. `test-06` verifies the config
+schema the lifecycle manager consumes (plugins block + route
+attachment) and the live config hot-reload flow (DW-006) that triggers
+checksum re-evaluation in a feature-enabled build.
+
+### Plugin SDK: host CLI scaffolding (DW-057)
+
+The operator CLI scaffolds new proxy-wasm plugin projects:
+
+```sh
+dwara-cli plugin new my-plugin
+```
+
+This creates `my-plugin/` with a `Cargo.toml` (cdylib targeting
+`wasm32-wasip1`, `proxy-wasm` dependency), `src/lib.rs` (the
+request/response headers phase callbacks stubbed out), a `dwara.yaml`
+manifest, a README, and a `.gitignore`. Build with `cargo build
+--release --target wasm32-wasip1`, then load the `.wasm` via the
+gateway's top-level `plugins` block. See the
+[plugin SDK guide](../../docs-site/guide/plugin-sdk.md).
+
+The scratch demo image ships only the gateway server binary, so this
+is a **host CLI** workflow. `test-07` runs the scaffold into a temp
+dir and asserts the generated files and their contents. Known quirks
+(verified live): the generated manifest does not pass gateway
+validation as-is -- it emits `action: proxy: {}` (the schema requires
+`type: proxy`) and a prefix match on `/` (validation rejects a prefix
+that would match every path). Fix both before `dwara-cli validate`
+passes.
+
+### Extension traits (developer-facing)
+
+Separate from the per-route plugin chain, dwara defines five swappable
+subsystem seams as traits -- the extension-trait boundary the gateway
+calls instead of any concrete backend:
+
+| Trait | What it owns | Default (OSS) impl | Enterprise impl |
+|---|---|---|---|
+| `RateLimiter` | rate-limit decisions per scope | local GCRA, stacked windows | Redis-backed distributed GCRA |
+| `ConfigSource` | where config generations come from | file watch / SIGHUP / admin API | controller gRPC stream (CP/DP) |
+| `CacheStore` | response cache get/set/invalidate | local in-memory, TTL/ETag | Redis-backed two-tier distributed cache |
+| `AnalyticsSink` | where completed-request records go | embedded SQLite analytics store | federated gRPC stream to controller |
+| `SecretSource` | how `${...}` secret references resolve | env, file, static inline | HashiCorp Vault and KMS |
+
+Each trait is consumed by exactly one domain (traffic policy, snapshot
+publish, response caching, analytics, config compile), so a backend
+swap is a config/build change, not a code change. This surface is
+developer-facing: there is **no gateway config block and no test
+script** for it in this demo -- writing an implementation means
+implementing the trait and wiring it in at startup. See the
+[extension traits guide](../../docs-site/guide/extension-traits.md)
+and `crates/dwara-core/src/extensions/`; the 11-enterprise demo
+documents the enterprise backends behind the same traits.
+
 ### Feature availability
 
 | Feature | Cargo feature | Default build | Config accepted | Runtime effect |
@@ -102,6 +216,10 @@ functions runtime.
 | Proxy-Wasm | `wasm` | OFF | Yes (inert) | None without feature |
 | CEL | `cel` | OFF | Fields not in schema | None without feature |
 | Nano-services | `nano_services` | OFF | Yes (inert, 502) | None without feature |
+| Extism PDK | `extism` | OFF | No (`extism:` selector rejected) | Stubbed no-ops |
+| Plugin lifecycle | `wasm` | OFF | Yes (inert; no admin endpoint) | None without feature |
+| Plugin SDK | (host CLI) | CLI on host | n/a (scaffolds files) | Host-side scaffold |
+| Extension traits | (developer-facing) | n/a | No config surface | n/a (trait swap) |
 
 The default `dwara:demo` image (built from `Dockerfile.scratch`) uses
 `cargo build --release` with NO features enabled. This keeps the binary
@@ -170,6 +288,9 @@ pass/fail summary.
 ./test-02-proxy-wasm.sh
 ./test-03-cel-expressions.sh
 ./test-04-nano-services.sh
+./test-05-extism-pdk.sh
+./test-06-plugin-lifecycle.sh
+./test-07-plugin-sdk.sh
 ```
 
 Or run them all at once:
@@ -186,7 +307,7 @@ docker compose down -v
 
 ## Expected results
 
-All four test scripts should pass with zero failures. Each test
+All seven test scripts should pass with zero failures. Each test
 verifies that the gateway starts and proxies correctly with the default
 build, while documenting the extensibility mechanism it covers:
 
@@ -196,6 +317,14 @@ build, while documenting the extensibility mechanism it covers:
 | test-02-proxy-wasm | gateway starts, /healthz 200, /v1/echo/test 200 | All pass |
 | test-03-cel-expressions | gateway starts, /healthz 200, /v1/echo/test 200, / 200 | All pass |
 | test-04-nano-services | gateway starts, echo + static composed services work | All pass |
+| test-05-extism-pdk | plugins-block shape validates; `extism:` selector rejected (documented limitation); gateway proxies | All pass |
+| test-06-plugin-lifecycle | lifecycle config shape validates; reload-nudge flow keeps serving | All pass |
+| test-07-plugin-sdk | `dwara-cli plugin new` scaffolds the 5 files; manifest quirk documented + fixed manifest validates | All pass |
+
+Tests 05-07 additionally use the **host** operator CLI
+(`dwara-cli`, at `target/debug/dwara-cli` or `target/release/dwara-cli`
+after `cargo build -p dwara-cli`) for config-shape validation and the
+plugin scaffold; the container image ships only the gateway server.
 
 ## Files
 
@@ -208,6 +337,9 @@ build, while documenting the extensibility mechanism it covers:
   test-02-proxy-wasm.sh           proxy-wasm (WebAssembly) plugins (DW-055)
   test-03-cel-expressions.sh      CEL expressions (DW-058/059)
   test-04-nano-services.sh        nano-services pattern (DW-106)
+  test-05-extism-pdk.sh           Extism PDK runtime (DW-109, stubbed + config-shape)
+  test-06-plugin-lifecycle.sh     plugin lifecycle (DW-056, config shape + reload flow)
+  test-07-plugin-sdk.sh           plugin SDK scaffold via host CLI (DW-057)
   README.md                       this file
   data/                           SQLite state DB (mounted volume)
 ```

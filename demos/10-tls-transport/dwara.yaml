@@ -5,12 +5,20 @@
 #   - Optional mTLS client-cert verification (client CA present)
 #   - SNI passthrough (configured but inert in this demo — see below)
 #   - HTTP/2 (negotiated via ALPN on the terminate listener)
+#   - Native gRPC proxying (route matched like any path, upstream
+#     dialed with protocol: http2 = TLS + h2 ALPN)
+#   - HTTP/3 ingress (QUIC listener; Alt-Svc advertised by edge-https)
+#   - L4 TCP proxying (byte splice to the echo upstream)
+#   - Post-quantum TLS opt-in (tls.pq: true on the terminate listener)
+#   - ACME block (config-accepted; runtime stubbed — see README)
 #   - PROXY protocol (documented; opt-in, not enabled here)
 #
-# Three data-plane listeners:
-#   - edge-http        (0.0.0.0:8080)  plaintext HTTP
+# Data-plane listeners:
+#   - edge-http        (0.0.0.0:8080)  plaintext HTTP (h1 + h2c)
 #   - edge-https       (0.0.0.0:8443)  TLS terminate, multi-SNI + mTLS
 #   - edge-passthrough (0.0.0.0:8444)  TLS SNI passthrough
+#   - edge-h3          (0.0.0.0:8445)  HTTP/3 over QUIC (UDP)
+#   - edge-l4-tcp      (0.0.0.0:8446)  L4 TCP byte-splice proxy
 #
 # No authentication is required on any route (auth_required defaults to
 # false); this demo focuses purely on transport-layer behavior.
@@ -22,7 +30,9 @@
 # ---------------------------------------------------------------------------
 
 listeners:
-  # Plaintext HTTP listener (for local dev / health checks).
+  # Plaintext HTTP listener (for local dev / health checks). Serves
+  # HTTP/1.1 and h2c prior-knowledge, so plaintext gRPC clients
+  # (grpcurl -plaintext) enter here too.
   - name: edge-http
     address: 0.0.0.0
     port: 8080
@@ -34,20 +44,43 @@ listeners:
   # client_ca_file requests + verifies a client certificate (mTLS);
   # a connection without a cert is still accepted (no credential is
   # required here), but an unverified cert fails the handshake.
+  #
+  # pq: true opts the listener into the post-quantum X25519+ML-KEM
+  # hybrid key-exchange preference (experimental; classical fallback
+  # kept — a non-PQ client still completes the handshake).
+  #
+  # alt_svc advertises the h3 (QUIC) listener on :8445 to HTTP/1.1 and
+  # HTTP/2 clients via the Alt-Svc response header.
+  #
+  # acme: config-accepted but runtime-stubbed. The block documents the
+  # intended Let's Encrypt automation (staging directory; TLS-ALPN-01
+  # challenge needs port 443 reachable by the CA). No issuance happens
+  # in this build; the manual cert_file/key_file pair above keeps
+  # serving (ACME-managed certs would become the fallback once wired).
   - name: edge-https
     address: 0.0.0.0
     port: 8443
     protocol: https
+    alt_svc: 'h3=":8445"; ma=86400'
     tls:
       mode: terminate
       cert_file: /etc/dwara/certs/server.crt
       key_file: /etc/dwara/certs/server.key
+      pq: true
       certificates:
         - server_names:
             - api.example.com
           cert_file: /etc/dwara/certs/server.crt
           key_file: /etc/dwara/certs/server.key
       client_ca_file: /etc/dwara/certs/client-ca.crt
+      acme:
+        domains:
+          - api.example.com
+        contact:
+          - admin@example.com
+        challenge: tls-alpn01
+        staging: true
+        state_dir: /var/lib/dwara/acme
 
   # SNI passthrough listener: the gateway peeks the TLS ClientHello
   # SNI and splices the raw TLS stream byte-for-byte to the upstream
@@ -72,11 +105,67 @@ listeners:
             - api.example.com
           upstream: echo-upstream
 
+  # HTTP/3 (QUIC) ingress listener. QUIC mandates TLS 1.3, so the tls
+  # block is required (terminate mode only; the same cert pair as
+  # edge-https). Binds UDP. Clients find this listener via the
+  # Alt-Svc header edge-https advertises, or connect directly. Note
+  # that macOS's bundled curl has no HTTP/3 support — use an h3-capable
+  # client (see README) or a browser against the published port.
+  - name: edge-h3
+    address: 0.0.0.0
+    port: 8445
+    protocol: h3
+    tls:
+      mode: terminate
+      cert_file: /etc/dwara/certs/server.crt
+      key_file: /etc/dwara/certs/server.key
+
+  # L4 TCP proxy listener: accepts raw TCP connections and splices
+  # them byte-for-byte to the `l4.upstream` (picked through that
+  # upstream's load balancer). No HTTP pipeline runs — no routing,
+  # transforms, or auth apply; the echo upstream's HTTP response
+  # simply flows back over the spliced socket. UDP L4 proxying is
+  # config-accepted but stubbed (see test-08-l4-proxying.sh).
+  - name: edge-l4-tcp
+    address: 0.0.0.0
+    port: 8446
+    protocol: tcp
+    l4:
+      upstream: echo-upstream
+      idle_timeout_s: 60
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 routes:
+  # Native gRPC: RPC paths (/dwdemo.DemoService/Method) match like any
+  # path; no rewrite (the RPC path must reach the upstream verbatim).
+  # grpcurl enters via edge-http (-plaintext, h2c prior knowledge) or
+  # edge-https (TLS + h2 ALPN); the gateway relays to the grpc
+  # upstream over its own http2 (TLS) connection with trailers
+  # pass-through.
+  - name: grpc-route
+    service: grpc-service
+    match:
+      path:
+        type: prefix
+        value: /dwdemo.DemoService/
+    action:
+      type: proxy
+
+  # gRPC server reflection through the gateway (grpcurl list/describe
+  # without local proto files): the reflection service is a bidi
+  # stream over the same h2 semantics, proxied like any RPC.
+  - name: grpc-reflection-route
+    service: grpc-service
+    match:
+      path:
+        type: prefix
+        value: /grpc.reflection.v1alpha.ServerReflection/
+    action:
+      type: proxy
+
   # Echo API: prefix match, strip the prefix before proxying.
   - name: echo-route
     service: echo-service
@@ -124,6 +213,9 @@ services:
   - name: static-service
     upstream: static-upstream
 
+  - name: grpc-service
+    upstream: grpc-upstream
+
 # ---------------------------------------------------------------------------
 # Upstreams
 # ---------------------------------------------------------------------------
@@ -142,6 +234,19 @@ upstreams:
     endpoints:
       - address: static
         port: 80
+
+  # Native gRPC upstream. protocol: http2 = TLS with ALPN h2 (the
+  # gateway does not speak h2c toward upstreams), so the demo gRPC
+  # server's TLS listener (grpc:8443) is the target and its
+  # self-signed cert (SAN DNS:grpc) is the trust anchor via
+  # trusted_ca_file.
+  - name: grpc-upstream
+    load_balancer: round_robin
+    protocol: http2
+    trusted_ca_file: /etc/dwara/grpc-certs/server.crt
+    endpoints:
+      - address: grpc
+        port: 8443
 
 # ---------------------------------------------------------------------------
 # Admin API (mTLS-only)

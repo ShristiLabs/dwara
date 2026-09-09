@@ -64,6 +64,16 @@ services:
     networks:
       - lb-net
 
+  # Discovery target for the dns-pool upstream: the gateway resolves
+  # this service NAME via docker's embedded DNS (no static endpoints
+  # configured anywhere).
+  echo-dns:
+    image: dwara-demo/echo
+    environment:
+      INSTANCE_NAME: echo-dns
+    networks:
+      - lb-net
+
 networks:
   lb-net:
     driver: bridge

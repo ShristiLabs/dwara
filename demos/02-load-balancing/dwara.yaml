@@ -1,12 +1,15 @@
 # Category 02: Load Balancing & Upstream Management.
 #
 # Five load-balancer strategies (round-robin, least-requests, IP-hash,
-# peak-EWMA, sticky sessions) plus a weighted traffic split, each
-# exposed on its own /lb/<strategy>/ prefix. No auth is required so the
-# test scripts can exercise the pools with a plain curl.
+# peak-EWMA, sticky sessions) plus a weighted traffic split and a
+# DNS-discovery pool, each exposed on its own /lb/<strategy>/ prefix.
+# No auth is required so the test scripts can exercise the pools with
+# a plain curl.
 #
 # Upstream endpoints use docker service names (echo-a, echo-b, echo-c,
-# slow) as addresses; the compose network resolves them.
+# slow) as addresses; the compose network resolves them. The dns-pool
+# upstream has NO static endpoints at all — its endpoint set is
+# populated live by DNS discovery (hostname: echo-dns).
 
 # ---------------------------------------------------------------------------
 # Listeners
@@ -89,6 +92,20 @@ routes:
       rewrite:
         type: strip_prefix
 
+  # DNS discovery: /lb/dns/ traffic reaches the echo-dns instance ONLY
+  # through the discovery-resolved endpoint set (the upstream below
+  # has no static endpoints).
+  - name: lb-dynamic-discovery
+    service: dns-service
+    match:
+      path:
+        type: prefix
+        value: /lb/dns/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
@@ -119,6 +136,9 @@ services:
           weight: 90
         - upstream: lr-pool
           weight: 10
+
+  - name: dns-service
+    upstream: dns-pool
 
 # ---------------------------------------------------------------------------
 # Upstreams
@@ -200,3 +220,25 @@ upstreams:
       - address: echo-b
         port: 8080
         weight: 1
+
+  # DNS-discovery pool (DW-042): NO static endpoints. A background
+  # task resolves `echo-dns` (the compose service name, answered by
+  # docker's embedded DNS) every refresh_interval_s and hot-swaps the
+  # resolved A records into the balancer's endpoint set. The resolver
+  # reads the container's /etc/resolv.conf, so cluster-local names
+  # resolve. fail_open keeps the last set on DNS failure;
+  # min_endpoints floors the set at 1. A single A record is fine here
+  # (docker DNS answers one address per service) — the assertion the
+  # demo makes is that discovery RESOLVES and ROUTES, not that it
+  # fans out.
+  - name: dns-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints: []
+    dns_discovery:
+      hostname: echo-dns
+      port: 8080
+      refresh_interval_s: 5
+      record_type: A
+      fail_open: true
+      min_endpoints: 1

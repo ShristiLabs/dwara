@@ -175,3 +175,9 @@ view and CRUD operation to that workspace.
   `DWARA_ADMIN_DEV=1` (loopback-only plaintext admin, see
   [Admin API](./admin-api#dev-fallback-never-in-production)) also
   serves the console in plaintext.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-06-web-console.sh`) in the repository.
+The category README covers prerequisites and teardown.

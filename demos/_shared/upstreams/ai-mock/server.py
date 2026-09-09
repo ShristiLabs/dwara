@@ -4,20 +4,66 @@
 Implements:
   POST /v1/chat/completions        - OpenAI chat completions (streaming + non-streaming)
   POST /v1/messages                - Anthropic messages API (streaming + non-streaming)
-  POST /v1/embeddings              - fixed-dimension embeddings
+  POST /v1/embeddings              - fixed-dimension embeddings (deterministic,
+                                     semantically similar for similar prompts)
+  POST /tasks/submit               - A2A task-submit (JSON-RPC 2.0, agent demo)
 
 Special model names:
   rate-limit-test  - returns 429 (for failover/quarantine tests)
   error-test       - returns 500 (for circuit breaker tests)
   delay-test       - adds 2s delay (for timeout tests)
 """
+import hashlib
 import json
+import re
 import time
 import uuid
 import http.server
 import os
 
 PORT = int(os.environ.get("PORT", "8080"))
+
+# --- Deterministic semantic embeddings -------------------------------------
+#
+# The gateway's AI semantic cache (DW-083) calls POST /v1/embeddings with the
+# prompt text and cosine-compares the returned vectors. For the demo to show
+# real semantic-cache hits, the mock must return DETERMINISTIC vectors where
+# paraphrased prompts land near each other. Scheme: tokenize the text, map
+# each distinct token to a fixed pseudo-random vector derived from md5
+# (Python's builtin hash() is per-process randomized -- never usable here),
+# and average the token vectors with content words weighted 1.0 and common
+# stopwords 0.1. Two prompts sharing their content words therefore have
+# cosine similarity ~= 0.99, while unrelated prompts land near 0.
+EMBEDDING_DIM = 128
+
+_STOPWORDS = frozenset(
+    """
+    the a an is are was were of to in on at for with and or but what whats
+    which who whom how why when where do does did can could should would will
+    shall may might you your yours i me my we our us it its this that these
+    those there here tell please give show say said write make about into
+    """.split()
+)
+
+
+def _token_vector(token):
+    """Deterministic pseudo-random vector for one token (md5-seeded)."""
+    return [
+        (int.from_bytes(hashlib.md5(f"{token}#{i}".encode()).digest()[:4], "big") / 2**32) * 2.0 - 1.0
+        for i in range(EMBEDDING_DIM)
+    ]
+
+
+def semantic_embedding(text):
+    """Token-set-hashed embedding: similar prompts -> near-identical vectors."""
+    tokens = {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 1} or {"<empty>"}
+    vec = [0.0] * EMBEDDING_DIM
+    for t in tokens:
+        weight = 0.1 if t in _STOPWORDS else 1.0
+        tv = _token_vector(t)
+        for i in range(EMBEDDING_DIM):
+            vec[i] += weight * tv[i]
+    return vec
 
 
 def make_completion(model, content):
@@ -38,14 +84,15 @@ def make_completion(model, content):
 
 
 def make_embedding(model, text):
-    dim = 128
+    if not isinstance(text, str):
+        text = " ".join(text) if isinstance(text, list) else str(text)
     return {
         "object": "list",
         "model": model,
         "data": [
             {
                 "index": 0,
-                "embedding": [hash(text + str(i)) % 1000 / 1000.0 for i in range(dim)],
+                "embedding": semantic_embedding(text),
             }
         ],
         "usage": {"prompt_tokens": 5, "total_tokens": 5},
@@ -123,6 +170,50 @@ class AiMockHandler(http.server.BaseHTTPRequestHandler):
         if path == "/v1/embeddings":
             text = body.get("input", "")
             resp = make_embedding(model, text)
+            payload = json.dumps(resp).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        # A2A task-submit (JSON-RPC 2.0 over HTTP): the gateway's a2a
+        # provider adapter (DW-114) folds a canonical chat request into
+        # {"jsonrpc":"2.0","method":"tasks/submit","params":{"model",
+        # "message":{role,content},...}} and parses the answer back from
+        # result.message. Echo the task text so tests can prove the
+        # request traversed the A2A adapter, and report a completed
+        # terminal task state with OpenAI-shaped usage.
+        if path == "/tasks/submit":
+            params = body.get("params", {})
+            task_model = params.get("model", "unknown")
+            message = params.get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(
+                        b.get("text", "") for b in content if isinstance(b, dict)
+                    )
+            else:
+                content = str(message)
+            resp = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "message": {
+                        "role": "assistant",
+                        "content": f"A2A mock agent reply to: {str(content)[:100]}",
+                    },
+                    "model": task_model,
+                    "state": "completed",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 20,
+                        "total_tokens": 30,
+                    },
+                },
+            }
             payload = json.dumps(resp).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

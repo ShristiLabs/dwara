@@ -53,7 +53,7 @@ listeners:
           - www.example.com
         contact:
           - admin@example.com
-        challenge: tls-alpn-01
+        challenge: tls-alpn01
         staging: false
         state_dir: ./acme-state
 ```
@@ -62,13 +62,13 @@ listeners:
 |---|---|---|
 | `domains` | (required) | Domain names to obtain certificates for. |
 | `contact` | (required) | Email addresses for ACME account registration. |
-| `challenge` | `tls-alpn-01` | ACME challenge type: `tls-alpn-01` or `http-01`. |
+| `challenge` | `tls-alpn01` | ACME challenge type: `tls-alpn01` or `http-01`. |
 | `staging` | `false` | Use the Let's Encrypt staging directory (for testing; avoids rate limits). |
 | `state_dir` | `./acme-state` | Directory for persisting the ACME account key and issued certificates. |
 
 ## Challenge types
 
-- **`tls-alpn-01`** (default): the TLS terminator handles the challenge
+- **`tls-alpn01`** (default): the TLS terminator handles the challenge
   during the TLS handshake on port 443. No separate HTTP listener is
   needed. This is the recommended default because it works behind most
   load balancers and in containerized environments where port 80 is not
@@ -122,6 +122,13 @@ note at the top of this page).
 - The ACME client will add a dependency to the gateway binary (gated
   behind the `acme` feature) once implemented; today the feature is
   flag-only with no dependency.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-10-acme.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.
 
 ## See also
 

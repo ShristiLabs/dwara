@@ -2,8 +2,10 @@
 #
 # Starts the dwara gateway with two listeners (HTTP on 8080 and HTTPS on
 # 8443 with TLS terminate + mTLS client-cert verification), an echo upstream,
-# and the mTLS-only admin API on 2019. All services share a single docker
-# network so the gateway can reach the echo upstream by service name.
+# the mock identity provider (JWT minting / JWKS / OIDC introspection /
+# OAuth2 token endpoint), an OPA policy server for the authz demo, and the
+# mTLS-only admin API on 2019. All services share a single docker network
+# so the gateway can reach every upstream by service name.
 #
 #   docker compose up -d
 #   ./test-01-api-key-auth.sh
@@ -12,6 +14,9 @@
 # (static musl binary on FROM scratch). Scratch has no users, so the
 # service injects the nonroot UID 65532 via `user:` (same UID the
 # distroless variant bakes in).
+#
+# Prerequisite images (built from demos/_shared):
+#   docker compose -f ../_shared/docker-compose.yml build echo idp-mock
 services:
   dwara:
     image: dwara:demo
@@ -32,6 +37,7 @@ services:
       - "2019:2019"
     depends_on:
       - echo
+      - idp-mock
     networks:
       - sec-net
 
@@ -39,6 +45,43 @@ services:
     image: dwara-demo/echo
     environment:
       INSTANCE_NAME: echo
+    networks:
+      - sec-net
+
+  # Mock identity provider (demos/_shared/upstreams/idp-mock): mints
+  # RS256 JWTs (openssl-backed keypair generated at container start),
+  # serves the JWKS + OIDC discovery, and answers introspection and
+  # client-credentials token requests. The gateway reaches it at
+  # http://idp-mock:8080 (the ISSUER embedded in tokens); test
+  # scripts reach it at http://localhost:19011.
+  idp-mock:
+    image: dwara-demo/idp-mock
+    environment:
+      ISSUER: http://idp-mock:8080
+    ports:
+      - "19011:8080"
+    networks:
+      - sec-net
+
+  # OPA policy server for the authorization demo. The demo policy
+  # (policies/demo.rego) allows /v1* paths and the opa-user consumer; the
+  # test drives it directly with the documented input format. NOTE:
+  # the gateway's `authz: opa:` config wiring has not landed yet (see
+  # policies/target-opa-authz.yaml and README "Documented limitations").
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      [
+        "run",
+        "--server",
+        "--addr=0.0.0.0:8181",
+        "--log-level=error",
+        "/policies/demo.rego",
+      ]
+    volumes:
+      - ./policies:/policies:ro
+    ports:
+      - "8181:8181"
     networks:
       - sec-net
 

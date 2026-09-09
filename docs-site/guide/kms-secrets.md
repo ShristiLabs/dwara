@@ -88,3 +88,10 @@ The built-in file secret source (reading secrets from files on disk,
 e.g. for Docker/Kubernetes secrets) is always available. External
 secret sources complement it -- you can mix file and Vault/KMS
 secrets in the same config.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/11-enterprise/` (test
+script: `test-11-kms-secrets.sh`) in the repository.
+The demo documents the current limitations alongside what
+runs today; see its README.

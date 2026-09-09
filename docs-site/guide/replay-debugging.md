@@ -76,3 +76,9 @@ so you can trace a config change's blast radius before shipping it.
 - Trace files contain redacted request metadata, not bodies, so they are
   safe to share for support -- but they still name routes and upstreams, so
   treat them as internal.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-07-replay-debugging.sh`) in the repository.
+The category README covers prerequisites and teardown.

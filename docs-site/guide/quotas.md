@@ -174,3 +174,9 @@ same state-store counters (absent -- never zero -- when the consumer
 has no budgets). See
 [Usage reports and exports](./analytics#usage-reports-and-exports)
 for the windowing, formats, and the manual trigger.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/03-resilience/` (test
+script: `test-13-quotas.sh`) in the repository.
+The category README covers prerequisites and teardown.

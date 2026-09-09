@@ -1,0 +1,48 @@
+# TARGET SURFACE (not a loadable config) — OPA authorization.
+#
+# Documents the planned `authz: opa:` block exactly as specified in
+# docs-site/guide/opa-authz.md: the gateway would POST the request
+# context to the OPA decision endpoint and honor the boolean result
+# (false -> 403, unreachable -> fail_closed).
+#
+# The OSS config schema has no `authz` key yet — the OPA HTTP client
+# is complete as a library component (crates/dwara-core/src/security/
+# cedar/opa.rs) but the config wiring has not landed. `dwara-cli
+# validate` therefore REJECTS this file with an unknown-field error,
+# which test-20-opa-authz.sh asserts live (the documented limitation).
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+routes:
+  - name: opa-route
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /v1/opa/
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: echo
+        port: 8080
+
+authz:
+  opa:
+    url: http://opa:8181/v1/data/demo/allow
+    timeout_ms: 100
+    fail_closed: true

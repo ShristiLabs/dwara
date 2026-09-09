@@ -85,3 +85,9 @@ headers.
 
 For the gateway's own request-timeout configuration, see
 [Timeouts](./timeouts).
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/10-tls-transport/` (test
+script: `test-06-grpc-proxying.sh`) in the repository.
+The category README covers prerequisites and teardown.

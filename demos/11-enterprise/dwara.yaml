@@ -119,6 +119,16 @@ admin:
     cert_file: /etc/dwara/certs/server.crt
     key_file: /etc/dwara/certs/server.key
     client_ca_file: /etc/dwara/certs/client-ca.crt
+  # SEC-01: admin audit log. When present, all mutating admin actions
+  # (PATCH /config, purge) are recorded in an append-only audit table
+  # in the state store (actor cert fingerprint or token hash, action,
+  # before/after config hash, timestamp). In the OSS build the block is
+  # accepted but INERT -- no runtime consumer records entries. The
+  # enterprise edition adds the workspace-scoped audit log (queried via
+  # GET /workspaces/<name>/audit) on the management plane.
+  # See crates/dwara-core/src/config/mod.rs AdminAuditConfig.
+  audit:
+    enabled: true
 
 # ---------------------------------------------------------------------------
 # Embedded analytics (OSS feature, DW-043)
@@ -182,3 +192,37 @@ config_convergence:
 license:
   file: /etc/dwara/license.json
   grace_period_days: 7
+
+# Fleet operations / cluster sync GA surface (DW-098 / DW-074,
+# enterprise).
+# OSS fallback: single-node gateway, no controller, no fleet -- the
+# block is accepted but inert.
+# In the enterprise edition (ent feature + a license with the
+# fleet_operations claim), the controller enforces this version-skew
+# policy on edge registration, rolls out generations in ordered waves
+# (label-selected, concurrency-capped, halting on failure), and exposes
+# GET /fleet/skew + GET /fleet/status. The GA cluster-sync layer this
+# configures adds conflict resolution (highest_generation /
+# most_recent_timestamp / leader_wins), split-brain guards (lease
+# timeout; edges refuse new generations and keep serving their cached
+# one), and version-skew tolerance.
+# NOTE: the schema uses fleet.upgrade.order[] entries (name + labels);
+# the controller-side `controller:` / `waves` naming in the guide is
+# the ent controller's own config surface, not this gateway schema.
+# See crates/dwara-core/src/config/mod.rs FleetConfig and
+# crates/dwara-core/src/cp_dp/cluster_sync.rs.
+fleet:
+  enabled: true
+  controller_version: "1.2.0"
+  stale_timeout_secs: 90
+  upgrade:
+    skew: allow_minor_skew
+    order:
+      - name: canary
+        labels:
+          env: canary
+      - name: prod
+        labels:
+          env: prod
+    max_concurrent: 2
+    halt_on_failure: true

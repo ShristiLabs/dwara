@@ -65,3 +65,9 @@ counters is delivered to the collector.
 Both OTLP export and the Prometheus `/metrics` endpoint can run
 simultaneously. Use whichever fits your environment; there is no
 need to choose one.
+
+## Runnable demo
+
+Run this feature against a live gateway: `demos/09-operations/` (test
+script: `test-04-otlp-export.sh`) in the repository.
+The category README covers prerequisites and teardown.

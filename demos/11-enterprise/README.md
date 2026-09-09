@@ -26,13 +26,17 @@ implementations for.
 | Distributed cache | (no config block; CacheStore trait) | Local in-memory (moka) cache | Redis-backed cache with Pub/Sub invalidation |
 | Redis rate limiters | `gateway.redis_rate_limiter` | Accepted, inert (local GCRA limiter) | Redis-backed GCRA, fleet-shared limits |
 | Redis quotas | `gateway.redis_quotas` | Accepted, inert (local SQLite quotas) | Redis-backed quotas, fleet-shared counters |
-| Vault/KMS secrets | (no config block; SecretSource trait) | File/env secret resolution (`${...}` grammar) | Vault KV v2 + KMS providers with TTL caching |
+| Vault secrets | (no config block; SecretSource trait) | File/env secret resolution (`${...}` grammar) | Vault KV v2 with TTL caching |
+| KMS secrets | (no config block; SecretSource trait) | File/env secret resolution (`${...}` grammar); `secret_sources:` rejected at validation | Envelope encryption: `key_id:ciphertext` refs decrypted by aws-kms/gcp-kms/azure-kv |
 | Workspace RBAC | (enterprise management plane) | Not available | Multi-workspace isolation + RBAC bindings |
+| Audit log | `admin.audit` (SEC-01 shape) | Accepted, inert (no runtime consumer) | Append-only workspace audit log via `GET /workspaces/<name>/audit` |
 | Federated analytics | (no config block; AnalyticsSink trait) | Embedded local SQLite analytics store | Edge-to-controller gRPC streaming (DW-095) |
 | Credential pools | `ai.providers[].credential_pool` | Rejected at validation (ent-gated) | Multi-key rotation with 429 quarantine (DW-080) |
 | Service mesh | `gateway.mesh` | Accepted, inert (validation warns) | Sidecar mode with SPIFFE/SPIRE mTLS (DW-107) |
+| Cluster sync GA | `gateway.fleet` (skew/waves) | Accepted, inert | Conflict resolution + split-brain guards + version skew (DW-074) |
 | Fleet operations | `gateway.fleet` | Accepted, inert | Version-skew policy + fleet status endpoints (DW-098) |
 | Licensing | `gateway.license` | Accepted, inert (LicenseGate::none()) | License verification + feature-claim gating (DW-032) |
+| Controller persistence | (controller flags/env, no YAML block) | Not available (single-node SQLite state) | PostgreSQL store: snapshots, license, membership, analytics |
 
 ### CP/DP split (control plane / data plane)
 
@@ -92,6 +96,45 @@ caching for rotation without restart. There is no config-level block -- the
 `SecretSource` implementation is selected at startup. The OSS edition ships
 file/env-based secret resolution via the `${...}` grammar (DW-045).
 
+### KMS secrets (envelope encryption)
+
+The KMS secret source stores secrets encrypted in the config (or a file)
+and decrypts them at resolve time: a reference looks like
+`kms:alias/dwara-secrets:<base64 ciphertext>`, and the provider
+(`aws-kms`, `gcp-kms`, `azure-kv`, or a `mock` for tests) decrypts the
+ciphertext with the named key. This keeps secrets encrypted at rest
+without a live dependency on a secret server. Like Vault, the source
+fails closed: an unresolvable secret prevents startup (or reload), never
+a silent fallback.
+
+The `secret_sources:` block from the guide is not part of the OSS config
+schema -- a config carrying it is **rejected at validation** (unknown
+field), mirroring the runtime fail-closed contract: the OSS build never
+accepts a KMS source it cannot decrypt from. `test-11` verifies exactly
+that rejection plus the healthy OSS secret path. See
+[the KMS secrets guide](../../docs-site/guide/kms-secrets.md).
+
+### Audit log (workspace audit, ent-gated)
+
+The enterprise audit log is an append-only record of administrative
+activity: every admin action is recorded with `seq` (monotonic,
+gap-free), `timestamp`, `principal` (mTLS cert subject), `action`,
+`workspace`, `before`/`after` state, and `request_id`. Entries cannot
+be edited or deleted after the fact. It completes the multi-tenant
+story: workspaces isolate, RBAC decides who may act, the audit log
+records what they actually did. It is queried via the admin API
+(`GET /workspaces/<name>/audit`).
+
+The OSS-adjacent surface is the `admin.audit` block (SEC-01): when
+present, mutating admin actions (PATCH /config, purge) are specified to
+be recorded in an append-only audit table in the state store with the
+actor (cert fingerprint or token hash), action, before/after config
+hash, and timestamp. In the OSS build the block is **accepted but
+inert** -- no runtime consumer records entries. The demo config ships
+`admin.audit: {enabled: true}`; `test-12` verifies the gateway accepts
+it and serves the admin API normally. See
+[the audit log guide](../../docs-site/guide/audit-log.md).
+
 ### Workspace RBAC
 
 Multi-workspace isolation with role-based access control for API management.
@@ -132,6 +175,70 @@ development key), never user-configurable. The config block
 The enterprise edition uses a private `licensing-core` dependency (stubbed
 out in OSS builds). The `vendor-licensing.sh` script in the enterprise
 quickstart vendors the private dependency for Docker builds.
+
+### Cluster sync GA (DW-074)
+
+The GA-hardened convergence layer for the CP/DP split control plane,
+adding production-grade convergence guarantees to the M3 gRPC
+controller/edge design:
+
+- **Conflict resolution:** when multiple controllers publish
+  simultaneously (e.g. during a leader-election transition), the fleet
+  resolves by `highest_generation` (default), `most_recent_timestamp`,
+  or `leader_wins`.
+- **Split-brain guards:** a controller is active if it heartbeated
+  within the lease timeout. When more than one is active, the
+  controller logs the active set, **edges refuse new generations** and
+  keep serving their cached config until one controller remains -- two
+  controllers can never push conflicting configs at once.
+- **Version skew tolerance:** during rolling upgrades, edges may run
+  different versions than the controller. The policy is `allow`,
+  `allow_minor_skew` (default: same major, within one minor), or
+  `require_exact`; an incompatible edge rejects the generation with a
+  `VersionSkewError` and keeps serving cached config.
+- **Chaos-validated:** partition, slow-member, and rollback scenarios
+  must all converge for the GA gate.
+
+The OSS gateway-side config surface is the `fleet` block (DW-098): the
+skew policy, the rolling-upgrade wave order (`upgrade.order[]` entries
+selected by `labels`, with a `max_concurrent` cap and
+`halt_on_failure`), the controller reference version, and the
+stale-edge timeout. It is **accepted but inert** in OSS. Note the
+naming split: the gateway schema uses `fleet.upgrade.order[]`
+(name + labels), while the `controller:` YAML in the guide
+(`conflict_resolution`, `lease_timeout_seconds`) is the ent controller
+binary's own config surface. `test-13` verifies the accepted block and
+its schema shape. See
+[the cluster sync guide](../../docs-site/guide/cluster-sync.md).
+
+### Ent controller persistence (PostgreSQL)
+
+The enterprise controller stores its durable state in PostgreSQL,
+chosen by ADR: the controller is a multi-writer service (config
+publishes, heartbeat updates, and analytics ingestion overlap), which
+rules out SQLite's single-writer model; the query patterns (fleet
+membership lookups, rollup aggregation, snapshot history) are
+relational, which rules out an object store. Four categories of state
+are persisted:
+
+1. **Config snapshots** -- every published config version, immutable,
+   with version, author, publish time, and the full YAML (served to
+   data planes over cluster sync; retained for audit and rollback).
+2. **License state** -- the license, its entitlements, and fleet-wide
+   consumption counters, so entitlements survive a restart.
+3. **Fleet membership** -- registered data-plane instances, their
+   last-seen heartbeat, reported version, and health.
+4. **Federated analytics** -- aggregated analytics streamed up from the
+   data planes, persisted in rollup tables.
+
+The store is accessed **only by the controller**; data planes receive
+config and report heartbeats over the cluster-sync protocol and never
+touch the database directly. There is no OSS-validate YAML surface for
+the DSN (the controller launches via flags/env vars, documented in
+`fixtures/ent-controller-launch.env`), and this demo deliberately ships no
+postgres container -- `test-14` verifies the documented decision plus
+the OSS single-node SQLite state store. See
+[the ent controller persistence guide](../../docs-site/guide/ent-controller-persistence.md).
 
 ## Prerequisites
 
@@ -190,6 +297,10 @@ runs its assertions, and prints a pass/fail summary.
 ./test-08-credential-pools.sh
 ./test-09-service-mesh.sh
 ./test-10-licensing.sh
+./test-11-kms-secrets.sh
+./test-12-audit-log.sh
+./test-13-cluster-sync.sh
+./test-14-ent-controller-persistence.sh
 ```
 
 Or run them all at once:
@@ -218,8 +329,15 @@ docker compose down -v
 | test-08-credential-pools | Basic auth path healthy | 200 on echo, static, healthz |
 | test-09-service-mesh | Reverse proxy baseline | 200 on echo, static; stripped path visible |
 | test-10-licensing | OSS licensing stub (inert block) | 200 on healthz, echo, static, admin /health |
+| test-11-kms-secrets | OSS secret path + KMS fail-closed rejection | 200 on healthz/echo/static; `secret_sources:` rejected (unknown field) |
+| test-12-audit-log | `admin.audit` block accepted-but-inert | 200 on healthz/echo, admin /health + /config; audit shape validates |
+| test-13-cluster-sync | `fleet` block accepted-but-inert | 200 on healthz/echo/static, admin /health; fleet shape validates |
+| test-14-ent-controller-persistence | Documented PostgreSQL store (no DB container) | 200 on healthz/echo/static; reference snippet + no-postgres guard |
 
-All tests should pass with zero failures.
+All tests should pass with zero failures. Tests 11-13 additionally use
+the **host** operator CLI (`dwara-cli`, at `target/debug/dwara-cli` or
+`target/release/dwara-cli` after `cargo build -p dwara-cli`) for their
+config-shape probes; the container image ships only the gateway server.
 
 ## Enterprise quickstart reference
 
@@ -243,7 +361,7 @@ itself (compiled in by the `ent` build). Only the Redis-backed features
 
 ## Config notes
 
-The `dwara.yaml` in this demo includes three enterprise-adjacent config
+The `dwara.yaml` in this demo includes five enterprise-adjacent config
 blocks that are **accepted but inert** in the OSS build:
 
 - `redis_rate_limiter` -- the URL and parameters are valid; the gateway
@@ -252,6 +370,11 @@ blocks that are **accepted but inert** in the OSS build:
   gateway logs a notice and uses the local file watcher only.
 - `license` -- the file path is valid; the gateway does not read it
   (the OSS stub is always `LicenseGate::none()`).
+- `admin.audit` (SEC-01 shape) -- the block round-trips through the
+  running gateway, but no OSS runtime consumer records audit entries.
+- `fleet` (DW-098 / DW-074) -- the skew policy and upgrade waves are
+  valid; the gateway runs single-node (no controller, no fleet status
+  endpoints).
 
 These blocks are included to show the config shape an enterprise
 deployment would use. Swapping the image to `Dockerfile.ent` + providing
@@ -280,5 +403,10 @@ cargo run -q -p dwara-cli --bin dwara-cli -- validate demos/11-enterprise/dwara.
   test-08-credential-pools.sh  credential pools documentation + basic auth verification
   test-09-service-mesh.sh      service mesh documentation + reverse proxy baseline
   test-10-licensing.sh         licensing documentation + OSS stub verification
+  test-11-kms-secrets.sh       KMS secrets documentation + fail-closed rejection
+  test-12-audit-log.sh         audit log documentation + admin.audit inert block
+  test-13-cluster-sync.sh      cluster sync documentation + fleet inert block
+  test-14-ent-controller-persistence.sh controller persistence documentation
+  fixtures/ent-controller-launch.env  controller launch-surface + PostgreSQL reference
   README.md                    this file
 ```

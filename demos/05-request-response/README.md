@@ -2,7 +2,8 @@
 
 A demo of dwara's request/response processing capabilities: header & query
 transforms, security-header injection, CORS, response compression, response
-caching, response field masking, and WebSocket proxying.
+caching, response field masking, request limits + JSON Schema body
+validation, and WebSocket proxying.
 
 ## Upstreams
 
@@ -22,6 +23,7 @@ caching, response field masking, and WebSocket proxying.
 | `compression-route` | `/v1/compress/` | static | gzip/brotli response compression |
 | `cache-route` | `/v1/cache/` | static | TTL + stale-while-revalidate + vary + coalescing |
 | `masking-route` | `/v1/mask/` | echo | Response field masking (`/password`, `/secret`) |
+| `limits-route` | `/v1/limits/` | echo | Request limits (body/header caps) + JSON Schema body validation |
 | `ws-route` | `/ws` | ws-echo | WebSocket proxying with origin check + frame-rate limit |
 
 No authentication is required on any route, so the test scripts can exercise
@@ -45,6 +47,7 @@ docker compose up -d
 ./test-07-response-caching.sh
 ./test-08-field-masking.sh
 ./test-09-websocket.sh
+./test-10-request-limits.sh
 
 # Tear down:
 docker compose down
@@ -106,12 +109,24 @@ websocat ws://localhost:8080/ws
 This test only verifies the `/ws` route is reachable (a plain GET returns a
 non-404 status such as 400/426 upgrade-required).
 
+### test-10-request-limits.sh
+Exercises the `limits` and `request_validation` blocks on `/v1/limits/`
+(`max_body_bytes: 1024`, `max_header_count: 10`, plus a JSON Schema
+requiring `name`, bounding `age` to 0-150, and rejecting unknown
+properties). Asserts:
+
+- a conforming body returns 200 and reaches the echo upstream;
+- a schema-violating JSON body (missing `name`, out-of-range `age`, or an
+  unknown property) returns `400 validation_failed` before the action runs;
+- a body declaring more than 1024 bytes returns `413 request_body_too_large`;
+- a flood of 15 extra header fields returns `431 request_headers_too_large`.
+
 ## Layout
 
 ```
 05-request-response/
   docker-compose.yml   # gateway + echo + static + ws-echo on one network
-  dwara.yaml           # listener, 7 routes, 3 services, 3 upstreams
+  dwara.yaml           # listener, 8 routes, 3 services, 3 upstreams
   test-01-header-transforms.sh
   test-02-query-transforms.sh
   test-04-security-headers.sh
@@ -120,5 +135,6 @@ non-404 status such as 400/426 upgrade-required).
   test-07-response-caching.sh
   test-08-field-masking.sh
   test-09-websocket.sh
+  test-10-request-limits.sh
   README.md
 ```
