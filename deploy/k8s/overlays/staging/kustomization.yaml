@@ -1,0 +1,31 @@
+# Staging overlay: 2 replicas, moderate resources, HPA + PDB.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+metadata:
+  name: dwara-staging
+resources:
+  - ../../base
+  - service.yaml
+  - hpa.yaml
+  - pdb.yaml
+namespace: dwara-system
+namePrefix: staging-
+patches:
+  - target:
+      kind: Deployment
+      name: dwara-controller
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
+        path: /spec/template/spec/containers/1/resources/limits/cpu
+        value: 1000m
+      - op: replace
+        path: /spec/template/spec/containers/1/resources/limits/memory
+        value: 512Mi
+images:
+  - name: ghcr.io/shristilabs/dwara-k8s-controller
+    newTag: staging
+  - name: ghcr.io/shristilabs/dwara
+    newTag: staging

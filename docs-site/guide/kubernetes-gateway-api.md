@@ -17,15 +17,36 @@ cargo build
 
 ## Deployment
 
-Deploy the controller + gateway to a Kubernetes cluster:
+Deploy the controller + gateway to a Kubernetes cluster. Three options
+are provided: raw manifests, Kustomize overlays, and a Helm chart.
+
+### Raw manifests
 
 ```sh
-kubectl apply -f deploy/k8s/namespace.yaml
-kubectl apply -f deploy/k8s/rbac.yaml
-kubectl apply -f deploy/k8s/gatewayclass.yaml
-kubectl apply -f deploy/k8s/configmap.yaml
-kubectl apply -f deploy/k8s/deployment.yaml
+kubectl apply -f deploy/k8s/base/
 ```
+
+### Kustomize overlays
+
+Environment overlays (dev, staging, prod) layer on the base, adding
+Service, HPA, PDB, NetworkPolicy, and ServiceMonitor objects as
+appropriate:
+
+```sh
+kubectl apply -k deploy/k8s/overlays/dev       # 1 replica, minimal
+kubectl apply -k deploy/k8s/overlays/staging   # 2 replicas, HPA + PDB
+kubectl apply -k deploy/k8s/overlays/prod      # 3 replicas, full set
+```
+
+### Helm chart
+
+```sh
+helm install dwara deploy/helm/dwara --namespace dwara-system --create-namespace
+```
+
+The chart renders the complete object set (Deployment, Service, HPA,
+PDB, NetworkPolicy, ServiceMonitor, GatewayClass, RBAC). Toggle each
+via values; see `deploy/helm/dwara/values.yaml`.
 
 The deployment runs two containers in a pod:
 

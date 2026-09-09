@@ -30,6 +30,19 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Helm chart + Kustomize overlays + complete K8s object set (#178,
+  USA-01): a Helm chart at `deploy/helm/dwara/` renders the full
+  Kubernetes object set — Deployment, Service, HorizontalPodAutoscaler,
+  PodDisruptionBudget, NetworkPolicy, ServiceMonitor, GatewayClass,
+  and RBAC — each toggleable via values. Kustomize overlays
+  (`deploy/k8s/overlays/{dev,staging,prod}`) layer on a self-contained
+  base (`deploy/k8s/base/`, where the five raw manifests now live),
+  adding Service/HPA/PDB in staging and the full set (plus
+  NetworkPolicy + ServiceMonitor) in prod. The chart adds readiness and
+  liveness probes, a non-root security context, and configurable TLS
+  secret mounts. A new `.github/workflows/helm.yml` CI job lints the
+  chart and builds all three overlays on every change to `deploy/`.
+  No config, schema, or dependency changes.
 - Nightly soak with RSS-ceiling and p99-drift assertions (#174,
   REL-03): a new `scripts/soak.sh` harness boots the real `dwara`
   gateway against an in-process echo upstream

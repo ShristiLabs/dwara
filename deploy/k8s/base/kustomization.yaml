@@ -1,0 +1,29 @@
+# Kustomize base for the dwara Kubernetes manifests.
+#
+# The five raw manifests live alongside this file so resources stay
+# within the kustomization root (kustomize forbids resources above
+# the root). Overlays (dev/staging/prod) live under
+# deploy/k8s/overlays/<env>/ and reference this base via `../../base`.
+#
+# Raw apply (no kustomize): `kubectl apply -f deploy/k8s/base/`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+metadata:
+  name: dwara-base
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - gatewayclass.yaml
+  - configmap.yaml
+  - deployment.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: dwara
+      app.kubernetes.io/part-of: dwara
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+images:
+  - name: ghcr.io/shristilabs/dwara-k8s-controller
+    newTag: latest
+  - name: ghcr.io/shristilabs/dwara
+    newTag: latest

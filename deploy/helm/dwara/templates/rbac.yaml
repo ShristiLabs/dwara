@@ -1,0 +1,65 @@
+{{- if .Values.rbac.enabled -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dwara.fullname" . }}-controller
+  namespace: {{ include "dwara.namespace" . }}
+  labels:
+    {{- include "dwara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dwara.fullname" . }}-controller
+  labels:
+    {{- include "dwara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  # Gateway API CRDs: read GatewayClass, Gateway, HTTPRoute + patch status.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways", "httproutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
+    verbs: ["patch", "update"]
+  # Ingress + IngressClass: read + patch status.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["patch", "update"]
+  # EndpointSlices: read (for upstream endpoint discovery).
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Services: read (for named port resolution).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Events: create (for controller event recording).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dwara.fullname" . }}-controller
+  labels:
+    {{- include "dwara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dwara.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dwara.fullname" . }}-controller
+    namespace: {{ include "dwara.namespace" . }}
+{{- end -}}
