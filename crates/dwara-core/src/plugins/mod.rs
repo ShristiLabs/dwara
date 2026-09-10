@@ -54,12 +54,6 @@
 pub mod chain;
 pub mod filter;
 pub mod registry;
-// DW-109: Extism PDK plugin runtime. Feature-gated behind the
-// `extism` cargo feature (default OFF). The scaffold types
-// (ExtismHost, ExtismPlugin, ExtismDispatch) allow Extism plugins to
-// be registered alongside native and WASM plugins in the unified
-// dispatch chain. The actual extism runtime calls are STUBBED.
-pub mod extism;
 
 pub use chain::{ChainOutcome, NoWasm, PluginChain, WasmDispatch};
 pub use filter::{FilterOutcome, LocalResponse, NativeFilter};
