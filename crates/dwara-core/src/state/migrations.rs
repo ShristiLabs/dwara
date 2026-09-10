@@ -43,7 +43,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Latest schema version this build knows how to produce. Equals the
 /// number of entries in [`migrations`]; asserted by test.
-pub const LATEST_SCHEMA_VERSION: u32 = 9;
+pub const LATEST_SCHEMA_VERSION: u32 = 10;
 
 /// Migration 001: the DW-018 baseline schema, verbatim (idempotent).
 ///
@@ -242,6 +242,24 @@ const MIGRATION_009_LEADER_ELECTION: &str = "
     );
 ";
 
+/// REL-14 (#249): event durability WAL for critical events. Events
+/// are written to this table before emission to the in-memory bus; on
+/// restart, un-acked events are replayed. The `acked` column is 0
+/// (pending) or 1 (delivered). The `payload` column is the JSON-
+/// serialized `EventPayload`.
+const MIGRATION_010_EVENT_WAL: &str = "
+    CREATE TABLE IF NOT EXISTS event_wal (
+        id           TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        gateway      TEXT NOT NULL,
+        timestamp_ms INTEGER NOT NULL,
+        payload      TEXT NOT NULL,
+        acked        INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_wal_acked
+        ON event_wal (acked, timestamp_ms);
+";
+
 /// The full forward migration set, in order. See the module docs for the
 /// baseline recognition rule and the forward-only policy.
 pub fn migrations() -> Migrations<'static> {
@@ -255,6 +273,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_007_MCP_SESSIONS),
         M::up(MIGRATION_008_WORKSPACE_PERSISTENCE),
         M::up(MIGRATION_009_LEADER_ELECTION),
+        M::up(MIGRATION_010_EVENT_WAL),
     ])
 }
 

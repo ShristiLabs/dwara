@@ -100,7 +100,7 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Every event kind the gateway emits (DW-044). Closed set: webhook
 /// `events` lists are validated against [`EventKind::from_config`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     /// A per-upstream circuit breaker moved closed -> open. Payload:
@@ -170,6 +170,30 @@ impl EventKind {
         EventKind::ProbeRecovered,
     ];
 
+    /// REL-14 (#249): whether this event kind is "critical" and should
+    /// be persisted to the WAL before emission. Critical events are
+    /// the ones an operator or controller needs for post-incident
+    /// investigation and fleet-state reconstruction: breaker
+    /// transitions, endpoint ejections/recoveries, config
+    /// publish/reject, quota near-limit, and canary promotions/rollbacks.
+    /// Probe events are excluded (high-volume, operational not
+    /// critical).
+    pub fn is_critical(self) -> bool {
+        matches!(
+            self,
+            EventKind::BreakerOpened
+                | EventKind::BreakerHalfOpen
+                | EventKind::BreakerClosed
+                | EventKind::EndpointEjected
+                | EventKind::EndpointRecovered
+                | EventKind::ConfigPublished
+                | EventKind::ConfigRejected
+                | EventKind::QuotaNearLimit
+                | EventKind::CanaryPromoted
+                | EventKind::CanaryRolledBack
+        )
+    }
+
     /// Stable wire/config spelling (serde's snake_case form, spelled out
     /// so it can be used in labels and validation messages without
     /// serializing).
@@ -203,7 +227,8 @@ impl EventKind {
 /// unset fields are omitted from the serialized envelope, and there is
 /// deliberately NO free-form/detail-string-from-input field — an
 /// envelope must stay small and safe to hand to a third party.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EventPayload {
     /// Upstream name (breaker and ejection events).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -214,7 +239,7 @@ pub struct EventPayload {
     /// The rule that tripped a breaker ("consecutive_failures" or
     /// "error_ratio") or the probe outcome that closed it — a static
     /// string, never operator- or request-derived text.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub detail: Option<&'static str>,
     /// Published generation number (config events).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,7 +345,7 @@ impl EventPayload {
 
 /// One emitted event. `id` and `timestamp_ms` are assigned by the bus at
 /// emit time (single place), `gateway` identifies the process.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// Process-unique, monotonically assigned: `evt-<hex unix ms>-<hex
     /// counter>` (the request-id shape; a correlation handle, not a
@@ -351,6 +376,28 @@ pub fn generate_instance_id() -> String {
     format!("dwara-{}-{:x}", std::process::id(), now_unix_ms())
 }
 
+/// REL-14 (#249): the durability seam for the event bus. The events
+/// domain owns the trait; the dataplane (which already holds both the
+/// `StateStore` and the `EventBus`) provides a concrete
+/// implementation that wraps `StateStore` methods. This keeps the
+/// dependency direction correct: `events` does not import `state`.
+pub trait EventDurability: Send + Sync + std::fmt::Debug {
+    /// Persist a critical event to the WAL before emission. Called
+    /// synchronously on the emit path; a failure is logged but does
+    /// not block the emit (best-effort durability).
+    fn append(&self, event: &Event);
+
+    /// Mark an event as delivered (acked). Called by the webhook
+    /// deliverer after the event has been dispatched to matching
+    /// targets.
+    fn ack(&self, id: &str);
+
+    /// Load all un-acked events from the WAL, ordered oldest-first.
+    /// Called on startup to replay events that were not delivered
+    /// before the previous process exited.
+    fn unacked(&self) -> Vec<Event>;
+}
+
 /// The bounded event queue plus its identity and counters. Share via
 /// `Arc`; emitters hold an [`Emitter`] (a cheap clone of that Arc).
 ///
@@ -366,6 +413,12 @@ pub struct EventBus {
     next_id: AtomicU64,
     emitted_total: AtomicU64,
     dropped_total: AtomicU64,
+    /// REL-14 (#249): optional durability layer. When set, critical
+    /// events are persisted to the WAL before emission and replayed on
+    /// startup. Settable after construction (the state store may open
+    /// after the bus in some wiring orders); a read lock is taken only
+    /// on critical event emits, which are infrequent.
+    durability: std::sync::RwLock<Option<Arc<dyn EventDurability>>>,
 }
 
 impl EventBus {
@@ -384,6 +437,7 @@ impl EventBus {
             next_id: AtomicU64::new(0),
             emitted_total: AtomicU64::new(0),
             dropped_total: AtomicU64::new(0),
+            durability: std::sync::RwLock::new(None),
         })
     }
 
@@ -397,6 +451,67 @@ impl EventBus {
             .take()
             .expect("a fresh bus holds its receiver");
         (bus, rx)
+    }
+
+    /// REL-14 (#249): new bus with a durability layer attached. On
+    /// construction, un-acked events from the WAL are replayed into
+    /// the channel (so they are delivered on the next deliverer
+    /// spawn). Critical events emitted after this point are persisted
+    /// to the WAL before being sent to the channel.
+    pub fn with_durability(
+        capacity: usize,
+        durability: Arc<dyn EventDurability>,
+    ) -> (Arc<Self>, mpsc::Receiver<Event>) {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let bus = Arc::new(EventBus {
+            tx,
+            rx: std::sync::Mutex::new(Some(rx)),
+            instance: Arc::from(generate_instance_id()),
+            next_id: AtomicU64::new(0),
+            emitted_total: AtomicU64::new(0),
+            dropped_total: AtomicU64::new(0),
+            durability: std::sync::RwLock::new(Some(durability)),
+        });
+
+        // Replay un-acked events from the WAL.
+        let replayed = bus
+            .durability
+            .read()
+            .expect("durability lock poisoned")
+            .as_ref()
+            .unwrap()
+            .unacked();
+        for event in replayed {
+            let _ = bus.tx.try_send(event);
+        }
+
+        let rx = bus
+            .rx
+            .lock()
+            .expect("event receiver lock poisoned")
+            .take()
+            .expect("a fresh bus holds its receiver");
+        (bus, rx)
+    }
+
+    /// REL-14 (#249): attach a durability layer to an existing bus.
+    /// The bus may already have emitted events (e.g. the startup
+    /// config_published); those are NOT retroactively persisted. After
+    /// this call, critical events are persisted to the WAL before
+    /// emission, and un-acked events from the WAL are replayed into
+    /// the channel for the next deliverer to drain. First attach
+    /// wins; a second call is a no-op.
+    pub fn attach_durability(&self, durability: Arc<dyn EventDurability>) {
+        let mut slot = self.durability.write().expect("durability lock poisoned");
+        if slot.is_none() {
+            // Replay un-acked events before marking the slot as set,
+            // so the deliverer sees them.
+            let replayed = durability.unacked();
+            for event in replayed {
+                let _ = self.tx.try_send(event);
+            }
+            *slot = Some(durability);
+        }
     }
 
     /// Take the single-consumer receiver (the first caller wins; later
@@ -421,6 +536,15 @@ impl EventBus {
         self.dropped_total.load(Ordering::Relaxed)
     }
 
+    /// REL-14 (#249): the durability layer, if attached. The webhook
+    /// deliverer uses this to ack events after dispatch.
+    pub fn durability(&self) -> Option<Arc<dyn EventDurability>> {
+        self.durability
+            .read()
+            .expect("durability lock poisoned")
+            .clone()
+    }
+
     /// A cheap emitter handle (clone of the bus Arc). A fresh `Arc`
     /// bump per call site is fine: emitters are taken once at build
     /// time, not per event.
@@ -432,6 +556,10 @@ impl EventBus {
 
     /// Assign identity and enqueue, or count the drop. The ONE emit
     /// path: never blocks, never allocates beyond the event itself.
+    /// REL-14 (#249): when a durability layer is attached, critical
+    /// events are persisted to the WAL before being sent to the
+    /// channel. A WAL write failure is logged but does not block the
+    /// emit (best-effort durability).
     fn dispatch(&self, kind: EventKind, payload: EventPayload) {
         let n = self.next_id.fetch_add(1, Ordering::Relaxed);
         let event = Event {
@@ -441,6 +569,19 @@ impl EventBus {
             gateway: self.instance.to_string(),
             payload,
         };
+        // REL-14 (#249): persist critical events to the WAL before
+        // sending. Best-effort: a WAL failure is logged but does not
+        // block the emit.
+        if kind.is_critical() {
+            if let Some(durability) = self
+                .durability
+                .read()
+                .expect("durability lock poisoned")
+                .as_ref()
+            {
+                durability.append(&event);
+            }
+        }
         match self.tx.try_send(event) {
             Ok(()) => {
                 self.emitted_total.fetch_add(1, Ordering::Relaxed);

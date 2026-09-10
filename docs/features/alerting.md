@@ -225,3 +225,91 @@ receivers (including a target that accepts and never answers, and a
 dead port), and the unit suite pins the retry machinery against
 scripted sinks — the same shapes the OTLP exporter's white-box tests
 use, expressed through the public `deliver` entry point.
+
+## Event durability / WAL (REL-14, #249)
+
+The in-memory event bus is intentionally not durable: a process crash
+drops queued events. For critical events (breaker transitions,
+endpoint ejections/recoveries, config publish/reject, quota
+near-limit, canary promotions/rollbacks), REL-14 adds an optional
+write-ahead log backed by the SQLite `StateStore`.
+
+### Design
+
+The `EventDurability` trait lives in the `events` domain (it can't
+import `state` — dependency direction). The concrete implementation
+`StoreEventDurability` lives in the `dataplane` domain (which owns
+both the `StateStore` and the `EventBus`), adapting the store's WAL
+methods to the trait.
+
+```mermaid
+sequenceDiagram
+    participant E as Emitter (resilience/snapshot)
+    participant B as EventBus
+    participant D as EventDurability (StoreEventDurability)
+    participant S as StateStore (SQLite)
+    participant W as Webhook deliverer
+
+    E->>B: emit(BreakerOpened, payload)
+    B->>B: kind.is_critical() = true
+    B->>D: append(event)
+    D->>S: INSERT INTO event_wal (acked=0)
+    B->>B: try_send(event) to channel
+    W->>W: rx.recv() event
+    W->>W: dispatch to matching targets
+    W->>D: ack(event.id)
+    D->>S: UPDATE event_wal SET acked=1
+```
+
+### Wiring
+
+The binary creates the `EventBus` before the `StateStore` (wiring
+order: the bus must exist before the first `compile_and_publish`).
+After the store opens, the binary calls
+`event_bus.attach_durability(StoreEventDurability::new(store))`.
+This retroactively attaches the durability layer and replays
+un-acked events from the WAL into the channel for the next deliverer
+to drain. The startup `config_published` event is already in the
+channel and is delivered normally (it is not retroactively
+persisted).
+
+### Schema
+
+Migration 010 adds the `event_wal` table:
+
+```sql
+CREATE TABLE event_wal (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    gateway      TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    payload      TEXT NOT NULL,    -- JSON-serialized EventPayload
+    acked        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_event_wal_acked ON event_wal (acked, timestamp_ms);
+```
+
+### At-least-once semantics
+
+The deliverer marks an event as acked AFTER dispatching to matching
+targets. On restart, only un-acked events are replayed. This gives
+at-least-once delivery: an event that was dispatched but not yet
+acked when the process crashed will be re-delivered on the next
+startup. Webhook targets should be idempotent (the event `id` is
+stable across replays).
+
+### Best-effort persistence
+
+A SQLite write failure is logged (`event_wal_append_failed`) but
+does not block the emit — the event still goes to the in-memory
+channel. This preserves the "a webhook target can never affect the
+dataplane" contract: the WAL is a reliability improvement, not a
+new blocking dependency.
+
+Code: `crates/dwara-core/src/events/mod.rs` (`EventDurability`
+trait, `EventBus::with_durability`, `attach_durability`),
+`crates/dwara-core/src/state/store.rs` (`append_event_wal`,
+`ack_event_wal`, `unacked_events_wal`, `purge_acked_events_wal`),
+`crates/dwara-core/src/dataplane/proxy.rs`
+(`StoreEventDurability`), `crates/dwara-core/src/events/webhook.rs`
+(`run_deliverer` ack call), `crates/dwara-bin/src/main.rs` (wiring).

@@ -537,6 +537,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dp.set_credential_pepper_previous(credential_pepper_previous);
     if let Some(store) = &state_store {
         dp.set_state_store(Arc::clone(store));
+        // REL-14 (#249): attach the event durability WAL so critical
+        // events are persisted before emission and replayed on
+        // restart. The bus was created before the store (wiring
+        // order), so we attach retroactively; the startup
+        // config_published event is already in the channel and will
+        // be delivered normally.
+        let durability = Arc::new(dwara_core::dataplane::proxy::StoreEventDurability::new(
+            Arc::clone(store),
+        ));
+        event_bus.attach_durability(durability);
     }
     // DW-032: publish the license status metric once the dataplane
     // (which owns the observability registry) is constructed.

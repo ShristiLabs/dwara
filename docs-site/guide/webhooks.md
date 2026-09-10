@@ -166,6 +166,27 @@ tried: envelope over the byte cap, or delivery concurrency saturated).
 full queue or no deliverer running. See
 [Observability: metrics](./observability#metrics).
 
+## Event durability (WAL)
+
+When a SQLite state store is configured (`DWARA_STATE_DB`), critical
+events are persisted to a write-ahead log before emission. This gives
+at-least-once delivery semantics across process restarts: if the
+gateway crashes after persisting an event but before the webhook
+deliverer dispatches it, the event is replayed on the next startup.
+
+Critical events are the ones an operator needs for post-incident
+investigation: breaker transitions, endpoint ejections/recoveries,
+config publish/reject, quota near-limit, and canary promotions/
+rollbacks. Probe events (high-volume, operational) are not persisted.
+
+The WAL is best-effort: a SQLite write failure is logged but does not
+block the emit (the event still goes to the in-memory channel). The
+deliverer marks each event as acked after dispatch; acked events are
+purged periodically to keep the WAL bounded.
+
+No configuration is needed beyond setting `DWARA_STATE_DB`. The WAL
+table (`event_wal`) is created automatically by the schema migration.
+
 ## Runnable demo
 
 Run webhooks against a live gateway: `demos/06-observability/` (test

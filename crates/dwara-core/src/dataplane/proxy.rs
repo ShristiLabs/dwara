@@ -1932,6 +1932,9 @@ impl DataPlane {
                 self.webhook_targets(),
                 Arc::clone(&self.obs),
                 shutdown,
+                // REL-14 (#249): pass the bus's durability layer so
+                // the deliverer can ack events after dispatch.
+                self.events.durability(),
             )),
             None => {
                 tracing::error!(
@@ -2118,6 +2121,83 @@ impl DataPlane {
     /// not its backends'.
     pub fn ready(&self) -> bool {
         self.state.snapshot().generation() >= 1
+    }
+}
+
+/// REL-14 (#249): concrete `EventDurability` backed by the SQLite
+/// `StateStore`. The dataplane owns both the store and the event bus,
+/// so it provides this adapter to the events module's trait. The
+/// implementation is best-effort: a SQLite error is logged but does
+/// not block the emit path (the event still goes to the in-memory
+/// channel).
+#[derive(Debug)]
+pub struct StoreEventDurability {
+    store: Arc<crate::state::store::StateStore>,
+}
+
+impl StoreEventDurability {
+    pub fn new(store: Arc<crate::state::store::StateStore>) -> Self {
+        StoreEventDurability { store }
+    }
+}
+
+impl crate::events::EventDurability for StoreEventDurability {
+    fn append(&self, event: &crate::events::Event) {
+        let payload_json = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".into());
+        if let Err(err) = self.store.append_event_wal(
+            &event.id,
+            event.kind.as_str(),
+            &event.gateway,
+            event.timestamp_ms,
+            &payload_json,
+        ) {
+            tracing::warn!(
+                code = "event_wal_append_failed",
+                event_id = %event.id,
+                kind = event.kind.as_str(),
+                error = %err,
+                "failed to persist critical event to WAL (best-effort; event still emitted to channel)"
+            );
+        }
+    }
+
+    fn ack(&self, id: &str) {
+        if let Err(err) = self.store.ack_event_wal(id) {
+            tracing::warn!(
+                code = "event_wal_ack_failed",
+                event_id = %id,
+                error = %err,
+                "failed to ack event in WAL"
+            );
+        }
+    }
+
+    fn unacked(&self) -> Vec<crate::events::Event> {
+        match self.store.unacked_events_wal() {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    let kind = crate::events::EventKind::from_config(&row.kind)?;
+                    let payload: crate::events::EventPayload =
+                        serde_json::from_str(&row.payload).unwrap_or_default();
+                    Some(crate::events::Event {
+                        id: row.id,
+                        kind,
+                        timestamp_ms: row.timestamp_ms as u64,
+                        gateway: row.gateway,
+                        payload,
+                    })
+                })
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    code = "event_wal_load_failed",
+                    error = %err,
+                    "failed to load un-acked events from WAL; skipping replay"
+                );
+                Vec::new()
+            }
+        }
     }
 }
 

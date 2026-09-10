@@ -1549,6 +1549,81 @@ impl StateStore {
             .ok();
         Ok(row.map(|v| v as u64))
     }
+
+    // -----------------------------------------------------------------------
+    // REL-14 (#249): Event durability WAL.
+    // -----------------------------------------------------------------------
+
+    /// Append a critical event to the WAL before emission. The event
+    /// is persisted as un-acked (`acked = 0`); the deliverer marks it
+    /// acked after dispatch. `payload_json` is the JSON-serialized
+    /// `EventPayload`.
+    pub fn append_event_wal(
+        &self,
+        id: &str,
+        kind: &str,
+        gateway: &str,
+        timestamp_ms: u64,
+        payload_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO event_wal (id, kind, gateway, timestamp_ms, payload, acked) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![id, kind, gateway, timestamp_ms as i64, payload_json],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an event as acked (delivered). Called by the webhook
+    /// deliverer after the event has been dispatched to matching
+    /// targets. Returns the number of rows updated (0 if the event was
+    /// already acked or doesn't exist).
+    pub fn ack_event_wal(&self, id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute(
+            "UPDATE event_wal SET acked = 1 WHERE id = ?1 AND acked = 0",
+            params![id],
+        )?;
+        Ok(n)
+    }
+
+    /// Load all un-acked events from the WAL, ordered by timestamp
+    /// (oldest first). Called on startup to replay events that were
+    /// not delivered before the previous process exited.
+    pub fn unacked_events_wal(&self) -> Result<Vec<EventWalRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, gateway, timestamp_ms, payload \
+             FROM event_wal WHERE acked = 0 ORDER BY timestamp_ms ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(EventWalRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                gateway: r.get(2)?,
+                timestamp_ms: r.get(3)?,
+                payload: r.get(4)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Purge acked events older than the given timestamp. Called
+    /// periodically to keep the WAL from growing unbounded. Returns
+    /// the number of rows purged.
+    pub fn purge_acked_events_wal(&self, older_than_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute(
+            "DELETE FROM event_wal WHERE acked = 1 AND timestamp_ms < ?1",
+            params![older_than_ms as i64],
+        )?;
+        Ok(n)
+    }
 }
 
 /// One workspace row (SCALE-05, #184). Plain data — the workspace
@@ -1603,6 +1678,18 @@ pub struct LeaderRow {
     pub epoch: u64,
     pub acquired_at_ms: i64,
     pub expires_at_ms: i64,
+}
+
+/// One event WAL row (REL-14, #249). Plain data — the events module
+/// owns the domain types; the store stays backend-neutral. The
+/// `payload` is the JSON-serialized `EventPayload`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWalRow {
+    pub id: String,
+    pub kind: String,
+    pub gateway: String,
+    pub timestamp_ms: i64,
+    pub payload: String,
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38

@@ -703,6 +703,12 @@ pub async fn deliver(target: WebhookTarget, body: Bytes, kind: EventKind, obs: A
 /// on shutdown (pending queue abandoned — documented: the gateway is
 /// not a durable queue) or when the bus closes.
 ///
+/// REL-14 (#249): when a durability layer is provided, the deliverer
+/// marks each event as acked after dispatching to matching targets.
+/// This gives at-least-once semantics on restart: an event that was
+/// persisted to the WAL but not yet acked is replayed on the next
+/// startup.
+///
 /// Spawned by the `DataPlane`
 /// (`DataPlane::spawn_webhook_deliverer`) so the binary and tests share
 /// one wiring path.
@@ -711,6 +717,7 @@ pub async fn run_deliverer(
     targets: watch::Receiver<Arc<Vec<WebhookTarget>>>,
     obs: Arc<Observability>,
     mut shutdown: watch::Receiver<()>,
+    durability: Option<Arc<dyn super::EventDurability>>,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_DELIVERIES));
     loop {
@@ -740,6 +747,13 @@ pub async fn run_deliverer(
                 MAX_ENVELOPE_BYTES
             );
             obs.record_webhook_event(event.kind.as_str(), "dropped");
+            // REL-14 (#249): ack even dropped events so they are not
+            // replayed on restart (they were delivered to the
+            // deliverer; the drop is a size-limit policy, not a
+            // delivery failure).
+            if let Some(d) = &durability {
+                d.ack(&event.id);
+            }
             continue;
         }
         let current = targets.borrow().clone();
@@ -762,6 +776,14 @@ pub async fn run_deliverer(
                 Arc::clone(&obs),
                 permit,
             ));
+        }
+        // REL-14 (#249): ack the event after dispatching to all
+        // matching targets. This gives at-least-once semantics: the
+        // event was consumed from the channel and handed off to the
+        // delivery tasks. On restart, only un-acked events are
+        // replayed.
+        if let Some(d) = &durability {
+            d.ack(&event.id);
         }
     }
 }
