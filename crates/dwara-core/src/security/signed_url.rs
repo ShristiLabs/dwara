@@ -29,6 +29,9 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+#[cfg(feature = "ent")]
+use std::sync::Arc;
+
 /// HMAC-SHA256 type alias.
 type HmacSha256 = Hmac<Sha256>;
 
@@ -221,6 +224,13 @@ pub struct SignedUrlVerifier {
     /// SEC-07 (#211): per-verifier nonce cache (guarded by the
     /// verifier's `Mutex` in `verify`).
     nonces: std::sync::Mutex<NonceCache>,
+    /// SEC-06 (#210, ent): optional distributed nonce store. When
+    /// present, the verifier uses the distributed store instead of
+    /// the in-process cache, so replay detection is shared across
+    /// the gateway fleet. The in-process cache remains as a
+    /// fallback when the distributed store is not configured.
+    #[cfg(feature = "ent")]
+    distributed_nonces: Option<Arc<dyn crate::extensions::nonce::NonceStore>>,
 }
 
 impl SignedUrlVerifier {
@@ -247,7 +257,23 @@ impl SignedUrlVerifier {
             nonce_param: config.nonce_param.clone(),
             bind_client_ip: config.bind_client_ip,
             nonces: std::sync::Mutex::new(NonceCache::new()),
+            #[cfg(feature = "ent")]
+            distributed_nonces: None,
         })
+    }
+
+    /// SEC-06 (#210, ent): attach a distributed nonce store. When
+    /// set, the verifier uses the distributed store for replay
+    /// detection instead of the in-process cache, so nonces are
+    /// shared across the gateway fleet. Requires the `ent` cargo
+    /// feature.
+    #[cfg(feature = "ent")]
+    pub fn with_distributed_nonce_store(
+        mut self,
+        store: Arc<dyn crate::extensions::nonce::NonceStore>,
+    ) -> Self {
+        self.distributed_nonces = Some(store);
+        self
     }
 
     /// The query parameter name this verifier looks for.
@@ -306,6 +332,86 @@ impl SignedUrlVerifier {
             let mut cache = self.nonces.lock().expect("nonce cache poisoned");
             if !cache.check_and_record(nonce, expires) {
                 return SignedUrlResult::NonceError;
+            }
+        }
+        // Recompute the HMAC over the canonical request.
+        let canonical = if self.bind_client_ip {
+            format!("{method}\n{path}\n{expires}\n{client_ip}")
+        } else {
+            format!("{method}\n{path}\n{expires}")
+        };
+        let mut mac = match HmacSha256::new_from_slice(&self.secret) {
+            Ok(m) => m,
+            Err(_) => return SignedUrlResult::Invalid,
+        };
+        mac.update(canonical.as_bytes());
+        let expected = mac.finalize().into_bytes();
+        let expected_hex = hex_encode(&expected);
+        if constant_time_eq(sig.as_bytes(), expected_hex.as_bytes()) {
+            SignedUrlResult::Valid
+        } else {
+            SignedUrlResult::Invalid
+        }
+    }
+
+    /// SEC-06 (#210, ent): async verify that uses the distributed
+    /// nonce store when attached. Falls back to the in-process
+    /// cache when no distributed store is configured (or when the
+    /// `ent` feature is disabled). The signature and expiry checks
+    /// are identical to [`verify`](Self::verify).
+    #[cfg(feature = "ent")]
+    pub async fn verify_async(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        now: u64,
+        client_ip: &str,
+    ) -> SignedUrlResult {
+        let params = parse_query(query);
+        let sig = match params.get(&self.query_param) {
+            Some(s) => s,
+            None => return SignedUrlResult::Invalid,
+        };
+        let expires_str = match params.get("expires") {
+            Some(e) => e,
+            None => return SignedUrlResult::Invalid,
+        };
+        let expires: u64 = match expires_str.parse() {
+            Ok(v) => v,
+            Err(_) => return SignedUrlResult::Invalid,
+        };
+        if now > expires {
+            return SignedUrlResult::Expired;
+        }
+        // SEC-06 (#210): nonce check via distributed store when
+        // available, else in-process cache.
+        if self.require_nonce {
+            let nonce = match params.get(&self.nonce_param) {
+                Some(n) => n,
+                None => return SignedUrlResult::NonceError,
+            };
+            if let Some(store) = &self.distributed_nonces {
+                match store.check_and_record(nonce, expires).await {
+                    Ok(true) => {}
+                    Ok(false) => return SignedUrlResult::NonceError,
+                    Err(e) => {
+                        tracing::warn!(
+                            code = "signed_url_distributed_nonce_error",
+                            error = %e,
+                            "distributed nonce store error; falling back to in-process cache"
+                        );
+                        let mut cache = self.nonces.lock().expect("nonce cache poisoned");
+                        if !cache.check_and_record(nonce, expires) {
+                            return SignedUrlResult::NonceError;
+                        }
+                    }
+                }
+            } else {
+                let mut cache = self.nonces.lock().expect("nonce cache poisoned");
+                if !cache.check_and_record(nonce, expires) {
+                    return SignedUrlResult::NonceError;
+                }
             }
         }
         // Recompute the HMAC over the canonical request.
