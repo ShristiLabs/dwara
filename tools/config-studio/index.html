@@ -6354,7 +6354,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    ]
   },
   "RedisRateLimiterConfig": {
-   "description": "Distributed Redis rate limiter config (`gateway.redis_rate_limiter`). When present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `redis_rate_limiter` feature claim is loaded, the\ngateway uses a Redis-backed GCRA limiter instead of the local\nin-memory one \u2014 so two or more gateway instances share one rate\nlimit. The same GCRA algorithm runs, but the bucket state (the\ntheoretical arrival time) lives in Redis and is updated atomically\nvia a Lua script in a single round-trip. When the `ent` feature is\nNOT compiled in, or the license lacks the claim, the block is\naccepted but inert (the local GCRA limiter is used). When Redis is\nunreachable, `fail_open` (default true) lets requests through; set\nit to false to reject with 429 instead.",
+   "description": "Distributed Redis-backed GCRA rate limiter config (`gateway.redis_rate_limiter`). When present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `redis_rate_limiter` feature claim is loaded, the gateway\nuses a Redis-backed GCRA rate limiter instead of the local in-memory\none \u2014 so two or more gateway instances share one rate limit per key. The\nsame stacked-window GCRA semantics run, but the per-key TAT lives in\nRedis and is updated atomically via a Lua script in a single round-trip.\nWhen the `ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local GCRA limiter is used).\nWhen Redis is unreachable, `fail_open` (default true) lets requests\nthrough; set it to false to reject with 429 instead.",
    "type": "object",
    "properties": {
     "url": {
@@ -6380,11 +6380,66 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "type": "integer",
      "format": "uint64",
      "minimum": 0
+    },
+    "ha": {
+     "description": "HA and topology config. Controls whether the\ngateway connects to a single Redis, a Sentinel deployment, or a\nRedis Cluster. Defaults to single-instance mode (the existing\nbehavior).",
+     "$ref": "#/$defs/RedisHaConfig"
     }
    },
    "additionalProperties": false,
    "required": [
     "url"
+   ]
+  },
+  "RedisHaConfig": {
+   "description": "Redis HA and multi-region config. Embedded in\neach Redis-backed config block (rate limiter, quotas, cache) to\ncontrol the connection topology and per-request timeout.",
+   "type": "object",
+   "properties": {
+    "topology": {
+     "description": "Deployment topology (default `single`).",
+     "$ref": "#/$defs/RedisTopology"
+    },
+    "nodes": {
+     "description": "Additional node URLs for `sentinel` or `cluster` mode. For\n`sentinel`, these are the Sentinel node URLs (e.g.\n`redis://sentinel-1:26379`). For `cluster`, these are the\ncluster node URLs (any subset of the cluster's nodes; the\nclient discovers the rest). When empty, the `url` field on\nthe parent config is used as the sole node.",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "master_name": {
+     "description": "The master name for `sentinel` mode (the `master_name` in\nSentinel config). Required when `topology = sentinel`; ignored\notherwise.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "request_timeout_ms": {
+     "description": "Per-request timeout in milliseconds (default 500; validated to\n50..=30 000). Applied to each Redis command (Lua script calls,\nGET/SET for cache). A timed-out command is treated as a backend\nerror and the fail-open policy applies. 0 means no per-request\ntimeout (use the connection's default).",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0
+    }
+   },
+   "additionalProperties": false
+  },
+  "RedisTopology": {
+   "description": "Redis deployment topology. Controls how the\ngateway connects to Redis for the distributed rate limiter,\nquotas, and shared cache. The default `single` mode uses one\nRedis URL (the existing behavior). `sentinel` mode resolves the\nmaster through a Sentinel deployment. `cluster` mode connects\nto a Redis Cluster.",
+   "oneOf": [
+    {
+     "description": "Single Redis instance (the default). Uses the `url` field\ndirectly. No HA \u2014 if the instance is down, the fail-open\npolicy applies.",
+     "type": "string",
+     "const": "single"
+    },
+    {
+     "description": "Redis Sentinel: resolves the master via the Sentinel nodes\nlisted in `nodes`, using `master_name` to identify the\nmonitored instance. The gateway connects to the resolved\nmaster via a `ConnectionManager` (automatic reconnection on\nfailover is handled by re-resolving on disconnect).",
+     "type": "string",
+     "const": "sentinel"
+    },
+    {
+     "description": "Redis Cluster: connects to the cluster via the node URLs in\n`nodes` (or `url` if `nodes` is empty). Uses the redis crate's\n`ClusterClient` which handles slot mapping, MOVED/ASK\nredirections, and cross-slot routing automatically. Lua\nscripts use hash tags (`{key}`) to ensure all keys in a script\nland on the same slot.",
+     "type": "string",
+     "const": "cluster"
+    }
    ]
   },
   "RedisQuotaConfig": {
@@ -6408,6 +6463,10 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "type": "integer",
      "format": "uint64",
      "minimum": 0
+    },
+    "ha": {
+     "description": "HA and topology config. Same shape as\n`redis_rate_limiter.ha`.",
+     "$ref": "#/$defs/RedisHaConfig"
     }
    },
    "additionalProperties": false,
@@ -6436,6 +6495,10 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "local_tier": {
      "description": "Whether to keep a local fronting cache (two-tier: local moka +\nRedis). Default true: the local cache fronts Redis for hot keys,\nand Redis Pub/Sub invalidation evicts local entries when another\ninstance purges a key. Set to false for a pure Redis cache (no\nlocal tier).",
      "type": "boolean"
+    },
+    "ha": {
+     "description": "HA and topology config. Same shape as\n`redis_rate_limiter.ha`.",
+     "$ref": "#/$defs/RedisHaConfig"
     }
    },
    "additionalProperties": false,
