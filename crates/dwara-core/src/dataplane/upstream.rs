@@ -283,6 +283,12 @@ pub enum UpstreamBodyError {
     /// The underlying transport errored mid-stream (connection reset,
     /// framing error, ...).
     Upstream(hyper::Error),
+    /// PERF-10 (#243): an H3/QUIC stream errored mid-body (h3 frame
+    /// error, QPACK error, QUIC stream reset, ...). The h3 error is
+    /// stringified because `h3::error::StreamError` is not `Clone` and
+    /// the channel carries `Result<Bytes, UpstreamBodyError>` across
+    /// an `await` boundary in the driver task.
+    H3Stream(String),
     /// The gap between two body frames exceeded `timeouts.write_ms`
     /// (inactivity timeout; see the module docs).
     WriteTimeout { after: Duration },
@@ -296,6 +302,9 @@ impl std::fmt::Display for UpstreamBodyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UpstreamBodyError::Upstream(e) => write!(f, "upstream body failed: {e}"),
+            UpstreamBodyError::H3Stream(msg) => {
+                write!(f, "h3 upstream stream failed: {msg}")
+            }
             UpstreamBodyError::WriteTimeout { after } => {
                 write!(f, "upstream body stalled for more than {after:?}")
             }
@@ -327,6 +336,34 @@ impl std::error::Error for UpstreamBodyError {}
 ///   nothing: the header-resolution report already classified the
 ///   exchange, and doubling successes would dilute failure ratios.
 ///
+/// A channel-backed streaming body for H3 responses (PERF-10, #243).
+/// Wraps a tokio mpsc receiver that receives `Result<Bytes,
+/// UpstreamBodyError>` chunks from a driver task that reads h3
+/// `recv_data`. Implements `hyper::body::Body` by polling the
+/// receiver; the bounded channel (capacity 1) applies backpressure
+/// from the consumer to the upstream.
+struct H3ChannelBody {
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, UpstreamBodyError>>,
+}
+
+impl hyper::body::Body for H3ChannelBody {
+    type Data = Bytes;
+    type Error = UpstreamBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, UpstreamBodyError>>> {
+        let this = self.get_mut();
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// The error is terminal for the stream: frames already forwarded to the
 /// client end abruptly (HTTP/1.1 truncation semantics); it is never
 /// retried (an attempt is final once its headers resolved).
@@ -476,6 +513,30 @@ impl UpstreamBody {
             idle: None,
             sleep: None,
             health: None,
+            release: None,
+            deadline: None,
+            inflight_guard: None,
+        }
+    }
+
+    /// Wrap a streaming H3 response body (PERF-10, #243): a
+    /// channel-backed body that forwards h3 `recv_data` chunks as they
+    /// arrive, matching the h1/h2 zero-buffer guarantee. The H3
+    /// transport spawns a driver task that reads `recv_data` from the
+    /// h3 stream and sends each chunk through the channel; this
+    /// constructor wraps the receiver as a `BoxBody` so the
+    /// idle/deadline/health knobs apply uniformly across transports.
+    pub fn from_h3_streaming(
+        rx: tokio::sync::mpsc::Receiver<Result<Bytes, UpstreamBodyError>>,
+        idle: Option<Duration>,
+        health: Option<(Arc<crate::dataplane::balance::UpstreamLb>, HealthDispatch)>,
+    ) -> Self {
+        let body = H3ChannelBody { rx };
+        UpstreamBody {
+            inner: body.boxed(),
+            idle,
+            sleep: None,
+            health,
             release: None,
             deadline: None,
             inflight_guard: None,

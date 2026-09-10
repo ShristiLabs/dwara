@@ -34,17 +34,23 @@
 //! footgun the gateway must not expose by default. The rustls client
 //! config disables early data ([`https_h3_client_config`]).
 //!
-//! ## Response buffering (documented v1 limitation)
+//! ## Response streaming (PERF-10, #243)
 //!
-//! Unlike the TCP/TLS path (which streams the upstream body through
-//! [`super::upstream::UpstreamBody`]), the H3 path buffers the full
-//! response body before returning. h3's `recv_data` is an async method
-//! on the stream handle, not a hyper `Body`, and bridging it into the
-//! streaming `UpstreamBody` wrapper without a per-stream driver task is
-//! a follow-up. The request body is likewise buffered (the proxy
-//! already buffers request bodies for retries; for H3 the body is sent
-//! as one `DATA` frame). Streaming H3 bodies are tracked as a future
-//! improvement, not a regression: an H3 upstream is a new transport.
+//! The H3 transport supports two response modes:
+//! - [`h3_request`]: buffers the full response body (the original v1
+//!   behavior; kept for compatibility and simple use cases).
+//! - [`h3_request_streaming`]: streams the response body through a
+//!   tokio channel as h3 `recv_data` chunks arrive, matching the
+//!   h1/h2 zero-buffer guarantee. The driver task reads `recv_data`
+//!   and sends each chunk through a bounded channel (capacity 1) so
+//!   backpressure flows from the consumer to the upstream. The caller
+//!   wraps the receiver in `UpstreamBody::from_h3_streaming` to get
+//!   a `hyper::Body`-compatible streaming body with the
+//!   idle/deadline/health knobs.
+//!
+//! The request body is still sent as one `DATA` frame (the proxy
+//! already buffers request bodies for retries); streaming request
+//! bodies are a separate enhancement.
 //!
 //! Everything in this module is compiled into the OSS build; H3
 //! upstreams are always available.
@@ -402,6 +408,82 @@ pub async fn h3_request(
     // trailers today); drain to cleanly close the stream.
     let _ = stream.recv_trailers().await;
     let mut resp = Response::new(Bytes::from(buf));
+    *resp.status_mut() = status;
+    *resp.headers_mut() = headers;
+    Ok(resp)
+}
+
+/// Send an HTTP/3 request over a QUIC stream and return a STREAMING
+/// response body (PERF-10, #243). The response headers are returned
+/// immediately; the body is forwarded through a tokio channel as h3
+/// `recv_data` chunks arrive, matching the h1/h2 zero-buffer guarantee.
+///
+/// The driver task reads `recv_data` from the h3 stream and sends each
+/// chunk through the channel. The caller wraps the receiver in an
+/// `UpstreamBody::from_h3_streaming` to get a `hyper::Body`-compatible
+/// streaming body with the idle/deadline/health knobs.
+///
+/// `send_request` is taken by mutable reference because h3's
+/// `send_request` requires `&mut self`; the caller clones it from the
+/// pool so the pooled connection itself is not borrowed.
+pub async fn h3_request_streaming(
+    send_request: &mut SendRequest<OpenStreams, Bytes>,
+    req: http::Request<Bytes>,
+) -> Result<
+    Response<
+        tokio::sync::mpsc::Receiver<Result<Bytes, crate::dataplane::upstream::UpstreamBodyError>>,
+    >,
+    H3Error,
+> {
+    use crate::dataplane::upstream::UpstreamBodyError;
+    let (parts, body) = req.into_parts();
+    let head = http::Request::from_parts(parts, ());
+    let mut stream = send_request
+        .send_request(head)
+        .await
+        .map_err(H3Error::Stream)?;
+    if !body.is_empty() {
+        stream.send_data(body).await.map_err(H3Error::Stream)?;
+    }
+    stream.finish().await.map_err(H3Error::Stream)?;
+    let resp_head = stream.recv_response().await.map_err(H3Error::Stream)?;
+    let status: StatusCode = resp_head.status();
+    let headers: HeaderMap = resp_head.headers().clone();
+
+    // Spawn a driver task that reads recv_data chunks and sends them
+    // through the channel. The channel is bounded to 1 so the driver
+    // applies backpressure: if the consumer is slow, the driver waits
+    // before reading the next chunk (matching the h1/h2 backpressure
+    // model).
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, UpstreamBodyError>>(1);
+    tokio::spawn(async move {
+        loop {
+            match stream.recv_data().await {
+                Ok(Some(mut chunk)) => {
+                    let bytes = chunk.copy_to_bytes(chunk.remaining());
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        // Receiver dropped (consumer disconnected); stop
+                        // reading and let the stream close.
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // End of stream; drain trailers and close.
+                    let _ = stream.recv_trailers().await;
+                    break;
+                }
+                Err(e) => {
+                    // Stream error; forward as an UpstreamBodyError.
+                    let _ = tx
+                        .send(Err(UpstreamBodyError::H3Stream(e.to_string())))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut resp = Response::new(rx);
     *resp.status_mut() = status;
     *resp.headers_mut() = headers;
     Ok(resp)
