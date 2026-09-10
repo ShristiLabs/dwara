@@ -6650,18 +6650,34 @@ where
                     let mirror_parts = parts.clone();
                     let mirror_upstream_name = m.upstream.clone();
                     let mirror_rid = rid.to_string();
+                    let mirror_timeout = Duration::from_millis(m.timeout_ms);
+                    let mirror_timeout_ms = m.timeout_ms;
                     dp.observability_arc().record_mirror_sent(&m.upstream);
                     tokio::spawn(async move {
                         let mirror_req = Request::from_parts(mirror_parts, Full::new(Bytes::new()));
-                        let result = mirror_handle.send(mirror_req).await;
-                        if let Err(e) = result {
-                            tracing::debug!(
-                                code = "mirror_request_failed",
-                                request_id = %mirror_rid,
-                                upstream = %mirror_upstream_name,
-                                error = %e,
-                                "mirror request failed (best-effort, ignored)"
-                            );
+                        let result =
+                            tokio::time::timeout(mirror_timeout, mirror_handle.send(mirror_req))
+                                .await;
+                        match result {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                tracing::debug!(
+                                    code = "mirror_request_failed",
+                                    request_id = %mirror_rid,
+                                    upstream = %mirror_upstream_name,
+                                    error = %e,
+                                    "mirror request failed (best-effort, ignored)"
+                                );
+                            }
+                            Err(_) => {
+                                tracing::debug!(
+                                    code = "mirror_request_timeout",
+                                    request_id = %mirror_rid,
+                                    upstream = %mirror_upstream_name,
+                                    timeout_ms = mirror_timeout_ms,
+                                    "mirror request timed out (best-effort, ignored)"
+                                );
+                            }
                         }
                     });
                     tracing::debug!(

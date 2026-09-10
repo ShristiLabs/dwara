@@ -38,6 +38,7 @@ routes:
 |---|---|---|
 | `upstream` | (required) | Name of the upstream to receive mirrored (shadow) requests. |
 | `percentage` | `0` | Percentage of requests to mirror (0-100). `0` mirrors nothing; `100` mirrors every request. |
+| `timeout_ms` | `2000` | Hard timeout for the mirror request in milliseconds. If the mirror upstream does not respond within this duration, the mirror request is abandoned. The mirror is fire-and-forget, so this timeout never affects the primary request. |
 
 ## How it works
 
@@ -55,9 +56,10 @@ configure body buffering on the route.
 ## Combining with fault injection
 
 Mirroring can be combined with [fault injection](./fault-injection)
-on the same route. Mirroring happens before fault injection, so the
-mirror upstream receives the request regardless of whether the
-primary is faulted.
+on the same route. Fault injection is evaluated first; if an abort
+fires, the request is short-circuited and no mirror request is sent.
+If the fault injection does not abort (e.g. a delay only), the
+mirror request is sent in parallel with the (delayed) primary.
 
 ## Runnable demo
 

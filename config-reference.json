@@ -2580,6 +2580,12 @@
           "format": "uint8",
           "minimum": 0,
           "maximum": 255
+        },
+        "timeout_ms": {
+          "description": "Hard timeout for the mirror request in milliseconds. If the\nmirror upstream does not respond within this duration, the\nmirror request is abandoned. Default 2000 (2 seconds). The\nmirror is fire-and-forget, so this timeout never affects the\nprimary request.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
