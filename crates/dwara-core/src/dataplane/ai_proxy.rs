@@ -752,6 +752,18 @@ where
         }
     }
 
+    // AI-13 (#201): fetch remote image URLs for multimodal requests.
+    // When the request contains remote image URLs (OpenAI
+    // `image_url.url` convention) and the target adapter requires
+    // base64 data (Anthropic, Gemini), the gateway fetches the image,
+    // converts to base64, and fills `data_b64` + `media_type`. The
+    // OpenAI adapter continues to pass the URL through unchanged.
+    // The fetcher is skipped entirely when there are no remote images.
+    if crate::ai::image_fetch::has_remote_images(&chat_req) {
+        let cfg = crate::ai::image_fetch::ImageFetchConfig::default();
+        chat_req = crate::ai::image_fetch::fetch_remote_images(chat_req, &cfg).await;
+    }
+
     // 3. Streaming (DW-077): the request is passed through with
     // usage reporting FORCED on the provider call — the stream
     // metrics and the (upcoming) token budgets need provider-reported

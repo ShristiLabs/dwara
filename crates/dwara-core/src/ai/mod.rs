@@ -51,6 +51,7 @@ pub mod credentials;
 pub mod experiments;
 pub mod governance;
 pub mod guardrails;
+pub mod image_fetch;
 pub mod logging;
 pub mod mcp;
 pub mod openai_compat;
