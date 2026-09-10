@@ -132,6 +132,7 @@ fn upstream_protocol_name(p: crate::config::UpstreamProtocol) -> &'static str {
     match p {
         crate::config::UpstreamProtocol::Http1 => "http1",
         crate::config::UpstreamProtocol::Http2 => "http2",
+        crate::config::UpstreamProtocol::H2c => "h2c",
         crate::config::UpstreamProtocol::Https => "https",
         crate::config::UpstreamProtocol::H3 => "h3",
     }
@@ -7508,13 +7509,13 @@ fn validate_pq(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     // Upstreams: check pq: true on each upstream.
     for u in &gateway.upstreams {
         if u.pq {
-            // Rule 3: http1 upstreams do not negotiate TLS.
-            if u.protocol == UpstreamProtocol::Http1 {
+            // Rule 3: http1/h2c upstreams do not negotiate TLS.
+            if matches!(u.protocol, UpstreamProtocol::Http1 | UpstreamProtocol::H2c) {
                 issues.push(issue(
                     "upstream",
                     &u.name,
                     "pq",
-                    "pq: true is only meaningful for https or http2 upstreams (http1 does \
+                    "pq: true is only meaningful for https or http2 upstreams (http1 and h2c do \
                      not negotiate TLS, so the kx group list is irrelevant)",
                 ));
                 continue;

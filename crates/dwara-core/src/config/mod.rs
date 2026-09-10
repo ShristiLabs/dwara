@@ -5658,6 +5658,10 @@ fn default_upstream_protocol() -> UpstreamProtocol {
 pub enum UpstreamProtocol {
     Http1,
     Http2,
+    /// Cleartext HTTP/2 with prior knowledge (h2c, DP-02 #235). No TLS;
+    /// the client speaks HTTP/2 directly over TCP. Common for internal
+    /// east-west gRPC traffic without TLS.
+    H2c,
     Https,
     /// HTTP/3 over QUIC (DW-108). QUIC mandates TLS 1.3, so an `h3`
     /// upstream always negotiates TLS with ALPN `h3`; the

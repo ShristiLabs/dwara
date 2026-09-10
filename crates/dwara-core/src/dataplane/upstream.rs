@@ -1445,6 +1445,12 @@ fn build_handle(
         .protocol
     {
         UpstreamProtocol::Http1 => ("http", None, false, None),
+        UpstreamProtocol::H2c => {
+            // DP-02 (#235): cleartext HTTP/2 with prior knowledge. No
+            // TLS; the client speaks HTTP/2 directly over TCP. Common
+            // for internal east-west gRPC traffic without TLS.
+            ("http", None, true, None)
+        }
         UpstreamProtocol::Https => {
             // SEC-04 / DW-109: when cert_pinning is configured AND
             // the `cert_pinning` cargo feature is ON, install the

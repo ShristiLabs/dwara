@@ -53,6 +53,7 @@ fn all_upstream_protocol_variants_parse() {
     for (tag, expected) in [
         ("http1", UpstreamProtocol::Http1),
         ("http2", UpstreamProtocol::Http2),
+        ("h2c", UpstreamProtocol::H2c),
         ("https", UpstreamProtocol::Https),
     ] {
         let gw = parse_ok(&format!(

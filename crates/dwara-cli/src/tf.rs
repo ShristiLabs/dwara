@@ -496,6 +496,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
         json!(match u.protocol {
             UpstreamProtocol::Http1 => "http1",
             UpstreamProtocol::Http2 => "http2",
+            UpstreamProtocol::H2c => "h2c",
             UpstreamProtocol::Https => "https",
             UpstreamProtocol::H3 => "h3",
         }),
@@ -523,6 +524,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
     };
     let protocol = match v.get("protocol").and_then(Value::as_str) {
         Some("http2") => UpstreamProtocol::Http2,
+        Some("h2c") => UpstreamProtocol::H2c,
         Some("https") => UpstreamProtocol::Https,
         Some("h3") => UpstreamProtocol::H3,
         _ => UpstreamProtocol::Http1,
@@ -686,6 +688,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             match u.protocol {
                 UpstreamProtocol::Http1 => "http1",
                 UpstreamProtocol::Http2 => "http2",
+                UpstreamProtocol::H2c => "h2c",
                 UpstreamProtocol::Https => "https",
                 UpstreamProtocol::H3 => "h3",
             }
