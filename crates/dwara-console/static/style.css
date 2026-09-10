@@ -262,3 +262,83 @@ pre {
 
 .version-badge.current { background: rgba(63,185,80,0.15); color: var(--green); }
 .version-badge.skewed { background: rgba(248,81,73,0.15); color: var(--red); }
+
+/* #226: live charts */
+.chart-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.chart-card h3 { font-size: 0.9rem; margin-bottom: 0.5rem; }
+
+.live-chart {
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+/* #226: CRUD flows */
+.crud-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.btn.small {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  margin-right: 0.25rem;
+}
+
+/* #226: modal dialog */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  width: 90%;
+  max-width: 700px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modal h3 {
+  font-size: 1rem;
+  color: var(--accent);
+  margin-bottom: 1rem;
+}
+
+.modal .editor-area {
+  min-height: 300px;
+}
+
+.modal-buttons {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}
+
+.modal .error-msg {
+  margin-top: 0.5rem;
+  text-align: left;
+  font-size: 0.82rem;
+}

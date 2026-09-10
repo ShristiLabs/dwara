@@ -748,7 +748,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             global_policies: Vec::new(),
             authorization: None,
             default_security_headers: None,
-        waf: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),

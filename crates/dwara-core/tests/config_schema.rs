@@ -206,7 +206,7 @@ fn empty_document_is_valid() {
             global_policies: Vec::new(),
             authorization: None,
             default_security_headers: None,
-        waf: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),

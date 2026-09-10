@@ -1,4 +1,4 @@
-// dwara console v2 -- CRUD + fleet views (Enterprise)
+// dwara console v3 -- live charts, CRUD flows, AI ops (#226)
 // Fetches from the admin API (same origin, mTLS listener).
 // No build step, no dependencies, vanilla JS.
 
@@ -556,6 +556,511 @@
     container.appendChild(previewDiv);
   }
 
+  // --- #226: Live charts view ---
+
+  var liveState = { history: [], maxPoints: 60 };
+
+  function renderLive() {
+    var content = document.getElementById('content');
+    content.innerHTML = '';
+    var wrap = el('div');
+    content.appendChild(card('Live Dashboard', wrap, renderLive));
+    wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
+
+    // Fetch dashboard summary + live stats in parallel.
+    Promise.all([
+      fetchJSON('/analytics/dashboard').catch(function () { return {}; }),
+      fetchJSON('/analytics/live').catch(function () { return {}; }),
+      fetchJSON('/stats').catch(function () { return {}; }),
+    ])
+      .then(function (results) {
+        var dashboard = results[0] || {};
+        var live = results[1] || {};
+        var stats = results[2] || {};
+        wrap.innerHTML = '';
+
+        // Stat cards row.
+        var grid = el('div', { class: 'stat-grid' });
+        grid.appendChild(makeStat('Active Requests', stats.active_requests || 0));
+        grid.appendChild(makeStat('RPS', live.rps || (dashboard.summary && dashboard.summary.rps) || 0));
+        grid.appendChild(makeStat('p50 (ms)', live.p50_ms || (dashboard.summary && dashboard.summary.p50_ms) || 'n/a'));
+        grid.appendChild(makeStat('p95 (ms)', live.p95_ms || (dashboard.summary && dashboard.summary.p95_ms) || 'n/a'));
+        grid.appendChild(makeStat('p99 (ms)', live.p99_ms || (dashboard.summary && dashboard.summary.p99_ms) || 'n/a'));
+        grid.appendChild(makeStat('Error Rate', (live.error_rate || 0).toFixed(2) + '%'));
+        wrap.appendChild(grid);
+
+        // Latency sparkline chart.
+        var chartCard = el('div', { class: 'chart-card' });
+        chartCard.appendChild(el('h3', { text: 'Latency Trend (ms)' }));
+        var canvas = el('canvas');
+        canvas.width = 800;
+        canvas.height = 200;
+        canvas.className = 'live-chart';
+        chartCard.appendChild(canvas);
+
+        // Track history for the sparkline.
+        var point = {
+          p50: live.p50_ms || 0,
+          p95: live.p95_ms || 0,
+          p99: live.p99_ms || 0,
+          ts: Date.now(),
+        };
+        liveState.history.push(point);
+        if (liveState.history.length > liveState.maxPoints) {
+          liveState.history.shift();
+        }
+        drawLatencyChart(canvas, liveState.history);
+        wrap.appendChild(chartCard);
+
+        // Per-route live table.
+        if (live.routes) {
+          var routesCard = el('div', { class: 'chart-card' });
+          routesCard.appendChild(el('h3', { text: 'Per-Route Live' }));
+          var table = el('table');
+          table.appendChild(el('thead', {}, el('tr', {}, [
+            el('th', { text: 'Route' }),
+            el('th', { text: 'RPS' }),
+            el('th', { text: 'p50 (ms)' }),
+            el('th', { text: 'p95 (ms)' }),
+            el('th', { text: 'Errors' }),
+          ])));
+          var tbody = el('tbody');
+          var routeData = live.routes || [];
+          if (Array.isArray(routeData)) {
+            routeData.forEach(function (r) {
+              tbody.appendChild(el('tr', {}, [
+                el('td', { text: r.route || r.name || '' }),
+                el('td', { text: String(r.rps || 0) }),
+                el('td', { text: String(r.p50_ms || 0) }),
+                el('td', { text: String(r.p95_ms || 0) }),
+                el('td', { text: String(r.errors || 0) }),
+              ]));
+            });
+          }
+          table.appendChild(tbody);
+          routesCard.appendChild(table);
+          wrap.appendChild(routesCard);
+        }
+
+        setLastRefresh();
+      })
+      .catch(function (err) {
+        wrap.innerHTML = '';
+        wrap.appendChild(el('div', { class: 'error-msg', text: err.message }));
+      });
+  }
+
+  function drawLatencyChart(canvas, history) {
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width;
+    var h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (history.length < 2) {
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Collecting data...', 10, h / 2);
+      return;
+    }
+
+    // Find max value for scaling.
+    var maxVal = 0;
+    history.forEach(function (p) {
+      maxVal = Math.max(maxVal, p.p99, p.p95, p.p50);
+    });
+    if (maxVal === 0) maxVal = 1;
+    var padding = 10;
+    var chartW = w - padding * 2;
+    var chartH = h - padding * 2;
+
+    // Draw grid lines.
+    ctx.strokeStyle = '#30363d';
+    ctx.lineWidth = 1;
+    for (var i = 0; i <= 4; i++) {
+      var y = padding + (chartH / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(padding, y);
+      ctx.lineTo(w - padding, y);
+      ctx.stroke();
+    }
+
+    // Draw lines for p50, p95, p99.
+    var series = [
+      { key: 'p50', color: '#3fb950', label: 'p50' },
+      { key: 'p95', color: '#d29922', label: 'p95' },
+      { key: 'p99', color: '#f85149', label: 'p99' },
+    ];
+    series.forEach(function (s) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      history.forEach(function (p, i) {
+        var x = padding + (chartW / (history.length - 1)) * i;
+        var y = padding + chartH - (p[s.key] / maxVal) * chartH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    // Legend.
+    ctx.font = '12px sans-serif';
+    var legendX = w - 120;
+    series.forEach(function (s, i) {
+      ctx.fillStyle = s.color;
+      ctx.fillRect(legendX, 5 + i * 18, 12, 12);
+      ctx.fillStyle = '#c9d1d9';
+      ctx.fillText(s.label, legendX + 18, 14 + i * 18);
+    });
+  }
+
+  // --- #226: CRUD flows ---
+
+  function sendJSON(method, path, body) {
+    return fetch(path, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    }).then(function (resp) {
+      return resp.json().then(function (data) {
+        return { status: resp.status, data: data, ok: resp.ok };
+      });
+    });
+  }
+
+  function renderCrudEntity(entityName, entityLabel, columns) {
+    var content = document.getElementById('content');
+    content.innerHTML = '';
+    var wrap = el('div');
+    var refreshFn = function () { renderCrudEntity(entityName, entityLabel, columns); };
+    content.appendChild(card(entityLabel + ' (CRUD)', wrap, refreshFn));
+    wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
+
+    // Toolbar with "Create" button.
+    var toolbar = el('div', { class: 'crud-toolbar' });
+    var createBtn = el('button', { class: 'btn primary', text: '+ Create ' + entityLabel });
+    toolbar.appendChild(createBtn);
+    wrap.appendChild(toolbar);
+
+    var tableWrap = el('div');
+    wrap.appendChild(tableWrap);
+
+    function loadTable() {
+      tableWrap.innerHTML = '';
+      tableWrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
+      fetchJSON('/' + entityName)
+        .then(function (data) {
+          tableWrap.innerHTML = '';
+          var items = data[entityName] || data.items || data || [];
+          if (!Array.isArray(items)) items = [];
+          if (items.length === 0) {
+            tableWrap.appendChild(el('p', { text: 'No ' + entityLabel.toLowerCase() + ' configured.' }));
+            return;
+          }
+          var table = el('table');
+          var headers = columns.map(function (c) { return el('th', { text: c.label }); });
+          headers.push(el('th', { text: 'Actions' }));
+          table.appendChild(el('thead', {}, el('tr', {}, headers)));
+          var tbody = el('tbody');
+          items.forEach(function (item) {
+            var cells = columns.map(function (c) {
+              var val = item[c.field];
+              if (typeof val === 'object' && val !== null) val = JSON.stringify(val);
+              return el('td', { text: String(val || '') });
+            });
+            // Action buttons.
+            var actionCell = el('td');
+            var editBtn = el('button', { class: 'btn small', text: 'Edit' });
+            var delBtn = el('button', { class: 'btn small danger', text: 'Delete' });
+            editBtn.addEventListener('click', function () {
+              openEditDialog(entityName, entityLabel, item, columns, loadTable);
+            });
+            delBtn.addEventListener('click', function () {
+              if (confirm('Delete ' + entityLabel + ' "' + item.name + '"?')) {
+                sendJSON('DELETE', '/' + entityName + '/' + item.name)
+                  .then(function (result) {
+                    if (result.ok) loadTable();
+                    else showCrudError(tableWrap, 'Delete failed: ' + (result.data && result.data.error && result.data.error.message || 'Unknown'));
+                  })
+                  .catch(function (err) { showCrudError(tableWrap, 'Delete failed: ' + err.message); });
+              }
+            });
+            actionCell.appendChild(editBtn);
+            actionCell.appendChild(delBtn);
+            cells.push(actionCell);
+            tbody.appendChild(el('tr', {}, cells));
+          });
+          table.appendChild(tbody);
+          tableWrap.appendChild(table);
+          setLastRefresh();
+        })
+        .catch(function (err) {
+          tableWrap.innerHTML = '';
+          tableWrap.appendChild(el('div', { class: 'error-msg', text: err.message }));
+        });
+    }
+
+    createBtn.addEventListener('click', function () {
+      openCreateDialog(entityName, entityLabel, columns, loadTable);
+    });
+
+    loadTable();
+  }
+
+  function openCreateDialog(entityName, entityLabel, columns, onSuccess) {
+    var overlay = el('div', { class: 'modal-overlay' });
+    var modal = el('div', { class: 'modal' });
+    modal.appendChild(el('h3', { text: 'Create ' + entityLabel }));
+    var textarea = el('textarea', { class: 'editor-area' });
+    textarea.setAttribute('spellcheck', 'false');
+    textarea.placeholder = 'Enter ' + entityLabel + ' JSON here...\nExample:\n{"name": "my-' + entityLabel + '"}';
+    modal.appendChild(textarea);
+    var btnRow = el('div', { class: 'modal-buttons' });
+    var cancelBtn = el('button', { class: 'btn', text: 'Cancel' });
+    var saveBtn = el('button', { class: 'btn primary', text: 'Create' });
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(saveBtn);
+    modal.appendChild(btnRow);
+    var errorDiv = el('div', { class: 'error-msg' });
+    modal.appendChild(errorDiv);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    cancelBtn.addEventListener('click', function () { document.body.removeChild(overlay); });
+    saveBtn.addEventListener('click', function () {
+      var body;
+      try { body = JSON.parse(textarea.value); }
+      catch (e) {
+        errorDiv.textContent = 'Invalid JSON: ' + e.message;
+        return;
+      }
+      sendJSON('POST', '/' + entityName, body)
+        .then(function (result) {
+          if (result.ok) {
+            document.body.removeChild(overlay);
+            onSuccess();
+          } else {
+            errorDiv.textContent = 'Create failed: ' + (result.data && result.data.error && result.data.error.message || 'Unknown');
+          }
+        })
+        .catch(function (err) { errorDiv.textContent = 'Create failed: ' + err.message; });
+    });
+  }
+
+  function openEditDialog(entityName, entityLabel, item, columns, onSuccess) {
+    var overlay = el('div', { class: 'modal-overlay' });
+    var modal = el('div', { class: 'modal' });
+    modal.appendChild(el('h3', { text: 'Edit ' + entityLabel + ': ' + (item.name || '') }));
+    var textarea = el('textarea', { class: 'editor-area' });
+    textarea.setAttribute('spellcheck', 'false');
+    textarea.value = JSON.stringify(item, null, 2);
+    modal.appendChild(textarea);
+    var btnRow = el('div', { class: 'modal-buttons' });
+    var cancelBtn = el('button', { class: 'btn', text: 'Cancel' });
+    var saveBtn = el('button', { class: 'btn primary', text: 'Save' });
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(saveBtn);
+    modal.appendChild(btnRow);
+    var errorDiv = el('div', { class: 'error-msg' });
+    modal.appendChild(errorDiv);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    cancelBtn.addEventListener('click', function () { document.body.removeChild(overlay); });
+    saveBtn.addEventListener('click', function () {
+      var body;
+      try { body = JSON.parse(textarea.value); }
+      catch (e) {
+        errorDiv.textContent = 'Invalid JSON: ' + e.message;
+        return;
+      }
+      sendJSON('PUT', '/' + entityName + '/' + (item.name || ''), body)
+        .then(function (result) {
+          if (result.ok) {
+            document.body.removeChild(overlay);
+            onSuccess();
+          } else {
+            errorDiv.textContent = 'Save failed: ' + (result.data && result.data.error && result.data.error.message || 'Unknown');
+          }
+        })
+        .catch(function (err) { errorDiv.textContent = 'Save failed: ' + err.message; });
+    });
+  }
+
+  function showCrudError(container, msg) {
+    var existing = container.querySelector('.error-msg');
+    if (existing) existing.remove();
+    container.appendChild(el('div', { class: 'error-msg', text: msg }));
+  }
+
+  function renderRoutesCrud() {
+    renderCrudEntity('routes', 'Route', [
+      { field: 'name', label: 'Name' },
+      { field: 'service', label: 'Service' },
+      { field: 'match', label: 'Match' },
+    ]);
+  }
+
+  function renderUpstreamsCrud() {
+    renderCrudEntity('upstreams', 'Upstream', [
+      { field: 'name', label: 'Name' },
+      { field: 'endpoints', label: 'Endpoints' },
+    ]);
+  }
+
+  function renderServicesCrud() {
+    renderCrudEntity('services', 'Service', [
+      { field: 'name', label: 'Name' },
+      { field: 'upstream', label: 'Upstream' },
+    ]);
+  }
+
+  function renderConsumersCrud() {
+    renderCrudEntity('consumers', 'Consumer', [
+      { field: 'name', label: 'Name' },
+    ]);
+  }
+
+  function renderPoliciesCrud() {
+    renderCrudEntity('policies', 'Policy', [
+      { field: 'name', label: 'Name' },
+    ]);
+  }
+
+  // --- #226: AI Ops view ---
+
+  function renderAiOps() {
+    var content = document.getElementById('content');
+    content.innerHTML = '';
+    var wrap = el('div');
+    content.appendChild(card('AI Operations', wrap, renderAiOps));
+    wrap.appendChild(el('div', { class: 'stat-label', text: 'Loading...' }));
+
+    Promise.all([
+      fetchJSON('/ai/credential-pools').catch(function () { return {}; }),
+      fetchJSON('/mcp/sessions').catch(function () { return {}; }),
+      fetchJSON('/mcp/tools').catch(function () { return {}; }),
+      fetchJSON('/experiments/prompt-overrides').catch(function () { return {}; }),
+    ])
+      .then(function (results) {
+        var pools = results[0] || {};
+        var sessions = results[1] || {};
+        var tools = results[2] || {};
+        var overrides = results[3] || {};
+        wrap.innerHTML = '';
+
+        // Credential pools card.
+        var poolsCard = el('div', { class: 'chart-card' });
+        poolsCard.appendChild(el('h3', { text: 'AI Credential Pools' }));
+        var poolList = pools.pools || pools || [];
+        if (Array.isArray(poolList) && poolList.length > 0) {
+          var poolTable = el('table');
+          poolTable.appendChild(el('thead', {}, el('tr', {}, [
+            el('th', { text: 'Pool' }),
+            el('th', { text: 'Provider' }),
+            el('th', { text: 'Active' }),
+            el('th', { text: 'Exhausted' }),
+            el('th', { text: 'Cooldown' }),
+          ])));
+          var poolTbody = el('tbody');
+          poolList.forEach(function (p) {
+            poolTbody.appendChild(el('tr', {}, [
+              el('td', { text: p.name || p.pool || '' }),
+              el('td', { text: p.provider || '' }),
+              el('td', { text: String(p.active || p.active_count || 0) }),
+              el('td', { text: String(p.exhausted || p.exhausted_count || 0) }),
+              el('td', { text: String(p.cooldown || p.cooldown_secs || 0) + 's' }),
+            ]));
+          });
+          poolTable.appendChild(poolTbody);
+          poolsCard.appendChild(poolTable);
+        } else {
+          poolsCard.appendChild(el('p', { text: 'No AI credential pools configured.' }));
+        }
+        wrap.appendChild(poolsCard);
+
+        // MCP sessions card.
+        var mcpCard = el('div', { class: 'chart-card' });
+        mcpCard.appendChild(el('h3', { text: 'MCP Sessions' }));
+        var sessionList = sessions.sessions || sessions || [];
+        if (Array.isArray(sessionList) && sessionList.length > 0) {
+          var sessTable = el('table');
+          sessTable.appendChild(el('thead', {}, el('tr', {}, [
+            el('th', { text: 'Session ID' }),
+            el('th', { text: 'Status' }),
+            el('th', { text: 'Tools' }),
+          ])));
+          var sessTbody = el('tbody');
+          sessionList.forEach(function (s) {
+            sessTbody.appendChild(el('tr', {}, [
+              el('td', { text: s.id || s.session_id || '' }),
+              el('td', { text: s.status || 'active' }),
+              el('td', { text: String((s.tools || []).length) }),
+            ]));
+          });
+          sessTable.appendChild(sessTbody);
+          mcpCard.appendChild(sessTable);
+        } else {
+          mcpCard.appendChild(el('p', { text: 'No active MCP sessions.' }));
+        }
+        wrap.appendChild(mcpCard);
+
+        // MCP tools card.
+        var toolsCard = el('div', { class: 'chart-card' });
+        toolsCard.appendChild(el('h3', { text: 'MCP Tools' }));
+        var toolList = tools.tools || tools || [];
+        if (Array.isArray(toolList) && toolList.length > 0) {
+          var toolTable = el('table');
+          toolTable.appendChild(el('thead', {}, el('tr', {}, [
+            el('th', { text: 'Tool' }),
+            el('th', { text: 'Description' }),
+          ])));
+          var toolTbody = el('tbody');
+          toolList.forEach(function (t) {
+            toolTbody.appendChild(el('tr', {}, [
+              el('td', { text: t.name || '' }),
+              el('td', { text: t.description || '' }),
+            ]));
+          });
+          toolTable.appendChild(toolTbody);
+          toolsCard.appendChild(toolTable);
+        } else {
+          toolsCard.appendChild(el('p', { text: 'No MCP tools registered.' }));
+        }
+        wrap.appendChild(toolsCard);
+
+        // Experiment overrides card.
+        var expCard = el('div', { class: 'chart-card' });
+        expCard.appendChild(el('h3', { text: 'Experiment Prompt Overrides' }));
+        var overrideList = overrides.overrides || overrides || [];
+        if (Array.isArray(overrideList) && overrideList.length > 0) {
+          var ovTable = el('table');
+          ovTable.appendChild(el('thead', {}, el('tr', {}, [
+            el('th', { text: 'Route' }),
+            el('th', { text: 'Override' }),
+          ])));
+          var ovTbody = el('tbody');
+          overrideList.forEach(function (o) {
+            ovTbody.appendChild(el('tr', {}, [
+              el('td', { text: o.route || o.key || '' }),
+              el('td', { text: JSON.stringify(o.value || o.override || '') }),
+            ]));
+          });
+          ovTable.appendChild(ovTbody);
+          expCard.appendChild(ovTable);
+        } else {
+          expCard.appendChild(el('p', { text: 'No experiment overrides active.' }));
+        }
+        wrap.appendChild(expCard);
+
+        setLastRefresh();
+      })
+      .catch(function (err) {
+        wrap.innerHTML = '';
+        wrap.appendChild(el('div', { class: 'error-msg', text: err.message }));
+      });
+  }
+
   // --- DW-118: Workspace switcher ---
 
   function initWorkspaceSwitcher() {
@@ -593,10 +1098,12 @@
 
   var views = {
     overview: renderOverview,
-    routes: renderRoutes,
-    upstreams: renderUpstreams,
+    live: renderLive,
+    routes: renderRoutesCrud,
+    upstreams: renderUpstreamsCrud,
     health: renderHealth,
     analytics: renderAnalytics,
+    aiops: renderAiOps,
     fleet: renderFleet,
     config: renderConfig,
     editor: renderEditor,
