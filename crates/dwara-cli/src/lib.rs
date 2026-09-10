@@ -29,6 +29,10 @@ pub mod import_nginx;
 pub mod import_kong;
 // DW-065: Envoy static config import (migration lever).
 pub mod import_envoy;
+// CFG-09 (#257): Traefik dynamic config import.
+pub mod import_traefik;
+// CFG-09 (#257): HAProxy config import.
+pub mod import_haproxy;
 pub mod loadgen;
 // DW-057: Plugin scaffolding (`dwara plugin new`).
 pub mod plugin_scaffold;

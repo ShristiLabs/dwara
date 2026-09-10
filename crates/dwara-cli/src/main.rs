@@ -244,6 +244,24 @@ enum ImportKind {
         #[arg(long, default_value = "dwara.yaml")]
         output: String,
     },
+    /// Import a Traefik dynamic config (YAML) and generate a Dwara
+    /// config (CFG-09, #257).
+    Traefik {
+        /// Path to the Traefik config file (.yaml or .yml).
+        config: String,
+        /// Output path for the generated Dwara config (default: dwara.yaml).
+        #[arg(long, default_value = "dwara.yaml")]
+        output: String,
+    },
+    /// Import a HAProxy config (haproxy.cfg) and generate a Dwara
+    /// config (CFG-09, #257).
+    Haproxy {
+        /// Path to the HAProxy config file.
+        config: String,
+        /// Output path for the generated Dwara config (default: dwara.yaml).
+        #[arg(long, default_value = "dwara.yaml")]
+        output: String,
+    },
 }
 
 /// Subcommands of `dwara tf` (DW-065).
@@ -565,6 +583,56 @@ fn main() {
                     1
                 }
                 Ok(text) => match dwara_cli::import_envoy::import_envoy(&text) {
+                    Ok(result) => match write_atomic(&output, &result.yaml) {
+                        Ok(()) => {
+                            println!(
+                                "imported {} routes from {} -> {}",
+                                result.route_count, config, output
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            1
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+            },
+            ImportKind::Traefik { config, output } => match read(&config) {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok(text) => match dwara_cli::import_traefik::import_traefik(&text) {
+                    Ok(result) => match write_atomic(&output, &result.yaml) {
+                        Ok(()) => {
+                            println!(
+                                "imported {} routes from {} -> {}",
+                                result.route_count, config, output
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            1
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+            },
+            ImportKind::Haproxy { config, output } => match read(&config) {
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+                Ok(text) => match dwara_cli::import_haproxy::import_haproxy(&text) {
                     Ok(result) => match write_atomic(&output, &result.yaml) {
                         Ok(()) => {
                             println!(
