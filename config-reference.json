@@ -2401,6 +2401,17 @@
               "type": "null"
             }
           ]
+        },
+        "federation": {
+          "description": "Federation passthrough config (DP-11, #256). When enabled, the\ngateway treats the route as a federation passthrough: it\nforwards GraphQL requests to a single federated upstream\n(subgraph or supergraph router) while preserving\nfederation-specific headers and allowing introspection queries\n(`_service`, `__schema`) to bypass depth/complexity checks.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphqlFederation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -2423,6 +2434,17 @@
           "additionalProperties": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "GraphqlFederation": {
+      "description": "Federation passthrough config (DP-11, #256,\n`routes[].graphql.federation`).\n\nWhen `passthrough` is true, the gateway:\n- Preserves Apollo federation headers on the proxied request\n  (`Apollo-Require-Preflight`, `x-apollo-operation-name`,\n  `graphql-preflight`, `x-apollo-operation-id`).\n- Allows federation introspection queries (`_service { sdl }`,\n  `__schema`, `__type`) to bypass depth and complexity checks.\n- Still applies persisted-query enforcement if configured.\n\nThis is **passthrough mode**: the gateway does NOT implement query\nplanning or subgraph stitching. It proxies to a single upstream\nthat is expected to be either a federation router (subgraph-aware)\nor a single subgraph.",
+      "type": "object",
+      "properties": {
+        "passthrough": {
+          "description": "Master switch. Default false.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

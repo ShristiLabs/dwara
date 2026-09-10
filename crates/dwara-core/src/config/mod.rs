@@ -3668,6 +3668,37 @@ pub struct RouteGraphql {
     /// persisted-query enforcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_queries: Option<GraphqlPersistedQueries>,
+    /// Federation passthrough config (DP-11, #256). When enabled, the
+    /// gateway treats the route as a federation passthrough: it
+    /// forwards GraphQL requests to a single federated upstream
+    /// (subgraph or supergraph router) while preserving
+    /// federation-specific headers and allowing introspection queries
+    /// (`_service`, `__schema`) to bypass depth/complexity checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<GraphqlFederation>,
+}
+
+/// Federation passthrough config (DP-11, #256,
+/// `routes[].graphql.federation`).
+///
+/// When `passthrough` is true, the gateway:
+/// - Preserves Apollo federation headers on the proxied request
+///   (`Apollo-Require-Preflight`, `x-apollo-operation-name`,
+///   `graphql-preflight`, `x-apollo-operation-id`).
+/// - Allows federation introspection queries (`_service { sdl }`,
+///   `__schema`, `__type`) to bypass depth and complexity checks.
+/// - Still applies persisted-query enforcement if configured.
+///
+/// This is **passthrough mode**: the gateway does NOT implement query
+/// planning or subgraph stitching. It proxies to a single upstream
+/// that is expected to be either a federation router (subgraph-aware)
+/// or a single subgraph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlFederation {
+    /// Master switch. Default false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub passthrough: bool,
 }
 
 /// Persisted-query enforcement config (DW-099,

@@ -127,6 +127,7 @@ pub struct GraphQLChecker {
     persisted_enabled: bool,
     persisted_store: HashMap<String, String>,
     max_body_bytes: usize,
+    federation_passthrough: bool,
 }
 
 impl GraphQLChecker {
@@ -149,6 +150,7 @@ impl GraphQLChecker {
                 .map(|pq| pq.store.clone())
                 .unwrap_or_default(),
             max_body_bytes: DEFAULT_GRAPHQL_MAX_BODY_BYTES,
+            federation_passthrough: cfg.federation.as_ref().is_some_and(|f| f.passthrough),
         })
     }
 
@@ -172,6 +174,23 @@ impl GraphQLChecker {
             &self.cost_per_field,
             self.complexity_coefficient,
         );
+
+        // Federation passthrough (DP-11, #256): allow introspection
+        // queries to bypass depth/complexity checks. The federation
+        // router and subgraphs use `_service { sdl }` and standard
+        // GraphQL introspection (`__schema`, `__type`) during schema
+        // composition; these are trusted internal operations that
+        // should not be blocked by operator-configured limits.
+        // Persisted-query enforcement still applies.
+        if self.federation_passthrough && is_federation_introspection(query) {
+            if self.persisted_enabled {
+                let hash = sha256_hex(query.as_bytes());
+                if !self.persisted_store.contains_key(&hash) {
+                    return (GraphQLCheckResult::DenyPersistedQuery, depth, complexity);
+                }
+            }
+            return (GraphQLCheckResult::Allow, depth, complexity);
+        }
 
         // Depth check first (cheaper, and a depth bomb is the sharper
         // attack -- reject it before evaluating complexity).
@@ -501,6 +520,24 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex
 }
 
+/// Detect whether a GraphQL query is a federation introspection
+/// operation (DP-11, #256). These queries are used by the Apollo
+/// federation router and subgraphs during schema composition and
+/// should bypass depth/complexity limits when federation passthrough
+/// is enabled.
+///
+/// Detected patterns:
+/// - `_service { sdl }` -- Apollo federation service info query
+/// - `__schema` -- standard GraphQL introspection
+/// - `__type` -- standard GraphQL introspection
+fn is_federation_introspection(query: &str) -> bool {
+    // A simple substring check is sufficient: these are reserved
+    // GraphQL root fields that cannot appear in normal user queries
+    // without being introspection. The check is case-sensitive
+    // (GraphQL field names are case-sensitive).
+    query.contains("_service") || query.contains("__schema") || query.contains("__type")
+}
+
 /// A body that replays the bytes collected by the GraphQL check (so
 /// the body is not consumed by the check and can be forwarded to the
 /// upstream). This mirrors the WAF body-replay pattern (DW-051): the
@@ -639,6 +676,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: None,
+            federation: None,
         };
         let checker = GraphQLChecker::from_config(&cfg).unwrap();
         let (result, depth, complexity) = checker.check_query("{ user { name email } }");
@@ -656,6 +694,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: None,
+            federation: None,
         };
         let checker = GraphQLChecker::from_config(&cfg).unwrap();
         // depth 5, limit 3.
@@ -673,6 +712,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: None,
+            federation: None,
         };
         let checker = GraphQLChecker::from_config(&cfg).unwrap();
         // 20 fields, limit 10.
@@ -695,6 +735,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: Some(pq),
+            federation: None,
         };
         let checker = GraphQLChecker::from_config(&cfg).unwrap();
         let (result, _, _) = checker.check_query("{ user { name } }");
@@ -718,6 +759,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: Some(pq),
+            federation: None,
         };
         let checker = GraphQLChecker::from_config(&cfg).unwrap();
         let (result, _, _) = checker.check_query(query);
@@ -733,6 +775,7 @@ mod tests {
             complexity_coefficient: 1,
             cost_per_field: HashMap::new(),
             persisted_queries: None,
+            federation: None,
         };
         assert!(GraphQLChecker::from_config(&cfg).is_none());
     }

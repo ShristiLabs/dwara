@@ -24,6 +24,7 @@ fn config_with(depth_limit: usize, complexity_limit: u64) -> RouteGraphql {
         complexity_coefficient: 1,
         cost_per_field: HashMap::new(),
         persisted_queries: None,
+        federation: None,
     }
 }
 
@@ -97,6 +98,7 @@ fn complexity_with_cost_per_field() {
         complexity_coefficient: 1,
         cost_per_field: costs,
         persisted_queries: None,
+        federation: None,
     };
     let checker = GraphQLChecker::from_config(&cfg).unwrap();
     // One field with cost 100, limit 50 -> denied.
@@ -120,6 +122,7 @@ fn persisted_query_denies_unknown_hash() {
         complexity_coefficient: 1,
         cost_per_field: HashMap::new(),
         persisted_queries: Some(pq),
+        federation: None,
     };
     let checker = GraphQLChecker::from_config(&cfg).unwrap();
     let (result, _, _) = checker.check_query("{ user { name } }");
@@ -143,6 +146,7 @@ fn persisted_query_allows_known_hash() {
         complexity_coefficient: 1,
         cost_per_field: HashMap::new(),
         persisted_queries: Some(pq),
+        federation: None,
     };
     let checker = GraphQLChecker::from_config(&cfg).unwrap();
     let (result, _, _) = checker.check_query(query);
@@ -162,6 +166,7 @@ fn persisted_query_disabled_allows_anything() {
         complexity_coefficient: 1,
         cost_per_field: HashMap::new(),
         persisted_queries: Some(pq),
+        federation: None,
     };
     let checker = GraphQLChecker::from_config(&cfg).unwrap();
     let (result, _, _) = checker.check_query("{ user { name } }");
@@ -295,6 +300,7 @@ fn disabled_graphql_returns_none() {
         complexity_coefficient: 1,
         cost_per_field: HashMap::new(),
         persisted_queries: None,
+        federation: None,
     };
     assert!(GraphQLChecker::from_config(&cfg).is_none());
 }
