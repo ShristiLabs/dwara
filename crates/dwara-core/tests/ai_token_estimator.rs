@@ -15,6 +15,7 @@ mod support;
 
 use dwara_core::ai::token_estimator::estimate_prompt_tokens;
 use dwara_core::ai::types::{ChatMessage, ChatRequest, ChatRole, ContentPart, ToolSpec};
+use std::collections::BTreeMap;
 
 // --- estimator unit tests (public API) -------------------------------------
 
@@ -30,6 +31,9 @@ fn req(messages: Vec<ChatMessage>) -> ChatRequest {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     }
 }
@@ -84,6 +88,9 @@ fn tool_definitions_add_tokens() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     let with_tools = estimate_prompt_tokens(&r_with_tools);

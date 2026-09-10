@@ -6142,6 +6142,35 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // REL-08 (#219): use_system_roots is the OS-native trust store
+        // alternative to the webpki default. It only applies to the TLS
+        // protocols, and is mutually exclusive with trusted_ca_file
+        // (both select a trust set; setting both is an authoring
+        // mistake — the operator must pick one).
+        if u.use_system_roots {
+            let tls = matches!(
+                u.protocol,
+                crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
+            );
+            if !tls {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "use_system_roots",
+                    "use_system_roots only applies to TLS upstreams (protocol https or http2); no \
+                     TLS is negotiated toward an http1 upstream",
+                ));
+            }
+            if u.trusted_ca_file.is_some() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "use_system_roots",
+                    "use_system_roots and trusted_ca_file are mutually exclusive; pick one trust \
+                     source per upstream",
+                ));
+            }
+        }
         // SEC-04 / DW-109: cert_pinning validation. The block is always
         // accepted by the parser (additive-only); validation enforces:
         // (1) only on TLS upstreams, (2) non-empty pin list, (3) each

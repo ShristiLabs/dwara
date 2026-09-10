@@ -106,6 +106,7 @@ fn empty_gateway() -> Gateway {
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,
@@ -394,6 +395,7 @@ fn hcl_escapes_special_characters() {
         compression: None,
         limits: None,
         authorization: None,
+        security_headers_opt_out: false,
         deprecation: None,
         maintenance: None,
         transforms: None,
@@ -430,6 +432,7 @@ fn hcl_escapes_special_characters() {
         load_balancer: LoadBalancer::RoundRobin,
         protocol: UpstreamProtocol::Http1,
         trusted_ca_file: None,
+        use_system_roots: false,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".to_string(),
             port: 9000,

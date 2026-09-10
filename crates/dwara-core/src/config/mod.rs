@@ -4854,6 +4854,18 @@ pub struct Upstream {
     /// this field otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_ca_file: Option<String>,
+    /// REL-08 (#219): when true, the upstream's TLS connections trust the
+    /// OS-native root CA store (loaded via `rustls-native-certs`) INSTEAD
+    /// of the bundled webpki root set. Useful in deployments whose
+    /// private CAs are provisioned through the host's trust store (e.g.
+    /// corporate PKI, cloud metadata CAs). Mutually exclusive with
+    /// `trusted_ca_file` (validation rejects a configuration that sets
+    /// both). Only meaningful for the TLS protocols (`https`/`http2`/`h3`)
+    /// — no TLS is negotiated toward `http1` endpoints, so validation
+    /// rejects that combination. Active health probes for this upstream
+    /// verify against the same roots. Defaults to `false` (webpki roots).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_system_roots: bool,
     /// Static endpoint list for this upstream. When `dns_discovery` is
     /// present, this becomes the initial/fallback set (used until the
     /// first DNS resolution completes and as a fallback when DNS fails

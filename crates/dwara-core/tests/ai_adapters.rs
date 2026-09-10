@@ -18,6 +18,7 @@ use dwara_core::ai::types::{
 };
 use dwara_core::config::ai::{AiConfig, AiModel, AiProvider, AiProviderAuth, AiProviderKind};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// A canonical request exercising the full surface: system + user +
 /// assistant tool call + tool result, tools, tool_choice, sampling.
@@ -60,6 +61,9 @@ fn canonical_request() -> ChatRequest {
         stop: Some(vec!["END".to_string()]),
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: [("seed".to_string(), json!(7))].into_iter().collect(),
     }
 }
@@ -270,6 +274,9 @@ fn anthropic_merges_consecutive_same_role_turns() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     let out = adapter.build_request(&req, "m").unwrap();
@@ -547,6 +554,9 @@ fn same_canonical_request_serves_all_three_dialects() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     for (kind, provider_body) in cases {
@@ -862,6 +872,9 @@ fn empty_content_assistant_message_round_trips() {
                 stop: None,
                 stream: false,
                 stream_options_include_usage: false,
+                response_format: None,
+                prompt: None,
+                prompt_variables: BTreeMap::new(),
                 other: Default::default(),
             },
             "m",
@@ -884,6 +897,9 @@ fn empty_content_assistant_message_round_trips() {
                 stop: None,
                 stream: false,
                 stream_options_include_usage: false,
+                response_format: None,
+                prompt: None,
+                prompt_variables: BTreeMap::new(),
                 other: Default::default(),
             },
             "m",
@@ -930,6 +946,9 @@ fn failover_composition_uses_only_the_trait_surface() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     // Attempt 1 "fails" (a provider 5xx the composer observed); the
@@ -1012,6 +1031,9 @@ fn gemini_wraps_non_object_tool_output_for_function_response() {
             stop: None,
             stream: false,
             stream_options_include_usage: false,
+            response_format: None,
+            prompt: None,
+            prompt_variables: BTreeMap::new(),
             other: Default::default(),
         };
         let out = adapter.build_request(&req, "m").unwrap();
@@ -1070,6 +1092,9 @@ fn azure_openai_builds_deployment_url_path() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     let pr = adapter.build_request(&req, "gpt-4o-deployment").unwrap();
@@ -1105,6 +1130,9 @@ fn azure_openai_api_version_override_from_other_map() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     req.other
@@ -1160,6 +1188,9 @@ fn bedrock_builds_invoke_path_with_encoded_model_id() {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: Default::default(),
     };
     let model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0";

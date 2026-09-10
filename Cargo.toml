@@ -50,6 +50,9 @@ tower-service = "0.3"
 # Upstream TLS verification (DW-008): Mozilla webpki root set — small,
 # deterministic, no OS variance in tests; system roots can follow later.
 webpki-roots = "0.26"
+# REL-08 (#219): OS-native root CA store for upstreams that opt into
+# `use_system_roots`. Loaded lazily; never linked into the default path.
+rustls-native-certs = "0.8"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_path_to_error = "0.1"

@@ -117,6 +117,7 @@ fn inject_default_services(gateway: &mut Gateway) {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,

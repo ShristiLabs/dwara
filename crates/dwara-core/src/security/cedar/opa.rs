@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn parse_url_http_default_port() {
-        let (scheme, host, port, path) = parse_url("http://opa.example.com/v1/data").unwrap();
+        let (scheme, host, port, _path) = parse_url("http://opa.example.com/v1/data").unwrap();
         assert_eq!(scheme, "http");
         assert_eq!(host, "opa.example.com");
         assert_eq!(port, 80);

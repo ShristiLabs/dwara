@@ -315,6 +315,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: Some(cfg),
         dns_discovery: None,
         peak_ewma: None,

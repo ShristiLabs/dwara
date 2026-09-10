@@ -1858,6 +1858,14 @@ impl UpstreamRegistry {
                             rustls::RootCertStore::empty()
                         }
                     },
+                    None if u.use_system_roots => {
+                        // REL-08 (#219): the upstream opted into the
+                        // OS-native root store instead of the bundled
+                        // webpki set. Loaded per-upstream (not shared)
+                        // because the OS store is process-wide and a
+                        // reload may pick up newly-installed roots.
+                        crate::security::tls::system_root_store()
+                    }
                     None => default_roots.clone(),
                 };
                 let prev = previous.and_then(|p| p.handles.get(&u.name));
@@ -2032,6 +2040,7 @@ mod tests {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
