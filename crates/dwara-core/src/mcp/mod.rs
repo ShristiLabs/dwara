@@ -449,3 +449,58 @@ fn validate_arguments(schema: &Value, args: &Value) -> Result<(), String> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// AI-11 (#200): SSE transport adapter for the agent-operable admin MCP
+// server. Encodes JSON-RPC responses as SSE frames so the admin MCP
+// server can be served over HTTP with server-sent events.
+// ---------------------------------------------------------------------------
+
+/// AI-11 (#200): Encode a JSON-RPC response as an SSE frame.
+/// Returns a string suitable for writing to an SSE response body
+/// (`data: <payload>\n\n`).
+pub fn encode_sse_response(response: &Value) -> String {
+    format!("data: {response}\n\n")
+}
+
+/// AI-11 (#200): Encode a JSON-RPC error as an SSE frame.
+pub fn encode_sse_error(id: Option<&Value>, code: i32, message: &str) -> String {
+    let error = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": code, "message": message}
+    });
+    encode_sse_response(&error)
+}
+
+/// AI-11 (#200): The transport type for the admin MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransport {
+    /// JSON-RPC over HTTP (request/response, no streaming).
+    Http,
+    /// JSON-RPC over Server-Sent Events (streaming responses).
+    Sse,
+    /// JSON-RPC over stdio (newline-delimited JSON on stdin/stdout).
+    Stdio,
+}
+
+impl McpTransport {
+    /// The stable name string (for analytics/config storage).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            McpTransport::Http => "http",
+            McpTransport::Sse => "sse",
+            McpTransport::Stdio => "stdio",
+        }
+    }
+
+    /// Parse a transport name string. Defaults to `Http` for an
+    /// unrecognized or None value.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("sse") => McpTransport::Sse,
+            Some("stdio") => McpTransport::Stdio,
+            _ => McpTransport::Http,
+        }
+    }
+}

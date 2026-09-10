@@ -1124,6 +1124,17 @@ pub struct AiMcpConfig {
     /// rejects duplicates and empty names).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, AiMcpTool>,
+    /// AI-11 (#200): Static resources exposed via `resources/list`
+    /// and `resources/read`. Each resource has a URI, a name, a
+    /// description, and an optional MIME type. The resource content
+    /// is served inline (no upstream proxy).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, AiMcpResource>,
+    /// AI-11 (#200): Static prompt templates exposed via
+    /// `prompts/list` and `prompts/get`. Each prompt has a name, a
+    /// description, and a template body with optional arguments.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prompts: BTreeMap<String, AiMcpPrompt>,
     /// Session policy. Absent (the default): the built-in defaults
     /// (TTL 3600s, max 1000 concurrent sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1172,6 +1183,60 @@ pub struct AiMcpTool {
     /// Upstream call timeout in milliseconds. Default 30000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+}
+
+/// AI-11 (#200): One MCP static resource (`ai.mcp.resources.<name>`).
+/// Resources are served inline (no upstream proxy). The content is
+/// returned verbatim in `resources/read` responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpResource {
+    /// The resource URI (e.g., `config://routes`, `data://users`). Must
+    /// be non-empty (validation rejects empty strings).
+    pub uri: String,
+    /// Human-readable name (returned in `resources/list`).
+    pub name: String,
+    /// Human-readable description (returned in `resources/list`).
+    pub description: String,
+    /// The MIME type of the content (e.g., `text/plain`,
+    /// `application/json`). Default `text/plain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// The resource content (returned verbatim in `resources/read`).
+    pub content: String,
+}
+
+/// AI-11 (#200): One MCP static prompt template
+/// (`ai.mcp.prompts.<name>`). Prompts are served inline. The
+/// template body is returned in `prompts/get` responses, with
+/// optional argument substitution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpPrompt {
+    /// Human-readable description (returned in `prompts/list`).
+    pub description: String,
+    /// The prompt template body. May contain `{{argument_name}}`
+    /// placeholders that are substituted from the `arguments` field
+    /// of a `prompts/get` request.
+    pub template: String,
+    /// The argument definitions for this prompt. Each argument has a
+    /// name, a description, and a required flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<AiMcpPromptArgument>,
+}
+
+/// AI-11 (#200): One prompt argument definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiMcpPromptArgument {
+    /// The argument name (used as the `{{name}}` placeholder in the
+    /// template).
+    pub name: String,
+    /// Human-readable description of the argument.
+    pub description: String,
+    /// Whether the argument is required (default false).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
 }
 
 /// MCP session policy (DW-087 `ai.mcp.sessions`).
