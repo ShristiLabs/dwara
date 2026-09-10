@@ -803,6 +803,8 @@ mod tests {
             stream: false,
             stream_options_include_usage: false,
             response_format: None,
+            prompt: None,
+            prompt_variables: Default::default(),
             other: Default::default(),
         }
     }

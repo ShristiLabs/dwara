@@ -1208,6 +1208,8 @@ mod tests {
             stream: false,
             stream_options_include_usage: false,
             response_format: None,
+            prompt: None,
+            prompt_variables: Default::default(),
             other: BTreeMap::new(),
         };
         let err = handle_a2a_request(&agent, &req).unwrap_err();

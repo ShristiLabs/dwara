@@ -243,6 +243,17 @@ pub struct ChatRequest {
     /// AI-06 (#196): structured-output format. Parsed from OpenAI
     /// `response_format` and translated by each adapter.
     pub response_format: Option<ResponseFormat>,
+    /// AI-14 (#202): server-side prompt template reference. When set,
+    /// the gateway resolves the named prompt template (from
+    /// `ai.experiments.prompts`), substitutes `prompt_variables` into
+    /// `{{var}}` placeholders, and prepends the result as a system
+    /// message before any existing system message. Format:
+    /// `"prompt_name"` (uses active version) or
+    /// `"prompt_name/version_name"`.
+    pub prompt: Option<String>,
+    /// AI-14 (#202): variables for prompt template substitution. Each
+    /// key maps to a `{{key}}` placeholder in the template body.
+    pub prompt_variables: BTreeMap<String, String>,
     /// Dialect-specific parameters the canonical surface does not model
     /// (e.g. `seed`, `presence_penalty`). Carried verbatim; only the
     /// OpenAI adapter re-emits them.

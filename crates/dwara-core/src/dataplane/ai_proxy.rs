@@ -1127,6 +1127,35 @@ where
     // the variant and returned its target in `candidates`. Here we
     // inject the variant's system message into the request (if any)
     // and record the assignment to analytics for attribution.
+    // AI-14 (#202): server-side prompt template resolution. When the
+    // client references a prompt template by name, resolve it from
+    // the experiments config, substitute variables, and prepend the
+    // system message BEFORE any existing system message.
+    if let Some(prompt_ref) = &chat_req.prompt {
+        let experiments = runtime.experiments_config();
+        let overrides = runtime.prompt_overrides();
+        let system = if let Some((name, version)) = prompt_ref.split_once('/') {
+            // Explicit version reference.
+            experiments
+                .and_then(|exp| exp.prompts.get(name))
+                .and_then(|p| p.versions.get(version))
+                .map(|v| v.system.clone())
+        } else {
+            // Active version (with runtime override).
+            crate::ai::experiments::active_prompt_system(experiments, overrides, prompt_ref)
+        };
+        if let Some(mut system) = system {
+            // Substitute {{var}} placeholders with prompt_variables.
+            for (key, value) in &chat_req.prompt_variables {
+                let placeholder = format!("{{{{{key}}}}}");
+                system = system.replace(&placeholder, value);
+            }
+            chat_req.messages.insert(
+                0,
+                crate::ai::types::ChatMessage::text(crate::ai::types::ChatRole::System, system),
+            );
+        }
+    }
     if let Some(crate::ai::CompiledModel::Experiment(test)) = runtime.model(&chat_req.model) {
         let variant = test.pick(rid);
         // Record the variant selection as a metric.

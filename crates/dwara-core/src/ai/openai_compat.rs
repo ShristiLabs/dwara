@@ -119,6 +119,23 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
     // AI-06 (#196): parse response_format into the typed field so
     // adapters can translate it across dialects.
     let response_format = parse_response_format(obj.get("response_format"));
+    // AI-14 (#202): parse the server-side prompt template reference
+    // and variables. The gateway resolves the template, substitutes
+    // variables, and prepends the result as a system message.
+    let prompt = obj
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let prompt_variables = obj
+        .get("prompt_variables")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     // Preserve every parameter the canonical surface does not model so
     // an OpenAI-to-OpenAI path is lossless.
     const KNOWN: &[&str] = &[
@@ -132,7 +149,9 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
         "stop",
         "stream",
         "stream_options",
-        "response_format", // AI-06: parsed into the typed field
+        "response_format",  // AI-06: parsed into the typed field
+        "prompt",           // AI-14: parsed into the typed field
+        "prompt_variables", // AI-14: parsed into the typed field
     ];
     let other = obj
         .iter()
@@ -154,6 +173,8 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
         stream,
         stream_options_include_usage,
         response_format,
+        prompt,
+        prompt_variables,
         other,
     })
 }

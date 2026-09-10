@@ -158,6 +158,8 @@ pub fn parse_anthropic_request(body: &Value) -> Result<ChatRequest, String> {
         stream,
         stream_options_include_usage: false,
         response_format: None,
+        prompt: None,
+        prompt_variables: Default::default(),
         other,
     })
 }
@@ -403,6 +405,8 @@ pub fn parse_gemini_request(body: &Value) -> Result<ChatRequest, String> {
         stream: false,
         stream_options_include_usage: false,
         response_format: None,
+        prompt: None,
+        prompt_variables: Default::default(),
         other,
     })
 }
