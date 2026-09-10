@@ -340,11 +340,17 @@ fn websocket_validation_rejects_out_of_bounds_idle_timeout() {
 fn websocket_validation_rejects_out_of_bounds_frame_size() {
     let issues = validate_ws_yaml("  websocket:\n    max_frame_size_bytes: 0\n");
     let joined = issues.join("\n");
-    assert!(joined.contains("max_frame_size_bytes must be in"), "{joined}");
+    assert!(
+        joined.contains("max_frame_size_bytes must be in"),
+        "{joined}"
+    );
 
     let issues = validate_ws_yaml("  websocket:\n    max_frame_size_bytes: 16777217\n");
     let joined = issues.join("\n");
-    assert!(joined.contains("max_frame_size_bytes must be in"), "{joined}");
+    assert!(
+        joined.contains("max_frame_size_bytes must be in"),
+        "{joined}"
+    );
 }
 
 // --- DP-05 (#253): frame scanner violation detection -----------------------

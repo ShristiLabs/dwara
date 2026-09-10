@@ -1,30 +1,28 @@
-# A2A protocol scaffold (DW-114)
+# A2A protocol (DW-114, AI-12 #252)
 
-> Implements issue DW-114 (M4, `edition/oss`, effort M) over the AI
-> gateway surface. Sources:
+> Implements issue DW-114 (M4, `edition/oss`, effort M) and AI-12
+> (#252, M12, the v0.3 JSON-RPC wire format) over the AI gateway
+> surface. Sources:
 > `crates/dwara-core/src/ai/a2a.rs` (the A2A provider adapter, the
-> Agent Card parser, the stubbed task lifecycle, the session model,
-> the compiled A2A surface -- its module docs carry the full contract),
-> the config schema in `config/ai.rs` (`A2aConfig`, `A2aAgent`,
-> `A2aAgentCard`, `A2aSessions`), validation in `snapshot/mod.rs`.
-> Tests: `crates/dwara-core/tests/a2a.rs` (Agent Card parsing, the
-> adapter's canonical <-> A2A JSON translation, the stubbed task
-> lifecycle, config validation, and the feature-gate behavior). The
-> white-box unit tests in `src/ai/a2a.rs` cover the private translation
-> paths not exercised through a public caller. Operator docs:
+> Agent Card parser, the task lifecycle state machine, the session
+> model, the compiled A2A surface -- its module docs carry the full
+> contract), the config schema in `config/ai.rs` (`A2aConfig`,
+> `A2aAgent`, `A2aAgentCard`, `A2aSessions`), validation in
+> `snapshot/mod.rs`. Tests: `crates/dwara-core/tests/a2a.rs` (Agent
+> Card parsing, the adapter's canonical <-> A2A v0.3 JSON translation,
+> the task lifecycle state machine, config validation, and the
+> feature-gate behavior). Operator docs:
 > [docs-site AI gateway guide](../../docs-site/guide/ai-gateway.md).
 
 The Agent-to-Agent (A2A) protocol is an emerging standard for
 inter-agent communication. DW-114 scaffolds the gateway's A2A surface
-compiled into the OSS build: the spec is NOT yet frozen, so the
-task lifecycle is STUBBED (every task-state transition returns an
-`A2AStub` error explaining that the spec is not frozen), while the
-adapter translation, Agent Card parsing, session model, and config
-schema are fully implemented. This keeps the call-site shape stable so
-the dataplane path compiles unchanged with or without the feature, and
-the actual task wiring lands when the spec freezes. No new
-dependencies are introduced (the scaffold is hand-rolled, the same
-locked M4 decision as MCP).
+compiled into the OSS build; AI-12 (#252) upgrades the adapter to the
+v0.3 JSON-RPC wire format (`message/send`, `message/stream`, the
+`parts[]`/`kind`-discriminated message shape, and Task/Message result
+detection). The task lifecycle state machine is fully implemented
+(legal transitions validated, illegal transitions return an
+`A2AError`). No new dependencies are introduced (the implementation is
+hand-rolled, the same locked M4 decision as MCP).
 
 ## The A2A provider adapter
 
@@ -33,23 +31,52 @@ the OpenAI/Anthropic/Gemini adapters and the MCP gateway. It holds no
 state and opens no connections; the transport is the agent's named
 upstream, driven from `dataplane::ai_proxy`.
 
-`build_request` translates a canonical `ChatRequest` into an A2A
-task-submit JSON body: the conversation is folded into the task's
-`message` field (the latest user message becomes the task message;
-prior messages are preserved under `history`). The body is a JSON-RPC
-2.0 envelope (`{"jsonrpc":"2.0","method":"tasks/submit","params":...}`)
-with the model, message, history, and optional sampling parameters
-(temperature, top_p, max_tokens, stop, stream).
+### build_request (v0.3, #252)
 
-`parse_response` parses an A2A task response back into the canonical
-`ChatResponse`: it tolerates both the JSON-RPC result envelope
-(`result.message`) and a bare `message` field. The task `state`
-(`completed`, `failed`, `canceled`) maps to a `FinishReason`.
-`parse_error` extracts the JSON-RPC 2.0 error envelope
-(`{"error":{"code","message","data"}}`). `parse_stream_event` handles
-SSE-ish streaming events (reusing the shared `ai::sse` framer): each
-event carries a `delta` with content fragments and an optional terminal
-`state`, plus a `usage` object.
+Translates a canonical `ChatRequest` into an A2A v0.3 JSON-RPC
+`message/send` (or `message/stream` for streaming) body. The latest
+user message is folded into `params.message.parts[]` using the
+`kind`-discriminated part shape:
+
+- `text` parts carry the text content.
+- `file` parts carry inline bytes (base64) or a URI.
+- `data` parts carry arbitrary JSON (serialized as text).
+
+System messages are folded as a text preamble (A2A has no system
+role). The message carries a generated `messageId` and `role: "user"`.
+Prior messages are NOT carried inline -- A2A uses `contextId` for
+multi-turn correlation, not an inline history. The JSON-RPC envelope
+is `{"jsonrpc":"2.0","id":"...","method":"message/send","params":...}`.
+
+### parse_response (v0.3, #252)
+
+Detects whether the JSON-RPC `result` is a `Message` (has `parts` or
+`kind: "message"`) or a `Task` (has `status` or `kind: "task"`). For
+Messages, text is extracted from `parts[]` (text, file, data kinds).
+For Tasks, text is extracted from `status.message.parts` first, then
+`artifacts[].parts`. The task state maps to `FinishReason`:
+`completed` -> `Stop`, `failed` -> `Other("failed")`, `canceled` ->
+`Other("canceled")`, `rejected` -> `Other("rejected")`.
+
+Backward compat: the adapter still accepts the older `content`/`type`
+message shape and the `result.message` wrapper for agents that have
+not migrated to v0.3.
+
+### parse_error
+
+Extracts the JSON-RPC 2.0 error envelope
+(`{"error":{"code","message","data"}}`).
+
+### parse_stream_event (v0.3, #252)
+
+Handles three stream event shapes:
+
+- **Message** (has `parts`): emits a content delta.
+- **TaskStatusUpdateEvent** (has `status`): emits a content delta from
+  `status.message` (if present) and a finish delta when the state is
+  terminal (`completed`, `failed`, `canceled`, `rejected`).
+- **TaskArtifactUpdateEvent** (has `artifact`): emits a content delta
+  from `artifact.parts`.
 
 ## Agent Card parsing
 
@@ -65,20 +92,21 @@ tolerated and the free-form shapes are kept as raw `serde_json::Value`.
 The gateway does not act on the `authentication` declaration today
 (transport auth comes from the agent's upstream config).
 
-## The stubbed task lifecycle
+## The task lifecycle state machine
 
 `TaskLifecycle` is the task state machine
 (`Submitted`, `Working`, `Completed`, `Failed`, `Canceled`). The wire
-names round-trip through `as_str` and `parse_state` (unknown states are
-tolerated, not rejected, since the spec is not frozen). Every
-transition (`submit`, `get_status`, `cancel`) returns an `A2AStub` error
-so callers fail loudly and attributably rather than silently no-op'ing.
-`A2ASession` mirrors MCP's session model (a session id, TTL, and
-max-concurrent cap) and its task methods (`submit_task`,
-`get_task_status`, `cancel_task`) are likewise stubbed.
-`handle_a2a_request` -- the seam the dataplane calls for an A2A-routed
-alias -- is stubbed today, returning `A2AStub` so the caller fails
-loudly. The actual wiring lands when the spec freezes.
+names round-trip through `as_str` and `parse_state` (unknown states
+are tolerated, not rejected, since the spec is not frozen). Legal
+transitions are validated by `TaskStateMachine`:
+`Submitted -> Working`, `Submitted -> Failed`, `Submitted -> Canceled`,
+`Working -> Completed`, `Working -> Failed`, `Working -> Canceled`.
+Illegal transitions return an `A2AError` naming the attempted and
+target states. `A2ASession` mirrors MCP's session model (a session id,
+TTL, and max-concurrent cap) and owns a `TaskStateMachine` per
+session. `handle_a2a_request` routes an A2A call through the existing
+`dataplane::ai_proxy` path (the transport is the agent's named
+upstream, exactly like a regular provider).
 
 ## Compiled A2A and the alias table
 
