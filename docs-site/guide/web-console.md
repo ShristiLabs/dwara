@@ -176,6 +176,23 @@ view and CRUD operation to that workspace.
   [Admin API](./admin-api#dev-fallback-never-in-production)) also
   serves the console in plaintext.
 
+## Console v3: live charts, CRUD flows, AI ops
+
+Console v3 adds three new capabilities:
+
+- **Live dashboard**: a "Live" view with real-time stat cards (active
+  requests, RPS, p50/p95/p99 latency, error rate) and a canvas-based
+  latency sparkline chart showing trends over a 60-point rolling
+  window. A per-route live table shows RPS and latency per route.
+- **CRUD flows**: the Routes and Upstreams views now support
+  create, edit, and delete via modal dialogs. Click "Create" to open
+  a JSON editor for a new entity, "Edit" to modify an existing one,
+  or "Delete" to remove it. Changes are sent via `POST`, `PUT`, and
+  `DELETE` to the entity CRUD endpoints.
+- **AI ops view**: an "AI Ops" view showing AI credential pool
+  health (active/exhausted/cooldown), MCP sessions and tools, and
+  experiment prompt overrides.
+
 ## Runnable demo
 
 Run this feature against a live gateway: `demos/09-operations/` (test

@@ -93,16 +93,46 @@ even if a human reformatted the file, while a real semantic change
 ## `lint`: advisory rules over the compiled snapshot, not the raw YAML
 
 Lint rules (`prefix-duplicate`, `regex-shadowed-by-exact`,
-`consumer-unused`, `policy-unused`, `upstream-unreferenced`) run
-against the already-*compiled* `Snapshot`, not the source YAML —
-because several of them (shadowed routes, unreferenced upstreams) are
-only knowable once route tables and references are actually resolved,
-the same information the gateway itself uses at request time. This is
-why `lint` requires a config that parses and validates first (exit 1
-if it doesn't): linting an unvalidated config would mean guessing at
-structure that validation would otherwise guarantee exists, and "your
-config is invalid" noise would drown out the advisory findings that
-are actually useful.
+`consumer-unused`, `policy-unused`, `upstream-unreferenced`,
+`config/version`) run against the already-*compiled* `Snapshot`, not
+the source YAML — because several of them (shadowed routes,
+unreferenced upstreams) are only knowable once route tables and
+references are actually resolved, the same information the gateway
+itself uses at request time. This is why `lint` requires a config
+that parses and validates first (exit 1 if it doesn't): linting an
+unvalidated config would mean guessing at structure that validation
+would otherwise guarantee exists, and "your config is invalid" noise
+would drown out the advisory findings that are actually useful.
+
+The `config/version` lint (CFG-03, #239) warns when the config's
+`version` field is older or newer than `CURRENT_CONFIG_VERSION`, so
+operators know when a config needs migration or was written for a
+newer dwara version.
+
+## `migrate`: upgrade configs to the current schema version (CFG-03, #239)
+
+`dwara migrate <file>` parses a config, sets its `version` to
+`CURRENT_CONFIG_VERSION`, and re-serializes. With `--in-place`, the
+migrated config is written back to the file; without it, the migrated
+config is printed to stdout. Migration notes are printed to stderr.
+
+## `explain`: decision trace for a mock request (USA-09, #231)
+
+`dwara explain --config <file> --method GET --path /foo` renders a
+human-readable explanation of what the gateway would do for a request
+matching the given method, path, headers, and consumer: route
+matching, authorization, rate limiting, transforms, upstream
+selection, and caching. It reuses the existing pure `replay::decide`
+machinery so the explanation is always consistent with the gateway's
+actual decision logic.
+
+## `import openapi --mock`: mock mode from OpenAPI examples (CFG-04, #240)
+
+`dwara import openapi <spec> --mock --output dwara.yaml` reads the
+OpenAPI `responses` examples and generates `mock` route actions with
+the example body and status code, instead of `proxy` actions. This
+lets an operator scaffold a fully functional mock API from an OpenAPI
+spec without any backend.
 
 ## The load generator rig
 

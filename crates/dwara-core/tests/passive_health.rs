@@ -65,6 +65,8 @@ fn health_cfg(consecutive_failures: u32, failure_min_volume: u32) -> PassiveHeal
         failure_min_volume,
         eject_ms: 5_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     }
 }
 
@@ -85,6 +87,8 @@ fn health_full(
         failure_min_volume,
         eject_ms,
         half_open_probes,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     }
 }
 
@@ -316,6 +320,7 @@ fn edge_params(failure_ratio: f64, failure_min_volume: u32) -> HealthParams {
         failure_min_volume,
         eject_ms: 1_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     }
 }
 
@@ -570,11 +575,13 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
     ));
 
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
             protocol: UpstreamProtocol::Http1,
@@ -603,6 +610,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -616,6 +624,8 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),
@@ -807,6 +817,7 @@ fn upstream_cfg(
     ConfigUpstream {
         name: "pool".into(),
         load_balancer,
+        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints,
         connection_cap: None,
@@ -818,6 +829,7 @@ fn upstream_cfg(
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
@@ -831,6 +843,7 @@ fn upstream_cfg(
 
 fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
@@ -840,6 +853,8 @@ fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),
@@ -1091,11 +1106,13 @@ async fn persistent_503s_eject_the_endpoint() {
 
 fn gateway_with_health(h: PassiveHealth) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
             protocol: UpstreamProtocol::Http1,
@@ -1115,6 +1132,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -1128,6 +1146,8 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

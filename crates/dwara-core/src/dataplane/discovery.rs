@@ -493,13 +493,15 @@ fn endpoints_from_srv(addrs: &[(IpAddr, u16, u32)]) -> Vec<Endpoint> {
 }
 
 /// One discovery refresh cycle: resolve, update the endpoint set.
+/// Returns `true` if the resolution succeeded, `false` on failure
+/// (used by the caller to apply backoff).
 async fn refresh_cycle(
     resolver: &DnsResolver,
     dns: &DnsDiscovery,
     lb: &Arc<UpstreamLb>,
     upstream_name: &str,
     obs: &Observability,
-) {
+) -> bool {
     obs.record_dns_discovery_refresh(upstream_name);
     let result = if dns.record_type == "SRV" {
         resolver.resolve_srv(&dns.hostname).await.map(|resolved| {
@@ -543,7 +545,7 @@ async fn refresh_cycle(
                     "DNS resolution yielded fewer than min_endpoints; keeping previous set"
                 );
                 // Keep the current set; do not update the balancer.
-                return;
+                return true;
             }
             // Update the balancer's endpoint set atomically. Unchanged
             // addresses keep their in-flight counters and health
@@ -568,6 +570,7 @@ async fn refresh_cycle(
                 endpoints.len(),
                 ttl
             );
+            true
         }
         Err(err) => {
             obs.record_dns_discovery_refresh_failure(upstream_name);
@@ -597,13 +600,23 @@ async fn refresh_cycle(
                 );
                 obs.set_dns_discovery_endpoints(upstream_name, 0);
             }
+            false
         }
     }
 }
 
+/// REL-12 (#223): maximum backoff cap (5 minutes). After this cap is
+/// reached, the loop continues at the cap until a successful resolution
+/// resets it.
+const DNS_BACKOFF_MAX_S: u64 = 300;
+
 /// The per-upstream discovery loop. Runs until the task is aborted by a
 /// respawn or shutdown. Each cycle resolves, updates the endpoint set,
-/// and sleeps `refresh_interval_s` seconds.
+/// and sleeps `refresh_interval_s` seconds. REL-12 (#223): on failure,
+/// applies exponential backoff (doubled each failure, capped at
+/// `DNS_BACKOFF_MAX_S`) to avoid hammering the DNS server during an
+/// outage. A successful resolution resets the backoff to
+/// `refresh_interval_s`.
 async fn discovery_loop(
     resolver: Arc<DnsResolver>,
     dns: DnsDiscovery,
@@ -612,15 +625,24 @@ async fn discovery_loop(
 ) {
     let upstream_name = handle.name().to_string();
     let lb = Arc::clone(handle.lb());
+    // REL-12 (#223): current backoff interval. Starts at
+    // refresh_interval_s; doubled on each failure, capped at
+    // DNS_BACKOFF_MAX_S. Reset to refresh_interval_s on success.
+    let mut backoff_s = dns.refresh_interval_s;
     loop {
-        refresh_cycle(&resolver, &dns, &lb, &upstream_name, &obs).await;
-        // Sleep refresh_interval_s. The resolver cache is disabled, so
-        // every lookup hits the name server; the sleep is purely the
-        // cadence. Using refresh_interval_s keeps the cycle predictable
-        // and bounded by the config (1..=3600s). A future enhancement
-        // could use the record TTL to schedule the next refresh sooner
-        // for short-TTL records.
-        tokio::time::sleep(Duration::from_secs(dns.refresh_interval_s)).await;
+        let ok = refresh_cycle(&resolver, &dns, &lb, &upstream_name, &obs).await;
+        let sleep_s = if ok {
+            // Success: reset backoff to the configured refresh interval.
+            backoff_s = dns.refresh_interval_s;
+            dns.refresh_interval_s
+        } else {
+            // Failure: sleep the current backoff, then double it for
+            // the next failure (capped at DNS_BACKOFF_MAX_S).
+            let current = backoff_s;
+            backoff_s = (backoff_s * 2).min(DNS_BACKOFF_MAX_S);
+            current
+        };
+        tokio::time::sleep(Duration::from_secs(sleep_s)).await;
     }
 }
 

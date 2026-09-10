@@ -295,6 +295,7 @@ fn ttl_override_equal_to_base_is_unchanged() {
 
 fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
     Upstream {
+        hash_on: None,
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
         protocol: UpstreamProtocol::Http1,
@@ -314,6 +315,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: Some(cfg),
         dns_discovery: None,
         peak_ewma: None,

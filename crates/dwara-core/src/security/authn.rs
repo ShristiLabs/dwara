@@ -1330,6 +1330,12 @@ impl JwtVerifier {
     /// per `refresh_secs` by construction.
     async fn key_for(&self, kid: Option<&str>, alg: Algorithm) -> Result<Jwk, AuthError> {
         let stale_after = Duration::from_secs(self.cfg.refresh_secs.max(1));
+        // SEC-12 (#215): the failed-refresh backoff window is now
+        // configurable via `stale_on_error_secs` (default
+        // `min(refresh_secs, 300)`). The unknown-kid throttle still
+        // uses the tighter `min(5s, stale_after)` so forged random-kid
+        // tokens cannot drive a fetch storm.
+        let failure_backoff = Duration::from_secs(self.cfg.stale_on_error_secs().max(1));
         let forced_min_interval = JWKS_FORCED_REFRESH_MIN_INTERVAL.min(stale_after);
         let fresh = {
             let keys = self.cache.keys.read().expect("jwks cache poisoned");
@@ -1370,7 +1376,7 @@ impl JwtVerifier {
                         .last_failed_refresh
                         .read()
                         .expect("jwks cache poisoned");
-                    failed.is_some_and(|t| t.elapsed() < forced_min_interval)
+                    failed.is_some_and(|t| t.elapsed() < failure_backoff)
                 };
                 if !in_failure_backoff {
                     match self.fetch().await {
@@ -1438,14 +1444,42 @@ impl JwtVerifier {
             // set without touching the JWKS endpoint.
             return Err(AuthError::Invalid("token key id is unknown"));
         }
-        let set = self.fetch().await?;
-        if let Some(jwk) = find_jwk(&set, kid, alg) {
-            return Ok(jwk.clone());
+        // SEC-12 (#215): on fetch failure, degrade gracefully — the
+        // kid is unknown in the cached set, but a transient JWKS
+        // outage should surface as 401 (invalid token) not 500
+        // (unavailable) when there ARE cached keys. The retired set
+        // (DW-046) is the last resort.
+        match self.fetch().await {
+            Ok(set) => {
+                if let Some(jwk) = find_jwk(&set, kid, alg) {
+                    return Ok(jwk.clone());
+                }
+                // DW-046: the forced rotation fetch delivered a set
+                // without the kid; the retired set's grace decides.
+                self.find_retired(kid, alg)
+                    .ok_or(AuthError::Invalid("token key id is unknown"))
+            }
+            Err(e) => {
+                // Fetch failed: try the retired set (DW-046) before
+                // surfacing the error. When the cache is empty there
+                // is nothing to degrade to.
+                if let Some(jwk) = self.find_retired(kid, alg) {
+                    return Ok(jwk);
+                }
+                let cached_nonempty = !self
+                    .cache
+                    .keys
+                    .read()
+                    .expect("jwks cache poisoned")
+                    .keys
+                    .is_empty();
+                if cached_nonempty {
+                    Err(AuthError::Invalid("token key id is unknown"))
+                } else {
+                    Err(e)
+                }
+            }
         }
-        // DW-046: the forced rotation fetch delivered a set without the
-        // kid; the retired set's grace decides.
-        self.find_retired(kid, alg)
-            .ok_or(AuthError::Invalid("token key id is unknown"))
     }
 
     /// The retired-set fallback (DW-046): the immediately-previous key

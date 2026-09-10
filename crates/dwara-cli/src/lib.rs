@@ -44,6 +44,8 @@ pub mod k8s_conformance;
 // USA-02 (#179): live operator views over the admin API
 // (`dwara status`, `dwara top`).
 pub mod status;
+// USA-09 (#231): `dwara explain` — decision trace for a mock request.
+pub mod explain;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};
@@ -88,6 +90,37 @@ pub fn validate_config_text(text: &str) -> ValidateOutcome {
 pub fn format_config_text(text: &str) -> Result<String, String> {
     let gateway = parse_gateway(text).map_err(|e| format!("parse failed: {e}"))?;
     gateway_to_yaml(&gateway).map_err(|e| format!("serialize failed: {e}"))
+}
+
+/// CFG-03 (#239): migrate a config to the current schema version.
+/// Parses the config, sets the version to `CURRENT_CONFIG_VERSION`,
+/// and re-serializes. Returns the migrated config YAML and a list of
+/// migration notes (what changed, if anything).
+pub fn migrate_config(text: &str) -> Result<(String, Vec<String>), String> {
+    let mut gateway = parse_gateway(text).map_err(|e| format!("parse failed: {e}"))?;
+    let mut notes = Vec::new();
+
+    if gateway.version < dwara_core::config::CURRENT_CONFIG_VERSION {
+        notes.push(format!(
+            "upgraded config version from {} to {}",
+            gateway.version,
+            dwara_core::config::CURRENT_CONFIG_VERSION
+        ));
+        gateway.version = dwara_core::config::CURRENT_CONFIG_VERSION;
+    } else if gateway.version == dwara_core::config::CURRENT_CONFIG_VERSION {
+        notes.push("config is already at the current version".to_string());
+    } else {
+        notes.push(format!(
+            "config version {} is newer than the current schema version {}; downgrading to {}",
+            gateway.version,
+            dwara_core::config::CURRENT_CONFIG_VERSION,
+            dwara_core::config::CURRENT_CONFIG_VERSION
+        ));
+        gateway.version = dwara_core::config::CURRENT_CONFIG_VERSION;
+    }
+
+    let yaml = gateway_to_yaml(&gateway).map_err(|e| format!("serialize failed: {e}"))?;
+    Ok((yaml, notes))
 }
 
 /// Compile both documents and report route/upstream/consumer deltas as
@@ -190,15 +223,26 @@ fn hash_by_name<'a>(
 }
 
 /// One advisory lint finding: `kind/name: message`.
+/// USA-08 (#230): `auto_fix` carries a suggested command or edit that
+/// would resolve the finding, when one is available. `None` means the
+/// finding is advisory only (no automatic fix is safe).
 pub struct LintWarning {
     pub kind: &'static str,
     pub name: String,
     pub message: String,
+    /// USA-08 (#230): a suggested auto-fix command or description of
+    /// the edit that would resolve this finding. Printed by `dwara lint
+    /// --fix` as a hint. `None` for findings with no safe automatic fix.
+    pub auto_fix: Option<String>,
 }
 
 impl std::fmt::Display for LintWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}: {}", self.kind, self.name, self.message)
+        write!(f, "{}/{}: {}", self.kind, self.name, self.message)?;
+        if let Some(fix) = &self.auto_fix {
+            write!(f, "\n  fix: {fix}")?;
+        }
+        Ok(())
     }
 }
 
@@ -226,6 +270,35 @@ impl std::fmt::Display for LintWarning {
 pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
     let mut warnings = Vec::new();
 
+    // CFG-03 (#239): config version lint. Warn when the config's
+    // version is older than the current schema version (the config may
+    // use deprecated fields or miss new defaults). Also warn when the
+    // version is NEWER than the current schema (the config was written
+    // for a newer dwara version and may use unknown features).
+    if gateway.version < dwara_core::config::CURRENT_CONFIG_VERSION {
+        warnings.push(LintWarning {
+            kind: "config",
+            name: "version".to_string(),
+            message: format!(
+                "config version {} is older than the current schema version {}; run 'dwara migrate' to upgrade",
+                gateway.version,
+                dwara_core::config::CURRENT_CONFIG_VERSION
+            ),
+            auto_fix: Some("dwara migrate <config-file>".to_string()),
+        });
+    } else if gateway.version > dwara_core::config::CURRENT_CONFIG_VERSION {
+        warnings.push(LintWarning {
+            kind: "config",
+            name: "version".to_string(),
+            message: format!(
+                "config version {} is newer than the current schema version {}; the config may use features not supported by this dwara version",
+                gateway.version,
+                dwara_core::config::CURRENT_CONFIG_VERSION
+            ),
+            auto_fix: None,
+        });
+    }
+
     // prefix-duplicate: equal-length ties resolve to the FIRST declared
     // prefix route, so later duplicates are dead config.
     let mut seen_prefixes: BTreeSet<&str> = BTreeSet::new();
@@ -240,6 +313,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                     "duplicate prefix pattern '{}' (an earlier prefix route wins equal-length ties; this route never matches)",
                     route.r#match.path.value
                 ),
+                auto_fix: Some(format!(
+                    "remove route '{}' or change its prefix pattern to a unique value",
+                    route.name
+                )),
             });
         }
     }
@@ -274,6 +351,9 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                      (exact lookup wins); those paths never reach this route",
                     path.value
                 ),
+                auto_fix: Some(format!(
+                    "remove exact route '{exact}' or tighten the regex to exclude its paths"
+                )),
             });
         }
     }
@@ -329,6 +409,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                     "unused: referenced by no authorization rule and bound to no jwt provider \
                           (advisory: runtime credential use is not statically visible)"
                         .to_string(),
+                auto_fix: Some(format!(
+                    "remove consumer '{}' or add it to an authorization rule / jwt provider",
+                    c.name
+                )),
             });
         }
     }
@@ -357,6 +441,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 message: "unused: attached to no consumer, route, service, listener, or \
                           gateway"
                     .to_string(),
+                auto_fix: Some(format!(
+                    "remove policy '{}' or attach it to a consumer, route, service, listener, or gateway",
+                    p.name
+                )),
             });
         }
     }
@@ -375,6 +463,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 kind: "upstream",
                 name: u.name.clone(),
                 message: "unreferenced: no service targets this upstream".to_string(),
+                auto_fix: Some(format!(
+                    "remove upstream '{}' or add a service that targets it",
+                    u.name
+                )),
             });
         }
     }

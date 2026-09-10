@@ -195,6 +195,7 @@ fn empty_document_is_valid() {
     assert_eq!(
         gateway,
         dwara_core::config::Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
@@ -204,6 +205,8 @@ fn empty_document_is_valid() {
             policies: vec![],
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),

@@ -67,6 +67,7 @@ fn proxy_route(name: &str, kind: PathMatchKind, value: &str) -> Route {
         compression: None,
         limits: None,
         authorization: None,
+        security_headers_opt_out: false,
         deprecation: None,
         maintenance: None,
         transforms: None,
@@ -96,6 +97,7 @@ fn service(name: &str, upstream: &str) -> Service {
 
 fn upstream(name: &str) -> Upstream {
     Upstream {
+        hash_on: None,
         name: name.into(),
         load_balancer: LoadBalancer::RoundRobin,
         protocol: UpstreamProtocol::Http1,
@@ -115,6 +117,7 @@ fn upstream(name: &str) -> Upstream {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
@@ -130,6 +133,7 @@ fn upstream(name: &str) -> Upstream {
 /// one upstream.
 fn base_gateway() -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![listener("l", "0.0.0.0", 8080)],
         routes: vec![proxy_route("r", PathMatchKind::Exact, "/x")],
@@ -139,6 +143,8 @@ fn base_gateway() -> Gateway {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),
@@ -1031,6 +1037,7 @@ fn validation_rejects_missing_trusted_ca_file_on_jwt_provider() {
         algorithms: vec!["RS256".into()],
         refresh_secs: 300,
         retired_key_grace_secs: None,
+        stale_on_error_secs: None,
         leeway_secs: 30,
         consumer: None,
     });
@@ -1050,6 +1057,7 @@ fn validation_rejects_trusted_ca_file_with_http_jwks_url() {
         algorithms: vec!["RS256".into()],
         refresh_secs: 300,
         retired_key_grace_secs: None,
+        stale_on_error_secs: None,
         leeway_secs: 30,
         consumer: None,
     });

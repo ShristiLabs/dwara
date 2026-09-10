@@ -244,6 +244,7 @@ impl Reconciler {
         // --- Gateway API translation ---
         // Translate each Gateway that references an accepted GatewayClass.
         let mut merged_gateway = crate::config::Gateway {
+            version: 1,
             listeners: Vec::new(),
             routes: Vec::new(),
             services: Vec::new(),
@@ -252,6 +253,8 @@ impl Reconciler {
             policies: Vec::new(),
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             trusted_proxies: Vec::new(),
             max_concurrent_requests: None,
             load_shed_dry_run: false,

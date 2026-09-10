@@ -48,7 +48,7 @@ pub struct LoadedSpec {
 /// and links to the specs. File specs are loaded (read + parsed) at
 /// build time; URL specs are fetched lazily at render time (the
 /// upstream may be down at publish time but up at render time).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DevPortal {
     config: Arc<DevPortalConfig>,
     file_specs: Arc<Vec<LoadedSpec>>,

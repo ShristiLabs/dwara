@@ -166,6 +166,36 @@ pub fn webpki_root_store() -> rustls::RootCertStore {
     roots
 }
 
+/// REL-08 (#219): the OS-native root CA store as a rustls
+/// `RootCertStore`. Loaded via `rustls-native-certs`, which reads the
+/// platform trust store (macOS keychain, Linux CA bundle, Windows root
+/// store). Used by upstreams that opt into `use_system_roots` instead of
+/// the bundled webpki set. Failures to load native certs fall back to
+/// the webpki set rather than failing every TLS handshake, because a
+/// missing OS trust store is a deployment mistake, not a security
+/// decision — and the operator's intent ("trust the OS") is best
+/// approximated by "trust what we have" rather than "trust nothing".
+pub fn system_root_store() -> rustls::RootCertStore {
+    let res = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    for c in res.certs {
+        let _ = roots.add(c);
+    }
+    if roots.is_empty() {
+        // No native certs (or every cert failed to parse): fall back to
+        // webpki rather than fail every handshake (an empty store is
+        // never a valid configuration). Any load errors are logged at
+        // debug level — the operator opted into the OS store and a
+        // silent fallback is preferable to a loud failure that blocks
+        // all traffic to this upstream.
+        for e in res.errors {
+            tracing::debug!(code = "native_cert_load_error", "{e}");
+        }
+        return webpki_root_store();
+    }
+    roots
+}
+
 /// Build a rustls `RootCertStore` from a PEM file of CA certificates
 /// (#121). The file may carry SEVERAL certificates — a typical CA bundle
 /// lists an anchor plus intermediates — and every certificate in it

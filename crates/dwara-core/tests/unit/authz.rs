@@ -37,6 +37,7 @@ fn identity(consumer: &str, claims: &[(&str, &str)]) -> Identity {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         body_digest: None,
+        agent: None,
     }
 }
 

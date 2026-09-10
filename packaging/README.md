@@ -64,3 +64,58 @@ foreign-arch leg needs no QEMU), making a published image byte-for-byte
 the published tarball binary. Local from-source builds keep using
 `Dockerfile.scratch` / `Dockerfile.distroless`. Nothing builds on PRs
 or pushes to main.
+
+## OS packages (.deb, .rpm, .apk)
+
+OS packages are built by `.github/workflows/os-packages.yml` on `v*`
+tag push (same trigger as `release-artifacts.yml`). The workflow:
+
+1. Downloads the verified musl tarballs from the `release-artifacts`
+   workflow (or builds from source as a fallback).
+2. Stages the binaries in `packaging/staging/`.
+3. Runs [nfpm](https://github.com/goreleaser/nfpm) with
+   `packaging/nfpm.yaml` to produce `.deb`, `.rpm`, and `.apk`
+   packages for amd64 and arm64.
+4. Generates sha256 checksums.
+5. Attaches the packages to the GitHub Release.
+
+### Local builds
+
+```sh
+packaging/build-packages.sh [version]
+```
+
+This script builds the musl binaries via Docker, stages them, and runs
+nfpm to produce all three package formats for both architectures. The
+packages are written to `dist/packages/`.
+
+### Package contents
+
+Each package includes:
+
+- `/usr/bin/dwara` — the gateway binary
+- `/usr/bin/dwara-cli` — the CLI
+- `/etc/systemd/system/dwara.service` — the systemd unit
+- `/etc/dwara/dwara.yaml.example` — a sample config
+
+The post-install script creates a `dwara` system user, the
+`/var/lib/dwara` data directory, and the `/etc/dwara` config directory.
+If no `/etc/dwara/dwara.yaml` exists, the example config is copied
+into place.
+
+### Installation
+
+```sh
+# Debian/Ubuntu
+dpkg -i dwara-<version>-amd64.deb
+systemctl enable --now dwara
+
+# RHEL/Fedora
+rpm -i dwara-<version>-amd64.rpm
+systemctl enable --now dwara
+
+# Alpine
+apk add --allow-untrusted dwara-<version>-amd64.apk
+rc-update add dwara default
+service dwara start
+```

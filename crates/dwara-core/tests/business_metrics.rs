@@ -60,6 +60,7 @@ fn attach_analytics(dp: &Arc<DataPlane>) -> AnalyticsHandle {
         DEFAULT_RETENTION_MS,
         100,
         0,
+        None,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));
@@ -318,7 +319,7 @@ async fn journey_query_returns_correlated_requests() {
 async fn dimension_query_returns_rollup() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("a.db").to_str().unwrap().to_string();
-    let store = EmbeddedAnalytics::open(&db_path, DEFAULT_RETENTION_MS, 50, 0).unwrap();
+    let store = EmbeddedAnalytics::open(&db_path, DEFAULT_RETENTION_MS, 50, 0, None).unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let _workers = store.spawn_workers(shutdown_rx);
 

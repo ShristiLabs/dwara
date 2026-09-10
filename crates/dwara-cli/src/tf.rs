@@ -239,6 +239,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
 
     let allow_empty_routes = routes.is_empty();
     Ok(Gateway {
+        version: 1,
         listeners,
         routes,
         services,
@@ -247,6 +248,8 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,
@@ -436,6 +439,7 @@ fn parse_route_attrs(v: &Value) -> Result<Route, String> {
         compression: None,
         limits: None,
         authorization: None,
+        security_headers_opt_out: false,
         deprecation: None,
         maintenance: None,
         transforms: None,
@@ -505,6 +509,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
             LoadBalancer::LeastRequests => "least_requests",
             LoadBalancer::Random => "random",
             LoadBalancer::IpHash => "ip_hash",
+            LoadBalancer::Maglev => "maglev",
             LoadBalancer::PeakEwma => "peak_ewma",
         }),
     );
@@ -513,6 +518,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
         json!(match u.protocol {
             UpstreamProtocol::Http1 => "http1",
             UpstreamProtocol::Http2 => "http2",
+            UpstreamProtocol::H2c => "h2c",
             UpstreamProtocol::Https => "https",
             UpstreamProtocol::H3 => "h3",
         }),
@@ -536,10 +542,13 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         Some("least_requests") => LoadBalancer::LeastRequests,
         Some("random") => LoadBalancer::Random,
         Some("ip_hash") => LoadBalancer::IpHash,
+        Some("maglev") => LoadBalancer::Maglev,
+        Some("peak_ewma") => LoadBalancer::PeakEwma,
         _ => LoadBalancer::RoundRobin,
     };
     let protocol = match v.get("protocol").and_then(Value::as_str) {
         Some("http2") => UpstreamProtocol::Http2,
+        Some("h2c") => UpstreamProtocol::H2c,
         Some("https") => UpstreamProtocol::Https,
         Some("h3") => UpstreamProtocol::H3,
         _ => UpstreamProtocol::Http1,
@@ -567,8 +576,10 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
     Ok(Upstream {
         name,
         load_balancer,
+        hash_on: None,
         protocol,
         trusted_ca_file: None,
+        use_system_roots: false,
         endpoints,
         connection_cap: None,
         slow_start_ms: None,
@@ -695,6 +706,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
                 LoadBalancer::LeastRequests => "least_requests",
                 LoadBalancer::Random => "random",
                 LoadBalancer::IpHash => "ip_hash",
+                LoadBalancer::Maglev => "maglev",
                 LoadBalancer::PeakEwma => "peak_ewma",
             }
         ));
@@ -703,6 +715,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
             match u.protocol {
                 UpstreamProtocol::Http1 => "http1",
                 UpstreamProtocol::Http2 => "http2",
+                UpstreamProtocol::H2c => "h2c",
                 UpstreamProtocol::Https => "https",
                 UpstreamProtocol::H3 => "h3",
             }
@@ -1360,6 +1373,7 @@ mod tests {
 
     fn sample_gateway() -> Gateway {
         Gateway {
+            version: 1,
             listeners: vec![Listener {
                 name: "main".to_string(),
                 address: "127.0.0.1".to_string(),
@@ -1395,6 +1409,7 @@ mod tests {
                 compression: None,
                 limits: None,
                 authorization: None,
+                security_headers_opt_out: false,
                 deprecation: None,
                 maintenance: None,
                 transforms: None,
@@ -1429,8 +1444,10 @@ mod tests {
             upstreams: vec![Upstream {
                 name: "api-upstream".to_string(),
                 load_balancer: LoadBalancer::RoundRobin,
+                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 trusted_ca_file: None,
+                use_system_roots: false,
                 endpoints: vec![
                     Endpoint {
                         address: "127.0.0.1".to_string(),
@@ -1468,6 +1485,8 @@ mod tests {
             policies: Vec::new(),
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             trusted_proxies: Vec::new(),
             max_concurrent_requests: None,
             load_shed_dry_run: false,
@@ -1644,6 +1663,7 @@ mod tests {
     #[test]
     fn empty_state_round_trips() {
         let gw = Gateway {
+            version: 1,
             listeners: Vec::new(),
             routes: Vec::new(),
             services: Vec::new(),
@@ -1652,6 +1672,8 @@ mod tests {
             policies: Vec::new(),
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             trusted_proxies: Vec::new(),
             max_concurrent_requests: None,
             load_shed_dry_run: false,

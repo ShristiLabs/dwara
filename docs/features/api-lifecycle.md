@@ -1,4 +1,4 @@
-# API lifecycle management (DW-110)
+# API lifecycle management (DW-110, USA-12 / #233)
 
 > Implements issue DW-110 (three sub-concerns, hand-rolled over
 > existing substrates, no new dependencies). Sources:
@@ -25,10 +25,7 @@
 Three concerns that span the lifetime of an API surface the gateway
 fronts, all hand-rolled over existing substrates (no new
 dependencies): the developer portal, environment profiles, and the
-journey recorder. The module is compiled into the OSS build
-API lifecycle; without it, the module is not compiled
-and the top-level `lifecycle` config block is accepted but inert
-(validation warns, mirroring the `a2a`/`graphql` pattern).
+journey recorder. The module is always compiled into the OSS build.
 
 `lifecycle` depends on `config`, `observability`, and `analytics` (the
 raw table the journey recorder stores into). It never imports
@@ -44,6 +41,13 @@ listing of the APIs, their versions, and links to the specs. It is
 served at a configured reserved path (before route resolution, like
 `/healthz`). The portal is read-only (no CRUD): it renders the specs
 the operator already configured.
+
+USA-12 (#233): the portal is built at snapshot compile time when
+`lifecycle.portal.enabled` is true, stored in the `Snapshot`, and
+served at its configured path (default `/portal`) as a reserved path
+that shadows any configured route. The `serve_portal` function in
+`dataplane/proxy.rs` checks the request path against the portal's
+configured path and returns the rendered HTML.
 
 `DevPortal::build` loads file specs at build time (read + parse as
 JSON, extract `info.title` and `info.version`); URL specs are deferred

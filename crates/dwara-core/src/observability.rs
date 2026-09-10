@@ -323,6 +323,19 @@ pub struct AccessRecord {
     pub shed: bool,
     pub status: u16,
     pub duration_ms: f64,
+    /// Inbound request body bytes (PERF-12, #209): the declared
+    /// `Content-Length` when present, 0 for streamed/chunked request
+    /// bodies (counting streamed request bytes would require wrapping
+    /// the upstream-forwarded body; the response-side count is the
+    /// primary signal for capacity planning and top-talker reports).
+    pub bytes_in: u64,
+    /// Outbound response body bytes (PERF-12, #209): counted frame-by-
+    /// frame as the response body streams to the client, WITHOUT
+    /// buffering. An `Arc<AtomicU64>` so the `CountingBody` wrapper
+    /// can increment it from `poll_frame` while the access record is
+    /// held by the caller; the final value is read when the body
+    /// completes and the deferred access log / analytics are emitted.
+    pub bytes_out: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Custom analytics dimensions (DW-043): config-declared
     /// header-sourced tags, captured at record creation. Analytics-
     /// only — deliberately NOT part of `emit_access`'s redacted
@@ -348,6 +361,8 @@ impl AccessRecord {
             shed: false,
             status: 0,
             duration_ms: 0.0,
+            bytes_in: 0,
+            bytes_out: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             custom: Vec::new(),
         }
     }
@@ -356,7 +371,12 @@ impl AccessRecord {
 /// Emit one access-log event (one JSON line under the binary's
 /// subscriber). The field list is exhaustive and redacted by
 /// construction: no headers, no query string, no credentials.
+/// `bytes_in`/`bytes_out` (PERF-12, #209): `bytes_in` is the declared
+/// `Content-Length` (0 for chunked); `bytes_out` is the frame-counted
+/// response body size (read from the atomic the `CountingBody`
+/// wrapper updated as frames streamed to the client).
 pub fn emit_access(rec: &AccessRecord) {
+    let bytes_out = rec.bytes_out.load(std::sync::atomic::Ordering::Relaxed);
     tracing::info!(
         target: "dwara::access",
         request_id = %rec.request_id,
@@ -372,6 +392,8 @@ pub fn emit_access(rec: &AccessRecord) {
         rate_limited = rec.rate_limited,
         broken = rec.broken,
         shed = rec.shed,
+        bytes_in = rec.bytes_in,
+        bytes_out = bytes_out,
         "access"
     );
 }
@@ -506,6 +528,10 @@ pub struct Observability {
     /// full or the stream disabled); scrape-time snapshot, same model
     /// as `dwara_events_dropped_total`.
     access_records_dropped: IntGauge,
+    /// REL-10 (#221): access records dropped by sampled degradation
+    /// (probabilistic pre-full drop). Scrape-time snapshot of the
+    /// analytics store's counter.
+    access_records_sampled_dropped: IntGauge,
     /// DW-039: WebSocket policy decisions — a CLOSED label set
     /// (`origin_denied`, `rate_closed`) over the route label space
     /// (config-bounded, the same cardinality class as
@@ -1037,6 +1063,16 @@ impl Observability {
              the stream disabled by the current generation); scrape-time \
              snapshot of the stream's monotonic counter (DW-121) — the \
              never-block posture's honest loss counter.",
+        )
+        .expect("valid metric definition");
+        let access_records_sampled_dropped = IntGauge::new(
+            "dwara_access_records_sampled_dropped_total",
+            "Access records dropped by sampled degradation (REL-10, #221): \
+             records probabilistically dropped when the analytics channel \
+             fill ratio exceeded the high watermark, before the channel \
+             was full. Scrape-time snapshot of the analytics store's \
+             monotonic counter — distinct from \
+             dwara_access_records_dropped_total (channel was full).",
         )
         .expect("valid metric definition");
         let split_picks_total = IntCounterVec::new(
@@ -1759,6 +1795,7 @@ impl Observability {
             Box::new(access_records_streamed_total.clone()),
             Box::new(access_records_offered.clone()),
             Box::new(access_records_dropped.clone()),
+            Box::new(access_records_sampled_dropped.clone()),
             Box::new(websocket_policy_total.clone()),
             Box::new(split_picks_total.clone()),
             Box::new(sticky_sessions_total.clone()),
@@ -1859,6 +1896,7 @@ impl Observability {
             access_records_streamed_total,
             access_records_offered,
             access_records_dropped,
+            access_records_sampled_dropped,
             websocket_policy_total,
             split_picks_total,
             sticky_sessions_total,
@@ -2751,6 +2789,14 @@ impl Observability {
     /// [`Self::set_access_records_offered`].
     pub fn set_access_records_dropped(&self, dropped: i64) {
         self.access_records_dropped.set(dropped);
+    }
+
+    /// Set the `dwara_access_records_sampled_dropped_total` gauge
+    /// (REL-10, #221): records dropped by sampled degradation.
+    /// Scrape-time snapshot setter; see
+    /// [`Self::set_access_records_dropped`].
+    pub fn set_access_records_sampled_dropped(&self, dropped: i64) {
+        self.access_records_sampled_dropped.set(dropped);
     }
 
     /// Count one split dispatch decision (DW-040) in

@@ -449,18 +449,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // bind UDP sockets and run a QUIC accept loop, not a TCP accept loop.
     // They reuse the TlsTermination cert material for the QUIC handshake.
     let mut h3_listeners: Vec<(Listener, Arc<TlsTermination>)> = Vec::new();
+    // DP-01 (#234): UDP L4 listeners are collected separately — they
+    // bind a UDP socket and run the UdpDispatcher recv loop.
+    let mut udp_listeners: Vec<Listener> = Vec::new();
     for l in &configured {
-        // DW-103: UDP listeners bind a UDP socket (not TCP). The UDP
-        // dispatcher is STUBBED, so skip them in the TCP bind loop --
-        // a log line documents that the listener is inert. TCP
-        // listeners go through the normal bind_listener path below.
+        // DP-01 (#234): UDP listeners bind a UDP socket and run the
+        // UdpDispatcher. Collect them for separate binding below.
         if l.protocol == ListenerProtocol::Udp {
-            tracing::info!(
-                code = "udp_listener_skipped",
-                addr = %format!("{}:{}", l.address, l.port),
-                listener = %l.name,
-                "udp listener is stubbed (DW-103 follow-up); not binding"
-            );
+            udp_listeners.push(l.clone());
             continue;
         }
         // DW-088: H3 listeners are handled separately (UDP/QUIC, not
@@ -969,7 +965,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(|r| r.effective())
                 .unwrap_or(dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS);
             let flush = cfg.flush_ms.unwrap_or(1000);
-            match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush, 0) {
+            // REL-10 (#221): resolve sampled degradation config.
+            let sampled_degradation = cfg.sampled_degradation.as_ref().map(|d| {
+                dwara_core::analytics::SampledDegradation::from_config(
+                    d.high_watermark,
+                    d.low_watermark,
+                    d.keep_rate,
+                )
+            });
+            match dwara_core::analytics::EmbeddedAnalytics::open(
+                &cfg.path,
+                retention,
+                flush,
+                0,
+                sampled_degradation,
+            ) {
                 Ok(store) => {
                     // DW-092: attach live in-process sketches when the
                     // config carries a `live_sketches` block (default
@@ -1274,6 +1284,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // DP-01 (#234): Spawn UDP L4 listener tasks. Each UDP listener
+    // binds a UdpSocket and runs the UdpDispatcher recv loop.
+    let mut udp_tasks = Vec::new();
+    for listener in udp_listeners {
+        let dp = Arc::clone(&dp);
+        let state = Arc::clone(&state);
+        let bind_addr = format!("{}:{}", listener.address, listener.port);
+        // Validation guarantees UDP listeners have an `l4` block.
+        let l4_cfg = listener
+            .l4
+            .clone()
+            .expect("validated udp listener has l4 config");
+        let l4_proxy = dwara_core::dataplane::l4::L4ProxyConfig::from_config(&l4_cfg);
+        let dispatcher = dwara_core::dataplane::l4::UdpDispatcher::new(l4_proxy);
+        let listener_name = listener.name.clone();
+        udp_tasks.push(tokio::spawn(async move {
+            let sock = match tokio::net::UdpSocket::bind(&bind_addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        code = "udp_listener_bind_failed",
+                        listener = %listener_name,
+                        addr = %bind_addr,
+                        "udp listener bind failed: {e}"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(
+                code = "listening_udp",
+                addr = %bind_addr,
+                listener = %listener_name,
+                "udp l4 listener bound"
+            );
+            let sock = Arc::new(sock);
+            loop {
+                let snapshot = state.snapshot();
+                let gateway = snapshot.gateway();
+                if let Err(err) = dispatcher.run(Arc::clone(&sock), &dp, gateway).await {
+                    tracing::error!(
+                        code = "udp_listener_failed",
+                        listener = %listener_name,
+                        "udp listener ended: {err}"
+                    );
+                    break;
+                }
+            }
+        }));
+    }
+
     // DW-049: PID file + upgrade readiness. If this process is an upgrade
     // CHILD (DWARA_UPGRADE_READY_SOCKET set), it signals READY to the old
     // process AFTER it is accepting — the old process then drains and
@@ -1311,6 +1371,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for t in h3_tasks {
         if let Err(err) = t.await {
             tracing::warn!("h3 listener task ended with an error: {err}");
+        }
+    }
+    // Drain UDP L4 listener tasks.
+    for t in udp_tasks {
+        if let Err(err) = t.await {
+            tracing::warn!("udp listener task ended with an error: {err}");
         }
     }
 

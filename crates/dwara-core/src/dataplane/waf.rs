@@ -532,3 +532,366 @@ where
         hint
     }
 }
+
+// --- SEC-08 (#212): OWASP CRS-compatible rule engine -----------------------
+
+use crate::config::GlobalWaf;
+
+/// A compiled CRS rule: the compiled regex, metadata, and the
+/// resolved target set. Built once per config generation.
+pub struct CompiledCrsRule {
+    pub id: u32,
+    pub severity: u8,
+    pub phase: u8,
+    pub tags: Vec<String>,
+    pattern: Regex,
+    targets: Vec<CrsTarget>,
+    transformations: Vec<Transformation>,
+}
+
+/// CRS inspection targets (resolved from string names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrsTarget {
+    Path,
+    Query,
+    Headers,
+    Body,
+}
+
+/// CRS transformations applied before pattern matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transformation {
+    Lowercase,
+    UrlDecode,
+    HtmlEntityDecode,
+    CompressWhitespace,
+    RemoveWhitespace,
+    UrlDecodeUni,
+}
+
+impl Transformation {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "lowercase" => Some(Transformation::Lowercase),
+            "url_decode" => Some(Transformation::UrlDecode),
+            "html_entity_decode" => Some(Transformation::HtmlEntityDecode),
+            "compress_whitespace" => Some(Transformation::CompressWhitespace),
+            "remove_whitespace" => Some(Transformation::RemoveWhitespace),
+            "url_decode_uni" => Some(Transformation::UrlDecodeUni),
+            _ => None,
+        }
+    }
+
+    fn apply(&self, input: &str) -> String {
+        match self {
+            Transformation::Lowercase => input.to_lowercase(),
+            Transformation::UrlDecode => percent_decode(input).unwrap_or_else(|| input.to_string()),
+            Transformation::HtmlEntityDecode => html_entity_decode(input),
+            Transformation::CompressWhitespace => compress_whitespace(input),
+            Transformation::RemoveWhitespace => {
+                input.chars().filter(|c| !c.is_whitespace()).collect()
+            }
+            Transformation::UrlDecodeUni => {
+                percent_decode(input).unwrap_or_else(|| input.to_string())
+            }
+        }
+    }
+}
+
+/// Percent-decode a URL-encoded string.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Decode HTML entities (< > & &#xx; etc.).
+fn html_entity_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            let mut entity = String::new();
+            let mut found = false;
+            for ec in chars.by_ref() {
+                entity.push(ec);
+                if ec == ';' {
+                    found = true;
+                    break;
+                }
+                if entity.len() > 10 {
+                    break;
+                }
+            }
+            if found {
+                match entity.as_str() {
+                    "lt;" => result.push('<'),
+                    "gt;" => result.push('>'),
+                    "amp;" => result.push('&'),
+                    "quot;" => result.push('"'),
+                    "apos;" => result.push('\''),
+                    _ => {
+                        // Numeric entity: &#NN; or &#xNN;
+                        if let Some(num) =
+                            entity.strip_prefix("#").and_then(|s| s.strip_suffix(";"))
+                        {
+                            if let Some(hex) = num.strip_prefix("x") {
+                                if let Ok(code) = u32::from_str_radix(hex, 16) {
+                                    if let Some(ch) = char::from_u32(code) {
+                                        result.push(ch);
+                                        continue;
+                                    }
+                                }
+                            } else if let Ok(code) = num.parse::<u32>() {
+                                if let Some(ch) = char::from_u32(code) {
+                                    result.push(ch);
+                                    continue;
+                                }
+                            }
+                        }
+                        // Unknown entity: keep as-is
+                        result.push('&');
+                        result.push_str(&entity);
+                    }
+                }
+            } else {
+                result.push('&');
+                result.push_str(&entity);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Collapse consecutive whitespace into single spaces.
+fn compress_whitespace(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut prev_ws = false;
+    for c in input.chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                result.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            result.push(c);
+            prev_ws = false;
+        }
+    }
+    result
+}
+
+/// A compiled CRS WAF generation: the rule set, exclusions, and
+/// anomaly threshold. Built once per config generation.
+pub struct CrsGeneration {
+    rules: Vec<CompiledCrsRule>,
+    anomaly_threshold: u32,
+    max_body_inspect_bytes: u64,
+    dry_run: bool,
+}
+
+/// The result of CRS evaluation: the total anomaly score and the
+/// list of matching rule IDs (for logging).
+#[derive(Debug, Clone)]
+pub struct CrsResult {
+    pub score: u32,
+    pub matched_rules: Vec<u32>,
+    pub blocked: bool,
+}
+
+impl CrsGeneration {
+    /// Build a CRS generation from the global WAF config. Returns
+    /// `None` when the WAF is disabled or has no rules.
+    pub fn from_config(waf: &GlobalWaf) -> Option<Self> {
+        if !waf.enabled || waf.rules.is_empty() {
+            return None;
+        }
+        let exclude_ids: std::collections::HashSet<u32> =
+            waf.exclude_rule_ids.iter().copied().collect();
+        let exclude_tags: std::collections::HashSet<&str> =
+            waf.exclude_tags.iter().map(|s| s.as_str()).collect();
+        let mut compiled = Vec::with_capacity(waf.rules.len());
+        for rule in &waf.rules {
+            // Skip excluded rules by ID.
+            if exclude_ids.contains(&rule.id) {
+                continue;
+            }
+            // Skip excluded rules by tag.
+            if rule.tags.iter().any(|t| exclude_tags.contains(t.as_str())) {
+                continue;
+            }
+            // Compile the regex pattern.
+            let pattern = match Regex::new(&rule.pattern) {
+                Ok(re) => re,
+                Err(_) => continue,
+            };
+            // Resolve targets.
+            let targets = rule
+                .targets
+                .iter()
+                .filter_map(|t| match t.as_str() {
+                    "path" => Some(CrsTarget::Path),
+                    "query" => Some(CrsTarget::Query),
+                    "header" | "headers" => Some(CrsTarget::Headers),
+                    "body" => Some(CrsTarget::Body),
+                    _ => None,
+                })
+                .collect();
+            // Resolve transformations.
+            let transformations = rule
+                .transformations
+                .iter()
+                .filter_map(|t| Transformation::from_name(t.as_str()))
+                .collect();
+            compiled.push(CompiledCrsRule {
+                id: rule.id,
+                severity: rule.severity,
+                phase: rule.phase,
+                tags: rule.tags.clone(),
+                pattern,
+                targets,
+                transformations,
+            });
+        }
+        if compiled.is_empty() {
+            return None;
+        }
+        Some(CrsGeneration {
+            rules: compiled,
+            anomaly_threshold: waf.anomaly_threshold,
+            max_body_inspect_bytes: waf.max_body_inspect_bytes,
+            dry_run: waf.dry_run,
+        })
+    }
+
+    /// Whether this CRS generation is in dry-run mode.
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// The configured body inspection byte cap.
+    pub fn max_body_inspect_bytes(&self) -> u64 {
+        self.max_body_inspect_bytes
+    }
+
+    /// Apply transformations to a value before matching.
+    fn transform(&self, rule: &CompiledCrsRule, value: &str) -> String {
+        let mut result = value.to_string();
+        for t in &rule.transformations {
+            result = t.apply(&result);
+        }
+        result
+    }
+
+    /// Inspect a single value against a rule's pattern (after
+    /// transformations).
+    fn rule_matches(&self, rule: &CompiledCrsRule, value: &str) -> bool {
+        let transformed = self.transform(rule, value);
+        rule.pattern.is_match(&transformed)
+    }
+
+    /// Evaluate phase-1 rules (path, query, headers). Returns the
+    /// accumulated anomaly score and matched rule IDs.
+    pub fn evaluate_phase1(
+        &self,
+        path: &str,
+        query: Option<&str>,
+        headers: &hyper::HeaderMap,
+    ) -> CrsResult {
+        let mut score: u32 = 0;
+        let mut matched = Vec::new();
+        for rule in &self.rules {
+            if rule.phase != 1 {
+                continue;
+            }
+            let mut hit = false;
+            for target in &rule.targets {
+                match target {
+                    CrsTarget::Path => {
+                        if self.rule_matches(rule, path) {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    CrsTarget::Query => {
+                        if let Some(q) = query {
+                            if self.rule_matches(rule, q) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                    }
+                    CrsTarget::Headers => {
+                        for name in &["user-agent", "referer", "cookie", "x-forwarded-for"] {
+                            if let Some(val) = headers.get(*name).and_then(|v| v.to_str().ok()) {
+                                if self.rule_matches(rule, val) {
+                                    hit = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if hit {
+                            break;
+                        }
+                    }
+                    CrsTarget::Body => {}
+                }
+            }
+            if hit {
+                score += rule.severity as u32;
+                matched.push(rule.id);
+            }
+        }
+        let blocked = score >= self.anomaly_threshold;
+        CrsResult {
+            score,
+            matched_rules: matched,
+            blocked,
+        }
+    }
+
+    /// Evaluate phase-2 rules (body). Returns the additional anomaly
+    /// score and matched rule IDs from body inspection.
+    pub fn evaluate_phase2(&self, body: &str) -> CrsResult {
+        let mut score: u32 = 0;
+        let mut matched = Vec::new();
+        for rule in &self.rules {
+            if rule.phase != 2 {
+                continue;
+            }
+            if !rule.targets.contains(&CrsTarget::Body) {
+                continue;
+            }
+            if self.rule_matches(rule, body) {
+                score += rule.severity as u32;
+                matched.push(rule.id);
+            }
+        }
+        let blocked = score >= self.anomaly_threshold;
+        CrsResult {
+            score,
+            matched_rules: matched,
+            blocked,
+        }
+    }
+}
+
+/// Build a CRS generation from the gateway config (if the global WAF
+/// is enabled). Convenience wrapper for the proxy path.
+pub fn crs_from_gateway(gateway: &crate::config::Gateway) -> Option<CrsGeneration> {
+    gateway.waf.as_ref().and_then(CrsGeneration::from_config)
+}

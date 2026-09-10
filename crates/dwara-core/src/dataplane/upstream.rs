@@ -357,6 +357,14 @@ pub struct UpstreamBody {
     /// polls constantly; a stalled one is bounded by the idle timer
     /// first). `None` = no deadline.
     deadline: Option<std::time::Instant>,
+    /// REL-06 (#217): optional in-flight guard held until the body
+    /// completes (or is dropped). When present, the in-flight counter
+    /// is decremented when the body stream ends (Poll::Ready(None)) or
+    /// when the body is dropped — NOT when headers resolve. This gives
+    /// `least_requests`, `random`, and `peak_ewma` a more accurate
+    /// view of actual endpoint load. Default behavior (when `None`)
+    /// remains header-resolution release (v1).
+    inflight_guard: Option<crate::dataplane::balance::InflightGuard>,
 }
 
 impl hyper::body::Body for UpstreamBody {
@@ -449,6 +457,7 @@ impl UpstreamBody {
             health,
             release: None,
             deadline: None,
+            inflight_guard: None,
         }
     }
 
@@ -469,6 +478,7 @@ impl UpstreamBody {
             health: None,
             release: None,
             deadline: None,
+            inflight_guard: None,
         }
     }
 
@@ -491,6 +501,105 @@ impl UpstreamBody {
     /// forward, continuing through the body — the RPC's total budget).
     pub fn set_deadline(&mut self, deadline: std::time::Instant) {
         self.deadline = Some(deadline);
+    }
+
+    /// REL-06 (#217): attach the in-flight guard so the endpoint's
+    /// in-flight counter is held until the body stream completes (or
+    /// the body is dropped). Used when `body_completion_inflight` is
+    /// enabled in the upstream's health config.
+    pub fn set_inflight_guard(&mut self, guard: crate::dataplane::balance::InflightGuard) {
+        self.inflight_guard = Some(guard);
+    }
+
+    /// REL-05 (#216): create an empty body (used as a placeholder while
+    /// the first-frame buffer drains the real body).
+    pub fn empty() -> Self {
+        UpstreamBody {
+            inner: http_body_util::Empty::new()
+                .map_err(|e: std::convert::Infallible| match e {})
+                .boxed(),
+            idle: None,
+            sleep: None,
+            health: None,
+            release: None,
+            deadline: None,
+            inflight_guard: None,
+        }
+    }
+
+    /// REL-05 (#216): replace the inner body with a pinned boxed body
+    /// (the remaining stream after the first-frame buffer drained the
+    /// prefix). The idle/deadline/health knobs are preserved.
+    pub fn set_inner(
+        &mut self,
+        inner: http_body_util::combinators::BoxBody<Bytes, UpstreamBodyError>,
+    ) {
+        self.inner = inner;
+    }
+
+    /// REL-05 (#216): replace the inner body with a fully-buffered
+    /// `Bytes` (the body completed within the first-frame buffer).
+    pub fn set_full(&mut self, body: Bytes) {
+        self.inner = http_body_util::Full::new(body)
+            .map_err(|e: std::convert::Infallible| match e {})
+            .boxed();
+    }
+
+    /// REL-05 (#216): create a body that emits a `prefix` then continues
+    /// with `rest`. Used when the first-frame buffer filled: the prefix
+    /// is flushed to the client, then the remaining upstream body
+    /// streams frame-by-frame.
+    pub fn with_prefix(prefix: Bytes, mut rest: UpstreamBody) -> Self {
+        // We extract the inner body from `rest` and build a chained
+        // body that emits the prefix first, then the rest's inner.
+        // The idle/deadline/health knobs are preserved on the new body.
+        let idle = rest.idle;
+        let health = rest.health.take();
+        let release = rest.release.take();
+        let deadline = rest.deadline;
+        let inflight_guard = rest.inflight_guard.take();
+        let rest_inner = std::mem::replace(
+            &mut rest.inner,
+            http_body_util::Empty::new()
+                .map_err(|e: std::convert::Infallible| match e {})
+                .boxed(),
+        );
+        let chained = http_body_util::combinators::BoxBody::new(PrefixBody {
+            prefix: Some(prefix),
+            rest: rest_inner,
+        });
+        UpstreamBody {
+            inner: chained,
+            idle,
+            sleep: None,
+            health,
+            release,
+            deadline,
+            inflight_guard,
+        }
+    }
+}
+
+/// REL-05 (#216): a body that emits a prefix `Bytes` frame first, then
+/// delegates to the rest of the upstream body. Used by
+/// [`UpstreamBody::with_prefix`] when the first-frame buffer filled.
+struct PrefixBody {
+    prefix: Option<Bytes>,
+    rest: http_body_util::combinators::BoxBody<Bytes, UpstreamBodyError>,
+}
+
+impl hyper::body::Body for PrefixBody {
+    type Data = Bytes;
+    type Error = UpstreamBodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, UpstreamBodyError>>> {
+        if let Some(prefix) = self.prefix.take() {
+            return Poll::Ready(Some(Ok(Frame::data(prefix))));
+        }
+        Pin::new(&mut self.rest).poll_frame(cx)
     }
 }
 
@@ -981,6 +1090,9 @@ pub struct UpstreamHandle {
     /// upstream is accepted at validation but inert). The other variants
     /// use the TCP/TLS `client` below.
     protocol: UpstreamProtocol,
+    /// DP-07 (#236): what to hash for consistent-hash load balancers
+    /// (`ip_hash` and `maglev`). `None` = client IP (the default).
+    hash_on: Option<crate::config::HashOn>,
     /// DW-108: the H3/QUIC upstream transport, present iff
     /// `protocol == H3` AND the `h3` cargo feature is enabled. When
     /// `protocol == H3` and this is `None`, the feature is off and every
@@ -989,6 +1101,10 @@ pub struct UpstreamHandle {
     /// SCALE-10 (#189): number of connections to pre-establish per
     /// endpoint on startup/reload. 0 = no pre-warming.
     pre_warm: u32,
+    /// REL-06 (#217): whether the in-flight counter is held until the
+    /// response body completes (true) or released at header resolution
+    /// (false, the v1 default).
+    body_completion_inflight: bool,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
@@ -1086,6 +1202,13 @@ impl UpstreamHandle {
     /// endpoint the same way) and for tests.
     pub fn lb(&self) -> &Arc<crate::dataplane::balance::UpstreamLb> {
         &self.lb
+    }
+
+    /// DP-07 (#236): the hash-key source for this upstream's
+    /// consistent-hash load balancer (`ip_hash` or `maglev`). `None`
+    /// means the client IP is used (the default).
+    pub fn hash_on(&self) -> Option<&crate::config::HashOn> {
+        self.hash_on.as_ref()
     }
 
     /// DW-094 (Ent): set the edge's locality context on this upstream's
@@ -1200,7 +1323,7 @@ impl UpstreamHandle {
         // endpoint resolution, and in-flight acquisition all run against
         // ONE state snapshot (pick_for_dispatch), so a concurrent reload
         // cannot detach the guard from the picked endpoint.
-        let (dispatch, authority) = {
+        let (mut dispatch, authority) = {
             // DW-021: the pick phase is its own span so a full trace
             // shows pick separately from the attempt that contains it.
             let span = tracing::info_span!(
@@ -1359,11 +1482,26 @@ impl UpstreamHandle {
         // a timeout is a latency signal. No-op when the algorithm is not
         // peak_ewma (the tracker is absent).
         self.lb.record_latency(dispatch.idx, issued.elapsed());
+        // REL-06 (#217): when body-completion in-flight accounting is
+        // enabled, move the in-flight guard to the response body so
+        // the counter is held until the body stream completes. On
+        // error paths, the guard is released normally (the body never
+        // starts).
+        let body_guard = if self.body_completion_inflight {
+            dispatch.take_guard()
+        } else {
+            None
+        };
         dispatch.release();
         outcome.map_err(Into::into).map(|resp| {
             (
                 resp.map(|inner| {
-                    UpstreamBody::from_incoming(inner, self.write_timeout, body_health)
+                    let mut body =
+                        UpstreamBody::from_incoming(inner, self.write_timeout, body_health);
+                    if let Some(guard) = body_guard {
+                        body.set_inflight_guard(guard);
+                    }
+                    body
                 }),
                 (),
             )
@@ -1448,6 +1586,12 @@ fn build_handle(
         .protocol
     {
         UpstreamProtocol::Http1 => ("http", None, false, None),
+        UpstreamProtocol::H2c => {
+            // DP-02 (#235): cleartext HTTP/2 with prior knowledge. No
+            // TLS; the client speaks HTTP/2 directly over TCP. Common
+            // for internal east-west gRPC traffic without TLS.
+            ("http", None, true, None)
+        }
         UpstreamProtocol::Https => {
             // SEC-04 / DW-109: when cert_pinning is configured AND
             // the `cert_pinning` cargo feature is ON, install the
@@ -1715,8 +1859,13 @@ fn build_handle(
         http2_only,
         tls_roots,
         protocol: u.protocol,
+        hash_on: u.hash_on.clone(),
         h3: h3_handle,
         pre_warm: u.pool.as_ref().and_then(|p| p.pre_warm).unwrap_or(0),
+        body_completion_inflight: u
+            .health
+            .as_ref()
+            .is_some_and(|h| h.body_completion_inflight),
     })
 }
 
@@ -1854,6 +2003,14 @@ impl UpstreamRegistry {
                             rustls::RootCertStore::empty()
                         }
                     },
+                    None if u.use_system_roots => {
+                        // REL-08 (#219): the upstream opted into the
+                        // OS-native root store instead of the bundled
+                        // webpki set. Loaded per-upstream (not shared)
+                        // because the OS store is process-wide and a
+                        // reload may pick up newly-installed roots.
+                        crate::security::tls::system_root_store()
+                    }
                     None => default_roots.clone(),
                 };
                 let prev = previous.and_then(|p| p.handles.get(&u.name));
@@ -2070,6 +2227,7 @@ mod tests {
         let up = ConfigUpstream {
             name: "bare".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![],
             connection_cap: None,
@@ -2081,6 +2239,7 @@ mod tests {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,

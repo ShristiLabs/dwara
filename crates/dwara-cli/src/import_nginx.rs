@@ -408,8 +408,10 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
             Upstream {
                 name: upstream_name.clone(),
                 load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+                hash_on: None,
                 protocol: dwara_core::config::UpstreamProtocol::Http1,
                 trusted_ca_file: None,
+                use_system_roots: false,
                 endpoints,
                 connection_cap: None,
                 slow_start_ms: None,
@@ -482,8 +484,10 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                     Upstream {
                         name: upstream_name.clone(),
                         load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+                        hash_on: None,
                         protocol: dwara_core::config::UpstreamProtocol::Http1,
                         trusted_ca_file: None,
+                        use_system_roots: false,
                         endpoints: vec![endpoint],
                         connection_cap: None,
                         slow_start_ms: None,
@@ -546,6 +550,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                 compression: None,
                 limits: None,
                 authorization: None,
+                security_headers_opt_out: false,
                 deprecation: None,
                 maintenance: None,
                 transforms: None,
@@ -576,6 +581,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
 
     let allow_empty_routes = routes.is_empty();
     let gateway = Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services: services.into_values().collect(),
@@ -584,6 +590,8 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,

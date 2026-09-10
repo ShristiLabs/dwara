@@ -132,6 +132,7 @@ fn upstream_protocol_name(p: crate::config::UpstreamProtocol) -> &'static str {
     match p {
         crate::config::UpstreamProtocol::Http1 => "http1",
         crate::config::UpstreamProtocol::Http2 => "http2",
+        crate::config::UpstreamProtocol::H2c => "h2c",
         crate::config::UpstreamProtocol::Https => "https",
         crate::config::UpstreamProtocol::H3 => "h3",
     }
@@ -1404,6 +1405,41 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                      (below 100 is timer churn; above 60000 adds nothing the \
                      rollup grace does not already cover)"
                 ),
+            ));
+        }
+    }
+    // REL-10 (#221): sampled degradation validation.
+    if let Some(d) = &a.sampled_degradation {
+        if !(0.0..=1.0).contains(&d.high_watermark) || d.high_watermark <= 0.0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.high_watermark",
+                "high_watermark must be in (0.0, 1.0]",
+            ));
+        }
+        if !(0.0..=1.0).contains(&d.low_watermark) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.low_watermark",
+                "low_watermark must be in [0.0, 1.0)",
+            ));
+        }
+        if d.low_watermark >= d.high_watermark {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.low_watermark",
+                "low_watermark must be < high_watermark",
+            ));
+        }
+        if !(0.0..=1.0).contains(&d.keep_rate) || d.keep_rate <= 0.0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.keep_rate",
+                "keep_rate must be in (0.0, 1.0]",
             ));
         }
     }
@@ -4284,6 +4320,112 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // SEC-08 (#212): Global WAF validation. When enabled, each CRS
+    // rule must have a valid regex pattern, a valid phase (1 or 2),
+    // a valid severity (1-4), and valid target names. The paranoia
+    // level must be 1-4, and the anomaly threshold must be > 0.
+    if let Some(waf) = &gateway.waf {
+        if waf.enabled {
+            if !(1..=4).contains(&waf.paranoia_level) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.paranoia_level",
+                    format!(
+                        "paranoia_level {} is out of range: must be 1-4",
+                        waf.paranoia_level
+                    ),
+                ));
+            }
+            if waf.anomaly_threshold == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.anomaly_threshold",
+                    "anomaly_threshold must be > 0 (use dry_run for audit-only mode)",
+                ));
+            }
+            if waf.max_body_inspect_bytes > 1_048_576 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.max_body_inspect_bytes",
+                    format!(
+                        "max_body_inspect_bytes {} is out of range: must be 0 \
+                         (no body inspection) or 1..=1048576 (1 MiB)",
+                        waf.max_body_inspect_bytes
+                    ),
+                ));
+            }
+            for (i, rule) in waf.rules.iter().enumerate() {
+                if !(1..=4).contains(&rule.severity) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].severity"),
+                        format!(
+                            "rule {} severity {} is out of range: must be 1-4",
+                            rule.id, rule.severity
+                        ),
+                    ));
+                }
+                if !(1..=2).contains(&rule.phase) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].phase"),
+                        format!(
+                            "rule {} phase {} is out of range: must be 1 (request headers) or 2 (request body)",
+                            rule.id, rule.phase
+                        ),
+                    ));
+                }
+                if regex::Regex::new(&rule.pattern).is_err() {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].pattern"),
+                        format!("rule {} has an invalid regex pattern", rule.id),
+                    ));
+                }
+                for (j, target) in rule.targets.iter().enumerate() {
+                    if !matches!(
+                        target.as_str(),
+                        "path" | "query" | "header" | "headers" | "body"
+                    ) {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("waf.rules[{i}].targets[{j}]"),
+                            format!(
+                                "rule {} has unknown target '{}': must be path, query, header, headers, or body",
+                                rule.id, target
+                            ),
+                        ));
+                    }
+                }
+                for (j, t) in rule.transformations.iter().enumerate() {
+                    if !matches!(
+                        t.as_str(),
+                        "lowercase"
+                            | "url_decode"
+                            | "html_entity_decode"
+                            | "compress_whitespace"
+                            | "remove_whitespace"
+                            | "url_decode_uni"
+                    ) {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("waf.rules[{i}].transformations[{j}]"),
+                            format!("rule {} has unknown transformation '{}'", rule.id, t),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // Load-shed monitor mode (DW-041) is only meaningful with a cap: an
     // uncapped gateway never sheds, so the flag would be a silent no-op
     // that reads as monitoring coverage. Rejected rather than ignored so
@@ -6370,6 +6512,35 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        // REL-08 (#219): use_system_roots is the OS-native trust store
+        // alternative to the webpki default. It only applies to the TLS
+        // protocols, and is mutually exclusive with trusted_ca_file
+        // (both select a trust set; setting both is an authoring
+        // mistake — the operator must pick one).
+        if u.use_system_roots {
+            let tls = matches!(
+                u.protocol,
+                crate::config::UpstreamProtocol::Https | crate::config::UpstreamProtocol::Http2
+            );
+            if !tls {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "use_system_roots",
+                    "use_system_roots only applies to TLS upstreams (protocol https or http2); no \
+                     TLS is negotiated toward an http1 upstream",
+                ));
+            }
+            if u.trusted_ca_file.is_some() {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "use_system_roots",
+                    "use_system_roots and trusted_ca_file are mutually exclusive; pick one trust \
+                     source per upstream",
+                ));
+            }
+        }
         // SEC-04 / DW-109: cert_pinning validation. The block is always
         // accepted by the parser (additive-only); validation enforces:
         // (1) only on TLS upstreams, (2) non-empty pin list, (3) each
@@ -6508,6 +6679,56 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     crate::config::limits::MAX_RING_VNODES
                 ),
             ));
+        }
+        // DP-07 (#236): hash_on is only meaningful for consistent-hash
+        // load balancers (ip_hash and maglev). A hash_on block on a
+        // non-hash algorithm is an authoring mistake.
+        if let Some(hash_on) = &u.hash_on {
+            if !matches!(
+                u.load_balancer,
+                crate::config::LoadBalancer::IpHash | crate::config::LoadBalancer::Maglev
+            ) {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "hash_on",
+                    format!(
+                        "hash_on only applies to ip_hash or maglev load balancers; \
+                         '{}' does not use a hash key",
+                        match u.load_balancer {
+                            crate::config::LoadBalancer::RoundRobin => "round_robin",
+                            crate::config::LoadBalancer::LeastRequests => "least_requests",
+                            crate::config::LoadBalancer::Random => "random",
+                            crate::config::LoadBalancer::PeakEwma => "peak_ewma",
+                            _ => "this",
+                        }
+                    ),
+                ));
+            }
+            // Validate cookie/header names are non-empty.
+            match hash_on {
+                crate::config::HashOn::Cookie { cookie } => {
+                    if cookie.trim().is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            "hash_on.cookie",
+                            "hash_on cookie name must be a non-empty string",
+                        ));
+                    }
+                }
+                crate::config::HashOn::Header { header } => {
+                    if header.trim().is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            "hash_on.header",
+                            "hash_on header name must be a non-empty string",
+                        ));
+                    }
+                }
+                _ => {}
+            }
         }
         if u.connection_cap == Some(0) {
             issues.push(issue(
@@ -7785,13 +8006,13 @@ fn validate_pq(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     // Upstreams: check pq: true on each upstream.
     for u in &gateway.upstreams {
         if u.pq {
-            // Rule 3: http1 upstreams do not negotiate TLS.
-            if u.protocol == UpstreamProtocol::Http1 {
+            // Rule 3: http1/h2c upstreams do not negotiate TLS.
+            if matches!(u.protocol, UpstreamProtocol::Http1 | UpstreamProtocol::H2c) {
                 issues.push(issue(
                     "upstream",
                     &u.name,
                     "pq",
-                    "pq: true is only meaningful for https or http2 upstreams (http1 does \
+                    "pq: true is only meaningful for https or http2 upstreams (http1 and h2c do \
                      not negotiate TLS, so the kx group list is irrelevant)",
                 ));
                 continue;
@@ -8186,14 +8407,81 @@ fn validate_json_schema(
 /// AFTER this resolution; a criteria miss does NOT fall through to the
 /// next candidate — the request is unmatched (404 in v1).
 ///
-/// Prefix lookup is a linear scan over the prefix list, O(n) in the number
-/// of prefix routes per request; fine at v1 route counts, revisit if route
-/// tables grow large.
+/// PERF-03 (#205): prefix lookup uses a radix trie (`PrefixTrie`) for
+/// O(k) longest-prefix-match where k is the path length, instead of the
+/// O(n) linear scan over all prefix routes.
+///
+/// PERF-03 (#205): A radix trie for longest-prefix matching. Each
+/// node stores an optional route index (set when a prefix ends at
+/// this node) and children keyed by the next byte. Lookup traverses
+/// the trie following the path bytes, recording the last node with
+/// a route index — that is the longest prefix match.
+///
+/// O(k) lookup where k is the path length, replacing the previous
+/// O(n) linear scan over all prefix routes.
+#[derive(Debug, Default)]
+struct PrefixTrie {
+    /// The route index stored at this node, if a prefix ends here.
+    /// `None` means this node is an internal node (no prefix ends
+    /// here, but longer prefixes pass through it).
+    route_idx: Option<usize>,
+    /// Child nodes keyed by the next byte of the prefix.
+    children: std::collections::HashMap<u8, Box<PrefixTrie>>,
+}
+
+impl PrefixTrie {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a prefix and its route index. The first-declared route
+    /// wins on equal-length ties, so we do NOT overwrite an existing
+    /// `route_idx` at the same node.
+    fn insert(&mut self, prefix: &str, idx: usize) {
+        let mut node = self;
+        for &byte in prefix.as_bytes() {
+            node = node
+                .children
+                .entry(byte)
+                .or_insert_with(|| Box::new(PrefixTrie::new()));
+        }
+        // First-declared wins: do not overwrite.
+        if node.route_idx.is_none() {
+            node.route_idx = Some(idx);
+        }
+    }
+
+    /// Longest-prefix-match: traverse the trie following the path
+    /// bytes, recording the last node with a route index. Returns
+    /// the route index of the longest matching prefix, or `None`.
+    fn longest_match(&self, path: &str) -> Option<usize> {
+        let mut node = self;
+        let mut best = node.route_idx;
+        for &byte in path.as_bytes() {
+            match node.children.get(&byte) {
+                Some(child) => {
+                    node = child;
+                    if node.route_idx.is_some() {
+                        best = node.route_idx;
+                    }
+                }
+                None => break,
+            }
+        }
+        best
+    }
+}
+
 #[derive(Debug)]
 pub struct RouteTable {
     exact: matchit::Router<usize>,
     /// (prefix, route index) for prefix-kind routes; longest prefix wins.
+    /// Kept for backward compatibility and Debug; the trie is the
+    /// primary lookup structure (PERF-03, #205).
+    #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
+    /// PERF-03 (#205): radix trie for O(k) longest-prefix-match.
+    prefix_trie: PrefixTrie,
     regex_set: regex::RegexSet,
     /// Route index per RegexSet member, in insertion order.
     regex_indices: Vec<usize>,
@@ -8201,6 +8489,12 @@ pub struct RouteTable {
     /// the action carries no regex rewrite). Validation guarantees these
     /// compiled at config-compile time, never at request time.
     rewrite_regexes: Vec<Option<regex::Regex>>,
+    /// Precompiled `path_rewrite.regex.substitution` per route index
+    /// (PERF-04, #206): the `$1`/`${name}` syntax is parsed into
+    /// literal segments and capture references ONCE at compile time so
+    /// the request path never re-parses the substitution string. `None`
+    /// where the route carries no regex rewrite.
+    rewrite_substitutions: Vec<Option<CompiledSubstitution>>,
     /// Precompiled CORS origin matcher per route index (DW-027): `None`
     /// where the route carries no `cors` block, mirroring
     /// `Route::cors` exactly so the proxy's config read and matcher
@@ -8247,6 +8541,12 @@ pub struct RouteTable {
     /// so the request path never touches the filesystem. `None` where
     /// the route carries no mock action or uses an inline `body`.
     mock_bodies: Vec<Option<bytes::Bytes>>,
+    /// Effective security headers per route index (SEC-09, #213): the
+    /// route's own `security_headers` block when present, else the
+    /// gateway-level `default_security_headers` when the route has
+    /// not opted out, else `None`. Computed once at compile time so
+    /// the request path never re-merges.
+    effective_security_headers: Vec<Option<crate::config::transforms::SecurityHeaders>>,
 }
 
 impl RouteTable {
@@ -8254,9 +8554,11 @@ impl RouteTable {
         RouteTable {
             exact: matchit::Router::new(),
             prefixes: Vec::new(),
+            prefix_trie: PrefixTrie::new(),
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
             rewrite_regexes: Vec::new(),
+            rewrite_substitutions: Vec::new(),
             cors_origins: Vec::new(),
             compression_types: Vec::new(),
             deprecations: Vec::new(),
@@ -8266,6 +8568,7 @@ impl RouteTable {
             masking: Vec::new(),
             caches: Vec::new(),
             mock_bodies: Vec::new(),
+            effective_security_headers: Vec::new(),
         }
     }
 
@@ -8292,19 +8595,23 @@ impl RouteTable {
         if let Some(i) = matches.iter().next() {
             return Some((self.regex_indices[i], Vec::new()));
         }
-        let mut best: Option<(usize, usize)> = None; // (prefix len, index)
-        for (prefix, idx) in &self.prefixes {
-            if path.starts_with(prefix.as_str()) && best.is_none_or(|(len, _)| prefix.len() > len) {
-                best = Some((prefix.len(), *idx));
-            }
+        // PERF-03 (#205): O(k) trie lookup replaces O(n) linear scan.
+        if let Some(idx) = self.prefix_trie.longest_match(path) {
+            return Some((idx, Vec::new()));
         }
-        best.map(|(_, idx)| (idx, Vec::new()))
+        None
     }
 
     /// The compiled rewrite regex for `idx`, if the route's proxy action
     /// carries a `path_rewrite.regex`.
     pub fn rewrite_regex(&self, idx: usize) -> Option<&regex::Regex> {
         self.rewrite_regexes.get(idx).and_then(|r| r.as_ref())
+    }
+
+    /// The precompiled substitution template for `idx` (PERF-04, #206),
+    /// if the route's proxy action carries a `path_rewrite.regex`.
+    pub fn rewrite_substitution(&self, idx: usize) -> Option<&CompiledSubstitution> {
+        self.rewrite_substitutions.get(idx).and_then(|s| s.as_ref())
     }
 
     /// The precompiled CORS origin matcher for route `idx` (`None`: the
@@ -8384,6 +8691,155 @@ impl RouteTable {
     pub fn mock_body(&self, idx: usize) -> Option<&bytes::Bytes> {
         self.mock_bodies.get(idx).and_then(|b| b.as_ref())
     }
+
+    /// The effective security headers for a route (SEC-09, #213): the
+    /// route's own `security_headers` block when present, else the
+    /// gateway-level `default_security_headers` when the route has
+    /// not opted out, else `None`.
+    pub fn effective_security_headers(
+        &self,
+        idx: usize,
+    ) -> Option<&crate::config::transforms::SecurityHeaders> {
+        self.effective_security_headers
+            .get(idx)
+            .and_then(|sh| sh.as_ref())
+    }
+}
+
+/// A precompiled `path_rewrite.regex.substitution` (PERF-04, #206).
+///
+/// The `$1` / `${name}` substitution syntax is parsed ONCE at snapshot
+/// compile time into a list of segments — literal text or a named/numeric
+/// reference — so the per-request rewrite path never re-parses the
+/// substitution string. Each segment is expanded against the regex
+/// captures (and the route's `{param}` template captures) in a single
+/// pass with a pre-sized `String`.
+#[derive(Debug, Clone)]
+pub struct CompiledSubstitution {
+    segments: Vec<SubstSegment>,
+    /// The precomputed output capacity: sum of all literal segment
+    /// lengths, so the result `String` is allocated once at the right
+    /// size (capture expansions add to it, but the literal baseline is
+    /// the dominant cost for most templates).
+    capacity: usize,
+}
+
+/// One segment of a compiled substitution template.
+#[derive(Debug, Clone)]
+enum SubstSegment {
+    /// Literal text copied verbatim.
+    Literal(String),
+    /// A numeric capture-group reference (`$1`, `${1}`).
+    Numeric(usize),
+    /// A named reference (`$name`, `${name}`): resolved against the
+    /// regex's named capture groups first, then the route's `{param}`
+    /// template captures.
+    Named(String),
+}
+
+impl CompiledSubstitution {
+    /// Parse a `$1` / `${name}` substitution string into segments.
+    /// Mirrors the grammar of `expand_substitution` in
+    /// `dataplane/proxy.rs` exactly: `$` followed by digits, an
+    /// identifier, or `{...}`; a lone `$` (end of string or followed
+    /// by a non-identifier char) is kept literally.
+    pub fn compile(substitution: &str) -> Self {
+        let mut segments = Vec::new();
+        let mut capacity = 0;
+        let mut rest = substitution;
+        let mut literal = String::new();
+
+        while let Some(dollar) = rest.find('$') {
+            literal.push_str(&rest[..dollar]);
+            let after = &rest[dollar + 1..];
+            if after.is_empty() {
+                literal.push('$');
+                rest = after;
+                break;
+            }
+            if let Some(braced) = after.strip_prefix('{') {
+                match braced.find('}') {
+                    Some(end) => {
+                        if !literal.is_empty() {
+                            capacity += literal.len();
+                            segments.push(SubstSegment::Literal(std::mem::take(&mut literal)));
+                        }
+                        let name = &braced[..end];
+                        if let Ok(i) = name.parse::<usize>() {
+                            segments.push(SubstSegment::Numeric(i));
+                        } else {
+                            segments.push(SubstSegment::Named(name.to_string()));
+                        }
+                        rest = &braced[end + 1..];
+                    }
+                    None => {
+                        literal.push('$');
+                        rest = after;
+                    }
+                }
+            } else {
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                if end == 0 {
+                    literal.push('$');
+                    rest = after;
+                } else {
+                    if !literal.is_empty() {
+                        capacity += literal.len();
+                        segments.push(SubstSegment::Literal(std::mem::take(&mut literal)));
+                    }
+                    let name = &after[..end];
+                    if let Ok(i) = name.parse::<usize>() {
+                        segments.push(SubstSegment::Numeric(i));
+                    } else {
+                        segments.push(SubstSegment::Named(name.to_string()));
+                    }
+                    rest = &after[end..];
+                }
+            }
+        }
+        literal.push_str(rest);
+        if !literal.is_empty() {
+            capacity += literal.len();
+            segments.push(SubstSegment::Literal(literal));
+        }
+
+        CompiledSubstitution { segments, capacity }
+    }
+
+    /// Expand against regex captures and route `{param}` captures.
+    /// The result `String` is pre-sized to the compiled literal
+    /// capacity, so the common case (a template with mostly literal
+    /// text and a few short capture refs) allocates exactly once.
+    pub fn expand(&self, caps: &regex::Captures<'_>, params: &[(String, String)]) -> String {
+        let mut out = String::with_capacity(self.capacity);
+        for seg in &self.segments {
+            match seg {
+                SubstSegment::Literal(s) => out.push_str(s),
+                SubstSegment::Numeric(i) => {
+                    if let Some(m) = caps.get(*i) {
+                        out.push_str(m.as_str());
+                    }
+                }
+                SubstSegment::Named(name) => {
+                    if let Some(m) = caps.name(name) {
+                        out.push_str(m.as_str());
+                    } else if let Some((_, v)) = params.iter().find(|(n, _)| n == name) {
+                        out.push_str(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The precomputed literal capacity (PERF-04, #206): the sum of
+    /// all literal segment lengths, so a caller building a larger
+    /// string around the expansion can pre-size its own output.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
 }
 
 /// Output of the pure compile step: everything a [`Snapshot`] needs except
@@ -8393,6 +8849,10 @@ pub struct Compiled {
     gateway: Arc<Gateway>,
     routes: Arc<RouteTable>,
     content_hash: u64,
+    /// USA-12 (#233): the developer portal, built at compile time when
+    /// `lifecycle.portal.enabled` is true. `None` when the portal is
+    /// disabled or no lifecycle config is present.
+    portal: Option<crate::lifecycle::DevPortal>,
 }
 
 impl Compiled {
@@ -8407,6 +8867,11 @@ impl Compiled {
     pub fn content_hash(&self) -> u64 {
         self.content_hash
     }
+
+    /// USA-12 (#233): the developer portal, when built.
+    pub fn portal(&self) -> Option<&crate::lifecycle::DevPortal> {
+        self.portal.as_ref()
+    }
 }
 
 /// Immutable, fully compiled configuration generation, cheap to share.
@@ -8416,6 +8881,8 @@ pub struct Snapshot {
     content_hash: u64,
     gateway: Arc<Gateway>,
     routes: Arc<RouteTable>,
+    /// USA-12 (#233): the developer portal, when built.
+    portal: Option<crate::lifecycle::DevPortal>,
 }
 
 impl Snapshot {
@@ -8426,6 +8893,7 @@ impl Snapshot {
             generation: 0,
             content_hash: 0,
             gateway: Arc::new(Gateway {
+                version: 1,
                 trusted_proxies: vec![],
                 listeners: Vec::new(),
                 routes: Vec::new(),
@@ -8435,6 +8903,8 @@ impl Snapshot {
                 policies: Vec::new(),
                 global_policies: Vec::new(),
                 authorization: None,
+                default_security_headers: None,
+                waf: None,
                 max_concurrent_requests: None,
                 load_shed_dry_run: false,
                 jwt_providers: Vec::new(),
@@ -8464,6 +8934,7 @@ impl Snapshot {
                 ssrf_filter: None,
             }),
             routes: Arc::new(RouteTable::empty()),
+            portal: None,
         }
     }
 
@@ -8482,6 +8953,7 @@ impl Snapshot {
             content_hash: compiled.content_hash,
             gateway: compiled.gateway,
             routes: compiled.routes,
+            portal: compiled.portal,
         }
     }
 
@@ -8495,6 +8967,11 @@ impl Snapshot {
 
     pub fn route_table(&self) -> &RouteTable {
         &self.routes
+    }
+
+    /// USA-12 (#233): the developer portal, when built.
+    pub fn portal(&self) -> Option<&crate::lifecycle::DevPortal> {
+        self.portal.as_ref()
     }
 
     /// Convenience: resolve a path to the matching route, if any.
@@ -8551,9 +9028,12 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
 
     let mut exact = matchit::Router::new();
     let mut prefixes = Vec::new();
+    let mut prefix_trie = PrefixTrie::new();
     let mut regex_patterns = Vec::new();
     let mut regex_indices = Vec::new();
     let mut rewrite_regexes: Vec<Option<regex::Regex>> = vec![None; gateway.routes.len()];
+    let mut rewrite_substitutions: Vec<Option<CompiledSubstitution>> =
+        vec![None; gateway.routes.len()];
 
     for (idx, route) in gateway.routes.iter().enumerate() {
         let path = &route.r#match.path;
@@ -8569,6 +9049,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             }
             PathMatchKind::Prefix => {
                 let prefix = path.value.trim_end_matches('/').to_string();
+                // PERF-03 (#205): insert into the trie for O(k) lookup.
+                // First-declared wins on equal-length ties, so insert
+                // before pushing to the Vec (which preserves order for
+                // Debug output only).
+                prefix_trie.insert(&prefix, idx);
                 prefixes.push((prefix, idx));
             }
             PathMatchKind::Regex => {
@@ -8582,7 +9067,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             }
         }
         if let RouteAction::Proxy {
-            rewrite: Some(PathRewrite::Regex { pattern, .. }),
+            rewrite:
+                Some(PathRewrite::Regex {
+                    pattern,
+                    substitution,
+                }),
         } = &route.action
         {
             let compiled = regex::Regex::new(pattern).map_err(|e| CompileError::InvalidRegex {
@@ -8591,6 +9080,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 message: e.to_string(),
             })?;
             rewrite_regexes[idx] = Some(compiled);
+            rewrite_substitutions[idx] = Some(CompiledSubstitution::compile(substitution));
         }
     }
 
@@ -8724,14 +9214,45 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
         })
         .collect();
 
+    // SEC-09 (#213): compute the effective security headers per route
+    // — the route's own block when present, else the gateway-level
+    // default when the route has not opted out, else None. Computed
+    // once here so the request path never re-merges.
+    let effective_security_headers = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            if let Some(sh) = &r.security_headers {
+                Some(sh.clone())
+            } else if !r.security_headers_opt_out {
+                gateway.default_security_headers.clone()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // USA-12 (#233): build the developer portal at compile time when
+    // `lifecycle.portal.enabled` is true. The portal is a read-only
+    // static HTML page aggregating the configured OpenAPI specs.
+    let portal = gateway
+        .lifecycle
+        .as_ref()
+        .and_then(|l| l.portal.as_ref())
+        .filter(|p| p.enabled)
+        .map(crate::lifecycle::DevPortal::build);
+
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
+        portal,
         routes: Arc::new(RouteTable {
             exact,
             prefixes,
+            prefix_trie,
             regex_set,
             regex_indices,
             rewrite_regexes,
+            rewrite_substitutions,
             cors_origins,
             compression_types,
             deprecations,
@@ -8741,6 +9262,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             masking,
             caches,
             mock_bodies,
+            effective_security_headers,
         }),
         content_hash,
     })
@@ -8861,6 +9383,7 @@ impl ConfigState {
             content_hash: compiled.content_hash,
             gateway: compiled.gateway,
             routes: compiled.routes,
+            portal: compiled.portal,
         };
         let info = SnapshotInfo {
             generation,

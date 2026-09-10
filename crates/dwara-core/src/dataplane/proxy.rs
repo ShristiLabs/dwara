@@ -312,6 +312,11 @@ pub enum ProxyBody {
     /// buffering, gateway-owned terminator, infallible by
     /// construction (provider aborts become terminal error frames).
     Ai(Box<crate::dataplane::ai_proxy::AiStreamBody>),
+    /// Byte-counting wrapper (PERF-12, #209): wraps any of the above
+    /// to count outbound bytes as they stream to the client, and
+    /// fires the deferred access-log/analytics callback on stream
+    /// completion. Always the outermost layer (applied in `handle`).
+    Counted(Box<CountingBody>),
 }
 
 /// Error of a [`ProxyBody`]: upstream stream failure or a compression
@@ -352,6 +357,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => Pin::new(b.as_mut()).poll_frame(cx),
             ProxyBody::Passthrough(b) => Pin::new(b).poll_frame(cx),
             ProxyBody::Ai(b) => Pin::new(b.as_mut()).poll_frame(cx),
+            ProxyBody::Counted(b) => Pin::new(b.as_mut()).poll_frame(cx),
         }
     }
 
@@ -362,6 +368,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => b.is_end_stream(),
             ProxyBody::Passthrough(b) => b.is_end_stream(),
             ProxyBody::Ai(b) => b.is_end_stream(),
+            ProxyBody::Counted(b) => b.is_end_stream(),
         }
     }
 
@@ -372,7 +379,91 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => b.size_hint(),
             ProxyBody::Passthrough(b) => b.size_hint(),
             ProxyBody::Ai(b) => b.size_hint(),
+            ProxyBody::Counted(b) => b.size_hint(),
         }
+    }
+}
+
+/// A response body wrapper that counts outbound bytes as they stream
+/// to the client (PERF-12, #209), WITHOUT buffering. Each data frame
+/// that passes through `poll_frame` increments the shared
+/// `Arc<AtomicU64>` (the same one in [`AccessRecord::bytes_out`]).
+///
+/// When the body stream ends (end-of-stream or error), the
+/// `on_complete` callback is invoked exactly once. The callback
+/// performs the deferred access-log emission and analytics recording
+/// (which need the final byte count). The body is zero-retention:
+/// frames are forwarded immediately, only the byte COUNT is kept.
+pub struct CountingBody {
+    inner: ProxyBody,
+    /// The shared byte counter (same `Arc<AtomicU64>` as
+    /// `AccessRecord::bytes_out`).
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Fired once when the stream ends. Consumed on the first
+    /// end-of-stream or error poll.
+    on_complete: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl CountingBody {
+    /// Wrap a `ProxyBody` with byte counting and a completion callback.
+    pub fn new(
+        inner: ProxyBody,
+        counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        on_complete: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Self {
+        CountingBody {
+            inner,
+            counter,
+            on_complete: Some(on_complete),
+        }
+    }
+}
+
+impl hyper::body::Body for CountingBody {
+    type Data = Bytes;
+    type Error = ProxyBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, ProxyBodyError>>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_frame(cx);
+        match &poll {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.counter
+                        .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                if let Some(cb) = this.on_complete.take() {
+                    cb();
+                }
+            }
+            Poll::Pending => {}
+        }
+        poll
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl std::fmt::Debug for CountingBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountingBody")
+            .field(
+                "bytes_out",
+                &self.counter.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field("has_callback", &self.on_complete.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -2120,6 +2211,27 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
     }
 }
 
+/// USA-12 (#233): serve the developer portal at its configured path.
+/// The portal is built at compile time and stored in the snapshot.
+/// This check runs AFTER the fixed reserved paths (`/healthz`,
+/// `/readyz`, `/metrics`) and BEFORE route resolution, so the portal
+/// path shadows any configured route (like the other reserved paths).
+fn serve_portal(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
+    let snapshot = dp.state.snapshot();
+    let portal = snapshot.portal()?;
+    if path != portal.path() {
+        return None;
+    }
+    let html = portal.render_html();
+    Some(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(ProxyBody::Full(Full::new(Bytes::from(html))))
+            .expect("portal html body is valid"),
+    )
+}
+
 /// The MCP session-id header name (DW-087).
 const MCP_SESSION_ID_HDR: hyper::header::HeaderName =
     hyper::header::HeaderName::from_static("mcp-session-id");
@@ -2991,6 +3103,17 @@ where
         }
     }
     obs.active_requests().inc();
+    // PERF-12 (#209): record the declared request body size for traffic
+    // accounting. Chunked/streamed request bodies (no Content-Length)
+    // record 0 — counting them would require wrapping the upstream-
+    // forwarded body; the response-side count is the primary signal.
+    rec.bytes_in = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let bytes_out = Arc::clone(&rec.bytes_out);
     let mut resp = handle_inner(dp, peer, req, &request_id, &mut rec, &root)
         .instrument(root.clone())
         .await;
@@ -3000,13 +3123,27 @@ where
     rec.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
     obs.record_slo(&rec.route, status, rec.duration_ms);
-    dp.record_analytics(&rec);
-    dp.record_stream_offer(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
     observability::stamp_correlation_id(resp.headers_mut(), &rec.correlation_id);
-    if obs.should_log_access(status) {
-        observability::emit_access(&rec);
-    }
+    // PERF-12 (#209): defer analytics recording and access-log emission
+    // to when the response body stream completes, so bytes_out (counted
+    // frame-by-frame by CountingBody) is included. The completion
+    // callback fires exactly once on end-of-stream or error.
+    let dp_clone = Arc::clone(dp);
+    let should_log = obs.should_log_access(status);
+    let on_complete = move || {
+        dp_clone.record_analytics(&rec);
+        dp_clone.record_stream_offer(&rec);
+        if should_log {
+            observability::emit_access(&rec);
+        }
+    };
+    let body = std::mem::replace(resp.body_mut(), ProxyBody::Full(Full::new(Bytes::new())));
+    *resp.body_mut() = ProxyBody::Counted(Box::new(CountingBody::new(
+        body,
+        bytes_out,
+        Box::new(on_complete),
+    )));
     resp
 }
 
@@ -3062,6 +3199,13 @@ where
 
     // Reserved gateway paths first: they shadow any configured route.
     if let Some(resp) = reserved_path(dp, &path, rid) {
+        return resp;
+    }
+
+    // USA-12 (#233): the developer portal, served at its configured
+    // path (default /portal). Like the reserved paths, it shadows any
+    // configured route.
+    if let Some(resp) = serve_portal(dp, &path) {
         return resp;
     }
 
@@ -3181,7 +3325,10 @@ where
                     resp.headers_mut(),
                 );
             }
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     }
@@ -3227,7 +3374,10 @@ where
                         "request blocked by security filter",
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
             }
@@ -3270,7 +3420,10 @@ where
                             "request blocked by security filter",
                             rid,
                         );
-                        stamp_security_headers(&mut resp, route);
+                        stamp_security_headers(
+                            &mut resp,
+                            gen.snapshot.route_table().effective_security_headers(idx),
+                        );
                         return resp;
                     }
                 }
@@ -3330,7 +3483,10 @@ where
                     "request rejected by GraphQL check"
                 );
                 let mut resp = simple(StatusCode::BAD_REQUEST, code, msg, rid);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
             // The body was consumed by the check; reconstruct it from
@@ -3428,7 +3584,10 @@ where
                     "request blocked by anomaly scoring",
                     rid,
                 );
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         } else {
@@ -3486,7 +3645,10 @@ where
                     "request rejected by route limits"
                 );
                 let mut resp = simple(status, code, &msg, rid);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         }
@@ -3507,7 +3669,10 @@ where
                 let mut resp =
                     crate::dataplane::cors::preflight_response(cors, origins, req.headers())
                         .map(ProxyBody::Full);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         }
@@ -3550,7 +3715,10 @@ where
         Ok(id) => id,
         Err(AuthError::Invalid(_)) => {
             let mut resp = unauthorized(&authn.challenge(), rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
         Err(AuthError::Unavailable(msg)) => {
@@ -3565,13 +3733,19 @@ where
                 "authentication unavailable",
                 rid,
             );
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     };
     if route.auth_required && identity.is_none() {
         let mut resp = unauthorized(&authn.challenge(), rid);
-        stamp_security_headers(&mut resp, route);
+        stamp_security_headers(
+            &mut resp,
+            gen.snapshot.route_table().effective_security_headers(idx),
+        );
         return resp;
     }
     if let Some(id) = &identity {
@@ -3717,7 +3891,10 @@ where
             ..
         } => {
             let mut resp = unauthorized(&authn.challenge(), rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
         crate::security::authz::Decision::Deny { reason, .. } => {
@@ -3734,7 +3911,10 @@ where
                 "authorization denied: {reason}"
             );
             let mut resp = forbidden(rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     }
@@ -3810,7 +3990,10 @@ where
                         retry_after_s,
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
                 RateLimitOutcome::Allowed {
@@ -3878,7 +4061,10 @@ where
                         "quota store unavailable",
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
                 Ok(None) => warn_quota_consumer_unsynced(consumer_name),
@@ -3937,7 +4123,10 @@ where
                             );
                             let mut resp =
                                 rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
-                            stamp_security_headers(&mut resp, route);
+                            stamp_security_headers(
+                                &mut resp,
+                                gen.snapshot.route_table().effective_security_headers(idx),
+                            );
                             return resp;
                         }
                         crate::state::quotas::QuotaOutcome::Unavailable => {
@@ -3954,7 +4143,10 @@ where
                                 "quota store unavailable",
                                 rid,
                             );
-                            stamp_security_headers(&mut resp, route);
+                            stamp_security_headers(
+                                &mut resp,
+                                gen.snapshot.route_table().effective_security_headers(idx),
+                            );
                             return resp;
                         }
                         // NotQuotaed here means the consumer row was
@@ -4086,6 +4278,7 @@ where
                                     Some(aq.queue_timeout),
                                     gateway.load_shed_dry_run,
                                     identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                    gen.snapshot.route_table().effective_security_headers(idx),
                                 )
                             } else {
                                 // Reserve a queue slot. The timed acquire
@@ -4112,6 +4305,7 @@ where
                                 None,
                                 gateway.load_shed_dry_run,
                                 identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                gen.snapshot.route_table().effective_security_headers(idx),
                             )
                         }
                     }
@@ -4149,6 +4343,7 @@ where
                         Some(timeout),
                         gateway.load_shed_dry_run,
                         identity.as_ref().map(|id| id.consumer_name.as_str()),
+                        gen.snapshot.route_table().effective_security_headers(idx),
                     );
                     match result {
                         AdmissionResult::Permit(p) => p,
@@ -4337,7 +4532,10 @@ where
                             ),
                             rid,
                         );
-                        stamp_security_headers(&mut resp, route);
+                        stamp_security_headers(
+                            &mut resp,
+                            gen.snapshot.route_table().effective_security_headers(idx),
+                        );
                         return resp;
                     }
                     tracing::warn!(
@@ -4353,7 +4551,10 @@ where
                         &format!("request body does not match the expected schema: {violation}"),
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
             }
@@ -4534,8 +4735,11 @@ where
     // upstream values AND over operator transforms (an operator who
     // needs per-route exceptions omits the field here and sets it via
     // transforms). REPLACE semantics: the gateway is the source of
-    // truth at its edge.
-    if let Some(sh) = &route.security_headers {
+    // truth at its edge. SEC-09 (#213): the effective posture is the
+    // route's own block when present, else the gateway-level default
+    // (when the route has not opted out), computed once at compile
+    // time.
+    if let Some(sh) = gen.snapshot.route_table().effective_security_headers(idx) {
         crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
     }
     // Admitted requests carry the binding constraint's rate headers (only
@@ -4555,8 +4759,11 @@ where
 /// (the deliberate asymmetry with deprecation stamps, which announce
 /// API lifecycle and stay off short-circuits; see
 /// `config::transforms::SecurityHeaders`).
-fn stamp_security_headers(resp: &mut Response<ProxyBody>, route: &Route) {
-    if let Some(sh) = &route.security_headers {
+fn stamp_security_headers(
+    resp: &mut Response<ProxyBody>,
+    sh: Option<&crate::config::transforms::SecurityHeaders>,
+) {
+    if let Some(sh) = sh {
         crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
     }
 }
@@ -4596,7 +4803,10 @@ fn maintenance_response(
     }
     // Security headers (DW-028): the 503 is a route-matched response —
     // the edge policy stamps it like every other.
-    stamp_security_headers(&mut resp, route);
+    stamp_security_headers(
+        &mut resp,
+        gen.snapshot.route_table().effective_security_headers(idx),
+    );
     resp
 }
 
@@ -4963,11 +5173,44 @@ pub fn apply_path_rewrite(
             None => path.to_string(),
         },
         PathRewrite::Regex { substitution, .. } => match table.rewrite_regex(idx) {
-            Some(re) => re
-                .replace(path, |caps: &regex::Captures<'_>| {
-                    expand_substitution(substitution, caps, params)
-                })
-                .into_owned(),
+            Some(re) => {
+                // PERF-04 (#206): use captures() + the precompiled
+                // substitution template instead of replace() with a
+                // closure, avoiding per-request re-parsing of the
+                // `$1`/`${name}` syntax and the closure's Cow
+                // allocation. The substitution is compiled once at
+                // snapshot compile time (CompiledSubstitution).
+                // Like `re.replace()`, only the FIRST match is
+                // replaced; the unmatched prefix and suffix of the
+                // path are preserved verbatim.
+                match re.captures(path) {
+                    Some(caps) => {
+                        let m = caps.get(0).expect("regex match exists");
+                        let pre = &path[..m.start()];
+                        let post = &path[m.end()..];
+                        match table.rewrite_substitution(idx) {
+                            Some(subst) => {
+                                let mut out = String::with_capacity(
+                                    pre.len() + post.len() + subst.capacity(),
+                                );
+                                out.push_str(pre);
+                                out.push_str(&subst.expand(&caps, params));
+                                out.push_str(post);
+                                out
+                            }
+                            // Generation-tear backstop: the regex and
+                            // substitution are built together, so this
+                            // is unreachable. Fall back to the legacy
+                            // path.
+                            None => {
+                                let expanded = expand_substitution(substitution, &caps, params);
+                                format!("{pre}{expanded}{post}")
+                            }
+                        }
+                    }
+                    None => path.to_string(),
+                }
+            }
             None => path.to_string(),
         },
     }
@@ -5218,6 +5461,21 @@ where
         };
     rec.upstream = Some(handle.name().to_string());
 
+    // DP-07 (#236): extract the hash_on key from the request before
+    // `req` is consumed by `into_parts()` below. The hash_on config
+    // on the upstream determines what to hash (cookie, header, or
+    // client IP). Falls back to None (client IP) when the cookie/header
+    // is absent or hash_on is not configured.
+    let hash_on_key: Option<String> = handle.hash_on().and_then(|hash_on| match hash_on {
+        crate::config::HashOn::Cookie { cookie } => read_cookie(req.headers(), cookie),
+        crate::config::HashOn::Header { header } => req
+            .headers()
+            .get(header)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        crate::config::HashOn::ClientIp => None,
+    });
+
     let wants_upgrade = req.headers().contains_key(UPGRADE);
     if wants_upgrade && req.version() == Version::HTTP_2 {
         return simple(
@@ -5441,7 +5699,12 @@ where
                     "oauth2 token endpoint unavailable",
                     rid,
                 );
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot
+                        .route_table()
+                        .effective_security_headers(route_idx),
+                );
                 return resp;
             }
         }
@@ -5669,8 +5932,16 @@ where
         // ip_hash branch pins the session to one endpoint; split
         // services without sticky hash per request id. Everything
         // else keeps the client-IP key (the ip_hash contract).
+        //
+        // DP-07 (#236): when the upstream has a `hash_on` config
+        // (cookie or header), the extracted value (hash_on_key, above)
+        // is used as the hash key. This takes priority over the client
+        // IP but is overridden by the sticky/split mechanism. Falls
+        // back to the client IP when the cookie/header is absent.
         let dispatch_hash_key: &str = if sticky_key.is_some() || service.split.is_some() {
             dispatch_key.as_str()
+        } else if let Some(ref hk) = hash_on_key {
+            hk.as_str()
         } else {
             peer_key.as_str()
         };
@@ -5855,6 +6126,106 @@ where
                             resp.status().as_u16(),
                             latency_ms,
                         );
+                    }
+                }
+                // REL-05 (#216): streaming failover with buffered
+                // first-frame. When enabled and retries remain, buffer
+                // up to `buffer_first_frame_bytes` of the response body
+                // before committing. If the body errors before the
+                // buffer fills, retry to a different endpoint (the
+                // client has not yet received any bytes). If the buffer
+                // fills or the body completes, flush and continue.
+                if may_retry && rp.buffer_first_frame_bytes > 0 && !wants_upgrade {
+                    match buffer_first_frame(resp, rp.buffer_first_frame_bytes).await {
+                        Ok(FirstFrame::Complete(resp)) => {
+                            // Body completed within the buffer — the
+                            // full response is in memory. Finalize and
+                            // return (no streaming needed).
+                            let mut resp = finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                            if let Some(cookie) = sticky_set_cookie.take() {
+                                if let Ok(v) = HeaderValue::from_str(&cookie) {
+                                    resp.headers_mut().append(hyper::header::SET_COOKIE, v);
+                                }
+                                obs.record_sticky_session();
+                            }
+                            return resp;
+                        }
+                        Ok(FirstFrame::Partial { prefix, rest }) => {
+                            // Buffer filled — flush the prefix and
+                            // continue streaming. The response is now
+                            // committed. Wrap the prefix + rest's body
+                            // as a single body. `rest` is the response
+                            // with the remaining body attached.
+                            let resp = rest.map(|body| UpstreamBody::with_prefix(prefix, body));
+                            let mut resp = finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                            if let Some(cookie) = sticky_set_cookie.take() {
+                                if let Ok(v) = HeaderValue::from_str(&cookie) {
+                                    resp.headers_mut().append(hyper::header::SET_COOKIE, v);
+                                }
+                                obs.record_sticky_session();
+                            }
+                            return resp;
+                        }
+                        Err(resp) => {
+                            // Body errored before the buffer filled —
+                            // retryable. Drop the partial response and
+                            // continue the retry loop.
+                            tracing::warn!(
+                                code = "first_frame_buffer_error",
+                                request_id = %rid,
+                                upstream = handle.name(),
+                                attempt = done_tries,
+                                "upstream body failed during first-frame buffer; retrying"
+                            );
+                            let delay = crate::resilience::retries::jitter_delay(
+                                rp.backoff_base_ms,
+                                rp.backoff_cap_ms,
+                                done_tries,
+                            );
+                            if let Some(sleep) =
+                                crate::resilience::retries::retry_sleep_within_total(
+                                    rp.total_deadline,
+                                    retry_loop_started,
+                                    delay,
+                                )
+                            {
+                                if budget.try_reserve_retry(rp.budget_percent) {
+                                    obs.record_retry(handle.name());
+                                    tokio::time::sleep(sleep).await;
+                                    continue;
+                                }
+                            }
+                            // Budget exhausted or deadline exceeded —
+                            // fall through to return the error response.
+                            return finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                        }
                     }
                 }
                 let mut resp = finish_proxy_response(
@@ -6456,6 +6827,14 @@ fn request_body_transform_failed(
 /// frames are dropped: the hop-by-hop `Trailer`/`TE` headers are already
 /// stripped from the forwarded request, so v1 forwards no trailers
 /// anywhere (documented; consistent with the no-trailer stance).
+///
+/// PERF-07 (#207): uses `BytesMut` instead of `Vec<u8>` so the final
+/// `freeze()` produces a `Bytes` handle without a reallocation (the
+/// `Vec<u8>` -> `Bytes::from(vec)` path moves the allocation but
+/// `BytesMut::freeze()` hands off the underlying buffer directly).
+/// When the input chunks are already `Bytes` with a single-owner
+/// backing allocation, `BytesMut::extend_from_slice` still copies, but
+/// the freeze avoids the second conversion allocation.
 async fn buffer_request_body<B>(body: B, cap: u64) -> Result<Bytes, (Bytes, Pin<Box<B>>)>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -6463,7 +6842,7 @@ where
 {
     use http_body_util::BodyExt as _;
     let mut body = Box::pin(body);
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: bytes::BytesMut = bytes::BytesMut::new();
     loop {
         match body.frame().await {
             Some(Ok(frame)) => {
@@ -6476,12 +6855,80 @@ where
                     // prefix (the caller streams prefix + remainder — the
                     // full body still reaches the upstream byte-exact).
                     buf.extend_from_slice(&data);
-                    return Err((Bytes::from(buf), body));
+                    return Err((buf.freeze(), body));
                 }
                 buf.extend_from_slice(&data);
             }
-            Some(Err(_)) => return Err((Bytes::from(buf), body)),
-            None => return Ok(Bytes::from(buf)),
+            Some(Err(_)) => return Err((buf.freeze(), body)),
+            None => return Ok(buf.freeze()),
+        }
+    }
+}
+
+/// The result of buffering the first frame of an upstream response
+/// (REL-05, #216).
+enum FirstFrame {
+    /// The body completed within the buffer cap — the full response
+    /// body is in memory. No streaming needed.
+    Complete(Response<UpstreamBody>),
+    /// The buffer filled before the body completed — `prefix` is the
+    /// buffered bytes, `rest` is the remaining upstream body to
+    /// stream frame-by-frame.
+    Partial {
+        prefix: Bytes,
+        rest: Response<UpstreamBody>,
+    },
+}
+
+/// Buffer the first `cap` bytes of an upstream response body (REL-05,
+/// #216). Returns:
+/// - `Ok(FirstFrame::Complete(resp))` if the body completed within
+///   the cap (the response body is replaced with the fully-buffered
+///   bytes).
+/// - `Ok(FirstFrame::Partial { prefix, rest })` if the buffer filled
+///   — `prefix` is the buffered bytes, `rest` is the response with
+///   its original body still attached for continued streaming.
+/// - `Err(resp)` if the body errored before the buffer filled — the
+///   response (with its error-state body) is returned so the caller
+///   can retry or finalize as appropriate.
+async fn buffer_first_frame(
+    mut resp: Response<UpstreamBody>,
+    cap: u64,
+) -> Result<FirstFrame, Response<UpstreamBody>> {
+    use http_body_util::BodyExt as _;
+    let body = std::mem::replace(resp.body_mut(), UpstreamBody::empty());
+    let mut buf = bytes::BytesMut::new();
+    let mut body = Box::pin(body);
+    loop {
+        match body.as_mut().frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue; // trailer frame: dropped
+                };
+                if buf.len() as u64 + data.len() as u64 >= cap {
+                    // Buffer filled — return partial. The remaining
+                    // body stays attached for streaming. Re-box the
+                    // pinned body as a BoxBody.
+                    buf.extend_from_slice(&data);
+                    let remaining = body.boxed();
+                    resp.body_mut().set_inner(remaining);
+                    return Ok(FirstFrame::Partial {
+                        prefix: buf.freeze(),
+                        rest: resp,
+                    });
+                }
+                buf.extend_from_slice(&data);
+            }
+            Some(Err(_)) => {
+                // Body errored before the buffer filled.
+                return Err(resp);
+            }
+            None => {
+                // Body completed within the buffer.
+                let bytes = buf.freeze();
+                resp.body_mut().set_full(bytes);
+                return Ok(FirstFrame::Complete(resp));
+            }
         }
     }
 }
@@ -7314,6 +7761,7 @@ fn handle_shed(
     retry_after: Option<Duration>,
     dry_run: bool,
     consumer_name: Option<&str>,
+    effective_sh: Option<&crate::config::transforms::SecurityHeaders>,
 ) -> AdmissionResult {
     if dry_run {
         dp.priority_counters.record_admitted(priority);
@@ -7358,7 +7806,7 @@ fn handle_shed(
                 resp.headers_mut().insert(hyper::header::RETRY_AFTER, v);
             }
         }
-        stamp_security_headers(&mut resp, route);
+        stamp_security_headers(&mut resp, effective_sh);
         AdmissionResult::Shed(resp)
     }
 }

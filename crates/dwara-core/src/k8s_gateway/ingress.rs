@@ -326,8 +326,10 @@ pub fn translate_ingress(
                     let upstream = DwaraUpstream {
                         name: upstream_name.clone(),
                         load_balancer: LoadBalancer::RoundRobin,
+                        hash_on: None,
                         protocol: UpstreamProtocol::Http1,
                         trusted_ca_file: None,
+                        use_system_roots: false,
                         endpoints: eps,
                         connection_cap: None,
                         slow_start_ms: None,
@@ -388,6 +390,7 @@ pub fn translate_ingress(
                     compression: None,
                     limits: None,
                     authorization: None,
+                    security_headers_opt_out: false,
                     deprecation: None,
                     maintenance: None,
                     transforms: None,
@@ -472,6 +475,7 @@ pub fn translate_ingress(
     }
 
     let dwara_gateway = DwaraGateway {
+        version: 1,
         listeners,
         routes: dwara_routes,
         services,
@@ -480,6 +484,8 @@ pub fn translate_ingress(
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,

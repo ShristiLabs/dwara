@@ -1,4 +1,5 @@
-//! L4 TCP/UDP proxying with SNI routing reuse (DW-103).
+//! L4 TCP/UDP proxying with SNI routing reuse (DW-103, DP-01 / #234:
+//! UDP datagram forwarding).
 //!
 //! L4 proxying is a LISTENER TYPE, not a route action: a `protocol: tcp`
 //! (or `protocol: udp`) listener accepts raw L4 connections and splices
@@ -36,14 +37,16 @@
 //! upstream once splicing starts: the entire hello is still in the
 //! socket buffer and is replayed to the upstream by the splice.
 //!
-//! ## UDP dispatcher (STUBBED)
+//! ## UDP dispatcher (DP-01, #234)
 //!
-//! [`UdpDispatcher`] is STUBBED: UDP session semantics (per-client
-//! session tracking, NAT timeout management, datagram boundaries) are
-//! harder to get right than a byte splice and are a follow-up. The stub
-//! accepts the config shape and returns [`L4Error::Unimplemented`] from
-//! [`UdpDispatcher::dispatch`] so the listener wiring can close the
-//! socket cleanly. The config schema is present so configs round-trip.
+//! [`UdpDispatcher`] implements UDP datagram forwarding with per-client
+//! session tracking. Each unique client `SocketAddr` gets a dedicated
+//! upstream `UdpSocket`; datagrams from the client are forwarded to the
+//! upstream, and responses from the upstream are forwarded back to the
+//! client. Sessions expire after a configurable idle timeout (default
+//! 30s) to avoid leaking NAT state. The dispatcher uses a bounded
+//! session table (`max_sessions`, default 4096) to prevent resource
+//! exhaustion under adversarial traffic.
 //!
 //! ## Availability
 //!
@@ -51,10 +54,13 @@
 //! schema (`ListenerProtocol::Tcp`/`Udp` + `L4Config`) is always
 //! present so configs round-trip; L4 proxying is always available.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::net::UdpSocket;
 
 use crate::config::{Gateway, L4Config, SniRoute};
 use crate::dataplane::proxy::DataPlane;
@@ -114,7 +120,9 @@ impl From<std::io::Error> for L4Error {
 /// `upstream` is the fallback / fixed upstream name; `sni_routing`
 /// selects per-connection routing via the TLS ClientHello SNI. The
 /// `idle_timeout` closes the splice after the configured inactivity
-/// gap (None = no timeout).
+/// gap (None = no timeout). `session_timeout` and `max_sessions` are
+/// UDP-specific: the session timeout expires idle NAT sessions, and
+/// `max_sessions` bounds the session table.
 #[derive(Debug, Clone)]
 pub struct L4ProxyConfig {
     /// The configured (or fallback) upstream name. None when
@@ -125,6 +133,14 @@ pub struct L4ProxyConfig {
     pub sni_routing: bool,
     /// Idle timeout for an established splice. None = no timeout.
     pub idle_timeout: Option<Duration>,
+    /// DP-01 (#234): UDP session idle timeout (default 30s). Sessions
+    /// that receive no datagrams for this duration are evicted from the
+    /// session table.
+    pub session_timeout: Duration,
+    /// DP-01 (#234): maximum concurrent UDP sessions (default 4096).
+    /// When the table is full, new sessions replace the oldest idle
+    /// session (LRU eviction).
+    pub max_sessions: usize,
 }
 
 impl L4ProxyConfig {
@@ -134,6 +150,8 @@ impl L4ProxyConfig {
             upstream: cfg.upstream.clone(),
             sni_routing: cfg.sni_routing,
             idle_timeout: cfg.idle_timeout_s.map(Duration::from_secs),
+            session_timeout: Duration::from_secs(cfg.session_timeout_s.unwrap_or(30)),
+            max_sessions: cfg.max_sessions.unwrap_or(4096),
         }
     }
 }
@@ -240,26 +258,149 @@ impl L4Dispatcher {
     }
 }
 
-/// UDP L4 dispatcher (STUBBED). The config shape is accepted so configs
-/// round-trip; [`UdpDispatcher::dispatch`] returns
-/// [`L4Error::Unimplemented`]. UDP session semantics (per-client
-/// session tracking, NAT timeout management, datagram boundaries) are
-/// a follow-up.
+/// One UDP session: a per-client upstream socket and the last-active
+/// timestamp (for idle eviction).
+struct UdpSession {
+    /// The upstream socket dedicated to this client session.
+    upstream: std::sync::Arc<UdpSocket>,
+    /// Last activity timestamp (Unix epoch milliseconds).
+    last_active_ms: u64,
+}
+
+/// UDP L4 dispatcher (DP-01, #234): per-client session tracking with
+/// datagram forwarding and idle-session eviction.
+///
+/// The dispatcher owns the listener-side `UdpSocket` and a session
+/// table keyed by client `SocketAddr`. Each unique client gets a
+/// dedicated upstream `UdpSocket`; datagrams from the client are
+/// forwarded to the upstream, and responses from the upstream are
+/// forwarded back to the client. Sessions that are idle for longer
+/// than `session_timeout` are evicted.
 pub struct UdpDispatcher {
-    #[allow(dead_code)]
     config: L4ProxyConfig,
 }
 
 impl UdpDispatcher {
-    /// Build a stubbed UDP dispatcher from the compiled config.
+    /// Build a UDP dispatcher from the compiled config.
     pub fn new(config: L4ProxyConfig) -> Self {
         Self { config }
     }
 
-    /// Dispatch one UDP datagram batch. STUBBED: returns
-    /// [`L4Error::Unimplemented`].
-    pub async fn dispatch(&self) -> Result<L4DispatchAction, L4Error> {
-        Err(L4Error::Unimplemented)
+    /// Run the UDP dispatch loop: receive datagrams on the listener
+    /// socket, forward them to per-client upstream sockets, and
+    /// forward responses back. Sessions are evicted after the idle
+    /// timeout.
+    ///
+    /// This method runs until the listener socket is closed (graceful
+    /// shutdown). It spawns two tasks per session: one for
+    /// client->upstream forwarding (handled inline on recv) and one
+    /// for upstream->client forwarding (spawned per session).
+    pub async fn run(
+        &self,
+        listener: std::sync::Arc<UdpSocket>,
+        dp: &DataPlane,
+        gateway: &Gateway,
+    ) -> Result<(), L4Error> {
+        let name = self
+            .config
+            .upstream
+            .as_deref()
+            .ok_or_else(|| L4Error::UnknownUpstream("(none configured)".into()))?;
+        let (upstream_host, upstream_port) = pick_endpoint(dp, gateway, name)?;
+
+        let upstream_addr: SocketAddr = format!("{}:{}", upstream_host, upstream_port)
+            .parse()
+            .map_err(|e| {
+                L4Error::Io(std::io::Error::other(format!("invalid upstream addr: {e}")))
+            })?;
+
+        let mut sessions: HashMap<SocketAddr, UdpSession> = HashMap::new();
+        let mut buf = vec![0u8; 65507]; // max UDP datagram payload
+        let session_timeout = self.config.session_timeout;
+        let max_sessions = self.config.max_sessions;
+
+        loop {
+            // Receive with a timeout so we can periodically evict idle
+            // sessions even when traffic stops.
+            let recv_result =
+                tokio::time::timeout(Duration::from_secs(1), listener.recv_from(&mut buf)).await;
+
+            // Evict idle sessions regardless of whether we received.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let timeout_ms = session_timeout.as_millis() as u64;
+            sessions
+                .retain(|_, session| now_ms.saturating_sub(session.last_active_ms) < timeout_ms);
+
+            match recv_result {
+                Ok(Ok((len, client_addr))) => {
+                    let datagram = &buf[..len];
+
+                    // Get or create the session for this client.
+                    let session = match sessions.get_mut(&client_addr) {
+                        Some(s) => {
+                            s.last_active_ms = now_ms;
+                            s
+                        }
+                        None => {
+                            // Evict the oldest session if at capacity.
+                            if sessions.len() >= max_sessions {
+                                if let Some((oldest_key, _)) = sessions
+                                    .iter()
+                                    .min_by_key(|(_, s)| s.last_active_ms)
+                                    .map(|(k, v)| (*k, v.last_active_ms))
+                                {
+                                    sessions.remove(&oldest_key);
+                                }
+                            }
+                            // Create a new upstream socket for this client.
+                            let upstream_sock =
+                                UdpSocket::bind("0.0.0.0:0").await.map_err(L4Error::Io)?;
+                            upstream_sock
+                                .connect(upstream_addr)
+                                .await
+                                .map_err(L4Error::Io)?;
+                            let upstream = std::sync::Arc::new(upstream_sock);
+                            sessions.insert(
+                                client_addr,
+                                UdpSession {
+                                    upstream: std::sync::Arc::clone(&upstream),
+                                    last_active_ms: now_ms,
+                                },
+                            );
+                            // Spawn the upstream->client forwarder.
+                            let listener = std::sync::Arc::clone(&listener);
+                            tokio::spawn(async move {
+                                let mut resp_buf = vec![0u8; 65507];
+                                while let Ok(resp_len) = upstream.recv(&mut resp_buf).await {
+                                    if listener
+                                        .send_to(&resp_buf[..resp_len], client_addr)
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            });
+                            sessions.get_mut(&client_addr).unwrap()
+                        }
+                    };
+
+                    // Forward the datagram to the upstream.
+                    let _ = session.upstream.send(datagram).await;
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(code = "l4_udp_recv_error", "udp recv error: {e}");
+                    return Err(L4Error::Io(e));
+                }
+                Err(_) => {
+                    // Timeout — continue the loop to evict idle sessions.
+                    continue;
+                }
+            }
+        }
     }
 }
 

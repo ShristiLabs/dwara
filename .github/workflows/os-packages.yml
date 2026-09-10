@@ -1,0 +1,143 @@
+name: os-packages
+
+# USA-05 (#228): Build OS packages (.deb, .rpm, .apk) from the
+# musl binaries produced by release-artifacts. Runs on version
+# tags (v*), after the musl-binaries job in release-artifacts.yml
+# has uploaded the verified tarballs. Downloads the tarballs,
+# stages the binaries, and runs nfpm to produce per-arch packages
+# for amd64 and arm64.
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  os-packages:
+    name: OS packages (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            nfpm_arch: amd64
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            nfpm_arch: arm64
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download musl artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pinned: v4 @ d3f86a10
+        with:
+          name: dwara-linux-musl-${{ matrix.arch }}
+          path: dist
+        continue-on-error: true
+
+      - name: Build musl binaries (fallback if artifacts missing)
+        run: |
+          if [ ! -f "dist/dwara-${{ steps.ver.outputs.version }}-${{ matrix.target }}.tar.gz" ]; then
+            echo "Artifacts not found, building from source..."
+            docker run --rm --platform linux/${{ matrix.arch }} \
+              -v "$PWD":/build -w /build \
+              -e CARGO_TERM_COLOR=always \
+              rust:1.94-alpine sh -c '
+                apk add --no-cache musl-dev cmake make perl &&
+                rustup target add '"${{ matrix.target }}"' &&
+                cargo build --release --target '"${{ matrix.target }}"' --bin dwara -p dwara-bin &&
+                cargo build --release --target '"${{ matrix.target }}"' --bin dwara-cli -p dwara-cli
+              '
+            mkdir -p dist
+            tar -czf "dist/dwara-${{ steps.ver.outputs.version }}-${{ matrix.target }}.tar.gz" \
+              -C "target/${{ matrix.target }}/release" \
+              dwara dwara-cli
+          fi
+
+      - name: Stage binaries for nfpm
+        run: |
+          mkdir -p packaging/staging
+          tar -xzf "dist/dwara-${{ steps.ver.outputs.version }}-${{ matrix.target }}.tar.gz" \
+            -C packaging/staging
+          ls -la packaging/staging/
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.41.1
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar xz -C /tmp nfpm
+          /tmp/nfpm --version
+
+      - name: Build .deb package
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          VERSION="${VERSION#v}"
+          export VERSION
+          export ARCH=${{ matrix.nfpm_arch }}
+          mkdir -p dist/packages
+          /tmp/nfpm pkg --packager deb \
+            --config packaging/nfpm.yaml \
+            --target "dist/packages/dwara-${VERSION}-${{ matrix.nfpm_arch }}.deb"
+
+      - name: Build .rpm package
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          VERSION="${VERSION#v}"
+          export VERSION
+          export ARCH=${{ matrix.nfpm_arch }}
+          /tmp/nfpm pkg --packager rpm \
+            --config packaging/nfpm.yaml \
+            --target "dist/packages/dwara-${VERSION}-${{ matrix.nfpm_arch }}.rpm"
+
+      - name: Build .apk package
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          VERSION="${VERSION#v}"
+          export VERSION
+          export ARCH=${{ matrix.nfpm_arch }}
+          /tmp/nfpm pkg --packager apk \
+            --config packaging/nfpm.yaml \
+            --target "dist/packages/dwara-${VERSION}-${{ matrix.nfpm_arch }}.apk"
+
+      - name: Generate checksums
+        run: |
+          cd dist/packages
+          for f in *.deb *.rpm *.apk; do
+            [ -f "$f" ] && sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - name: Upload OS packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned: v4 @ ea165f8d
+        with:
+          name: dwara-os-packages-${{ matrix.arch }}
+          path: dist/packages/*
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@da05d552573c5fa8d7e29b1e32f0f60b3e0a73f0 # pinned: v2 @ da05d5525
+        with:
+          files: dist/packages/*
+          draft: false
+          prerelease: false

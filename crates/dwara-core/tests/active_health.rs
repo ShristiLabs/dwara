@@ -69,11 +69,13 @@ async fn serve_switchable(healthy: Arc<AtomicBool>) -> u16 {
 
 fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
             protocol: UpstreamProtocol::Http1,
@@ -92,6 +94,7 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -105,6 +108,8 @@ fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),
@@ -477,6 +482,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
 
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
@@ -486,6 +492,8 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
             policies: vec![],
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),
@@ -527,6 +535,7 @@ async fn reserved_paths_shadow_configured_routes() {
     let state = Arc::new(ConfigState::new());
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![
@@ -566,6 +575,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     compression: None,
                     limits: None,
                     authorization: None,
+                    security_headers_opt_out: false,
                     deprecation: None,
                     maintenance: None,
                     transforms: None,
@@ -614,6 +624,7 @@ async fn reserved_paths_shadow_configured_routes() {
                     compression: None,
                     limits: None,
                     authorization: None,
+                    security_headers_opt_out: false,
                     deprecation: None,
                     maintenance: None,
                     transforms: None,
@@ -638,6 +649,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 authorization: None,
             }],
             upstreams: vec![Upstream {
+                hash_on: None,
                 name: "up".into(),
                 load_balancer: LoadBalancer::RoundRobin,
                 protocol: UpstreamProtocol::Http1,
@@ -657,6 +669,7 @@ async fn reserved_paths_shadow_configured_routes() {
                 breaker: None,
                 max_pending: None,
                 trusted_ca_file: None,
+                use_system_roots: false,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
@@ -670,6 +683,8 @@ async fn reserved_paths_shadow_configured_routes() {
             policies: vec![],
             global_policies: vec![],
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),
@@ -1446,6 +1461,7 @@ fn window_purity_params() -> (HealthParams, HealthParams) {
         failure_min_volume: 3,
         eject_ms: 60_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     };
     let probe_report = HealthParams {
         window_ms: passive.window_ms,
@@ -1454,6 +1470,7 @@ fn window_purity_params() -> (HealthParams, HealthParams) {
         failure_min_volume: u32::MAX,
         eject_ms: passive.eject_ms,
         half_open_probes: passive.half_open_probes,
+        recovery_ramp_ms: 0,
     };
     (passive, probe_report)
 }

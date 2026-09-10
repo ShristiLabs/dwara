@@ -380,6 +380,7 @@ fn clusters_body(ctx: &AdminContext) -> serde_json::Value {
             dwara_core::config::LoadBalancer::LeastRequests => "least_requests",
             dwara_core::config::LoadBalancer::Random => "random",
             dwara_core::config::LoadBalancer::IpHash => "ip_hash",
+            dwara_core::config::LoadBalancer::Maglev => "maglev",
             dwara_core::config::LoadBalancer::PeakEwma => "peak_ewma",
         };
         let breaker_state = if handle.breaker_params().is_none() {
@@ -1925,13 +1926,203 @@ async fn patch_config(ctx: &AdminContext, body: Bytes, request_id: &str) -> Resp
     }
 }
 
+/// USA-05 (#227): Generate an OpenAPI 3.0.3 spec for the admin API.
+/// The spec documents all admin endpoints with their methods and a
+/// brief description. It is served at `/v1/openapi.json` (and the
+/// legacy `/openapi.json`). The spec is intentionally compact — it
+/// documents the route table, not the full request/response schemas
+/// (those live in `config-reference.json` for config-bearing
+/// endpoints).
+fn openapi_spec() -> String {
+    use serde_json::{json, Map, Value};
+    let mut paths: Map<String, Value> = Map::new();
+    // Helper to add a path item with operations.
+    let mut add = |path: &str, ops: &[(&str, &str, &str)]| {
+        let mut item = Map::new();
+        for (method, summary, tag) in ops {
+            item.insert(
+                (*method).to_string(),
+                json!({"summary": summary, "tags": [tag]}),
+            );
+        }
+        paths.insert(path.to_string(), Value::Object(item));
+    };
+    add(
+        "/v1/config",
+        &[
+            ("get", "Get the redacted, typed config dump", "config"),
+            ("patch", "Replace the full config document", "config"),
+        ],
+    );
+    add(
+        "/v1/config/validate",
+        &[("post", "Validate a config without publishing", "config")],
+    );
+    add("/v1/health", &[("get", "Gateway health check", "health")]);
+    add(
+        "/v1/stats",
+        &[("get", "Gateway stats (Prometheus or JSON)", "observability")],
+    );
+    add(
+        "/v1/clusters",
+        &[("get", "Envoy-style cluster dump", "debug")],
+    );
+    add(
+        "/v1/config_dump",
+        &[("get", "Redacted config dump (JSON)", "debug")],
+    );
+    add(
+        "/v1/runtime_info",
+        &[("get", "Runtime info (version, uptime, build)", "debug")],
+    );
+    add(
+        "/v1/cache/purge",
+        &[("post", "Purge the response cache", "cache")],
+    );
+    add(
+        "/v1/analytics/dashboard",
+        &[("get", "Analytics dashboard summary", "analytics")],
+    );
+    add(
+        "/v1/analytics/top",
+        &[("get", "Top-N analytics breakdown", "analytics")],
+    );
+    add(
+        "/v1/analytics/query",
+        &[("post", "Query analytics events", "analytics")],
+    );
+    add(
+        "/v1/analytics/spend",
+        &[("post", "Spend analytics query", "analytics")],
+    );
+    add(
+        "/v1/analytics/dimensions",
+        &[("post", "List analytics dimensions", "analytics")],
+    );
+    add(
+        "/v1/analytics/journey",
+        &[("get", "API journey analytics", "analytics")],
+    );
+    add(
+        "/v1/analytics/live",
+        &[("get", "Live analytics stream", "analytics")],
+    );
+    add(
+        "/v1/analytics/forecast",
+        &[("get", "Forecast analytics", "analytics")],
+    );
+    add(
+        "/v1/analytics/anomalies",
+        &[("get", "Anomaly detection results", "analytics")],
+    );
+    add(
+        "/v1/analytics/governance-audit",
+        &[("post", "Governance audit query", "analytics")],
+    );
+    add(
+        "/v1/analytics/prompt-logs",
+        &[("post", "Prompt log query", "analytics")],
+    );
+    add(
+        "/v1/analytics/exports",
+        &[("get", "List analytics exports", "analytics")],
+    );
+    add(
+        "/v1/analytics/exports/run",
+        &[("post", "Run an analytics export", "analytics")],
+    );
+    add(
+        "/v1/quotas/usage",
+        &[("get", "Quota usage report", "quotas")],
+    );
+    add(
+        "/v1/ai/credential-pools",
+        &[("get", "AI credential pool status", "ai")],
+    );
+    add(
+        "/v1/consumers/{name}/credentials",
+        &[
+            ("get", "List consumer credentials", "consumers"),
+            ("post", "Create consumer credential", "consumers"),
+        ],
+    );
+    add(
+        "/v1/credentials/{id}/retire",
+        &[("post", "Retire a credential", "consumers")],
+    );
+    add(
+        "/v1/experiments/prompt-overrides",
+        &[
+            ("get", "List prompt overrides", "experiments"),
+            ("put", "Set prompt overrides", "experiments"),
+            ("delete", "Clear prompt overrides", "experiments"),
+        ],
+    );
+    add(
+        "/v1/experiments/feedback",
+        &[("post", "Submit experiment feedback", "experiments")],
+    );
+    add(
+        "/v1/experiments/verdict",
+        &[("post", "Record experiment verdict", "experiments")],
+    );
+    add("/v1/mcp/sessions", &[("get", "List MCP sessions", "mcp")]);
+    add(
+        "/v1/mcp/sessions/{id}",
+        &[("delete", "Delete an MCP session", "mcp")],
+    );
+    add("/v1/mcp/tools", &[("get", "List MCP tools", "mcp")]);
+    add("/v1/mcp/calls", &[("get", "List MCP calls", "mcp")]);
+    // Entity CRUD (routes, services, upstreams, consumers, policies)
+    for entity in &["routes", "services", "upstreams", "consumers", "policies"] {
+        add(
+            &format!("/v1/{entity}"),
+            &[
+                ("get", &format!("List {entity}"), "crud"),
+                ("post", &format!("Create a {entity}"), "crud"),
+            ],
+        );
+        add(
+            &format!("/v1/{entity}/{{name}}"),
+            &[
+                ("get", &format!("Get a {entity}"), "crud"),
+                ("put", &format!("Replace a {entity}"), "crud"),
+                ("delete", &format!("Delete a {entity}"), "crud"),
+            ],
+        );
+    }
+    add("/v1/openapi.json", &[("get", "This OpenAPI spec", "meta")]);
+    add("/v1/version", &[("get", "API version info", "meta")]);
+    let spec = json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "dwara Admin API",
+            "version": "1.0.0",
+            "description": "The dwara admin API for config management, observability, and CRUD operations.",
+        },
+        "servers": [
+            {"url": "/v1", "description": "Versioned admin API (canonical)"},
+        ],
+        "paths": Value::Object(paths),
+    });
+    serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".into())
+}
+
 /// Dispatch one admin request. Errors use the dataplane's error
 /// envelope style (code/message/request_id) so operators can grep one
 /// shape across both surfaces.
 async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<AdminBody> {
     let request_id = resolve_request_id(req.headers());
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let raw_path = req.uri().path().to_string();
+    // USA-05 (#227): API versioning. /v1/ is the canonical prefix for
+    // the admin API. The legacy un-prefixed paths remain as aliases
+    // for backward compatibility. Strip the /v1/ prefix here so the
+    // route table below matches both /v1/config and /config.
+    let path = raw_path
+        .strip_prefix("/v1/")
+        .map(|p| format!("/{p}"))
+        .unwrap_or_else(|| raw_path.clone());
     // Same framing-ambiguity rejection as the dataplane (DW-023): a
     // request carrying both Content-Length and Transfer-Encoding is the
     // smuggling primitive; the admin surface applies the identical policy.
@@ -2512,6 +2703,47 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             &format!("{method} not allowed here"),
             &request_id,
         ),
+        // USA-05 (#227): OpenAPI 3.0 spec for the admin API. Served at
+        // both /v1/openapi.json and /openapi.json (the /v1/ prefix is
+        // stripped above). The spec is generated from the route table
+        // so it stays in sync with the implementation.
+        ("GET", "/openapi.json") => {
+            let spec = openapi_spec();
+            Response::builder()
+                .status(200)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .header(hyper::header::CACHE_CONTROL, "no-cache")
+                .body(Full::new(Bytes::from(spec)))
+                .unwrap_or_else(|_| {
+                    envelope(
+                        500,
+                        "internal_error",
+                        "failed to build openapi response",
+                        &request_id,
+                    )
+                })
+        }
+        // USA-05 (#227): API version info endpoint.
+        ("GET", "/version") => {
+            let info = serde_json::json!({
+                "api_version": "v1",
+                "versioned_paths": true,
+                "legacy_paths": true,
+                "spec": "/v1/openapi.json",
+            });
+            Response::builder()
+                .status(200)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(Full::new(Bytes::from(info.to_string())))
+                .unwrap_or_else(|_| {
+                    envelope(
+                        500,
+                        "internal_error",
+                        "failed to build version response",
+                        &request_id,
+                    )
+                })
+        }
         _ => envelope(
             404,
             "not_found",

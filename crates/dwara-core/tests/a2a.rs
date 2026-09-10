@@ -116,6 +116,9 @@ fn user_request(text: &str) -> ChatRequest {
         stop: None,
         stream: false,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: BTreeMap::new(),
     }
 }
@@ -166,6 +169,9 @@ fn adapter_build_request_preserves_history() {
         stop: None,
         stream: true,
         stream_options_include_usage: false,
+        response_format: None,
+        prompt: None,
+        prompt_variables: BTreeMap::new(),
         other: BTreeMap::new(),
     };
     let provider_req = adapter.build_request(&req, "agent").expect("builds");

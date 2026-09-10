@@ -25,13 +25,13 @@ that branch:
 ```mermaid
 flowchart TD
     A[ai action selected] --> B[Budget pre-check\nper-minute / per-day\ntoken caps]
-    B -->|over budget| BX[429\ntoken_budget_exceeded]
+    B -->|over budget| BX[429\nai_budget_exceeded]
     B -->|ok| C[Read + parse body\nOpenAI chat-completions format]
     C -->|parse error| CX[400\nbad_request]
     C -->|ok| D[Model governance\nper-team allowlist check]
-    D -->|denied| DX[403\nmodel_not_allowed]
+    D -->|denied| DX[403\nmodel_denied_by_policy]
     D -->|ok| E[Prompt guardrails\ninjection / PII /\nbanned content / schema]
-    E -->|denied| EX[403\nguardrail_violation]
+    E -->|denied| EX[400\nguardrail_blocked]
     E -->|ok| F{Semantic cache\nlookup}
     F -->|hit| FC[Return cached response]
     F -->|miss| G[Alias resolution\nfailover / canary /\nrouting policy / A-B test]
@@ -42,7 +42,7 @@ flowchart TD
     K --> L[Cost computation\npricing table\nmicros per token]
     L --> M[Budget spend recording\nguard.spend]
     M --> N[Response guardrails\nPII / banned content /\nschema validation]
-    N -->|denied| NX[403\nguardrail_violation]
+    N -->|denied| NX[400\nguardrail_blocked]
     N -->|ok| O[Semantic cache store\nfire-and-forget]
     O --> P[Return OpenAI-format\nresponse to client]
     FC --> P
@@ -63,9 +63,11 @@ The exact order, verified against `dataplane/ai_proxy.rs::serve_ai`:
 4. **Prompt guardrails** — the prompt phase checks for prompt
    injection, PII, banned content, and schema violations. Denials are
    403.
-5. **Semantic cache lookup** — for non-streaming requests, an
-   embedding-similarity cache is checked (compiled into the OSS build). A hit
-   returns the cached response without contacting the provider.
+5. **Semantic cache lookup** — an embedding-similarity cache is
+   checked (compiled into the OSS build; streaming and
+   non-streaming requests alike). A hit returns the cached response
+   — or replays the cached SSE frames — without contacting the
+   provider.
 6. **Alias resolution / routing** — the model alias is resolved to a
    provider target. This may involve failover chains, canary splits,
    routing policies, or A/B test selection.
@@ -87,7 +89,8 @@ The exact order, verified against `dataplane/ai_proxy.rs::serve_ai`:
 13. **Response guardrails** — the response phase checks for PII,
     banned content, and schema violations. Denials are 403.
 14. **Semantic cache store** — the response is stored in the semantic
-    cache (fire-and-forget, non-streaming only).
+    cache (fire-and-forget; streams are cached through a bounded tee
+    buffer when they complete within its cap).
 15. **Return** — the canonical response is serialized to OpenAI format
     and returned to the client.
 

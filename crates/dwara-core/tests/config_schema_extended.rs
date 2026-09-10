@@ -4,7 +4,7 @@
 //! tests/config_schema.rs appear here.
 
 use dwara_core::config::{
-    gateway_to_yaml, json_schema, parse_gateway, Credential, Gateway, ListenerProtocol,
+    gateway_to_yaml, json_schema, parse_gateway, Credential, Gateway, HashOn, ListenerProtocol,
     LoadBalancer, PathMatchKind, RouteAction, TlsMode, UpstreamProtocol,
 };
 
@@ -28,12 +28,47 @@ fn all_load_balancer_variants_parse() {
         ("least_requests", LoadBalancer::LeastRequests),
         ("random", LoadBalancer::Random),
         ("ip_hash", LoadBalancer::IpHash),
+        ("maglev", LoadBalancer::Maglev),
+        ("peak_ewma", LoadBalancer::PeakEwma),
     ] {
         let gw = parse_ok(&format!(
             "upstreams:\n  - name: u\n    load_balancer: {tag}\n    endpoints: []\n"
         ));
         assert_eq!(gw.upstreams[0].load_balancer, expected, "tag {tag}");
     }
+}
+
+#[test]
+fn hash_on_cookie_and_header_parse() {
+    let gw = parse_ok(
+        "upstreams:\n  - name: u\n    load_balancer: ip_hash\n    hash_on:\n      type: cookie\n      cookie: sess\n    endpoints:\n      - { address: 127.0.0.1, port: 8080 }\n",
+    );
+    assert_eq!(
+        gw.upstreams[0].hash_on,
+        Some(HashOn::Cookie {
+            cookie: "sess".into()
+        })
+    );
+
+    let gw = parse_ok(
+        "upstreams:\n  - name: u\n    load_balancer: maglev\n    hash_on:\n      type: header\n      header: x-user-id\n    endpoints:\n      - { address: 127.0.0.1, port: 8080 }\n",
+    );
+    assert_eq!(
+        gw.upstreams[0].hash_on,
+        Some(HashOn::Header {
+            header: "x-user-id".into()
+        })
+    );
+
+    // Default: no hash_on = None (client IP).
+    let gw = parse_ok("upstreams:\n  - name: u\n    load_balancer: ip_hash\n    endpoints: []\n");
+    assert_eq!(gw.upstreams[0].hash_on, None);
+
+    // Explicit client_ip.
+    let gw = parse_ok(
+        "upstreams:\n  - name: u\n    load_balancer: ip_hash\n    hash_on:\n      type: client_ip\n    endpoints: []\n",
+    );
+    assert_eq!(gw.upstreams[0].hash_on, Some(HashOn::ClientIp));
 }
 
 #[test]
@@ -53,6 +88,7 @@ fn all_upstream_protocol_variants_parse() {
     for (tag, expected) in [
         ("http1", UpstreamProtocol::Http1),
         ("http2", UpstreamProtocol::Http2),
+        ("h2c", UpstreamProtocol::H2c),
         ("https", UpstreamProtocol::Https),
     ] {
         let gw = parse_ok(&format!(
@@ -530,6 +566,7 @@ fn duplicate_keys_inside_a_listener_are_rejected() {
 fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
     use dwara_core::config::*;
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "l".into(),
@@ -590,6 +627,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             compression: None,
             limits: None,
             authorization: None,
+            security_headers_opt_out: false,
             deprecation: None,
             maintenance: None,
             transforms: None,
@@ -604,6 +642,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         }],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "u".into(),
             load_balancer: LoadBalancer::IpHash,
             protocol: UpstreamProtocol::Https,
@@ -623,6 +662,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -664,6 +704,8 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         }],
         global_policies: vec![],
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

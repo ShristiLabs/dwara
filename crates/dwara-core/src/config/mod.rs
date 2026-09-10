@@ -64,11 +64,40 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// CFG-03 (#239): the current config schema version. Increment when
+/// the schema gains a breaking change (removed fields, renamed
+/// fields, changed semantics). The `dwara lint` command warns when a
+/// config's `version` is older than this; `dwara migrate` upgrades
+/// configs to this version.
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
+/// Default config version (assumed when `version` is absent from the
+/// YAML). The initial schema is version 1.
+fn default_config_version() -> u32 {
+    1
+}
+
+/// Whether the config version is the default (1). Used by
+/// `skip_serializing_if` to omit the field when it's the default.
+fn is_default_config_version(v: &u32) -> bool {
+    *v == 1
+}
+
 /// Root of a dwara configuration: one gateway process, N listeners, and one
 /// compiled config generation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Gateway {
+    /// CFG-03 (#239): config schema version. Defaults to 1 when
+    /// absent (the initial schema). The `dwara lint` command warns
+    /// when the version is older than the current schema version; the
+    /// `dwara migrate` command upgrades the config to the current
+    /// version.
+    #[serde(
+        default = "default_config_version",
+        skip_serializing_if = "is_default_config_version"
+    )]
+    pub version: u32,
     /// Entry points the gateway binds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<Listener>,
@@ -112,6 +141,25 @@ pub struct Gateway {
     /// authorization; see [`Authz`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+    /// Gateway-level default security headers baseline (SEC-09, #213):
+    /// applied to EVERY route that does not carry its own
+    /// `security_headers` block and has not set
+    /// `security_headers_opt_out: true`. Fail-secure defaults: a
+    /// route with no `security_headers` block inherits this posture
+    /// rather than shipping without HSTS/nosniff. A route that needs
+    /// to disable a header from the default sets its own
+    /// `security_headers` block (which fully replaces the default
+    /// for that route), or sets `security_headers_opt_out: true` to
+    /// opt out entirely. See [`SecurityHeaders`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_security_headers: Option<SecurityHeaders>,
+    /// SEC-08 (#212): Global WAF policy with CRS-compatible rules.
+    /// When enabled, the rules are evaluated on every request
+    /// (regardless of route-level WAF config). The anomaly score is
+    /// accumulated across all matching rules; the request is blocked
+    /// when the score exceeds the threshold. See [`GlobalWaf`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waf: Option<GlobalWaf>,
     /// IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims
     /// are trusted (gateway-level; the direct connection peer must be in
     /// this list for an inbound XFF chain to be preserved and extended).
@@ -1262,6 +1310,47 @@ pub struct AnalyticsConfig {
     /// See [`AnalyticsReplayCapture`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_capture: Option<AnalyticsReplayCapture>,
+    /// REL-10 (#221): sampled degradation under channel pressure. When
+    /// the analytics channel's fill ratio exceeds `high_watermark`,
+    /// the offer path probabilistically drops records (keeping 1 in
+    /// `sample_rate`) BEFORE the channel fills, so a sustained burst
+    /// degrades to sampled telemetry rather than a hard drop cliff.
+    /// Below `low_watermark` every record is kept. Defaults to off
+    /// (no sampling); when enabled, `high_watermark` must be >
+    /// `low_watermark` and both are in (0.0, 1.0].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampled_degradation: Option<AnalyticsSampledDegradation>,
+}
+
+/// Sampled degradation config (REL-10, #221). See
+/// [`AnalyticsConfig::sampled_degradation`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsSampledDegradation {
+    /// Channel fill ratio above which sampling kicks in. Must be in
+    /// (0.0, 1.0) and > `low_watermark`.
+    #[serde(default = "default_sampled_high_watermark")]
+    pub high_watermark: f64,
+    /// Channel fill ratio below which sampling stops (every record
+    /// kept). Must be in (0.0, 1.0) and < `high_watermark`.
+    #[serde(default = "default_sampled_low_watermark")]
+    pub low_watermark: f64,
+    /// Fraction of records to KEEP when sampling (1 in N). 1.0 keeps
+    /// all (no sampling); 0.1 keeps 10%. Must be in (0.0, 1.0].
+    #[serde(default = "default_sampled_keep_rate")]
+    pub keep_rate: f64,
+}
+
+fn default_sampled_high_watermark() -> f64 {
+    0.8
+}
+
+fn default_sampled_low_watermark() -> f64 {
+    0.5
+}
+
+fn default_sampled_keep_rate() -> f64 {
+    0.1
 }
 
 /// Live in-process sketches config (DW-092, `analytics.live_sketches`).
@@ -2232,6 +2321,16 @@ pub struct JwtProvider {
     /// the value at 7 days (604800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_key_grace_secs: Option<u64>,
+    /// How long to serve stale (cached) keys after a JWKS fetch failure
+    /// (SEC-12, #215), in seconds (default: same as `refresh_secs`,
+    /// capped at 300). When a JWKS fetch fails, the cached key set
+    /// keeps serving for this duration before a new fetch is attempted,
+    /// so a transient JWKS provider outage does not cascade into auth
+    /// failures. 0 disables stale-on-error (a fetch failure surfaces
+    /// immediately when the cache is empty; when the cache is non-empty
+    /// the existing degraded-mode behavior applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_on_error_secs: Option<u64>,
 }
 
 impl JwtProvider {
@@ -2239,6 +2338,15 @@ impl JwtProvider {
     /// (default 86 400; the DW-046 dual-validity window).
     pub fn retired_key_grace_secs(&self) -> u64 {
         self.retired_key_grace_secs.unwrap_or(86_400)
+    }
+    /// `stale_on_error_secs` resolved to its effective value (SEC-12,
+    /// #215): the default is `min(refresh_secs, 300)` — a failed fetch
+    /// backs off for at most one refresh interval (capped at 5 min) so
+    /// a down JWKS endpoint does not chain every Bearer request through
+    /// a doomed fetch attempt.
+    pub fn stale_on_error_secs(&self) -> u64 {
+        self.stale_on_error_secs
+            .unwrap_or_else(|| self.refresh_secs.min(300))
     }
 }
 
@@ -2711,6 +2819,17 @@ pub struct L4Config {
     /// closes). Bounded by validation to at most 1 hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_s: Option<u64>,
+    /// DP-01 (#234): UDP session idle timeout in seconds. A UDP session
+    /// (per-client upstream socket) that receives no datagrams for this
+    /// duration is evicted from the session table. Default 30s. UDP
+    /// only; ignored for TCP listeners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_timeout_s: Option<u64>,
+    /// DP-01 (#234): maximum concurrent UDP sessions. When the session
+    /// table is full, the oldest idle session is evicted (LRU). Default
+    /// 4096. UDP only; ignored for TCP listeners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
 }
 
 fn default_tls_mode() -> TlsMode {
@@ -2836,6 +2955,16 @@ pub struct Route {
     /// [`SecurityHeaders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_headers: Option<SecurityHeaders>,
+    /// Opt out of the gateway-level `default_security_headers`
+    /// baseline (SEC-09, #213): when true, a route with no
+    /// `security_headers` block ships WITHOUT the gateway's default
+    /// security headers. A route that carries its own
+    /// `security_headers` block always uses it (the block fully
+    /// replaces the default); this flag is for the rare route that
+    /// deliberately needs no security headers at all. Default:
+    /// false (inherit the default when present).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub security_headers_opt_out: bool,
     /// Response field masking (DW-029, feature analysis 5-Security):
     /// redacts the named RFC 6901 JSON pointers from the route's
     /// responses — the floor `fields` for every consumer, plus the
@@ -3296,6 +3425,121 @@ fn default_waf_max_body_inspect_bytes() -> u64 {
 
 fn is_default_waf_max_body_inspect_bytes(v: &u64) -> bool {
     *v == 131_072
+}
+
+/// SEC-08 (#212): A single OWASP CRS-compatible WAF rule. Each rule
+/// has a numeric ID (CRS convention: 9xxxx), a severity level, a
+/// phase (1 = request headers, 2 = request body), a list of tags, a
+/// regex pattern, and the inspection targets to apply the pattern
+/// to. Rules are evaluated in order; matching rules add their
+/// severity to the request's anomaly score. The request is blocked
+/// when the score exceeds the configured threshold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrsRule {
+    /// Unique rule ID (CRS convention: 9xxxx). Used for exclusions
+    /// and logging.
+    pub id: u32,
+    /// Rule severity: 1 = critical, 2 = warning, 3 = notice, 4 = info.
+    /// Higher severity contributes more to the anomaly score.
+    #[serde(default = "default_crs_severity")]
+    pub severity: u8,
+    /// Evaluation phase: 1 = request headers (path, query, headers),
+    /// 2 = request body. Default 1.
+    #[serde(default = "default_crs_phase")]
+    pub phase: u8,
+    /// Tags for grouping and exclusion (e.g. "OWASP_CRS", "SQL_INJECTION").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The regex pattern to match against the target values.
+    pub pattern: String,
+    /// Which request parts to inspect: "path", "query", "header",
+    /// "headers" (all selected headers), "body". Default: ["path", "query"].
+    #[serde(default = "default_crs_targets")]
+    pub targets: Vec<String>,
+    /// Optional list of transformations to apply before matching
+    /// (e.g. "lowercase", "url_decode", "html_entity_decode"). Default: [].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transformations: Vec<String>,
+}
+
+fn default_crs_severity() -> u8 {
+    2
+}
+
+fn default_crs_phase() -> u8 {
+    1
+}
+
+fn default_crs_targets() -> Vec<String> {
+    vec!["path".into(), "query".into()]
+}
+
+/// SEC-08 (#212): Global WAF policy with CRS-compatible rules. When
+/// enabled, the rules are evaluated on every request (regardless of
+/// route-level WAF config). The anomaly score is accumulated across
+/// all matching rules; the request is blocked when the score exceeds
+/// the threshold. Rule exclusions can disable specific rules by ID or
+/// tag. The paranoia level controls which rules are active (1 =
+/// default, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalWaf {
+    /// Master switch. Default false.
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Audit-log-only mode (same semantics as RouteWaf::dry_run).
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Paranoia level (1-4). Rules with a higher paranoia level than
+    /// this are skipped. Default 1.
+    #[serde(
+        default = "default_crs_paranoia",
+        skip_serializing_if = "is_default_crs_paranoia"
+    )]
+    pub paranoia_level: u8,
+    /// Anomaly score threshold for blocking. A request is blocked
+    /// when the sum of matching rule severities reaches this value.
+    /// Default 5 (critical rules block immediately, warnings need
+    /// multiple hits).
+    #[serde(
+        default = "default_crs_threshold",
+        skip_serializing_if = "is_default_crs_threshold"
+    )]
+    pub anomaly_threshold: u32,
+    /// Maximum body bytes to inspect (same semantics as
+    /// RouteWaf::max_body_inspect_bytes). Default 131072.
+    #[serde(
+        default = "default_waf_max_body_inspect_bytes",
+        skip_serializing_if = "is_default_waf_max_body_inspect_bytes"
+    )]
+    pub max_body_inspect_bytes: u64,
+    /// CRS-compatible rules to evaluate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<CrsRule>,
+    /// Rule IDs to exclude (skip even if the rule is in the rules
+    /// list). Useful for tuning false positives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_rule_ids: Vec<u32>,
+    /// Tags to exclude (skip all rules carrying any of these tags).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_tags: Vec<String>,
+}
+
+fn default_crs_paranoia() -> u8 {
+    1
+}
+
+fn is_default_crs_paranoia(v: &u8) -> bool {
+    *v == 1
+}
+
+fn default_crs_threshold() -> u32 {
+    5
+}
+
+fn is_default_crs_threshold(v: &u32) -> bool {
+    *v == 5
 }
 
 /// Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).
@@ -4907,6 +5151,13 @@ pub struct Upstream {
     pub name: String,
     #[serde(default = "default_load_balancer")]
     pub load_balancer: LoadBalancer,
+    /// DP-07 (#236): what to hash for consistent-hash load balancers
+    /// (`ip_hash` and `maglev`). Defaults to `client_ip` (the pre-#236
+    /// behavior). When set to `cookie` or `header`, the gateway extracts
+    /// the value from the request and uses it as the hash key; if the
+    /// cookie/header is absent, it falls back to the client IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_on: Option<HashOn>,
     /// Protocol used toward upstream endpoints.
     #[serde(default = "default_upstream_protocol")]
     pub protocol: UpstreamProtocol,
@@ -4922,6 +5173,18 @@ pub struct Upstream {
     /// this field otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_ca_file: Option<String>,
+    /// REL-08 (#219): when true, the upstream's TLS connections trust the
+    /// OS-native root CA store (loaded via `rustls-native-certs`) INSTEAD
+    /// of the bundled webpki root set. Useful in deployments whose
+    /// private CAs are provisioned through the host's trust store (e.g.
+    /// corporate PKI, cloud metadata CAs). Mutually exclusive with
+    /// `trusted_ca_file` (validation rejects a configuration that sets
+    /// both). Only meaningful for the TLS protocols (`https`/`http2`/`h3`)
+    /// — no TLS is negotiated toward `http1` endpoints, so validation
+    /// rejects that combination. Active health probes for this upstream
+    /// verify against the same roots. Defaults to `false` (webpki roots).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_system_roots: bool,
     /// Static endpoint list for this upstream. When `dns_discovery` is
     /// present, this becomes the initial/fallback set (used until the
     /// first DNS resolution completes and as a fallback when DNS fails
@@ -5475,6 +5738,22 @@ pub struct RetryConfig {
     /// `0` is rejected (omit the field for unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_deadline_ms: Option<u64>,
+    /// Streaming failover first-frame buffer cap in bytes (REL-05, #216).
+    /// When > 0, the proxy buffers up to this many bytes of the upstream
+    /// response body BEFORE forwarding any bytes to the client. If the
+    /// upstream fails (connection reset, read timeout, framing error)
+    /// before the buffer fills or the body completes, the proxy can
+    /// still retry the request to a different endpoint — the client has
+    /// not yet received any bytes, so the response is not committed.
+    /// Once the buffer fills (or the body completes), the buffered
+    /// prefix is flushed to the client and the rest of the body streams
+    /// frame-by-frame (the stream is then committed; a later mid-body
+    /// failure is terminal, as in v1). Default 0 = no first-frame
+    /// buffering (v1 behavior: the response is committed as soon as
+    /// headers resolve). Requires `attempts > 0` and
+    /// `buffer_max_bytes > 0` (the request body must be replayable).
+    #[serde(default)]
+    pub buffer_first_frame_bytes: u64,
 }
 
 impl Default for RetryConfig {
@@ -5490,6 +5769,7 @@ impl Default for RetryConfig {
             buffer_max_bytes: 0,
             hedge: None,
             total_deadline_ms: None,
+            buffer_first_frame_bytes: 0,
         }
     }
 }
@@ -5626,6 +5906,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn default_false() -> bool {
+    false
+}
+
 /// Passive health / outlier detection knobs (DW-012). All fields default;
 /// a `health:` block with no keys enables ejection with the defaults.
 ///
@@ -5660,6 +5944,25 @@ pub struct PassiveHealth {
     /// re-ejects for another `eject_ms`.
     #[serde(default = "default_health_half_open_probes")]
     pub half_open_probes: u32,
+    /// Recovery ramp window in milliseconds (REL-06, #217). When > 0,
+    /// an endpoint that recovers from ejection (a half-open probe
+    /// succeeds) does NOT immediately return to full traffic. Instead
+    /// it ramps its effective weight from a floor (1) to its
+    /// configured weight over this window, reducing the blast radius
+    /// of a partial recovery (the endpoint may still be slow or
+    /// partially degraded). Default 0 = no ramp (v1 behavior: a
+    /// successful probe restores full weight immediately).
+    #[serde(default)]
+    pub recovery_ramp_ms: u64,
+    /// Whether the in-flight counter is held until the response body
+    /// completes (REL-06, #217). Default false: the in-flight counter
+    /// is released when response headers resolve (v1 behavior). When
+    /// true, the counter is held until the body stream ends or is
+    /// dropped, giving `least_requests`, `random`, and `peak_ewma` a
+    /// more accurate view of actual endpoint load. The trade-off is a
+    /// slightly higher in-flight count under streaming workloads.
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub body_completion_inflight: bool,
 }
 
 impl Default for PassiveHealth {
@@ -5671,6 +5974,8 @@ impl Default for PassiveHealth {
             failure_min_volume: 20,
             eject_ms: 30_000,
             half_open_probes: 1,
+            recovery_ramp_ms: 0,
+            body_completion_inflight: false,
         }
     }
 }
@@ -5800,6 +6105,10 @@ fn default_probe_jitter_ms() -> u64 {
 pub enum ProbeKind {
     /// HTTP/1.1 GET to `path`; success = 2xx.
     Http,
+    /// HTTP/2 GET to `path` over a pooled H2 connection (REL-07, #218);
+    /// for HTTP/2-only and gRPC upstreams that refuse HTTP/1.1 on a
+    /// separate connection. Success = 2xx.
+    Http2,
     /// TCP connect within the timeout.
     Tcp,
 }
@@ -5815,6 +6124,12 @@ pub enum LoadBalancer {
     LeastRequests,
     Random,
     IpHash,
+    /// Maglev consistent hashing (DP-07, #236): Google's Maglev algorithm
+    /// uses a fixed-size lookup table (default 65537 entries) populated
+    /// by each endpoint's permutation. Provides better distribution than
+    /// ketama for large endpoint pools with tight balance bounds. The
+    /// hash key is determined by `hash_on` (client IP, cookie, or header).
+    Maglev,
     /// Peak-EWMA latency-aware load balancing (DW-090, Finagle-style):
     /// favors low-latency endpoints and degrades outliers. Each endpoint
     /// carries an atomic EWMA cost tracker (nanosecond resolution) updated
@@ -5830,6 +6145,33 @@ pub enum LoadBalancer {
     PeakEwma,
 }
 
+/// What to hash for consistent-hash load balancers (`ip_hash` and
+/// `maglev`). DP-07 (#236): extends the hash key source beyond the
+/// client IP to support cookie-based sticky sessions and header-based
+/// affinity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HashOn {
+    /// Hash the client IP (the default behavior, backward-compatible
+    /// with pre-#236 configs).
+    #[default]
+    ClientIp,
+    /// Hash a cookie value. If the cookie is not present in the request,
+    /// the gateway falls back to the client IP. Used for sticky sessions
+    /// without the `services[].sticky` split mechanism.
+    Cookie {
+        /// The cookie name to read.
+        cookie: String,
+    },
+    /// Hash a request header value. If the header is not present, falls
+    /// back to the client IP. Common for routing by `X-User-Id` or
+    /// `X-Session-Id` for session affinity.
+    Header {
+        /// The header name to read (case-insensitive).
+        header: String,
+    },
+}
+
 fn default_upstream_protocol() -> UpstreamProtocol {
     UpstreamProtocol::Http1
 }
@@ -5839,6 +6181,10 @@ fn default_upstream_protocol() -> UpstreamProtocol {
 pub enum UpstreamProtocol {
     Http1,
     Http2,
+    /// Cleartext HTTP/2 with prior knowledge (h2c, DP-02 #235). No TLS;
+    /// the client speaks HTTP/2 directly over TCP. Common for internal
+    /// east-west gRPC traffic without TLS.
+    H2c,
     Https,
     /// HTTP/3 over QUIC (DW-108). QUIC mandates TLS 1.3, so an `h3`
     /// upstream always negotiates TLS with ALPN `h3`; the

@@ -147,3 +147,52 @@ Throw attack payloads at a live gateway: `demos/04-security-auth/`
 XSS, and path-traversal inputs (asserting 403) alongside a clean
 request (200). The category README covers prerequisites and
 teardown.
+
+## Global CRS-compatible WAF
+
+In addition to the per-route WAF-lite, the gateway supports a global
+CRS-compatible WAF policy configured at the gateway level. This is a
+rule-based engine with OWASP Core Rule Set concepts: rule IDs,
+severity levels, phases, tags, transformations, anomaly scoring,
+paranoia levels, and rule exclusions.
+
+### Configuration
+
+```yaml
+waf:
+  enabled: true
+  dry_run: false
+  paranoia_level: 1
+  anomaly_threshold: 5
+  max_body_inspect_bytes: 131072
+  rules:
+    - id: 900001
+      severity: 2
+      phase: 1
+      tags: [SQL_INJECTION, OWASP_CRS]
+      pattern: "(?i)union\\s+select"
+      targets: [path, query]
+      transformations: [lowercase, url_decode]
+  exclude_rule_ids: [900002]
+  exclude_tags: [PARANOID]
+```
+
+### How it works
+
+- **Rules**: each rule has a numeric ID, severity (1-4), phase
+  (1 = request headers, 2 = request body), tags, a regex pattern,
+  targets (path, query, headers, body), and transformations.
+- **Transformations**: applied before pattern matching — lowercase,
+  url_decode, html_entity_decode, compress_whitespace,
+  remove_whitespace, url_decode_uni.
+- **Anomaly scoring**: each matching rule adds its severity to the
+  request's anomaly score. The request is blocked when the total
+  reaches the `anomaly_threshold`.
+- **Exclusions**: rules can be excluded by ID or tag, useful for
+  tuning false positives without modifying the rule set.
+- **Dry run**: when enabled, matches are logged but the request
+  continues — useful for measuring the false-positive rate before
+  enforcing.
+
+The global WAF runs alongside the per-route WAF-lite. Both are
+opt-in (default off).

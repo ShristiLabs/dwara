@@ -163,6 +163,71 @@ fn app_js_has_workspace_switcher() {
 }
 
 #[test]
+fn app_js_has_live_charts_view() {
+    let file = resolve("/console/app.js").unwrap();
+    let js = std::str::from_utf8(file.body).unwrap();
+    // #226: live charts view with canvas-based rendering.
+    assert!(js.contains("renderLive"));
+    assert!(js.contains("drawLatencyChart"));
+    assert!(js.contains("/analytics/dashboard"));
+    assert!(js.contains("/analytics/live"));
+    assert!(js.contains("liveState"));
+}
+
+#[test]
+fn app_js_has_crud_flows() {
+    let file = resolve("/console/app.js").unwrap();
+    let js = std::str::from_utf8(file.body).unwrap();
+    // #226: CRUD flows for routes, upstreams, services, consumers, policies.
+    assert!(js.contains("renderCrudEntity"));
+    assert!(js.contains("renderRoutesCrud"));
+    assert!(js.contains("renderUpstreamsCrud"));
+    assert!(js.contains("openCreateDialog"));
+    assert!(js.contains("openEditDialog"));
+    assert!(js.contains("sendJSON"));
+}
+
+#[test]
+fn app_js_has_ai_ops_view() {
+    let file = resolve("/console/app.js").unwrap();
+    let js = std::str::from_utf8(file.body).unwrap();
+    // #226: AI ops view with credential pools, MCP, and experiments.
+    assert!(js.contains("renderAiOps"));
+    assert!(js.contains("/ai/credential-pools"));
+    assert!(js.contains("/mcp/sessions"));
+    assert!(js.contains("/mcp/tools"));
+    assert!(js.contains("/experiments/prompt-overrides"));
+}
+
+#[test]
+fn index_html_has_v3_nav_buttons() {
+    let file = resolve("/console/").unwrap();
+    let html = std::str::from_utf8(file.body).unwrap();
+    // #226: live and aiops nav buttons.
+    assert!(html.contains("data-view=\"live\""));
+    assert!(html.contains("data-view=\"aiops\""));
+}
+
+#[test]
+fn index_html_has_v3_footer() {
+    let file = resolve("/console/").unwrap();
+    let html = std::str::from_utf8(file.body).unwrap();
+    // #226: footer updated to v3.
+    assert!(html.contains("console v3"));
+}
+
+#[test]
+fn style_css_has_v3_styles() {
+    let file = resolve("/console/style.css").unwrap();
+    let css = std::str::from_utf8(file.body).unwrap();
+    // #226: live chart and modal styles.
+    assert!(css.contains(".chart-card"));
+    assert!(css.contains(".live-chart"));
+    assert!(css.contains(".modal-overlay"));
+    assert!(css.contains(".crud-toolbar"));
+}
+
+#[test]
 fn style_css_has_dark_theme() {
     let file = resolve("/console/style.css").unwrap();
     let css = std::str::from_utf8(file.body).unwrap();

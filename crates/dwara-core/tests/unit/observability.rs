@@ -88,11 +88,13 @@ fn render_contains_families() {
     use dwara_core::config::{Endpoint, Gateway, LoadBalancer, Upstream};
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
             upstreams: vec![Upstream {
+                hash_on: None,
                 name: "u".into(),
                 load_balancer: LoadBalancer::RoundRobin,
                 protocol: dwara_core::config::UpstreamProtocol::Http1,
@@ -112,6 +114,7 @@ fn render_contains_families() {
                 breaker: None,
                 max_pending: None,
                 trusted_ca_file: None,
+                use_system_roots: false,
                 oauth2_client_credentials: None,
                 dns_discovery: None,
                 peak_ewma: None,
@@ -125,6 +128,8 @@ fn render_contains_families() {
             policies: vec![],
             global_policies: Vec::new(),
             authorization: None,
+            default_security_headers: None,
+            waf: None,
             max_concurrent_requests: None,
             load_shed_dry_run: false,
             jwt_providers: Vec::new(),

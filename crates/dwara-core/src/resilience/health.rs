@@ -137,6 +137,10 @@ pub struct HealthParams {
     pub eject_ms: u64,
     /// Trial requests allowed through per half-open recovery attempt.
     pub half_open_probes: u32,
+    /// Recovery ramp window in milliseconds (REL-06, #217). When > 0,
+    /// a recovered endpoint ramps its effective weight from 1 to its
+    /// configured weight over this window. Default 0 = no ramp.
+    pub recovery_ramp_ms: u64,
 }
 
 impl HealthParams {
@@ -151,6 +155,7 @@ impl HealthParams {
             failure_min_volume: h.failure_min_volume,
             eject_ms: h.eject_ms,
             half_open_probes: h.half_open_probes,
+            recovery_ramp_ms: h.recovery_ramp_ms,
         }
     }
 }
@@ -159,6 +164,14 @@ impl HealthParams {
 const HEALTHY: u8 = 0;
 const EJECTED: u8 = 1;
 const HALF_OPEN: u8 = 2;
+
+/// Unix-epoch milliseconds (the health clock convention).
+fn system_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Per-endpoint passive health tracker. All pick-path reads are atomic;
 /// only the observation window takes a lock (report path). Share via `Arc`
@@ -184,6 +197,11 @@ pub struct EndpointHealth {
     /// and `address:port` labels by the balancer at construction — the
     /// tracker itself knows its state machine, not its own address.
     sink: Option<crate::events::EndpointEvents>,
+    /// REL-06 (#217): Unix-epoch ms when the endpoint recovered from
+    /// ejection (a half-open probe succeeded). Used by the load
+    /// balancer to compute the recovery ramp weight. 0 = the endpoint
+    /// was never ejected (or the ramp is disabled).
+    recovered_at_ms: AtomicU64,
 }
 
 impl EndpointHealth {
@@ -443,12 +461,25 @@ impl EndpointHealth {
         self.status.store(HEALTHY, Ordering::Release);
         self.consecutive_failures.store(0, Ordering::Relaxed);
         events.clear();
+        // REL-06 (#217): record the recovery timestamp so the load
+        // balancer can apply a recovery ramp. The timestamp is the
+        // system clock (the same clock used for ejection expiry).
+        self.recovered_at_ms
+            .store(system_now_ms(), Ordering::Relaxed);
         // DW-044: see eject_locked. Recovery covers both paths that
         // restore an endpoint (a successful half-open probe and the
         // all-ejected fail-open success).
         if let Some(sink) = &self.sink {
             sink.emit(crate::events::EventKind::EndpointRecovered);
         }
+    }
+
+    /// REL-06 (#217): the Unix-epoch ms when the endpoint last recovered
+    /// from ejection, or 0 if it was never ejected (or the ramp is
+    /// disabled). Used by the load balancer to compute the recovery
+    /// ramp weight multiplier.
+    pub fn recovered_at_ms(&self) -> u64 {
+        self.recovered_at_ms.load(Ordering::Relaxed)
     }
 }
 

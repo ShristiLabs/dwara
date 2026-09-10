@@ -12,6 +12,135 @@ Your model names stay yours: clients ask for the alias you publish
 and the provider's real model identifier never leaves the gateway.
 Rotate providers by editing the alias table -- no client changes.
 
+## How it works
+
+An `ai` route hands the request to the AI branch of the [request
+pipeline](../architecture/request-pipeline) instead of the regular
+proxy branch. The branch is a pure translation and policy layer on
+top of the normal proxy machinery: governance, guardrails, budgets,
+and caching inspect the request and response, while the actual
+provider call rides the same upstream pool, TLS, connection caps,
+and circuit breaking as any other proxied request.
+
+Every AI request flows through four stage groups -- ingress (admit
+and inspect), routing (pick a target), the provider call (translate
+and send), and egress (inspect and account):
+
+```mermaid
+flowchart TD
+    Client[OpenAI-compatible client] --> Act[ai route action]
+
+    Act --> B1
+    subgraph Ingress["Ingress - admit and inspect"]
+        B1["1. Budget pre-check"] --> B2["2. Parse body"]
+        B2 --> B3["3. Model governance"]
+        B3 --> B4["4. Prompt guardrails"]
+        B4 --> B5["5. Semantic cache lookup"]
+    end
+
+    B5 -->|cache hit| E5
+    B5 -->|miss| R
+
+    subgraph Routing["Routing - pick a target"]
+        R["6. Alias resolution\ndirect / failover / canary / policy / A-B"]
+    end
+
+    R --> P1
+    subgraph ProviderCall["Provider call - translate and send"]
+        P1["7. Adapter translation"] --> P2["8. Credential pool pick"]
+        P2 --> P3["9. Upstream send\npool + TLS + breaker"]
+    end
+
+    P3 --> LLM[("LLM provider")]
+    LLM --> E1
+
+    subgraph Egress["Egress - inspect and account"]
+        E1["10. Response translation"] --> E2["11. Cost and spend recording"]
+        E2 --> E3["12. Response guardrails"]
+        E3 --> E4["13. Cache store + prompt logging"]
+        E4 --> E5["14. Return OpenAI-shaped response"]
+    end
+
+    E5 --> Client
+```
+
+From the outside it is one facade with many providers -- clients
+speak the OpenAI dialect (Anthropic Messages and Gemini
+`generateContent` shapes are also accepted), and the adapters speak
+each provider's native wire format:
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        C1[OpenAI SDK]
+        C2[Anthropic SDK]
+        C3[Curl / any HTTP client]
+    end
+    subgraph Dwara["Dwara AI gateway"]
+        F["Canonical chat-completions core\ngovernance + guardrails + budgets + cache"]
+        AT["Alias table\nyours, not the providers'"]
+        AD["Adapters\nper-provider wire format"]
+        F --> AT --> AD
+    end
+    subgraph Providers
+        PR1[OpenAI and compatibles]
+        PR2[Anthropic]
+        PR3[Gemini]
+        PR4[Azure OpenAI / Bedrock]
+        PR5[A2A agents]
+    end
+    C1 --> F
+    C2 --> F
+    C3 --> F
+    AD --> PR1
+    AD --> PR2
+    AD --> PR3
+    AD --> PR4
+    AD --> PR5
+```
+
+### The phases
+
+| # | Phase | What happens | Rejects with | Details |
+|---|---|---|---|---|
+| 1 | Budget pre-check | Per-minute token / per-day spend caps checked before the body is read; a second estimate-based check runs after parsing | 429 `ai_budget_exceeded` | [Token budgets](./ai-token-budgets) |
+| 2 | Parse body | Body parsed into the canonical chat-completions request; prompt templates resolved; OpenAI, Anthropic, and Gemini dialects accepted | 400 `invalid_json` | [Prompt experimentation](./ai-prompt-experimentation) |
+| 3 | Model governance | Model alias checked against the consumer's team allowlist, before routing | 403 `model_denied_by_policy` | [Governance](./ai-governance) |
+| 4 | Prompt guardrails | Injection, PII, banned-content, and schema checks on the parsed prompt | 400 `guardrail_blocked` | [Guardrails](./ai-guardrails) |
+| 5 | Semantic cache | Embedding-similarity lookup; a hit returns the cached response (or replays cached SSE frames) with no provider call | -- hit short-circuits | [Semantic caching](./ai-semantic-caching) |
+| 6 | Alias resolution | Alias mapped to a provider target via direct, failover chain, canary split, routing policy, or A/B test | 404 `model_not_found` | [Failover and canary](#failover-and-canary), [routing policies](./ai-routing-policies) |
+| 7 | Adapter translation | Canonical request translated to the provider's wire format | 502 translation error | [Providers](#providers) |
+| 8 | Credential pick | Round-robin or weighted key pick from the provider's credential pool; 429'd keys are quarantined (Enterprise) | 429 when the pool is exhausted | [Credential pools](#credential-pools) |
+| 9 | Upstream send | Provider call through the standard pool / TLS / breaker path; failover retries happen here | 502 `provider_unreachable` | [Failover chains](#failover-chains) |
+| 10 | Response translation | Provider response (or SSE chunks) translated back to the canonical shape | 502 `provider_malformed_response` | [Streaming](#streaming) |
+| 11 | Cost and spend | Provider-reported tokens matched against the pricing table; micro-USD cost recorded against the consumer's budget | -- | [Cost attribution](./ai-token-budgets) |
+| 12 | Response guardrails | PII, banned-content, and schema checks on the response | 400 `guardrail_blocked` / `response_schema_violation` | [Guardrails](./ai-guardrails) |
+| 13 | Cache store + logging | Fire-and-forget semantic-cache store; opt-in prompt/response capture with PII redaction | -- | [Prompt logging](./ai-prompt-logging) |
+| 14 | Return | OpenAI-shaped response returned to the client | -- | [Errors](#errors) |
+
+Details worth knowing:
+
+- **Token accounting is provider-reported.** A lightweight local
+  estimate is used only for the phase-1 pre-check; everything
+  recorded -- budgets, metrics, cost -- uses the provider's numbers.
+- **Failover stops at the first chunk.** Failover and canary
+  selection happen before the provider call commits. Once a stream
+  is flowing, the serving provider is committed; budget or
+  banned-content violations mid-stream end the stream cleanly
+  (`ai_budget_exceeded_midstream`, `guardrail_blocked_midstream`)
+  instead of resetting the connection.
+- **All policy phases are scoped like regular policies** (consumer >
+  route > service > listener > global): a team can carry its own
+  model allowlist, a route its own guardrails, a consumer its own
+  budget -- composing independently.
+- **Everything is a hot reload.** Alias changes, policy edits, and
+  credential rotations take effect on the next request after a
+  config reload, with no restart.
+
+For the runtime deep dive -- where each stage sits in the dispatch
+and how the adapter trait composes -- see [AI gateway
+architecture](../architecture/ai-gateway).
+
 ## When to use this
 
 Use the AI gateway when:

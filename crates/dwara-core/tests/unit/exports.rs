@@ -94,6 +94,7 @@ fn schema_v2_export_runs_table_exists() {
         DEFAULT_RETENTION_MS,
         1000,
         0,
+        None,
     )
     .unwrap();
     store

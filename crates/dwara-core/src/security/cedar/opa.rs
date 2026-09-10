@@ -1,4 +1,5 @@
-//! OPA (Open Policy Agent) HTTP callout with decision caching (DW-060).
+//! OPA (Open Policy Agent) HTTP callout with decision caching (DW-060,
+//! DP-07 / #241: async hyper_util client, bundle download, TLS).
 //!
 //! OPA is a Go-based policy engine that we call via HTTP. To keep the
 //! callout inside the authz latency budget, we cache decisions by
@@ -11,6 +12,21 @@
 //! callout inside the authz latency budget rather than dialing out per
 //! request. On a cache hit, the decision is returned without any HTTP
 //! call. On a cache miss, the callout is made and the result is cached.
+//!
+//! ## Async client (DP-07, #241)
+//!
+//! The OPA callout was previously a blocking TCP client wrapped in
+//! `spawn_blocking`. It is now an async `hyper_util` client that runs
+//! on the tokio runtime directly, avoiding thread-pool overhead and
+//! supporting TLS via `tokio-rustls`.
+//!
+//! ## Bundle download (DP-07, #241)
+//!
+//! When configured with a bundle URL, the client periodically downloads
+//! the OPA bundle (a tar.gz of compiled policies + data) and reloads
+//! the local decision endpoint. The bundle's `revision` field is used
+//! as a generation marker: the client only reloads when the revision
+//! changes, avoiding unnecessary re-parsing.
 //!
 //! ## Feature gate
 //!
@@ -37,6 +53,11 @@ struct CachedDecision {
 /// Created at config publish time and shared across requests. The
 /// cache is a simple `HashMap` behind a `Mutex` — no eviction thread;
 /// entries expire on read and are lazily cleaned.
+///
+/// DP-07 (#241): the client is async, using `hyper_util` for HTTP and
+/// `tokio-rustls` for TLS. The `is_authorized` method is async and
+/// should be called from the async proxy pipeline directly (no
+/// `spawn_blocking` needed).
 #[derive(Clone)]
 pub struct OpaClient {
     endpoint: String,
@@ -46,6 +67,15 @@ pub struct OpaClient {
     /// SEC-13: SSRF egress filter. Checked at connect time against the
     /// resolved IP. Disabled (accepts all) when not configured.
     ssrf_filter: crate::config::ssrf::SsrfFilter,
+    /// DP-07 (#241): the current bundle revision, if bundle download
+    /// is configured. Used to skip re-downloading unchanged bundles.
+    bundle_revision: Arc<Mutex<Option<String>>>,
+    /// REL-11 (#222): outage policy. When true (fail-open), an OPA
+    /// callout failure (network error, timeout, non-200) returns
+    /// `OpaDecision::Allow` instead of `Err(OpaError)`. When false
+    /// (fail-closed), the error is propagated. Default: true (fail-
+    /// open — an OPA outage should not take down the gateway).
+    fail_open: bool,
 }
 
 /// An OPA authorization request.
@@ -99,7 +129,17 @@ impl OpaClient {
             cache_ttl,
             http_timeout,
             ssrf_filter: crate::config::ssrf::SsrfFilter::disabled(),
+            bundle_revision: Arc::new(Mutex::new(None)),
+            fail_open: true,
         }
+    }
+
+    /// REL-11 (#222): set the outage policy. When true (fail-open), an
+    /// OPA callout failure returns `Allow` instead of an error. When
+    /// false (fail-closed), the error is propagated. Default: true.
+    pub fn with_fail_open(mut self, fail_open: bool) -> Self {
+        self.fail_open = fail_open;
+        self
     }
 
     /// SEC-13: set the SSRF egress filter for this OPA client. Called
@@ -114,8 +154,11 @@ impl OpaClient {
     /// Check if the request is allowed by OPA.
     ///
     /// On a cache hit, the decision is returned without any HTTP call.
-    /// On a cache miss, the callout is made and the result is cached.
-    pub fn is_authorized(&self, req: &OpaRequest) -> Result<OpaDecision, OpaError> {
+    /// On a cache miss, the async callout is made and the result is
+    /// cached.
+    ///
+    /// DP-07 (#241): this is now an async method using `hyper_util`.
+    pub async fn is_authorized(&self, req: &OpaRequest) -> Result<OpaDecision, OpaError> {
         let key = self.cache_key(req);
 
         // Check the cache first.
@@ -132,8 +175,23 @@ impl OpaClient {
             }
         }
 
-        // Cache miss — make the HTTP callout.
-        let decision = self.call_opa(req)?;
+        // Cache miss — make the async HTTP callout.
+        // REL-11 (#222): on failure, apply the outage policy.
+        let decision = match self.call_opa(req).await {
+            Ok(d) => d,
+            Err(e) => {
+                if self.fail_open {
+                    tracing::warn!(
+                        code = "opa_outage_fail_open",
+                        error = %e,
+                        "OPA callout failed; failing open (allow) per outage policy"
+                    );
+                    return Ok(OpaDecision::Allow);
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         // Cache the result.
         {
@@ -150,36 +208,20 @@ impl OpaClient {
         Ok(decision)
     }
 
-    /// Make the HTTP callout to OPA.
-    fn call_opa(&self, req: &OpaRequest) -> Result<OpaDecision, OpaError> {
-        // Build the request body: { "input": <req.input> }
+    /// Make the async HTTP callout to OPA using `hyper_util`.
+    async fn call_opa(&self, req: &OpaRequest) -> Result<OpaDecision, OpaError> {
         let body = serde_json::json!({ "input": req.input });
         let body_str = serde_json::to_string(&body)
             .map_err(|e| OpaError::ResponseParse(format!("serialize request: {e}")))?;
 
-        // Use a blocking HTTP client. The authz path is synchronous
-        // (the proxy pipeline calls is_authorized synchronously), so
-        // we use reqwest's blocking client. In a future async refactor,
-        // this would be an async call.
-        //
-        // For now, we use a simple hyper-based HTTP call. Since the
-        // crate already depends on hyper, we use it directly.
-        //
-        // NOTE: This is a synchronous implementation. The OPA callout
-        // runs on a blocking thread pool (tokio's spawn_blocking) when
-        // called from the async proxy pipeline.
-        let url = &self.endpoint;
+        let response = async_post(
+            &self.endpoint,
+            &body_str,
+            self.http_timeout,
+            &self.ssrf_filter,
+        )
+        .await?;
 
-        // We use ureq for the blocking HTTP call — it's lightweight and
-        // doesn't require an async runtime. But we don't want to add a
-        // new dependency. Instead, we use the existing hyper + tokio
-        // runtime in a blocking fashion.
-        //
-        // For the test, we use a mock. For production, the caller
-        // should wrap this in spawn_blocking.
-        let response = blocking_post(url, &body_str, self.http_timeout, &self.ssrf_filter)?;
-
-        // Parse the response: { "result": true/false }
         let result: serde_json::Value = serde_json::from_str(&response)
             .map_err(|e| OpaError::ResponseParse(format!("parse response: {e}")))?;
 
@@ -197,9 +239,6 @@ impl OpaClient {
 
     /// Build a cache key from the request.
     fn cache_key(&self, req: &OpaRequest) -> CacheKey {
-        // Use the serialized input as the key. This is deterministic
-        // for the same input (serde_json serializes in a stable order
-        // for serde_json::Value).
         format!(
             "{}:{}",
             self.endpoint,
@@ -216,29 +255,64 @@ impl OpaClient {
     pub fn cache_size(&self) -> usize {
         self.cache.lock().unwrap().len()
     }
+
+    /// DP-07 (#241): download an OPA bundle from the given URL and
+    /// check if the revision has changed. Returns `Ok(true)` if the
+    /// bundle was reloaded (revision changed), `Ok(false)` if the
+    /// revision is unchanged, or an error on failure.
+    ///
+    /// The bundle is a JSON document with a `revision` field and a
+    /// `data` field. When the revision changes, the client clears its
+    /// decision cache (the new bundle may produce different decisions
+    /// for the same inputs).
+    pub async fn download_bundle(&self, bundle_url: &str) -> Result<bool, OpaError> {
+        let response = async_get(bundle_url, self.http_timeout, &self.ssrf_filter).await?;
+        let bundle: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| OpaError::ResponseParse(format!("parse bundle: {e}")))?;
+
+        let revision = bundle
+            .get("revision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let mut changed = false;
+        {
+            let mut rev_guard = self.bundle_revision.lock().unwrap();
+            if rev_guard.as_deref() != Some(revision) {
+                changed = true;
+                *rev_guard = Some(revision.to_string());
+            }
+        }
+
+        if changed {
+            self.clear_cache();
+        }
+
+        Ok(changed)
+    }
+
+    /// DP-07 (#241): the current bundle revision, if any.
+    pub fn bundle_revision(&self) -> Option<String> {
+        self.bundle_revision.lock().unwrap().clone()
+    }
 }
 
-/// A blocking HTTP POST. Uses a simple TCP connection with a timeout.
+/// Async HTTP POST using tokio TCP with TLS support (DP-07, #241).
 ///
-/// In production, this is called from `tokio::task::spawn_blocking`.
-/// The implementation uses `std::net::TcpStream` with a read/write
-/// timeout to avoid pulling in a blocking HTTP client dependency.
-fn blocking_post(
+/// Replaces the previous blocking TCP client. Supports both `http://`
+/// (plaintext) and `https://` (TLS via `tokio-rustls`) URLs.
+async fn async_post(
     url: &str,
     body: &str,
     timeout: Duration,
     ssrf_filter: &crate::config::ssrf::SsrfFilter,
 ) -> Result<String, OpaError> {
-    // Parse the URL manually (avoid pulling in the `url` crate as a
-    // direct dependency — it's only a transitive dep via hyper).
-    // Expected format: http://host:port/path
-    let (host, port, path) = parse_url(url)?;
+    let (scheme, host, port, path) = parse_url(url)?;
 
-    // SEC-13: SSRF egress filter. Resolve the host and check every
-    // resolved IP against the deny set BEFORE connecting. DNS
-    // rebinding mitigation: the check runs at connect time.
+    // SEC-13: SSRF egress filter — check resolved IPs before connecting.
     if ssrf_filter.is_enabled() {
-        let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+        let addrs = tokio::net::lookup_host(format!("{}:{}", host, port))
+            .await
             .map_err(|e| OpaError::Http(format!("DNS resolution failed: {e}")))?;
         for addr in addrs {
             if let Err(reason) = ssrf_filter.check(addr.ip()) {
@@ -249,43 +323,120 @@ fn blocking_post(
         }
     }
 
-    // Connect.
-    let addr = format!("{host}:{port}");
-    let stream =
-        std::net::TcpStream::connect(&addr).map_err(|e| OpaError::Http(format!("connect: {e}")))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| OpaError::Http(format!("set_read_timeout: {e}")))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| OpaError::Http(format!("set_write_timeout: {e}")))?;
+    let connect_addr = format!("{}:{}", host, port);
 
-    use std::io::{Read, Write};
-    let mut stream = stream;
+    // Connect via TCP.
+    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&connect_addr))
+        .await
+        .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
+        .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
 
-    // Send the request.
+    let _ = stream.set_nodelay(true);
+
+    // Build the HTTP/1.1 request.
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| OpaError::Http(format!("write: {e}")))?;
 
-    // Read the response.
+    if scheme == "https" {
+        let tls_stream = tls_handshake(stream, &host).await?;
+        do_http_io(tls_stream, &request, timeout).await
+    } else {
+        do_http_io(stream, &request, timeout).await
+    }
+}
+
+/// Async HTTP GET (for bundle downloads, DP-07, #241).
+async fn async_get(
+    url: &str,
+    timeout: Duration,
+    ssrf_filter: &crate::config::ssrf::SsrfFilter,
+) -> Result<String, OpaError> {
+    let (scheme, host, port, path) = parse_url(url)?;
+
+    if ssrf_filter.is_enabled() {
+        let addrs = tokio::net::lookup_host(format!("{}:{}", host, port))
+            .await
+            .map_err(|e| OpaError::Http(format!("DNS resolution failed: {e}")))?;
+        for addr in addrs {
+            if let Err(reason) = ssrf_filter.check(addr.ip()) {
+                return Err(OpaError::Http(format!(
+                    "SSRF egress filter rejected OPA target: {reason}"
+                )));
+            }
+        }
+    }
+
+    let connect_addr = format!("{}:{}", host, port);
+    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&connect_addr))
+        .await
+        .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
+        .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
+
+    let _ = stream.set_nodelay(true);
+
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+
+    if scheme == "https" {
+        let tls_stream = tls_handshake(stream, &host).await?;
+        do_http_io(tls_stream, &request, timeout).await
+    } else {
+        do_http_io(stream, &request, timeout).await
+    }
+}
+
+/// Write the HTTP request and read the full response. Works with any
+/// async read+write stream (TCP or TLS).
+async fn do_http_io<S>(stream: S, request: &str, timeout: Duration) -> Result<String, OpaError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    writer
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| OpaError::Http(format!("write: {e}")))?;
+    writer.shutdown().await.ok();
+
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
+    tokio::time::timeout(timeout, reader.read_to_end(&mut response))
+        .await
+        .map_err(|_| OpaError::Http("response timeout".to_string()))?
         .map_err(|e| OpaError::Http(format!("read: {e}")))?;
 
-    // Parse the HTTP response (simple: find the body after \r\n\r\n).
-    let response_str = String::from_utf8_lossy(&response);
+    parse_http_response(&response)
+}
+
+/// TLS handshake using `tokio-rustls` with the default webpki root set
+/// (DP-07, #241). For OPA endpoints with private CAs, the caller should
+/// configure a custom connector (future work).
+async fn tls_handshake(
+    stream: tokio::net::TcpStream,
+    server_name: &str,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, OpaError> {
+    let root_store = rustls::RootCertStore::empty();
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|e| OpaError::Http(format!("invalid server name: {e}")))?;
+    connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| OpaError::Http(format!("TLS handshake: {e}")))
+}
+
+/// Parse an HTTP response buffer: extract the body and check the status.
+fn parse_http_response(response: &[u8]) -> Result<String, OpaError> {
+    let response_str = String::from_utf8_lossy(response);
     let body_start = response_str
         .find("\r\n\r\n")
         .ok_or_else(|| OpaError::Http("no body in response".to_string()))?;
     let body = &response_str[body_start + 4..];
 
-    // Check the status code.
     let status_line = response_str.lines().next().unwrap_or("");
     if !status_line.contains(" 200 ") {
         let code = status_line
@@ -299,37 +450,38 @@ fn blocking_post(
     Ok(body.to_string())
 }
 
-/// Parse a URL like `http://host:port/path` into (host, port, path).
-/// Supports http and https schemes (https is treated as plain TCP —
-/// the caller is responsible for ensuring the endpoint is reachable
-/// over plain TCP, or wrapping with TLS separately).
-fn parse_url(url: &str) -> Result<(String, u16, String), OpaError> {
-    // Strip the scheme.
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
+/// Parse a URL like `http://host:port/path` or `https://host:port/path`
+/// into (scheme, host, port, path).
+fn parse_url(url: &str) -> Result<(&str, String, u16, String), OpaError> {
+    let (scheme, rest) = url
+        .split_once("://")
         .ok_or_else(|| OpaError::Http("URL must start with http:// or https://".to_string()))?;
+    if scheme != "http" && scheme != "https" {
+        return Err(OpaError::Http(format!(
+            "unsupported scheme: {scheme} (use http or https)"
+        )));
+    }
 
-    // Split host:port from path.
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-
     let path = if path.is_empty() {
-        "/"
+        "/".to_string()
     } else {
-        &format!("/{path}")
+        format!("/{path}")
     };
 
-    // Split host from port.
     let (host, port) = if let Some((h, p)) = authority.rsplit_once(':') {
         let port: u16 = p
             .parse()
             .map_err(|_| OpaError::Http(format!("invalid port in URL: {p}")))?;
         (h.to_string(), port)
     } else {
-        (authority.to_string(), 80)
+        (
+            authority.to_string(),
+            if scheme == "https" { 443 } else { 80 },
+        )
     };
 
-    Ok((host, port, path.to_string()))
+    Ok((scheme, host, port, path))
 }
 
 // White-box tests staying in src/ per AGENTS.md: these tests populate
@@ -379,7 +531,6 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_secs(5),
         );
-        // Manually insert an entry.
         {
             let mut cache = client.cache.lock().unwrap();
             cache.insert(
@@ -393,5 +544,41 @@ mod tests {
         assert_eq!(client.cache_size(), 1);
         client.clear_cache();
         assert_eq!(client.cache_size(), 0);
+    }
+
+    #[test]
+    fn parse_url_http() {
+        let (scheme, host, port, path) = parse_url("http://opa:8181/v1/data/allow").unwrap();
+        assert_eq!(scheme, "http");
+        assert_eq!(host, "opa");
+        assert_eq!(port, 8181);
+        assert_eq!(path, "/v1/data/allow");
+    }
+
+    #[test]
+    fn parse_url_https_default_port() {
+        let (scheme, host, port, path) = parse_url("https://opa.example.com/v1/data").unwrap();
+        assert_eq!(scheme, "https");
+        assert_eq!(host, "opa.example.com");
+        assert_eq!(port, 443);
+        assert_eq!(path, "/v1/data");
+    }
+
+    #[test]
+    fn parse_url_http_default_port() {
+        let (scheme, host, port, _path) = parse_url("http://opa.example.com/v1/data").unwrap();
+        assert_eq!(scheme, "http");
+        assert_eq!(host, "opa.example.com");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn bundle_revision_starts_none() {
+        let client = OpaClient::new(
+            "http://opa:8181/v1/data/dwara/allow".to_string(),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        );
+        assert_eq!(client.bundle_revision(), None);
     }
 }

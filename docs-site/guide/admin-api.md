@@ -263,3 +263,29 @@ Run the mTLS admin API against a live gateway: `demos/09-operations/`
 in the repository (test script: `test-02-admin-api.sh` -- `/health`,
 `/config`, and `/stats` over mTLS, plus a handshake failure without a
 client cert). The category README covers prerequisites and teardown.
+
+## API versioning and OpenAPI spec
+
+All admin API endpoints are available under both the canonical
+`/v1/` prefix and the legacy un-prefixed path. For example,
+`GET /v1/config` and `GET /config` resolve to the same handler. The
+legacy paths remain as backward-compatible aliases.
+
+Two metadata endpoints are available:
+
+- `GET /v1/openapi.json` (or `/openapi.json`) — returns a generated
+  OpenAPI 3.0.3 spec for the admin API. The spec documents all
+  endpoints with their HTTP methods, summaries, and tags.
+- `GET /v1/version` (or `/version`) — returns API version metadata:
+  ```json
+  {
+    "api_version": "v1",
+    "versioned_paths": true,
+    "legacy_paths": true,
+    "spec": "/v1/openapi.json"
+  }
+  ```
+
+Use the OpenAPI spec to generate client bindings or explore the
+admin API surface. The spec is generated programmatically and stays
+in sync with the route table.

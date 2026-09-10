@@ -84,6 +84,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -135,6 +136,7 @@ pub fn report_params(active: &ActiveParams, passive: &HealthParams) -> HealthPar
         failure_min_volume: u32::MAX,
         eject_ms: passive.eject_ms,
         half_open_probes: passive.half_open_probes,
+        recovery_ramp_ms: passive.recovery_ramp_ms,
     }
 }
 
@@ -247,7 +249,78 @@ pub async fn probe_once(
                 .map(|r| r.unwrap_or(false))
                 .unwrap_or(false)
         }
+        ProbeKind::Http2 => {
+            // REL-07 (#218): HTTP/2 probe for H2-only/gRPC upstreams.
+            // Uses hyper's H2 client with ALPN negotiation. The TLS
+            // config (when present) is cloned with h2 ALPN so the
+            // handshake negotiates HTTP/2; plaintext H2c is also
+            // supported via the prior-knowledge path.
+            let attempt = async {
+                let tcp = crate::dataplane::upstream::happy_dial(address, port, happy).await?;
+                match tls {
+                    None => {
+                        // Plaintext H2c (prior knowledge).
+                        let io = hyper_util::rt::TokioIo::new(tcp);
+                        let (sender, conn) = hyper::client::conn::http2::handshake(
+                            hyper_util::rt::TokioExecutor::new(),
+                            io,
+                        )
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        tokio::spawn(conn);
+                        http2_status_ok(sender, &authority(address, port), path).await
+                    }
+                    Some(cfg) => {
+                        // TLS with h2 ALPN.
+                        let mut h2_cfg = (**cfg).clone();
+                        h2_cfg.alpn_protocols = vec![b"h2".to_vec()];
+                        let connector = tokio_rustls::TlsConnector::from(Arc::new(h2_cfg));
+                        let name =
+                            match rustls::pki_types::ServerName::try_from(address.to_string()) {
+                                Ok(n) => n,
+                                Err(_) => return Ok(false),
+                            };
+                        let tls = connector.connect(name, tcp).await?;
+                        let io = hyper_util::rt::TokioIo::new(tls);
+                        let (sender, conn) = hyper::client::conn::http2::handshake(
+                            hyper_util::rt::TokioExecutor::new(),
+                            io,
+                        )
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        tokio::spawn(conn);
+                        http2_status_ok(sender, &authority(address, port), path).await
+                    }
+                }
+            };
+            tokio::time::timeout(timeout, attempt)
+                .await
+                .map(|r| r.unwrap_or(false))
+                .unwrap_or(false)
+        }
     }
+}
+
+/// Send a GET request over an H2 connection and classify the status
+/// (REL-07, #218). Mirrors `http_status_ok`: 2xx = success.
+async fn http2_status_ok(
+    mut sender: hyper::client::conn::http2::SendRequest<http_body_util::Empty<Bytes>>,
+    authority: &str,
+    path: &str,
+) -> Result<bool, std::io::Error> {
+    let req = hyper::Request::builder()
+        .method(hyper::Method::GET)
+        .uri(format!("https://{authority}{path}"))
+        .header(hyper::header::HOST, authority)
+        .header(hyper::header::USER_AGENT, "dwara-probe")
+        .body(http_body_util::Empty::<Bytes>::new())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let status = resp.status().as_u16();
+    Ok((200..300).contains(&status))
 }
 
 /// DW-108: QUIC active health probe for `protocol: h3` upstreams. Opens

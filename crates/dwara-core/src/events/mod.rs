@@ -141,6 +141,15 @@ pub enum EventKind {
     /// severe regression). Payload: canary_group, canary_action,
     /// canary_weight, canary_metric_value.
     CanaryRolledBack,
+    /// DP-10 (#238): a synthetic probe crossed the failure threshold
+    /// and entered an alerting state. Edge-triggered: subsequent
+    /// consecutive failures do not re-fire. Payload: route, status,
+    /// latency_ms, detail.
+    ProbeFailed,
+    /// DP-10 (#238): a previously-alerting synthetic probe recovered
+    /// (a successful probe after an alert). Payload: route, status,
+    /// latency_ms.
+    ProbeRecovered,
 }
 
 impl EventKind {
@@ -157,6 +166,8 @@ impl EventKind {
         EventKind::QuotaNearLimit,
         EventKind::CanaryPromoted,
         EventKind::CanaryRolledBack,
+        EventKind::ProbeFailed,
+        EventKind::ProbeRecovered,
     ];
 
     /// Stable wire/config spelling (serde's snake_case form, spelled out
@@ -174,6 +185,8 @@ impl EventKind {
             EventKind::QuotaNearLimit => "quota_near_limit",
             EventKind::CanaryPromoted => "canary_promoted",
             EventKind::CanaryRolledBack => "canary_rolled_back",
+            EventKind::ProbeFailed => "probe_failed",
+            EventKind::ProbeRecovered => "probe_recovered",
         }
     }
 
@@ -245,6 +258,19 @@ pub struct EventPayload {
     /// The metric value that triggered the adjustment (DW-091).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canary_metric_value: Option<f64>,
+    /// DP-10 (#238): the route name for synthetic probe events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// DP-10 (#238): the HTTP status code from the probe response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// DP-10 (#238): the probe round-trip latency in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// DP-10 (#238): dynamic error message from a failed probe (unlike
+    /// `detail`, this is a runtime string, not a static label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_detail: Option<String>,
 }
 
 impl EventPayload {
@@ -274,6 +300,19 @@ impl EventPayload {
             detail: Some(budget),
             used: Some(used),
             limit: Some(limit),
+            ..EventPayload::default()
+        }
+    }
+
+    /// Payload for a synthetic probe event (DP-10, #238): `route` is
+    /// the probed route name, `status` the HTTP status code, and
+    /// `error` an optional dynamic error message (None on recovery).
+    pub fn probe(route: &str, status: u16, latency_ms: u64, error: Option<&str>) -> Self {
+        EventPayload {
+            route: Some(route.to_string()),
+            status: Some(status),
+            latency_ms: Some(latency_ms),
+            probe_detail: error.map(|s| s.to_string()),
             ..EventPayload::default()
         }
     }

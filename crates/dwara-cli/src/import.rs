@@ -10,6 +10,11 @@
 //! `proxy` action, and an `openapi` extension field carrying the
 //! operationId, summary, and tags for traceability.
 //!
+//! CFG-04 (#240): with `--mock`, the importer reads the OpenAPI
+//! `responses` examples and generates `mock` route actions with the
+//! example response body and status. This lets an operator scaffold a
+//! fully functional mock API from an OpenAPI spec without any backend.
+//!
 //! No new dependencies: `serde_yaml_ng` and `serde_json` (both already
 //! workspace dependencies) parse the spec. A minimal OpenAPI 3.x struct
 //! captures paths, methods, operationId, parameters, and requestBody
@@ -19,8 +24,8 @@
 use std::collections::BTreeMap;
 
 use dwara_core::config::{
-    Endpoint, Gateway, OpenApiMeta, PathMatch, PathMatchKind, Route, RouteAction, RouteMatch,
-    Service, Upstream,
+    Endpoint, Gateway, MockAction, OpenApiMeta, PathMatch, PathMatchKind, Route, RouteAction,
+    RouteMatch, Service, Upstream,
 };
 use serde::Deserialize;
 
@@ -55,7 +60,8 @@ struct PathItem {
     head: Option<Operation>,
 }
 
-/// One OpenAPI operation: operationId, summary, tags.
+/// One OpenAPI operation: operationId, summary, tags, and responses
+/// (CFG-04, #240: responses carry examples for mock mode).
 #[derive(Debug, Deserialize)]
 struct Operation {
     #[serde(default, rename = "operationId")]
@@ -64,6 +70,34 @@ struct Operation {
     summary: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    /// OpenAPI responses: status code -> response object. Used by
+    /// `--mock` to pick an example response.
+    #[serde(default)]
+    responses: BTreeMap<String, Response>,
+}
+
+/// One OpenAPI response: carries `content` (media type -> media type
+/// object with examples).
+#[derive(Debug, Deserialize)]
+struct Response {
+    #[serde(default)]
+    content: BTreeMap<String, MediaType>,
+}
+
+/// One media type object: carries `example` or `examples`.
+#[derive(Debug, Deserialize)]
+struct MediaType {
+    #[serde(default)]
+    example: Option<serde_json::Value>,
+    #[serde(default)]
+    examples: BTreeMap<String, ExampleRef>,
+}
+
+/// An example reference or inline value.
+#[derive(Debug, Deserialize)]
+struct ExampleRef {
+    #[serde(default)]
+    value: Option<serde_json::Value>,
 }
 
 /// The HTTP methods the importer recognizes, in a stable order for
@@ -92,13 +126,18 @@ pub struct ImportResult {
 /// Import an OpenAPI spec (YAML or JSON, detected by file extension or
 /// content) and produce a Dwara config YAML. Returns an error string
 /// on parse failure (the caller prints it and exits 1).
-pub fn import_openapi(spec_text: &str, is_json: bool) -> Result<ImportResult, String> {
+///
+/// When `mock` is true (CFG-04, #240), the importer reads OpenAPI
+/// `responses` examples and generates `mock` route actions instead of
+/// `proxy` actions, so the config is a fully functional mock API
+/// without any backend.
+pub fn import_openapi(spec_text: &str, is_json: bool, mock: bool) -> Result<ImportResult, String> {
     let doc: OpenApiDoc = if is_json {
         serde_json::from_str(spec_text).map_err(|e| format!("invalid JSON spec: {e}"))?
     } else {
         serde_yaml_ng::from_str(spec_text).map_err(|e| format!("invalid YAML spec: {e}"))?
     };
-    let gateway = build_gateway(&doc);
+    let gateway = build_gateway(&doc, mock);
     let route_count = gateway.routes.len();
     let yaml = dwara_core::config::gateway_to_yaml(&gateway)
         .map_err(|e| format!("failed to serialize generated config: {e}"))?;
@@ -119,7 +158,7 @@ pub fn is_json_spec(text: &str) -> bool {
 /// operation on each path drives the route name (operationId
 /// preferred); subsequent methods on the same path are appended to
 /// `match.methods`.
-fn build_gateway(doc: &OpenApiDoc) -> Gateway {
+fn build_gateway(doc: &OpenApiDoc, mock: bool) -> Gateway {
     let mut routes = Vec::new();
     let mut used_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
@@ -141,6 +180,25 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         let op = first_op.expect("at least one operation");
         let method = first_method.expect("at least one method");
         let name = derive_route_name(op, path, method, &mut used_names);
+
+        // CFG-04 (#240): in mock mode, generate a mock action with the
+        // example response from the OpenAPI spec. In proxy mode, the
+        // standard proxy action is used.
+        let action = if mock {
+            let (status, body) = extract_example(op);
+            RouteAction::Mock {
+                mock: MockAction {
+                    status,
+                    headers: BTreeMap::new(),
+                    body,
+                    body_file: None,
+                    delay_ms: None,
+                },
+            }
+        } else {
+            RouteAction::Proxy { rewrite: None }
+        };
+
         let route = Route {
             name,
             service: "openapi-service".to_string(),
@@ -156,7 +214,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
                 cookies: Vec::new(),
                 accept: None,
             },
-            action: RouteAction::Proxy { rewrite: None },
+            action,
             policies: Vec::new(),
             priority: None,
             auth_required: false,
@@ -164,6 +222,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             compression: None,
             limits: None,
             authorization: None,
+            security_headers_opt_out: false,
             deprecation: None,
             maintenance: None,
             transforms: None,
@@ -196,6 +255,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
 
     let allow_empty_routes = routes.is_empty();
     Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services: vec![Service {
@@ -211,8 +271,10 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         upstreams: vec![Upstream {
             name: "openapi-backend".to_string(),
             load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: dwara_core::config::UpstreamProtocol::Http1,
             trusted_ca_file: None,
+            use_system_roots: false,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".to_string(),
                 port: 9000,
@@ -241,6 +303,8 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,
@@ -270,6 +334,60 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         mesh: None,
         ssrf_filter: None,
     }
+}
+
+/// CFG-04 (#240): extract an example response from an OpenAPI
+/// operation's `responses` block. Returns `(status, body)` where
+/// `body` is the serialized example (pretty JSON) or `None` when no
+/// example is found.
+///
+/// Selection order:
+/// 1. The lowest 2xx status code with an example.
+/// 2. The `default` response with an example.
+/// 3. The first response (any status) with an example.
+/// 4. Fallback: `(200, None)` — a 200 with an empty body.
+fn extract_example(op: &Operation) -> (u16, Option<String>) {
+    // Try 2xx responses in ascending order.
+    for (status_str, response) in &op.responses {
+        if let Ok(status) = status_str.parse::<u16>() {
+            if (200..300).contains(&status) {
+                if let Some(body) = pick_example(response) {
+                    return (status, Some(body));
+                }
+            }
+        }
+    }
+    // Try `default` response.
+    if let Some(response) = op.responses.get("default") {
+        if let Some(body) = pick_example(response) {
+            return (200, Some(body));
+        }
+    }
+    // Try any response with an example.
+    for (status_str, response) in &op.responses {
+        if let Some(body) = pick_example(response) {
+            let status = status_str.parse::<u16>().unwrap_or(200);
+            return (status, Some(body));
+        }
+    }
+    // Fallback: 200 with no body.
+    (200, None)
+}
+
+/// Pick an example from a response's content. Tries `example` first,
+/// then the first `examples` entry's `value`.
+fn pick_example(response: &Response) -> Option<String> {
+    for media in response.content.values() {
+        if let Some(example) = &media.example {
+            return Some(serde_json::to_string_pretty(example).unwrap_or_default());
+        }
+        for ex in media.examples.values() {
+            if let Some(value) = &ex.value {
+                return Some(serde_json::to_string_pretty(value).unwrap_or_default());
+            }
+        }
+    }
+    None
 }
 
 /// Derive a route name from the operationId (preferred) or a

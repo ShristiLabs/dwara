@@ -54,6 +54,13 @@ pub mod redis_cache;
 pub mod secrets;
 #[cfg(feature = "ent")]
 pub mod vault_secrets;
+// SEC-06 (#210): Distributed Redis-backed HMAC nonce store (ent
+// feature only). The module compiles only when the `ent` cargo
+// feature is enabled; OSS builds never pull in the redis dependency.
+// The OSS in-process nonce cache (signed_url::NonceCache) remains
+// the default; this store is opt-in when a Redis URL is configured.
+#[cfg(feature = "ent")]
+pub mod nonce;
 
 /// Shared error type for all extension traits.
 ///

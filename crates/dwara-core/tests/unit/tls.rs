@@ -380,6 +380,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         acme: None,
     };
     let gateway = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "edge".into(),
@@ -396,6 +397,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         routes: vec![],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "backend-a".into(),
             load_balancer: LoadBalancer::RoundRobin,
             protocol: UpstreamProtocol::Http1,
@@ -415,6 +417,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -428,6 +431,8 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

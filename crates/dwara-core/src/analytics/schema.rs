@@ -285,8 +285,20 @@ pub const SCHEMA_V10: &str = "
     ALTER TABLE raw ADD COLUMN auth_identity TEXT;
 ";
 
+/// Schema v11 (PERF-12, #209): add `bytes_in` and `bytes_out` columns
+/// to the `raw` table for per-route traffic accounting. `bytes_in` is
+/// the declared `Content-Length` (0 for chunked request bodies);
+/// `bytes_out` is the frame-counted response body size (counted as
+/// frames stream to the client, no buffering). Both default to 0 so
+/// pre-v11 rows land as zero. Uses ALTER TABLE (additive) so existing
+/// databases migrate in place.
+pub const SCHEMA_V11: &str = "
+    ALTER TABLE raw ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE raw ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0;
+";
+
 /// Latest analytics schema version this build knows.
-pub const LATEST_SCHEMA_VERSION: u32 = 11;
+pub const LATEST_SCHEMA_VERSION: u32 = 12;
 
 /// Schema v6 (DW-086): three tables for prompt experimentation.
 ///
@@ -441,6 +453,11 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
              CREATE VIEW raw_all AS SELECT * FROM raw;",
         )?;
         conn.pragma_update(None, "user_version", 11)?;
+    }
+    if version < 12 {
+        // PERF-12 (#209): add byte counters to the raw access table.
+        conn.execute_batch(SCHEMA_V11)?;
+        conn.pragma_update(None, "user_version", 12)?;
     }
     Ok(())
 }

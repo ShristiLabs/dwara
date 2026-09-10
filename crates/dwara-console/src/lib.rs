@@ -1,4 +1,4 @@
-//! dwara web console v2 (CRUD + fleet, Enterprise) -- DW-118.
+//! dwara web console v3 (live charts, CRUD flows, AI ops) -- #226.
 //!
 //! A static SPA served from the mTLS admin listener. The SPA fetches
 //! from the admin API (same origin). No dataplane deps -- the SPA is
@@ -8,11 +8,17 @@
 //!
 //! - Overview: gateway status, active requests, uptime, config epoch,
 //!   route/listener counts.
-//! - Routes: route table (name, path, service, methods).
+//! - Live (#226): real-time charts from /analytics/live and
+//!   /analytics/dashboard. Canvas-based latency sparklines and
+//!   request-rate bars, auto-refreshing every 2 seconds.
+//! - Routes: route table (name, path, service, methods) with CRUD
+//!   buttons (create, edit, delete) that call POST/PUT/DELETE /routes.
 //! - Upstreams: upstream/service health table (service, address,
-//!   health, requests, errors).
+//!   health, requests, errors) with CRUD buttons.
 //! - Health: raw health JSON.
 //! - Analytics: Top-N analytics.
+//! - AI Ops (#226): AI credential pool status, MCP sessions/tools,
+//!   experiment overrides, and prompt-log query.
 //! - Fleet (DW-118): version skew check + fleet status (upgrade order,
 //!   concurrency cap, halt-on-failure). Consumes GET /fleet/skew and
 //!   GET /fleet/status.

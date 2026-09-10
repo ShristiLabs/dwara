@@ -9,6 +9,7 @@ use dwara_core::snapshot::*;
 
 fn good_gateway() -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "main".into(),
@@ -55,6 +56,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                security_headers_opt_out: false,
                 deprecation: None,
                 maintenance: None,
                 transforms: None,
@@ -99,6 +101,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                security_headers_opt_out: false,
                 deprecation: None,
                 maintenance: None,
                 transforms: None,
@@ -143,6 +146,7 @@ fn good_gateway() -> Gateway {
                 compression: None,
                 limits: None,
                 authorization: None,
+                security_headers_opt_out: false,
                 deprecation: None,
                 maintenance: None,
                 transforms: None,
@@ -167,6 +171,7 @@ fn good_gateway() -> Gateway {
             authorization: None,
         }],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "users-pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
             protocol: UpstreamProtocol::Http1,
@@ -186,6 +191,7 @@ fn good_gateway() -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -199,6 +205,8 @@ fn good_gateway() -> Gateway {
         policies: vec![],
         global_policies: vec![],
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

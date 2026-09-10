@@ -35,6 +35,7 @@ fn report_params_swap_thresholds_and_disable_ratio() {
         failure_min_volume: 5,
         eject_ms: 2_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     };
     let p = report_params(&active, &passive);
     assert_eq!(p.consecutive_failures, 4);

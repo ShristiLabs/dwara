@@ -225,6 +225,59 @@ fn ketama_same_key_is_sticky_and_weights_skew_distribution() {
     assert!(owned_b > 150, "weight-3 endpoint owned only {owned_b}/300");
 }
 
+// --- maglev (#236) -------------------------------------------------------
+
+#[test]
+fn maglev_same_key_is_sticky() {
+    let spec = eps(&[("a", 1, 1), ("b", 2, 1), ("c", 3, 1)]);
+    let lb = UpstreamLb::new(&spec, LoadBalancer::Maglev, Duration::ZERO);
+    let first = lb.pick(Some("203.0.113.9"));
+    assert!(first.is_some());
+    // Same key must always pick the same endpoint.
+    assert_eq!(lb.pick(Some("203.0.113.9")), first);
+    assert_eq!(lb.pick(Some("203.0.113.9")), first);
+}
+
+#[test]
+fn maglev_distribution_is_balanced() {
+    let spec = eps(&[("a", 1, 1), ("b", 2, 1), ("c", 3, 1), ("d", 4, 1)]);
+    let lb = UpstreamLb::new(&spec, LoadBalancer::Maglev, Duration::ZERO);
+    let keys: Vec<String> = (0..4000).map(|i| format!("198.51.100.{i}")).collect();
+    let owners = owned_keys(&lb, &keys);
+    let n = 4;
+    let ideal = 1.0f64 / n as f64;
+    for i in 0..n {
+        let share = owners.iter().filter(|&&o| o == i).count() as f64 / keys.len() as f64;
+        // Maglev should have tighter balance than ketama.
+        assert!(
+            (share - ideal).abs() < 0.05,
+            "maglev endpoint {i} share {share:.3} vs ideal {ideal:.3}"
+        );
+    }
+}
+
+#[test]
+fn maglev_weights_skew_distribution() {
+    let spec = eps(&[("a", 1, 1), ("b", 2, 3)]);
+    let lb = UpstreamLb::new(&spec, LoadBalancer::Maglev, Duration::ZERO);
+    let keys: Vec<String> = (0..300).map(|i| format!("192.0.2.{i}")).collect();
+    let owned_b = owned_keys(&lb, &keys).iter().filter(|&&o| o == 1).count();
+    // Weight-3 endpoint should own the clear majority.
+    assert!(
+        owned_b > 150,
+        "weight-3 maglev endpoint owned only {owned_b}/300"
+    );
+}
+
+#[test]
+fn maglev_no_key_falls_back_to_wrr() {
+    let spec = eps(&[("a", 1, 1), ("b", 2, 1)]);
+    let lb = UpstreamLb::new(&spec, LoadBalancer::Maglev, Duration::ZERO);
+    // No key: should still pick an endpoint (WRR fallback).
+    let pick = lb.pick(None);
+    assert!(pick.is_some());
+}
+
 // --- slow start (the ramp test stays in src: private state) ------------
 
 // --- hot swap / carry-over ----------------------------------------------
@@ -321,6 +374,8 @@ fn single_candidate_half_open_consumes_probe_budget() {
         failure_min_volume: 1000, // isolate the consecutive-failure path
         eject_ms: 1_000,
         half_open_probes: 2,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     };
     let lb = UpstreamLb::new_with_health(
         &eps(&[("solo", 80, 1)]),
@@ -368,6 +423,7 @@ fn single_candidate_half_open_consumes_probe_budget() {
 
 fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
     ConfigUpstream {
+        hash_on: None,
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
         protocol: UpstreamProtocol::Http1,
@@ -401,6 +457,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
         breaker: None,
         max_pending: None,
         trusted_ca_file: None,
+        use_system_roots: false,
         oauth2_client_credentials: None,
         dns_discovery: None,
         peak_ewma: None,
@@ -416,6 +473,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
 async fn dataplane_reload_changes_weights_without_restart() {
     let st = Arc::new(ConfigState::new());
     let mut g = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
@@ -425,6 +483,8 @@ async fn dataplane_reload_changes_weights_without_restart() {
         policies: vec![],
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

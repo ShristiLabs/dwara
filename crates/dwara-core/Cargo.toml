@@ -38,6 +38,8 @@ http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower-service = { workspace = true }
 webpki-roots = { workspace = true }
+# REL-08 (#219): OS-native root CA store for `use_system_roots` upstreams.
+rustls-native-certs = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration.workspace = true
 subtle = { workspace = true }

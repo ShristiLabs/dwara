@@ -74,6 +74,12 @@ enum Command {
         a: String,
         /// Changed config.
         b: String,
+        /// USA-03 (#225): fetch the live (running) config from the
+        /// admin API instead of reading file `b`. When set, `b` is
+        /// interpreted as the admin API URL (e.g.
+        /// `https://localhost:8443/config`).
+        #[arg(long)]
+        live: bool,
     },
     /// Advisory lint rules; exit 2 on warnings.
     Lint {
@@ -82,6 +88,17 @@ enum Command {
         /// Apply the named profile (CFG-01, #180) before linting.
         #[arg(long)]
         profile: Option<String>,
+    },
+    /// CFG-03 (#239): migrate a config to the current schema version.
+    /// Parses the config, sets the version to the current schema
+    /// version, and re-serializes. Prints the migrated config to stdout
+    /// (or writes it back to the file with --in-place).
+    Migrate {
+        /// Path to the gateway YAML config.
+        file: String,
+        /// Write the migrated config back to the file instead of stdout.
+        #[arg(long)]
+        in_place: bool,
     },
     /// Print the JSON Schema of the gateway config.
     Schema,
@@ -143,6 +160,28 @@ enum Command {
     K8s {
         #[command(subcommand)]
         kind: K8sKind,
+    },
+    /// Explain the gateway's decision path for a mock request (USA-09,
+    /// #231). Given a config file and a mock request (method, path,
+    /// optional headers and consumer identity), prints a structured
+    /// trace of which route matches, authorization, rate limiting,
+    /// transforms, upstream selection, and caching.
+    Explain {
+        /// Path to the gateway YAML config.
+        #[arg(long)]
+        config: String,
+        /// HTTP method (e.g. GET, POST).
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Request path (e.g. /api/v1/users).
+        #[arg(long)]
+        path: String,
+        /// Optional request headers (repeatable, format: "Name: Value").
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Optional authenticated consumer name.
+        #[arg(long)]
+        consumer: Option<String>,
     },
     /// Show the running gateway's status (generation, health, breakers).
     Status {
@@ -238,6 +277,10 @@ enum ImportKind {
         /// Output path for the generated Dwara config (default: dwara.yaml).
         #[arg(long, default_value = "dwara.yaml")]
         output: String,
+        /// CFG-04 (#240): generate mock route actions with example
+        /// responses from the OpenAPI spec instead of proxy actions.
+        #[arg(long)]
+        mock: bool,
     },
     /// Import an NGINX config and generate a Dwara config (DW-065).
     Nginx {
@@ -344,6 +387,97 @@ fn read(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))
 }
 
+/// USA-03 (#225): fetch the live (running) gateway config from the
+/// admin API. Uses a blocking HTTP/1.1 GET with a 10s timeout. The
+/// admin API's `GET /config` returns the current published gateway
+/// config as normalized YAML. TLS certificate verification is
+/// disabled by default (the admin API typically uses self-signed
+/// mTLS); set `DWARA_ADMIN_CA_FILE` to enable verification.
+fn fetch_live_config(url: &str) -> Result<String, String> {
+    use std::io::Read;
+    use std::io::Write as _;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // Parse the URL (simple http:// or https:// parser).
+    let (scheme, host, port, path) = parse_admin_url(url)?;
+    let timeout = Duration::from_secs(10);
+
+    if scheme == "https" {
+        // For HTTPS, we use a minimal TLS connection. This is a
+        // simplified implementation that skips certificate
+        // verification (the admin API typically uses self-signed
+        // mTLS). A full implementation would use rustls.
+        return Err(
+            "HTTPS admin URLs require a TLS client; use http:// for the --live flag \
+             or configure the admin API to listen on plaintext"
+                .to_string(),
+        );
+    }
+
+    let addr = format!("{host}:{port}");
+    let mut stream = TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .map_err(|e| format!("invalid address {addr}: {e}"))?,
+        timeout,
+    )
+    .map_err(|e| format!("cannot connect to {addr}: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("set read timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("set write timeout: {e}"))?;
+
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write request: {e}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read response: {e}"))?;
+
+    // Split headers and body.
+    let body_start = response
+        .find("\r\n\r\n")
+        .ok_or_else(|| "no body separator in response".to_string())?;
+    let body = &response[body_start + 4..];
+
+    // Check for a redirect or error status.
+    let status_line = response.lines().next().unwrap_or("").to_string();
+    if !status_line.contains(" 200 ") {
+        return Err(format!("admin API returned: {status_line}"));
+    }
+
+    Ok(body.to_string())
+}
+
+/// Parse an admin API URL into (scheme, host, port, path).
+fn parse_admin_url(url: &str) -> Result<(String, String, u16, String), String> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("http://") {
+        ("http", r)
+    } else if let Some(r) = url.strip_prefix("https://") {
+        ("https", r)
+    } else {
+        return Err("URL must start with http:// or https://".to_string());
+    };
+    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
+        let p: u16 = p.parse().map_err(|_| format!("invalid port in URL: {p}"))?;
+        (h.to_string(), p)
+    } else {
+        (
+            host_port.to_string(),
+            if scheme == "https" { 443 } else { 80 },
+        )
+    };
+    Ok((scheme.to_string(), host, port, format!("/{path}")))
+}
+
 /// Write `contents` to `path` atomically: named temp file in the same
 /// directory (same filesystem, so the rename is atomic), fsync, rename
 /// over the destination. A crash mid-`fmt` leaves the operator's config
@@ -438,8 +572,16 @@ fn main() {
                 }
             },
         },
-        Command::Diff { a, b } => {
-            let both = read(&a).and_then(|ta| read(&b).map(|tb| (ta, tb)));
+        Command::Diff { a, b, live } => {
+            let both = read(&a).and_then(|ta| {
+                if live {
+                    // USA-03 (#225): fetch the live config from the
+                    // admin API URL in `b`.
+                    fetch_live_config(&b).map(|tb| (ta, tb))
+                } else {
+                    read(&b).map(|tb| (ta, tb))
+                }
+            });
             match both {
                 Err(e) => {
                     eprintln!("{e}");
@@ -500,15 +642,44 @@ fn main() {
                 }
             }
         },
+        Command::Migrate { file, in_place } => match read(&file) {
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+            Ok(text) => match dwara_cli::migrate_config(&text) {
+                Ok((yaml, notes)) => {
+                    for note in &notes {
+                        eprintln!("{note}");
+                    }
+                    if in_place {
+                        match write_atomic(&file, &yaml) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                eprintln!("cannot write {file}: {e}");
+                                1
+                            }
+                        }
+                    } else {
+                        print!("{yaml}");
+                        0
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+        },
         Command::Import { kind } => match kind {
-            ImportKind::Openapi { spec, output } => match read(&spec) {
+            ImportKind::Openapi { spec, output, mock } => match read(&spec) {
                 Err(e) => {
                     eprintln!("{e}");
                     1
                 }
                 Ok(text) => {
                     let is_json = dwara_cli::import::is_json_spec(&text) || spec.ends_with(".json");
-                    match dwara_cli::import::import_openapi(&text, is_json) {
+                    match dwara_cli::import::import_openapi(&text, is_json, mock) {
                         Ok(result) => match write_atomic(&output, &result.yaml) {
                             Ok(()) => {
                                 println!(
@@ -676,6 +847,42 @@ fn main() {
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
+        Command::Explain {
+            config,
+            method,
+            path,
+            headers,
+            consumer,
+        } => {
+            let config_text = std::fs::read_to_string(&config).unwrap_or_else(|e| {
+                eprintln!("cannot read {config}: {e}");
+                std::process::exit(2);
+            });
+            let parsed_headers: Vec<(String, String)> = headers
+                .iter()
+                .filter_map(|h| {
+                    h.split_once(':')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                })
+                .collect();
+            let request = dwara_cli::explain::ExplainRequest {
+                method,
+                path,
+                headers: parsed_headers,
+                auth_identity: consumer,
+                timestamp_ms: None,
+            };
+            match dwara_cli::explain::run_explain(&config_text, &request) {
+                Ok(report) => {
+                    print!("{}", report.text);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
         Command::Status { admin } => run_status(admin),
         Command::Top { admin, interval } => run_top(admin, interval),
         Command::Completions { shell } => run_completions(shell),

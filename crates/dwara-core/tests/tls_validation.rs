@@ -79,6 +79,7 @@ fn tls_cert(names: &[&str]) -> TlsCertificate {
 
 fn base_gateway(listener: Listener) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![listener],
         routes: vec![Route {
@@ -113,6 +114,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             compression: None,
             limits: None,
             authorization: None,
+            security_headers_opt_out: false,
             deprecation: None,
             maintenance: None,
             transforms: None,
@@ -138,6 +140,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         upstreams: vec![Upstream {
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),
@@ -155,6 +158,7 @@ fn base_gateway(listener: Listener) -> Gateway {
             breaker: None,
             max_pending: None,
             trusted_ca_file: None,
+            use_system_roots: false,
             oauth2_client_credentials: None,
             dns_discovery: None,
             peak_ewma: None,
@@ -168,6 +172,8 @@ fn base_gateway(listener: Listener) -> Gateway {
         policies: vec![],
         global_policies: vec![],
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

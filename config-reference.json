@@ -4,6 +4,12 @@
   "description": "Root of a dwara configuration: one gateway process, N listeners, and one\ncompiled config generation.",
   "type": "object",
   "properties": {
+    "version": {
+      "description": "CFG-03 (#239): config schema version. Defaults to 1 when\nabsent (the initial schema). The `dwara lint` command warns\nwhen the version is older than the current schema version; the\n`dwara migrate` command upgrades the config to the current\nversion.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
     "listeners": {
       "description": "Entry points the gateway binds.",
       "type": "array",
@@ -58,6 +64,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/Authz"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "default_security_headers": {
+      "description": "Gateway-level default security headers baseline (SEC-09, #213):\napplied to EVERY route that does not carry its own\n`security_headers` block and has not set\n`security_headers_opt_out: true`. Fail-secure defaults: a\nroute with no `security_headers` block inherits this posture\nrather than shipping without HSTS/nosniff. A route that needs\nto disable a header from the default sets its own\n`security_headers` block (which fully replaces the default\nfor that route), or sets `security_headers_opt_out: true` to\nopt out entirely. See [`SecurityHeaders`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SecurityHeaders"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "waf": {
+      "description": "SEC-08 (#212): Global WAF policy with CRS-compatible rules.\nWhen enabled, the rules are evaluated on every request\n(regardless of route-level WAF config). The anomaly score is\naccumulated across all matching rules; the request is blocked\nwhen the score exceeds the threshold. See [`GlobalWaf`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GlobalWaf"
         },
         {
           "type": "null"
@@ -812,6 +840,24 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "session_timeout_s": {
+          "description": "DP-01 (#234): UDP session idle timeout in seconds. A UDP session\n(per-client upstream socket) that receives no datagrams for this\nduration is evicted from the session table. Default 30s. UDP\nonly; ignored for TCP listeners.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_sessions": {
+          "description": "DP-01 (#234): maximum concurrent UDP sessions. When the session\ntable is full, the oldest idle session is evicted (LRU). Default\n4096. UDP only; ignored for TCP listeners.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -941,6 +987,10 @@
               "type": "null"
             }
           ]
+        },
+        "security_headers_opt_out": {
+          "description": "Opt out of the gateway-level `default_security_headers`\nbaseline (SEC-09, #213): when true, a route with no\n`security_headers` block ships WITHOUT the gateway's default\nsecurity headers. A route that carries its own\n`security_headers` block always uses it (the block fully\nreplaces the default); this flag is for the rare route that\ndeliberately needs no security headers at all. Default:\nfalse (inherit the default when present).",
+          "type": "boolean"
         },
         "masking": {
           "description": "Response field masking (DW-029, feature analysis 5-Security):\nredacts the named RFC 6901 JSON pointers from the route's\nresponses — the floor `fields` for every consumer, plus the\n`groups` additions for members of each consumer group — before\nany other body-handling stage. The redaction is fail-closed: a\nresponse the gateway cannot prove clean (encoded, non-JSON,\nover the cap, unparseable, or missing a configured pointer)\nanswers 502, never a passthrough. See [`Masking`].",
@@ -1378,6 +1428,11 @@
               "$ref": "#/$defs/AiEndpoint",
               "default": "chat"
             },
+            "dialect": {
+              "description": "AI-05 (#195): The client-facing request dialect. Defaults\nto `openai` (the historical behavior). When set to\n`anthropic` or `gemini`, the gateway parses the incoming\nrequest using that dialect's native format and translates\nto the canonical `ChatRequest`. When set to `passthrough`,\nthe request body is forwarded to the provider as-is (no\ntranslation, still metered/governed).",
+              "$ref": "#/$defs/AiIngressDialect",
+              "default": "openai"
+            },
             "type": {
               "type": "string",
               "const": "ai"
@@ -1513,6 +1568,36 @@
           "description": "OpenAI moderation (`POST /v1/moderations`). Proxied as a\npassthrough.",
           "type": "string",
           "const": "moderation"
+        },
+        {
+          "description": "AI-04 (#194): OpenAI Batch API (`POST /v1/batches`). Proxied\nas a passthrough for batch creation/status/cancel. When batch\nresults are retrieved (`GET /v1/batches/{id}/output`), the\nJSONL result file is parsed and each line's `usage` is metered\nat the batch (50% discount) rate.",
+          "type": "string",
+          "const": "batch"
+        }
+      ]
+    },
+    "AiIngressDialect": {
+      "description": "AI-05 (#195): The client-facing request dialect for an AI route.\nDetermines how the gateway parses the incoming request body.",
+      "oneOf": [
+        {
+          "description": "OpenAI chat-completions shape (the historical default). The\nrequest is parsed by `openai_compat::parse_chat_request`.",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "Anthropic Messages API shape. The request is parsed by\n`ingress::parse_anthropic_request` and translated to the\ncanonical `ChatRequest`.",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Gemini generateContent shape. The request is parsed by\n`ingress::parse_gemini_request` and translated to the\ncanonical `ChatRequest`.",
+          "type": "string",
+          "const": "gemini"
+        },
+        {
+          "description": "Passthrough mode: the request body is forwarded to the\nprovider as-is (no translation, still metered/governed).\nThe response is returned as-is.",
+          "type": "string",
+          "const": "passthrough"
         }
       ]
     },
@@ -3063,6 +3148,17 @@
           "$ref": "#/$defs/LoadBalancer",
           "default": "round_robin"
         },
+        "hash_on": {
+          "description": "DP-07 (#236): what to hash for consistent-hash load balancers\n(`ip_hash` and `maglev`). Defaults to `client_ip` (the pre-#236\nbehavior). When set to `cookie` or `header`, the gateway extracts\nthe value from the request and uses it as the hash key; if the\ncookie/header is absent, it falls back to the client IP.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HashOn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "protocol": {
           "description": "Protocol used toward upstream endpoints.",
           "$ref": "#/$defs/UpstreamProtocol",
@@ -3074,6 +3170,10 @@
             "string",
             "null"
           ]
+        },
+        "use_system_roots": {
+          "description": "REL-08 (#219): when true, the upstream's TLS connections trust the\nOS-native root CA store (loaded via `rustls-native-certs`) INSTEAD\nof the bundled webpki root set. Useful in deployments whose\nprivate CAs are provisioned through the host's trust store (e.g.\ncorporate PKI, cloud metadata CAs). Mutually exclusive with\n`trusted_ca_file` (validation rejects a configuration that sets\nboth). Only meaningful for the TLS protocols (`https`/`http2`/`h3`)\n— no TLS is negotiated toward `http1` endpoints, so validation\nrejects that combination. Active health probes for this upstream\nverify against the same roots. Defaults to `false` (webpki roots).",
+          "type": "boolean"
         },
         "endpoints": {
           "description": "Static endpoint list for this upstream. When `dns_discovery` is\npresent, this becomes the initial/fallback set (used until the\nfirst DNS resolution completes and as a fallback when DNS fails\nand `fail_open` is true); it may be empty. When `dns_discovery`\nis absent, this is the complete endpoint set and must be\nnon-empty (validation rejects an empty list).",
@@ -3263,9 +3363,71 @@
           ]
         },
         {
+          "description": "Maglev consistent hashing (DP-07, #236): Google's Maglev algorithm\nuses a fixed-size lookup table (default 65537 entries) populated\nby each endpoint's permutation. Provides better distribution than\nketama for large endpoint pools with tight balance bounds. The\nhash key is determined by `hash_on` (client IP, cookie, or header).",
+          "type": "string",
+          "const": "maglev"
+        },
+        {
           "description": "Peak-EWMA latency-aware load balancing (DW-090, Finagle-style):\nfavors low-latency endpoints and degrades outliers. Each endpoint\ncarries an atomic EWMA cost tracker (nanosecond resolution) updated\nwith the Finagle peak-EWMA formula: a new RTT that EXCEEDS the\ncurrent cost replaces it outright (the \"peak\"), otherwise the cost\ndecays toward the new RTT at rate `exp(-td / tau)`. Selection picks\nthe endpoint with the lowest `cost_ns * (inflight + 1)` score, so a\nslow endpoint with few in-flight requests can still win a pick\nwhile a fast one is saturated. Tunable via `upstreams[].peak_ewma`\n(decay tau and the initial cost); defaults are 10 s decay and a\n250 ms initial cost. Carried across rebuilds by `address:port`,\nexactly like in-flight counters and health trackers.",
           "type": "string",
           "const": "peak_ewma"
+        }
+      ]
+    },
+    "HashOn": {
+      "description": "What to hash for consistent-hash load balancers (`ip_hash` and\n`maglev`). DP-07 (#236): extends the hash key source beyond the\nclient IP to support cookie-based sticky sessions and header-based\naffinity.",
+      "oneOf": [
+        {
+          "description": "Hash the client IP (the default behavior, backward-compatible\nwith pre-#236 configs).",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "client_ip"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Hash a cookie value. If the cookie is not present in the request,\nthe gateway falls back to the client IP. Used for sticky sessions\nwithout the `services[].sticky` split mechanism.",
+          "type": "object",
+          "properties": {
+            "cookie": {
+              "description": "The cookie name to read.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "cookie"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "cookie"
+          ]
+        },
+        {
+          "description": "Hash a request header value. If the header is not present, falls\nback to the client IP. Common for routing by `X-User-Id` or\n`X-Session-Id` for session affinity.",
+          "type": "object",
+          "properties": {
+            "header": {
+              "description": "The header name to read (case-insensitive).",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "header"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "header"
+          ]
         }
       ]
     },
@@ -3278,6 +3440,11 @@
             "http2",
             "https"
           ]
+        },
+        {
+          "description": "Cleartext HTTP/2 with prior knowledge (h2c, DP-02 #235). No TLS;\nthe client speaks HTTP/2 directly over TCP. Common for internal\neast-west gRPC traffic without TLS.",
+          "type": "string",
+          "const": "h2c"
         },
         {
           "description": "HTTP/3 over QUIC (DW-108). QUIC mandates TLS 1.3, so an `h3`\nupstream always negotiates TLS with ALPN `h3`; the\n`trusted_ca_file` field selects the trust roots (the default\nwebpki public set, or a private-CA bundle). Requires the `h3`\ncargo feature on dwara-bin to actually proxy: when the feature is\noff the protocol is accepted at validation but the upstream is\ninert (every dispatch fails closed with a clear error rather than\nsilently falling back to a wrong transport).",
@@ -3370,6 +3537,17 @@
           "format": "uint32",
           "minimum": 0,
           "default": 1
+        },
+        "recovery_ramp_ms": {
+          "description": "Recovery ramp window in milliseconds (REL-06, #217). When > 0,\nan endpoint that recovers from ejection (a half-open probe\nsucceeds) does NOT immediately return to full traffic. Instead\nit ramps its effective weight from a floor (1) to its\nconfigured weight over this window, reducing the blast radius\nof a partial recovery (the endpoint may still be slow or\npartially degraded). Default 0 = no ramp (v1 behavior: a\nsuccessful probe restores full weight immediately).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "body_completion_inflight": {
+          "description": "Whether the in-flight counter is held until the response body\ncompletes (REL-06, #217). Default false: the in-flight counter\nis released when response headers resolve (v1 behavior). When\ntrue, the counter is held until the body stream ends or is\ndropped, giving `least_requests`, `random`, and `peak_ewma` a\nmore accurate view of actual endpoint load. The trade-off is a\nslightly higher in-flight count under streaming workloads.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -3432,6 +3610,11 @@
           "description": "HTTP/1.1 GET to `path`; success = 2xx.",
           "type": "string",
           "const": "http"
+        },
+        {
+          "description": "HTTP/2 GET to `path` over a pooled H2 connection (REL-07, #218);\nfor HTTP/2-only and gRPC upstreams that refuse HTTP/1.1 on a\nseparate connection. Success = 2xx.",
+          "type": "string",
+          "const": "http2"
         },
         {
           "description": "TCP connect within the timeout.",
@@ -3521,6 +3704,13 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "buffer_first_frame_bytes": {
+          "description": "Streaming failover first-frame buffer cap in bytes (REL-05, #216).\nWhen > 0, the proxy buffers up to this many bytes of the upstream\nresponse body BEFORE forwarding any bytes to the client. If the\nupstream fails (connection reset, read timeout, framing error)\nbefore the buffer fills or the body completes, the proxy can\nstill retry the request to a different endpoint — the client has\nnot yet received any bytes, so the response is not committed.\nOnce the buffer fills (or the body completes), the buffered\nprefix is flushed to the client and the rest of the body streams\nframe-by-frame (the stream is then committed; a later mid-body\nfailure is terminal, as in v1). Default 0 = no first-frame\nbuffering (v1 behavior: the response is committed as soon as\nheaders resolve). Requires `attempts > 0` and\n`buffer_max_bytes > 0` (the request body must be replayable).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
         }
       },
       "additionalProperties": false
@@ -4040,6 +4230,17 @@
             "boolean",
             "null"
           ]
+        },
+        "agent": {
+          "description": "AI-16 (#204): agent principal metadata. Only meaningful when\n`consumer_type` is `agent`; ignored otherwise. Carries the\nagent's display name, description, owner, and permission level\nfor first-class agent principal attribution.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentPrincipal"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -4231,6 +4432,65 @@
         }
       },
       "additionalProperties": false
+    },
+    "AgentPrincipal": {
+      "description": "AI-16 (#204): First-class agent principal metadata. Attached to a\n`Consumer` with `consumer_type: agent` to carry agent-specific\nattribution and permission data.",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "The agent's display name (human-readable). Defaults to the\nconsumer name when not set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "A human-readable description of the agent's purpose.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "The owner of this agent (a user or team name). Used for\nattribution and audit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "The agent's permission level. One of: `read_only`,\n`read_write`, `admin`. Default `read_only`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentPermissionLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentPermissionLevel": {
+      "description": "AI-16 (#204): Agent permission levels for first-class agent\nprincipals. Mirrors the `Permission` enum in the MCP module but\nlives in config for declarative assignment.",
+      "oneOf": [
+        {
+          "description": "Read-only access (list, get, stats, health, config).",
+          "type": "string",
+          "const": "read_only"
+        },
+        {
+          "description": "Read-write access (read + create, update, delete).",
+          "type": "string",
+          "const": "read_write"
+        },
+        {
+          "description": "Full admin access (all tools including purge).",
+          "type": "string",
+          "const": "admin"
+        }
+      ]
     },
     "Policy": {
       "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
@@ -4569,6 +4829,125 @@
         }
       ]
     },
+    "GlobalWaf": {
+      "description": "SEC-08 (#212): Global WAF policy with CRS-compatible rules. When\nenabled, the rules are evaluated on every request (regardless of\nroute-level WAF config). The anomaly score is accumulated across\nall matching rules; the request is blocked when the score exceeds\nthe threshold. Rule exclusions can disable specific rules by ID or\ntag. The paranoia level controls which rules are active (1 =\ndefault, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default false.",
+          "type": "boolean"
+        },
+        "dry_run": {
+          "description": "Audit-log-only mode (same semantics as RouteWaf::dry_run).",
+          "type": "boolean"
+        },
+        "paranoia_level": {
+          "description": "Paranoia level (1-4). Rules with a higher paranoia level than\nthis are skipped. Default 1.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "anomaly_threshold": {
+          "description": "Anomaly score threshold for blocking. A request is blocked\nwhen the sum of matching rule severities reaches this value.\nDefault 5 (critical rules block immediately, warnings need\nmultiple hits).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_body_inspect_bytes": {
+          "description": "Maximum body bytes to inspect (same semantics as\nRouteWaf::max_body_inspect_bytes). Default 131072.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rules": {
+          "description": "CRS-compatible rules to evaluate.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CrsRule"
+          }
+        },
+        "exclude_rule_ids": {
+          "description": "Rule IDs to exclude (skip even if the rule is in the rules\nlist). Useful for tuning false positives.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "exclude_tags": {
+          "description": "Tags to exclude (skip all rules carrying any of these tags).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CrsRule": {
+      "description": "SEC-08 (#212): A single OWASP CRS-compatible WAF rule. Each rule\nhas a numeric ID (CRS convention: 9xxxx), a severity level, a\nphase (1 = request headers, 2 = request body), a list of tags, a\nregex pattern, and the inspection targets to apply the pattern\nto. Rules are evaluated in order; matching rules add their\nseverity to the request's anomaly score. The request is blocked\nwhen the score exceeds the configured threshold.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Unique rule ID (CRS convention: 9xxxx). Used for exclusions\nand logging.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "severity": {
+          "description": "Rule severity: 1 = critical, 2 = warning, 3 = notice, 4 = info.\nHigher severity contributes more to the anomaly score.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 2
+        },
+        "phase": {
+          "description": "Evaluation phase: 1 = request headers (path, query, headers),\n2 = request body. Default 1.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 1
+        },
+        "tags": {
+          "description": "Tags for grouping and exclusion (e.g. \"OWASP_CRS\", \"SQL_INJECTION\").",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pattern": {
+          "description": "The regex pattern to match against the target values.",
+          "type": "string"
+        },
+        "targets": {
+          "description": "Which request parts to inspect: \"path\", \"query\", \"header\",\n\"headers\" (all selected headers), \"body\". Default: [\"path\", \"query\"].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "path",
+            "query"
+          ]
+        },
+        "transformations": {
+          "description": "Optional list of transformations to apply before matching\n(e.g. \"lowercase\", \"url_decode\", \"html_entity_decode\"). Default: [].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "pattern"
+      ]
+    },
     "JwtProvider": {
       "description": "One JWT verification provider (DW-019).",
       "type": "object",
@@ -4633,6 +5012,15 @@
         },
         "retired_key_grace_secs": {
           "description": "How long a key REMOVED from a fresh JWKS fetch keeps verifying\n(DW-046), in seconds (default 86400 = 24 h; 0 disables). The\ndual-validity window for JWKS rotation: issuers drop the old\nkey from their JWKS the moment the new one appears, while\npreviously-issued tokens still carry the old `kid` — during\nthis grace the gateway honors the immediately-previous key set\nfor kids the fresh set no longer carries. Only ONE previous set\nis retained (rotation is one step at a time). Validation caps\nthe value at 7 days (604800).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stale_on_error_secs": {
+          "description": "How long to serve stale (cached) keys after a JWKS fetch failure\n(SEC-12, #215), in seconds (default: same as `refresh_secs`,\ncapped at 300). When a JWKS fetch fails, the cached key set\nkeeps serving for this duration before a new fetch is attempted,\nso a transient JWKS provider outage does not cascade into auth\nfailures. 0 disables stale-on-error (a fetch failure surfaces\nimmediately when the cache is empty; when the cache is non-empty\nthe existing degraded-mode behavior applies).",
           "type": [
             "integer",
             "null"
@@ -4960,6 +5348,17 @@
               "type": "null"
             }
           ]
+        },
+        "sampled_degradation": {
+          "description": "REL-10 (#221): sampled degradation under channel pressure. When\nthe analytics channel's fill ratio exceeds `high_watermark`,\nthe offer path probabilistically drops records (keeping 1 in\n`sample_rate`) BEFORE the channel fills, so a sustained burst\ndegrades to sampled telemetry rather than a hard drop cliff.\nBelow `low_watermark` every record is kept. Defaults to off\n(no sampling); when enabled, `high_watermark` must be >\n`low_watermark` and both are in (0.0, 1.0].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsSampledDegradation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -5198,6 +5597,31 @@
         "capture_body": {
           "description": "Whether to capture the request body (default false — PII risk).\nBody capture is off by default; enabling it is an explicit\noperator decision to accept the PII exposure of stored bodies\n(even redacted bodies may carry residual sensitive content).",
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AnalyticsSampledDegradation": {
+      "description": "Sampled degradation config (REL-10, #221). See\n[`AnalyticsConfig::sampled_degradation`].",
+      "type": "object",
+      "properties": {
+        "high_watermark": {
+          "description": "Channel fill ratio above which sampling kicks in. Must be in\n(0.0, 1.0) and > `low_watermark`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "low_watermark": {
+          "description": "Channel fill ratio below which sampling stops (every record\nkept). Must be in (0.0, 1.0) and < `high_watermark`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.5
+        },
+        "keep_rate": {
+          "description": "Fraction of records to KEEP when sampling (1 in N). 1.0 keeps\nall (no sampling); 0.1 keeps 10%. Must be in (0.0, 1.0].",
+          "type": "number",
+          "format": "double",
+          "default": 0.1
         }
       },
       "additionalProperties": false
@@ -6675,6 +7099,20 @@
               "description": "The selection preference: `cost` (cheapest), `latency`\n(fastest), or `balanced` (best cost/latency sum).",
               "$ref": "#/$defs/AiLatencyPreference"
             },
+            "live": {
+              "description": "AI-15 (#203): when true, the policy uses live latency\nobservations to dynamically adjust candidate ordering. The\nstatic `latency` scores are used as priors; observed latencies\nfrom recent requests refine the selection. Default false\n(static selection, the DW-085 behavior).",
+              "type": "boolean"
+            },
+            "live_window": {
+              "description": "AI-15 (#203): the window size for live latency tracking\n(number of recent observations to average). Default 10. Only\nused when `live` is true.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0,
+              "default": 10
+            },
             "kind": {
               "type": "string",
               "const": "latency_cost"
@@ -6935,6 +7373,20 @@
             "$ref": "#/$defs/AiMcpTool"
           }
         },
+        "resources": {
+          "description": "AI-11 (#200): Static resources exposed via `resources/list`\nand `resources/read`. Each resource has a URI, a name, a\ndescription, and an optional MIME type. The resource content\nis served inline (no upstream proxy).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiMcpResource"
+          }
+        },
+        "prompts": {
+          "description": "AI-11 (#200): Static prompt templates exposed via\n`prompts/list` and `prompts/get`. Each prompt has a name, a\ndescription, and a template body with optional arguments.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AiMcpPrompt"
+          }
+        },
         "sessions": {
           "description": "Session policy. Absent (the default): the built-in defaults\n(TTL 3600s, max 1000 concurrent sessions).",
           "anyOf": [
@@ -7011,6 +7463,91 @@
         "description",
         "upstream",
         "input_schema"
+      ]
+    },
+    "AiMcpResource": {
+      "description": "AI-11 (#200): One MCP static resource (`ai.mcp.resources.<name>`).\nResources are served inline (no upstream proxy). The content is\nreturned verbatim in `resources/read` responses.",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "description": "The resource URI (e.g., `config://routes`, `data://users`). Must\nbe non-empty (validation rejects empty strings).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable name (returned in `resources/list`).",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description (returned in `resources/list`).",
+          "type": "string"
+        },
+        "mime_type": {
+          "description": "The MIME type of the content (e.g., `text/plain`,\n`application/json`). Default `text/plain`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "description": "The resource content (returned verbatim in `resources/read`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "name",
+        "description",
+        "content"
+      ]
+    },
+    "AiMcpPrompt": {
+      "description": "AI-11 (#200): One MCP static prompt template\n(`ai.mcp.prompts.<name>`). Prompts are served inline. The\ntemplate body is returned in `prompts/get` responses, with\noptional argument substitution.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Human-readable description (returned in `prompts/list`).",
+          "type": "string"
+        },
+        "template": {
+          "description": "The prompt template body. May contain `{{argument_name}}`\nplaceholders that are substituted from the `arguments` field\nof a `prompts/get` request.",
+          "type": "string"
+        },
+        "arguments": {
+          "description": "The argument definitions for this prompt. Each argument has a\nname, a description, and a required flag.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AiMcpPromptArgument"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "template"
+      ]
+    },
+    "AiMcpPromptArgument": {
+      "description": "AI-11 (#200): One prompt argument definition.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The argument name (used as the `{{name}}` placeholder in the\ntemplate).",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of the argument.",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether the argument is required (default false).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description"
       ]
     },
     "AiMcpSessions": {

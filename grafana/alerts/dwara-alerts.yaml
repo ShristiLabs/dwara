@@ -1,0 +1,565 @@
+# Grafana alert rules for the dwara gateway.
+#
+# Provision by placing this file in the Grafana provisioning
+# `alerting` directory (default: /etc/grafana/provisioning/alerting).
+# All rules evaluate against the Prometheus datasource referenced by the
+# `${DS_PROMETHEUS}` dashboard variable; override `datasourceUid` with the
+# actual datasource UID in production.
+#
+# Rules are grouped into a single folder ("dwara") and tagged with the
+# gateway name so they can be filtered in the alerting UI.
+#
+# Conventions:
+#   - Every rule carries a `runbook` annotation linking back to the docs.
+#   - For (C) severity = Critical (page), (W) severity = Warning (ticket).
+#   - Thresholds are conservative defaults; tune per deployment.
+
+apiVersion: 1
+
+groups:
+  # ------------------------------------------------------------------
+  # Error rate and SLO burn
+  # ------------------------------------------------------------------
+  - name: dwara.errors
+    interval: 30s
+    rules:
+      - uid: dwara-high-error-rate
+        title: dwara high gateway error rate (5xx)
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Gateway 5xx error rate above 2% over 5m"
+          description: >-
+            The fraction of gateway-answered 5xx responses exceeds 2% over a
+            5-minute window. Sustained gateway errors usually indicate an
+            upstream outage, a misconfigured plugin, or resource exhaustion.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: critical
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                sum(rate(requests_total{status_class="5xx"}[5m]))
+                /
+                clamp_min(sum(rate(requests_total[5m])), 1e-9)
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-slo-fast-burn
+        title: dwara SLO fast burn (1h window)
+        condition: A
+        for: 2m
+        annotations:
+          summary: "SLO error budget fast-burn over 1h (any route/objective)"
+          description: >-
+            dwara_slo_burn_rate{window="1h"} exceeds 14.4x, the classic
+            fast-burn page threshold: the route is exhausting its entire
+            monthly error budget in under an hour.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: critical
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'max(dwara_slo_burn_rate{window="1h"}) > 14.4'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-slo-slow-burn
+        title: dwara SLO slow burn (5m window)
+        condition: A
+        for: 10m
+        annotations:
+          summary: "SLO error budget slow-burn over 5m (any route/objective)"
+          description: >-
+            dwara_slo_burn_rate{window="5m"} exceeds 6x for 10 minutes: the
+            route is consuming its budget at 6x the allowed rate. Investigate
+            before it escalates to a fast-burn page.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'max(dwara_slo_burn_rate{window="5m"}) > 6'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Latency
+  # ------------------------------------------------------------------
+  - name: dwara.latency
+    interval: 30s
+    rules:
+      - uid: dwara-high-p95-latency
+        title: dwara high p95 latency
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Gateway p95 request latency above 1s for 5m"
+          description: >-
+            The 95th-percentile gateway request duration (route resolution to
+            response headers) exceeds 1 second. Check upstream latency,
+            cache effectiveness, and connection-pool saturation.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                histogram_quantile(0.95,
+                  sum by (route, le) (rate(request_duration_seconds_bucket[5m]))
+                ) > 1
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-high-p99-latency
+        title: dwara high p99 latency
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Gateway p99 request latency above 2.5s for 5m"
+          description: >-
+            The 99th-percentile gateway request duration exceeds 2.5
+            seconds. Tail latency is degrading; investigate slow upstreams,
+            retry storms, and coalescing fallback rates.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: critical
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                histogram_quantile(0.99,
+                  sum by (route, le) (rate(request_duration_seconds_bucket[5m]))
+                ) > 2.5
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Gateway saturation
+  # ------------------------------------------------------------------
+  - name: dwara.saturation
+    interval: 30s
+    rules:
+      - uid: dwara-active-requests-saturated
+        title: dwara active requests near concurrency cap
+        condition: A
+        for: 3m
+        annotations:
+          summary: "In-flight requests sustained above 80% of expected capacity"
+          description: >-
+            active_requests has been above 8000 for 3 minutes. The gateway is
+            approaching its concurrency cap; load shedding (shed_total) will
+            begin shortly. Scale out or raise the cap.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'active_requests > 8000'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-load-shedding
+        title: dwara load shedding active
+        condition: A
+        for: 2m
+        annotations:
+          summary: "Gateway is shedding requests (priority-based)"
+          description: >-
+            shed_total is increasing for 2 minutes: the concurrency cap is
+            reached and the gateway is dropping low-priority requests. This
+            is intentional back-pressure but warrants investigation.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'sum(rate(shed_total[2m])) > 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Upstream health
+  # ------------------------------------------------------------------
+  - name: dwara.upstream
+    interval: 30s
+    rules:
+      - uid: dwara-upstream-5xx-rate
+        title: dwara upstream 5xx error rate high
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Upstream 5xx attempt rate above 5% for 5m"
+          description: >-
+            More than 5% of upstream attempts are returning 5xx. One or more
+            upstreams are failing; check breaker_state and endpoint_health.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: critical
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                sum(rate(upstream_attempts_total{status_class="5xx"}[5m]))
+                /
+                clamp_min(sum(rate(upstream_attempts_total[5m])), 1e-9)
+                > 0.05
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-circuit-breaker-open
+        title: dwara circuit breaker open
+        condition: A
+        for: 1m
+        annotations:
+          summary: "One or more upstream circuit breakers are open"
+          description: >-
+            breaker_state == 1 (open) for at least one upstream. The breaker
+            is tripping, meaning the upstream is consistently failing. The
+            breaker will half-open and probe; confirm the upstream recovers.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: critical
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'max(breaker_state) == 1'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-endpoint-ejected
+        title: dwara endpoints ejected from pools
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Endpoints ejected by health checks for 5m"
+          description: >-
+            endpoint_health == 0 (ejected) for one or more endpoints for 5
+            minutes. Passive or active health checks have removed them;
+            verify the upstream service is healthy and reachable.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'min(endpoint_health) == 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-retry-storm
+        title: dwara upstream retry storm
+        condition: A
+        for: 3m
+        annotations:
+          summary: "Upstream retry rate above 10% of attempts for 3m"
+          description: >-
+            retries_total is above 10% of upstream_attempts_total. A retry
+            storm amplifies upstream load and can cascade; reduce retry
+            counts or fix the failing upstream.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                sum(rate(retries_total[3m]))
+                /
+                clamp_min(sum(rate(upstream_attempts_total[3m])), 1e-9)
+                > 0.10
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Rate limiting and quotas
+  # ------------------------------------------------------------------
+  - name: dwara.ratelimit
+    interval: 30s
+    rules:
+      - uid: dwara-rate-limit-spike
+        title: dwara rate-limit denials spiking
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Rate-limited (429) requests above 10% of traffic for 5m"
+          description: >-
+            rate_limited_total exceeds 10% of total requests. Consumers are
+            consistently hitting limits; either raise limits or confirm the
+            traffic is legitimate.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: >-
+                sum(rate(rate_limited_total[5m]))
+                /
+                clamp_min(sum(rate(requests_total[5m])), 1e-9)
+                > 0.10
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-rate-limiter-evictions
+        title: dwara rate-limiter evictions high
+        condition: A
+        for: 10m
+        annotations:
+          summary: "Rate-limiter key evictions elevated for 10m"
+          description: >-
+            dwara_rate_limiter_evictions_total is non-trivial: the
+            rate-limiter store is churning keys, which can cause
+            over-limiting or under-limiting. Consider raising the store cap.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'dwara_rate_limiter_evictions_total > 1000'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Security and config
+  # ------------------------------------------------------------------
+  - name: dwara.security
+    interval: 60s
+    rules:
+      - uid: dwara-config-convergence-drift
+        title: dwara config convergence drift
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Config instances reporting a different generation"
+          description: >-
+            dwara_config_convergence_drift is non-zero: one or more gateway
+            instances have not converged on the latest published config
+            generation. A hot-reload may have failed on a subset of nodes.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'dwara_config_convergence_drift > 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-jwks-refresh-failing
+        title: dwara JWKS refresh failures
+        condition: A
+        for: 10m
+        annotations:
+          summary: "JWKS refresh activity sustained with no successful fetch"
+          description: >-
+            jwks_refresh_total keeps increasing while token validation may
+            be relying on stale keys. Verify the JWKS endpoint is reachable
+            and the provider is healthy.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'sum(rate(jwks_refresh_total[10m])) > 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-license-expiring
+        title: dwara enterprise license issue
+        condition: A
+        for: 1m
+        annotations:
+          summary: "Enterprise license status is not active"
+          description: >-
+            dwara_license_status is not 1 (active). The license may be
+            expired or invalid; enterprise features will degrade.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'dwara_license_status != 1'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+  # ------------------------------------------------------------------
+  # Event and access-log pipeline
+  # ------------------------------------------------------------------
+  - name: dwara.pipeline
+    interval: 60s
+    rules:
+      - uid: dwara-events-dropped
+        title: dwara events being dropped
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Event bus is dropping events"
+          description: >-
+            dwara_events_dropped_total is increasing: the event queue is
+            full or no deliverer is draining. Webhooks and analytics may
+            lose data.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'dwara_events_dropped_total > 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error
+
+      - uid: dwara-access-records-dropped
+        title: dwara access records being dropped
+        condition: A
+        for: 5m
+        annotations:
+          summary: "Access-log stream is dropping records"
+          description: >-
+            dwara_access_records_dropped_total is increasing: the access-log
+            stream channel is full or disabled. Audit and compliance records
+            may be incomplete.
+          runbook: "https://shristilabs.github.io/dwara/guide/operating.html"
+        labels:
+          severity: warning
+          service: dwara
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: 'dwara_access_records_dropped_total > 0'
+              instant: false
+              refId: A
+        noDataState: NoData
+        execErrState: Error

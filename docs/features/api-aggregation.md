@@ -1,18 +1,16 @@
-# API Aggregation Plugin Pack (DW-061)
+# API Aggregation (DW-061, DP-09 / #237)
 
 ## Overview
 
 dwara supports KrakenD-style API aggregation: composing a response
 from multiple upstreams with JSONPath fragment shaping and
-per-fragment fail-open/closed policies.
+per-fragment fail-open/closed policies. The async runtime (DP-09)
+fetches fragments from upstream services and composes the result.
 
-## Enabling
+## Availability
 
-Build with the `aggregation` feature:
-
-```sh
-cargo build
-```
+The aggregation module is always compiled into the OSS build. No
+cargo feature is required.
 
 ## Constraint (decision 10, section 12.1)
 
@@ -30,8 +28,8 @@ Each fragment specifies:
 - A target field in the composed response
 - A fail-open/closed policy (fail-open = skip on error, fail-closed = return an error)
 
-The aggregator fetches all fragments in parallel, shapes each, and
-combines them into a single JSON response.
+The aggregator fetches all fragments, shapes each, and combines them
+into a single JSON response.
 
 ## API
 
@@ -49,12 +47,27 @@ fail policy, max fragment size.
 - `FailOpen`: skip the fragment on error (the composed response omits the field). Default.
 - `FailClosed`: return an error on failure (the entire composed response fails).
 
+### run_aggregation (DP-09, #237)
+
+The async runtime entry point: fetches all fragments from their
+upstream services via async TCP + HTTP/1.1, shapes each through
+JSONPath, and composes the result through the pure `compose`
+function. A `ServiceResolver` trait abstracts service-to-endpoint
+resolution so the runtime can be wired to the dataplane's current
+generation balancers.
+
+### ServiceResolver trait
+
+Maps a service name to an upstream endpoint (host, port). Implemented
+by the dataplane (which has the current snapshot's services, upstreams,
+and balancers).
+
 ### compose
 
 The pure composition step: takes fragment results (already fetched +
-shaped by the plugin runtime) and combines them into a single JSON
-object. Fail-open fragments are skipped; fail-closed fragments cause
-the entire composition to fail (with a partial response).
+shaped by the runtime) and combines them into a single JSON object.
+Fail-open fragments are skipped; fail-closed fragments cause the
+entire composition to fail (with a partial response).
 
 ### extract_jsonpath
 
@@ -109,7 +122,7 @@ let spec = AggregationSpec {
     ..Default::default()
 };
 
-// Fragment results (fetched by the plugin runtime).
+// Fragment results (fetched by the runtime).
 let results = vec![
     make_fragment_result(&spec.fragments[0], r#"{"id":1,"name":"alice"}"#),
     make_fragment_result(&spec.fragments[1], r#"{"bio":"Engineer"}"#),
@@ -128,8 +141,3 @@ match compose(&spec, &results) {
     }
 }
 ```
-
-## Feature gate
-
-The aggregation module is compiled into the OSS build. The
-module is not compiled.

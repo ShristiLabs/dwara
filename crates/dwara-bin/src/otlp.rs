@@ -240,6 +240,30 @@ const DEFAULT_METRICS_EXPORT_INTERVAL: Duration = Duration::from_secs(15);
 /// use a short interval; production keeps the 15s default.
 const METRICS_INTERVAL_ENV: &str = "DWARA_OTLP_METRICS_INTERVAL_SECS";
 
+/// REL-09 (#220): env var override for the export timeout (seconds).
+/// The total budget for one export POST (connect + send + receive +
+/// retries). Default 10s (matches the otel spec).
+const EXPORT_TIMEOUT_ENV: &str = "DWARA_OTLP_EXPORT_TIMEOUT_SECS";
+
+/// REL-09 (#220): env var override for the max export attempts. The
+/// initial attempt plus retries. Default 3.
+const MAX_ATTEMPTS_ENV: &str = "DWARA_OTLP_MAX_ATTEMPTS";
+
+/// REL-09 (#220): env var override for the retry backoff base in
+/// milliseconds. Default 100ms.
+const BACKOFF_BASE_ENV: &str = "DWARA_OTLP_BACKOFF_BASE_MS";
+
+/// REL-09 (#220): env var override for the retry backoff cap in
+/// milliseconds. Default 1000ms (1s).
+const BACKOFF_CAP_ENV: &str = "DWARA_OTLP_BACKOFF_CAP_MS";
+
+/// REL-09 (#220): env var override for the max retry queue depth. When
+/// greater than 0, failed metrics exports are buffered in a bounded
+/// in-memory queue and retried on subsequent ticks. Default 0 = no
+/// queueing (v1 behavior: a failed tick is dropped, the next tick
+/// starts fresh).
+const METRICS_QUEUE_DEPTH_ENV: &str = "DWARA_OTLP_METRICS_QUEUE_DEPTH";
+
 /// Resolve the metrics export interval from the env override or the
 /// default. An invalid value falls back to the default (with a warn).
 fn metrics_export_interval() -> Duration {
@@ -256,6 +280,102 @@ fn metrics_export_interval() -> Duration {
             }
         },
         Err(_) => DEFAULT_METRICS_EXPORT_INTERVAL,
+    }
+}
+
+/// REL-09 (#220): resolve the export timeout from the env override or
+/// the default. An invalid value falls back to the default (with a
+/// warn).
+fn export_timeout() -> Duration {
+    match std::env::var(EXPORT_TIMEOUT_ENV) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                tracing::warn!(
+                    code = "otlp_export_timeout_invalid",
+                    value = %v,
+                    "invalid {EXPORT_TIMEOUT_ENV}; falling back to default"
+                );
+                EXPORT_TIMEOUT
+            }
+        },
+        Err(_) => EXPORT_TIMEOUT,
+    }
+}
+
+/// REL-09 (#220): resolve the max export attempts from the env override
+/// or the default. An invalid value falls back to the default.
+fn max_export_attempts() -> u32 {
+    match std::env::var(MAX_ATTEMPTS_ENV) {
+        Ok(v) => match v.parse::<u32>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    code = "otlp_max_attempts_invalid",
+                    value = %v,
+                    "invalid {MAX_ATTEMPTS_ENV}; falling back to default"
+                );
+                MAX_EXPORT_ATTEMPTS
+            }
+        },
+        Err(_) => MAX_EXPORT_ATTEMPTS,
+    }
+}
+
+/// REL-09 (#220): resolve the retry backoff base from the env override
+/// or the default. An invalid value falls back to the default.
+fn retry_backoff_base() -> Duration {
+    match std::env::var(BACKOFF_BASE_ENV) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => {
+                tracing::warn!(
+                    code = "otlp_backoff_base_invalid",
+                    value = %v,
+                    "invalid {BACKOFF_BASE_ENV}; falling back to default"
+                );
+                RETRY_BACKOFF_BASE
+            }
+        },
+        Err(_) => RETRY_BACKOFF_BASE,
+    }
+}
+
+/// REL-09 (#220): resolve the retry backoff cap from the env override
+/// or the default. An invalid value falls back to the default.
+fn retry_backoff_cap() -> Duration {
+    match std::env::var(BACKOFF_CAP_ENV) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => {
+                tracing::warn!(
+                    code = "otlp_backoff_cap_invalid",
+                    value = %v,
+                    "invalid {BACKOFF_CAP_ENV}; falling back to default"
+                );
+                RETRY_BACKOFF_CAP
+            }
+        },
+        Err(_) => RETRY_BACKOFF_CAP,
+    }
+}
+
+/// REL-09 (#220): resolve the metrics retry queue depth from the env
+/// override. Default 0 = no queueing (v1 behavior).
+fn metrics_queue_depth() -> usize {
+    match std::env::var(METRICS_QUEUE_DEPTH_ENV) {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) => n,
+            _ => {
+                tracing::warn!(
+                    code = "otlp_metrics_queue_depth_invalid",
+                    value = %v,
+                    "invalid {METRICS_QUEUE_DEPTH_ENV}; falling back to default (0)"
+                );
+                0
+            }
+        },
+        Err(_) => 0,
     }
 }
 
@@ -290,6 +410,7 @@ impl OtlpMetrics {
         let endpoint = std::env::var(ENDPOINT_ENV).ok().filter(|v| !v.is_empty())?;
         let url = metrics_endpoint(&endpoint);
         let interval = metrics_export_interval();
+        let queue_depth = metrics_queue_depth();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         tracing::info!(
@@ -297,6 +418,7 @@ impl OtlpMetrics {
             endpoint = %endpoint,
             metrics_url = %url,
             interval_secs = interval.as_secs(),
+            queue_depth = queue_depth,
             "exporting metrics over OTLP (base endpoint; /v1/metrics appended)"
         );
 
@@ -307,15 +429,34 @@ impl OtlpMetrics {
             // be initializing).
             ticker.tick().await;
             let mut shutdown_rx = std::pin::pin!(shutdown_rx);
+            // REL-09 (#220): bounded retry queue for failed metric
+            // exports. When queue_depth > 0, a failed export is buffered
+            // and retried on subsequent ticks (oldest first, FIFO).
+            // When the queue is full, the oldest entry is dropped
+            // (newer data is more valuable than older data for
+            // cumulative counters).
+            let mut retry_queue: std::collections::VecDeque<Vec<u8>> =
+                std::collections::VecDeque::with_capacity(queue_depth.max(1));
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
-                        // Final flush on shutdown.
-                        export_metrics_tick(&obs, &url).await;
+                        // Final flush on shutdown: export the current
+                        // tick, then drain the retry queue.
+                        export_metrics_tick(&obs, &url, &mut retry_queue, queue_depth).await;
+                        while let Some(body) = retry_queue.pop_front() {
+                            if let Err(e) = post_otlp(&url, &body).await {
+                                tracing::warn!(
+                                    code = "otlp_metrics_flush_failed",
+                                    error = %e,
+                                    "failed to flush queued metrics on shutdown"
+                                );
+                                break;
+                            }
+                        }
                         break;
                     }
                     _ = ticker.tick() => {
-                        export_metrics_tick(&obs, &url).await;
+                        export_metrics_tick(&obs, &url, &mut retry_queue, queue_depth).await;
                     }
                 }
             }
@@ -332,11 +473,41 @@ impl OtlpMetrics {
     }
 }
 
-/// One metrics export tick: gather, convert, POST.
+/// One metrics export tick: gather, convert, POST. REL-09 (#220):
+/// when a retry queue is configured, failed exports are buffered and
+/// retried before the current tick's payload. The queue is bounded;
+/// when full, the oldest entry is dropped.
 async fn export_metrics_tick(
     obs: &std::sync::Arc<dwara_core::observability::Observability>,
     url: &str,
+    retry_queue: &mut std::collections::VecDeque<Vec<u8>>,
+    queue_depth: usize,
 ) {
+    // REL-09 (#220): drain the retry queue first (oldest first). A
+    // successful export removes the entry; a failed export re-queues
+    // it and stops draining (the collector is still down).
+    while let Some(body) = retry_queue.front().cloned() {
+        match post_otlp(url, &body).await {
+            Ok(()) => {
+                retry_queue.pop_front();
+                tracing::debug!(
+                    code = "otlp_metrics_retried",
+                    bytes = body.len(),
+                    "retried queued metrics export"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    code = "otlp_metrics_retry_skipped",
+                    error = %e,
+                    queue_len = retry_queue.len(),
+                    "retry queue drain paused (collector still unavailable)"
+                );
+                break;
+            }
+        }
+    }
+
     let families = obs.gather();
     if families.is_empty() {
         return;
@@ -365,8 +536,24 @@ async fn export_metrics_tick(
             tracing::warn!(
                 code = "otlp_metrics_export_failed",
                 error = %e,
-                "OTLP metrics export failed (will retry next tick)"
+                queue_len = retry_queue.len(),
+                queue_depth = queue_depth,
+                "OTLP metrics export failed"
             );
+            // REL-09 (#220): buffer the failed payload for retry on
+            // the next tick, if the queue is configured.
+            if queue_depth > 0 {
+                if retry_queue.len() >= queue_depth {
+                    retry_queue.pop_front();
+                    tracing::warn!(
+                        code = "otlp_metrics_queue_evicted",
+                        queue_len = retry_queue.len(),
+                        queue_depth = queue_depth,
+                        "retry queue full; evicted oldest entry"
+                    );
+                }
+                retry_queue.push_back(body);
+            }
         }
     }
 }
@@ -628,7 +815,7 @@ fn build_provider(
     }
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_http_client(StdHttpClient::new(EXPORT_TIMEOUT))
+        .with_http_client(StdHttpClient::new(export_timeout()))
         .with_protocol(Protocol::HttpBinary)
         .with_endpoint(traces_endpoint(endpoint))
         .build()?;
@@ -657,6 +844,12 @@ fn build_provider(
 #[derive(Debug)]
 struct StdHttpClient {
     timeout: Duration,
+    /// REL-09 (#220): max export attempts (initial + retries).
+    max_attempts: u32,
+    /// REL-09 (#220): retry backoff base duration.
+    backoff_base: Duration,
+    /// REL-09 (#220): retry backoff cap duration.
+    backoff_cap: Duration,
 }
 
 /// Time left against the total export deadline; `Err` once the budget
@@ -684,7 +877,12 @@ fn resolve_host(host: &str) -> &str {
 
 impl StdHttpClient {
     fn new(timeout: Duration) -> Self {
-        StdHttpClient { timeout }
+        StdHttpClient {
+            timeout,
+            max_attempts: max_export_attempts(),
+            backoff_base: retry_backoff_base(),
+            backoff_cap: retry_backoff_cap(),
+        }
     }
 
     /// Perform one exchange. Fully synchronous on purpose: it is called
@@ -842,13 +1040,13 @@ impl StdHttpClient {
         request: &Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, HttpError> {
-        let mut backoff = RETRY_BACKOFF_BASE;
-        for attempt in 1..=MAX_EXPORT_ATTEMPTS {
+        let mut backoff = self.backoff_base;
+        for attempt in 1..=self.max_attempts {
             match self.post(request, deadline) {
                 Ok(response) => return Ok(response),
                 Err(Attempt::Fatal(error)) => return Err(error),
                 Err(Attempt::Retry { error, retry_after }) => {
-                    if attempt == MAX_EXPORT_ATTEMPTS {
+                    if attempt == self.max_attempts {
                         tracing::warn!(
                             code = "otlp_export_retry_exhausted",
                             attempts = attempt,
@@ -864,7 +1062,7 @@ impl StdHttpClient {
                         Some(ra) if !ra.is_zero() => ra,
                         _ => backoff,
                     };
-                    backoff = backoff.saturating_mul(2).min(RETRY_BACKOFF_CAP);
+                    backoff = backoff.saturating_mul(2).min(self.backoff_cap);
                     let left = match remaining(deadline) {
                         Ok(left) => left,
                         Err(_) => {

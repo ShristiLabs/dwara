@@ -27,6 +27,34 @@ Release tags produce musl binaries for amd64 and arm64, each under a
 25 MB size bar (stripped, [LTO](https://en.wikipedia.org/wiki/Interprocedural_optimization#WPO_and_LTO) (link-time optimization, a whole-program compiler pass) release build). Download the tarball for
 your architecture from the release's GitHub artifacts.
 
+## OS packages (.deb, .rpm, .apk)
+
+Release tags also produce OS packages for amd64 and arm64. The
+packages include the `dwara` and `dwara-cli` binaries, the systemd
+unit, and a sample config. The post-install script creates the
+`dwara` system user and the `/var/lib/dwara` data directory.
+
+Download the package for your architecture from the GitHub Release
+attachments, then install:
+
+```sh
+# Debian/Ubuntu
+dpkg -i dwara-<version>-amd64.deb
+systemctl enable --now dwara
+
+# RHEL/Fedora
+rpm -i dwara-<version>-amd64.rpm
+systemctl enable --now dwara
+
+# Alpine
+apk add --allow-untrusted dwara-<version>-amd64.apk
+rc-update add dwara default
+service dwara start
+```
+
+Edit `/etc/dwara/dwara.yaml` to configure the gateway. The sample
+config is installed at `/etc/dwara/dwara.yaml.example`.
+
 ## Building from source
 
 Requires Rust 1.94 (pinned via `rust-toolchain.toml` (pins the exact Rust version), installed
