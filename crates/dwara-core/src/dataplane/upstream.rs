@@ -1789,6 +1789,13 @@ fn build_handle(
             // when they ask to "tune max_concurrent_streams" for p99.
             builder.http2_initial_max_send_streams(n as usize);
         }
+        // PERF-11 (#244): per-upstream h2 flow-control window sizes.
+        if let Some(sz) = p.http2_initial_stream_window_size {
+            builder.http2_initial_stream_window_size(sz);
+        }
+        if let Some(sz) = p.http2_initial_connection_window_size {
+            builder.http2_initial_connection_window_size(sz);
+        }
     }
 
     // Hot-swap: an existing balancer for this upstream name keeps its

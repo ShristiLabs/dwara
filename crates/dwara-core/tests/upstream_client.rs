@@ -1094,6 +1094,8 @@ fn full_pool_block() -> UpstreamPoolConfig {
         pre_warm: None,
         per_endpoint_cap: None,
         max_connection_age_ms: None,
+        http2_initial_stream_window_size: None,
+        http2_initial_connection_window_size: None,
     }
 }
 
@@ -1325,6 +1327,8 @@ async fn pool_max_idle_per_host_one_does_not_break_sequential_reuse() {
             pre_warm: None,
             per_endpoint_cap: None,
             max_connection_age_ms: None,
+            http2_initial_stream_window_size: None,
+            http2_initial_connection_window_size: None,
         },
     )]);
     let registry = UpstreamRegistry::from_snapshot(&snap);

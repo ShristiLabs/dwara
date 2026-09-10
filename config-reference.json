@@ -437,6 +437,17 @@
               "type": "null"
             }
           ]
+        },
+        "http2": {
+          "description": "HTTP/2 flow-control tuning for this listener (PERF-11, #244).\nWhen set, the h2 server builder uses these values instead of\nthe process-wide defaults from `DWARA_H2_*` env vars. Only\nmeaningful on `http` and `https` listeners (h2 is negotiated\nvia ALPN or prior knowledge); ignored on `h3` (HTTP/3 has its\nown transport-level flow control) and `tcp`/`udp`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Http2ListenerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -857,6 +868,44 @@
             "null"
           ],
           "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Http2ListenerConfig": {
+      "description": "HTTP/2 flow-control tuning for a listener (PERF-11, #244,\n`listeners[].http2`). Every field is optional; an omitted field\nkeeps the process-wide default from `DWARA_H2_*` env vars. This\nallows per-listener tuning for streaming (SSE) workloads where\nlarger windows reduce flow-control stalls on long-lived streams.",
+      "type": "object",
+      "properties": {
+        "initial_stream_window_size": {
+          "description": "Initial stream-level window size in bytes (hyper\n`initial_stream_window_size`). Absent: process default\n(1 MiB via `DWARA_H2_STREAM_WINDOW_KIB`). Larger values\nreduce stalls on streaming responses but increase memory\nper stream. Bounds: at most 16 MiB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "initial_connection_window_size": {
+          "description": "Initial connection-level window size in bytes (hyper\n`initial_connection_window_size`). Absent: process default\n(4 MiB via `DWARA_H2_CONNECTION_WINDOW_KIB`). Bounds: at\nmost 64 MiB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "adaptive_window": {
+          "description": "Enable adaptive flow-control window (hyper\n`adaptive_window`). Absent: false. When true, the\nconnection window grows and shrinks based on throughput,\nwhich helps streaming workloads on high-BDP paths.",
+          "type": "boolean"
+        },
+        "max_concurrent_streams": {
+          "description": "Maximum number of concurrent streams per connection (hyper\n`max_concurrent_streams`). Absent: process default (128 via\n`DWARA_H2_MAX_CONCURRENT_STREAMS`). Bounds: at most 1_000_000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
           "minimum": 0
         }
       },
@@ -4128,8 +4177,26 @@
           "format": "uint32",
           "minimum": 0
         },
+        "http2_initial_stream_window_size": {
+          "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. (PERF-11, #244)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "per_endpoint_cap": {
           "description": "SCALE-10 (#189): per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "http2_initial_connection_window_size": {
+          "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n(PERF-11, #244)",
           "type": [
             "integer",
             "null"

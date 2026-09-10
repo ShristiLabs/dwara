@@ -335,6 +335,7 @@ fn parse_listener_attrs(v: &Value) -> Result<Listener, String> {
         authorization: None,
         alt_svc: None,
         l4: None,
+        http2: None,
     })
 }
 
@@ -1385,6 +1386,7 @@ mod tests {
                 authorization: None,
                 alt_svc: None,
                 l4: None,
+                http2: None,
             }],
             routes: vec![Route {
                 name: "api".to_string(),

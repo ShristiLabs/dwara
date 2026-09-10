@@ -191,6 +191,30 @@ impl HttpHardening {
             .max_send_buf_size(self.h2_max_send_buf_size);
     }
 
+    /// Apply per-listener HTTP/2 overrides (PERF-11, #244). Called
+    /// after `apply` to override the process-wide h2 defaults with
+    /// listener-specific values. Only the fields present in the
+    /// config are overridden; absent fields keep the process default.
+    pub fn apply_listener_h2<E>(
+        &self,
+        builder: &mut hyper_util::server::conn::auto::Builder<E>,
+        config: &crate::config::Http2ListenerConfig,
+    ) {
+        let mut h2 = builder.http2();
+        if let Some(stream_window) = config.initial_stream_window_size {
+            h2.initial_stream_window_size(stream_window);
+        }
+        if let Some(conn_window) = config.initial_connection_window_size {
+            h2.initial_connection_window_size(conn_window);
+        }
+        if config.adaptive_window {
+            h2.adaptive_window(true);
+        }
+        if let Some(max_streams) = config.max_concurrent_streams {
+            h2.max_concurrent_streams(max_streams);
+        }
+    }
+
     /// Wrap an inbound request body with the inactivity-gap timeout. A thin
     /// passthrough when the knob is disabled.
     pub fn wrap_request_body<B>(&self, body: B) -> InboundBody<B>

@@ -31,6 +31,7 @@ fn listener(name: &str, address: &str, port: u16) -> Listener {
         authorization: None,
         alt_svc: None,
         l4: None,
+        http2: None,
     }
 }
 

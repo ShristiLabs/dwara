@@ -430,6 +430,7 @@ pub fn translate_ingress(
         authorization: None,
         alt_svc: None,
         l4: None,
+        http2: None,
     });
 
     if !tls_configs.is_empty() {
@@ -471,6 +472,7 @@ pub fn translate_ingress(
             authorization: None,
             alt_svc: None,
             l4: None,
+            http2: None,
         });
     }
 

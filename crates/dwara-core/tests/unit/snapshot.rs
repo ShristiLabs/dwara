@@ -22,6 +22,7 @@ fn good_gateway() -> Gateway {
             proxy_protocol: false,
             alt_svc: None,
             l4: None,
+            http2: None,
         }],
         routes: vec![
             Route {
@@ -256,6 +257,7 @@ fn validate_reports_all_semantic_issues() {
         proxy_protocol: false,
         alt_svc: None,
         l4: None,
+        http2: None,
     });
     let issues = validate(&gw);
     assert!(issues
@@ -687,6 +689,8 @@ fn validate_accepts_in_bounds_pool_block() {
         pre_warm: None,
         per_endpoint_cap: None,
         max_connection_age_ms: None,
+        http2_initial_stream_window_size: None,
+        http2_initial_connection_window_size: None,
     });
     let issues = validate(&gw);
     assert!(
@@ -708,6 +712,8 @@ fn validate_rejects_pool_zero_and_over_cap_values() {
         pre_warm: None,
         per_endpoint_cap: None,
         max_connection_age_ms: None,
+        http2_initial_stream_window_size: None,
+        http2_initial_connection_window_size: None,
     });
     let issues = validate(&gw);
     for field in [
