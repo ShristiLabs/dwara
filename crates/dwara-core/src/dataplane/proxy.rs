@@ -6720,6 +6720,14 @@ fn request_body_transform_failed(
 /// frames are dropped: the hop-by-hop `Trailer`/`TE` headers are already
 /// stripped from the forwarded request, so v1 forwards no trailers
 /// anywhere (documented; consistent with the no-trailer stance).
+///
+/// PERF-07 (#207): uses `BytesMut` instead of `Vec<u8>` so the final
+/// `freeze()` produces a `Bytes` handle without a reallocation (the
+/// `Vec<u8>` -> `Bytes::from(vec)` path moves the allocation but
+/// `BytesMut::freeze()` hands off the underlying buffer directly).
+/// When the input chunks are already `Bytes` with a single-owner
+/// backing allocation, `BytesMut::extend_from_slice` still copies, but
+/// the freeze avoids the second conversion allocation.
 async fn buffer_request_body<B>(body: B, cap: u64) -> Result<Bytes, (Bytes, Pin<Box<B>>)>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -6727,7 +6735,7 @@ where
 {
     use http_body_util::BodyExt as _;
     let mut body = Box::pin(body);
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: bytes::BytesMut = bytes::BytesMut::new();
     loop {
         match body.frame().await {
             Some(Ok(frame)) => {
@@ -6740,12 +6748,12 @@ where
                     // prefix (the caller streams prefix + remainder — the
                     // full body still reaches the upstream byte-exact).
                     buf.extend_from_slice(&data);
-                    return Err((Bytes::from(buf), body));
+                    return Err((buf.freeze(), body));
                 }
                 buf.extend_from_slice(&data);
             }
-            Some(Err(_)) => return Err((Bytes::from(buf), body)),
-            None => return Ok(Bytes::from(buf)),
+            Some(Err(_)) => return Err((buf.freeze(), body)),
+            None => return Ok(buf.freeze()),
         }
     }
 }
