@@ -246,6 +246,10 @@ enum ImportKind {
         /// Output path for the generated Dwara config (default: dwara.yaml).
         #[arg(long, default_value = "dwara.yaml")]
         output: String,
+        /// CFG-04 (#240): generate mock route actions with example
+        /// responses from the OpenAPI spec instead of proxy actions.
+        #[arg(long)]
+        mock: bool,
     },
     /// Import an NGINX config and generate a Dwara config (DW-065).
     Nginx {
@@ -522,14 +526,14 @@ fn main() {
             },
         },
         Command::Import { kind } => match kind {
-            ImportKind::Openapi { spec, output } => match read(&spec) {
+            ImportKind::Openapi { spec, output, mock } => match read(&spec) {
                 Err(e) => {
                     eprintln!("{e}");
                     1
                 }
                 Ok(text) => {
                     let is_json = dwara_cli::import::is_json_spec(&text) || spec.ends_with(".json");
-                    match dwara_cli::import::import_openapi(&text, is_json) {
+                    match dwara_cli::import::import_openapi(&text, is_json, mock) {
                         Ok(result) => match write_atomic(&output, &result.yaml) {
                             Ok(()) => {
                                 println!(

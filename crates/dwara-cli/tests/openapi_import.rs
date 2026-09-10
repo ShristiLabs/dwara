@@ -49,7 +49,7 @@ const PETSTORE_JSON: &str = r#"{
 
 #[test]
 fn import_yaml_generates_valid_config() {
-    let result = import_openapi(PETSTORE_YAML, false).expect("YAML import succeeds");
+    let result = import_openapi(PETSTORE_YAML, false, false).expect("YAML import succeeds");
     // 2 unique paths -> 2 routes (methods are combined per path).
     assert_eq!(result.route_count, 2);
     let gateway = parse_gateway(&result.yaml).expect("generated config parses");
@@ -60,7 +60,7 @@ fn import_yaml_generates_valid_config() {
 
 #[test]
 fn import_json_generates_valid_config() {
-    let result = import_openapi(PETSTORE_JSON, true).expect("JSON import succeeds");
+    let result = import_openapi(PETSTORE_JSON, true, false).expect("JSON import succeeds");
     assert_eq!(result.route_count, 2);
     let gateway = parse_gateway(&result.yaml).expect("generated config parses");
     assert_eq!(gateway.routes.len(), 2);
@@ -68,7 +68,7 @@ fn import_json_generates_valid_config() {
 
 #[test]
 fn import_preserves_path_params() {
-    let result = import_openapi(PETSTORE_YAML, false).unwrap();
+    let result = import_openapi(PETSTORE_YAML, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     // /pets/{id} path -> showPetById is the first operation -> route name "showpetbyid".
     let pet_by_id = gateway
@@ -85,7 +85,7 @@ fn import_preserves_path_params() {
 
 #[test]
 fn import_preserves_openapi_metadata() {
-    let result = import_openapi(PETSTORE_YAML, false).unwrap();
+    let result = import_openapi(PETSTORE_YAML, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     // /pets path -> listPets is the first operation -> route name "listpets".
     let list_pets = gateway
@@ -122,7 +122,7 @@ paths:
   /items:
     get: {}
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     assert_eq!(gateway.routes[0].name, "get-items");
 }
@@ -142,7 +142,7 @@ paths:
     get:
       operationId: dup
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     let names: Vec<&str> = gateway.routes.iter().map(|r| r.name.as_str()).collect();
     assert!(names.contains(&"dup"));
@@ -151,7 +151,7 @@ paths:
 
 #[test]
 fn import_generated_config_validates() {
-    let result = import_openapi(PETSTORE_YAML, false).unwrap();
+    let result = import_openapi(PETSTORE_YAML, false, false).unwrap();
     match dwara_cli::validate_config_text(&result.yaml) {
         dwara_cli::ValidateOutcome::Valid { routes } => assert_eq!(routes, 2),
         dwara_cli::ValidateOutcome::Invalid(issues) => {
@@ -177,7 +177,7 @@ paths:
     options: { operationId: rOptions }
     head: { operationId: rHead }
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     // 1 unique path -> 1 route with 7 methods.
     assert_eq!(result.route_count, 1);
     let gateway = parse_gateway(&result.yaml).unwrap();
@@ -194,7 +194,7 @@ paths:
 
 #[test]
 fn import_invalid_yaml_reports_error() {
-    let result = import_openapi("not: valid: yaml: [", false);
+    let result = import_openapi("not: valid: yaml: [", false, false);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("invalid"));
@@ -202,7 +202,7 @@ fn import_invalid_yaml_reports_error() {
 
 #[test]
 fn import_invalid_json_reports_error() {
-    let result = import_openapi("{not valid json", true);
+    let result = import_openapi("{not valid json", true, false);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("invalid"));
@@ -217,7 +217,7 @@ info:
   version: 1.0.0
 paths: {}
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     assert_eq!(result.route_count, 0);
     // The generated config has zero routes — it needs
     // allow_empty_routes to validate.

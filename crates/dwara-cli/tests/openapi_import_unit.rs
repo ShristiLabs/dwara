@@ -35,7 +35,7 @@ paths:
 
 #[test]
 fn import_yaml_petstore() {
-    let result = import_openapi(PETSTORE_YAML, false).unwrap();
+    let result = import_openapi(PETSTORE_YAML, false, false).unwrap();
     // 2 unique paths -> 2 routes (methods combined per path).
     assert_eq!(result.route_count, 2);
     // Verify the generated YAML parses back.
@@ -54,7 +54,7 @@ fn import_yaml_petstore() {
 
 #[test]
 fn import_preserves_path_params() {
-    let result = import_openapi(PETSTORE_YAML, false).unwrap();
+    let result = import_openapi(PETSTORE_YAML, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     let pet_by_id = gateway
         .routes
@@ -68,7 +68,7 @@ fn import_preserves_path_params() {
 #[test]
 fn import_json_spec() {
     let json = r#"{"openapi":"3.0.0","info":{"title":"Test","version":"1.0.0"},"paths":{"/hello":{"get":{"operationId":"hello"}}}}"#;
-    let result = import_openapi(json, true).unwrap();
+    let result = import_openapi(json, true, false).unwrap();
     assert_eq!(result.route_count, 1);
     let gateway = parse_gateway(&result.yaml).unwrap();
     assert_eq!(gateway.routes[0].name, "hello");
@@ -92,7 +92,7 @@ paths:
   /items:
     get: {}
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     assert_eq!(gateway.routes[0].name, "get-items");
 }
@@ -112,7 +112,7 @@ paths:
     get:
       operationId: dup
 "#;
-    let result = import_openapi(yaml, false).unwrap();
+    let result = import_openapi(yaml, false, false).unwrap();
     let gateway = parse_gateway(&result.yaml).unwrap();
     let names: Vec<&str> = gateway.routes.iter().map(|r| r.name.as_str()).collect();
     assert!(names.contains(&"dup"));
