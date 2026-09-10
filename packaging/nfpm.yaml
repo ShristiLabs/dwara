@@ -1,0 +1,69 @@
+# NFPM configuration for building dwara OS packages (.deb, .rpm, .apk).
+# USA-05 (#228): OS packages and release automation.
+#
+# Usage:
+#   nfpm pkg --packager deb --target dist/
+#   nfpm pkg --packager rpm --target dist/
+#   nfpm pkg --packager apk --target dist/
+#
+# The binaries (dwara, dwara-cli) must already be built and placed in
+# the staging directory (packaging/staging/) before running nfpm.
+# The release workflow builds them from the musl targets.
+
+name: dwara
+arch: amd64
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: ShristiLabs <noreply@shristilabs.com>
+description: |
+  dwara is a streaming reverse-proxy API gateway for AI and
+  general-purpose HTTP workloads. Built in Rust, it provides
+  load balancing, retries, circuit breaking, caching, WAF,
+  analytics, and more.
+vendor: ShristiLabs
+homepage: https://github.com/shristilabs/dwara
+license: Apache-2.0
+
+# Contents: binaries + systemd unit + config examples.
+contents:
+  - src: packaging/staging/dwara
+    dst: /usr/bin/dwara
+    type: binary
+  - src: packaging/staging/dwara-cli
+    dst: /usr/bin/dwara-cli
+    type: binary
+  - src: packaging/systemd/dwara.service
+    dst: /etc/systemd/system/dwara.service
+    type: config|noreplace
+  - src: crates/dwara-bin/dwara.yaml
+    dst: /etc/dwara/dwara.yaml.example
+    type: config|noreplace
+
+# Scripts: post-install creates the dwara user and data directory.
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+# RPM-specific.
+rpm:
+  group: Applications/Internet
+  compression: xz
+
+# DEB-specific.
+deb:
+  scripts:
+    postinstall: packaging/scripts/postinstall.sh
+    preremove: packaging/scripts/preremove.sh
+    postremove: packaging/scripts/postremove.sh
+  triggers:
+    # No triggers needed for v1.
+
+# APK-specific.
+apk:
+  scripts:
+    postinstall: packaging/scripts/postinstall.sh
+    preremove: packaging/scripts/preremove.sh
+    postremove: packaging/scripts/postremove.sh

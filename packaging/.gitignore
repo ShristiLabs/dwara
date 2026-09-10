@@ -1,0 +1,2 @@
+# Staged binaries for nfpm (built by build-packages.sh / CI).
+packaging/staging/
