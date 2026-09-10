@@ -221,15 +221,26 @@ fn hash_by_name<'a>(
 }
 
 /// One advisory lint finding: `kind/name: message`.
+/// USA-08 (#230): `auto_fix` carries a suggested command or edit that
+/// would resolve the finding, when one is available. `None` means the
+/// finding is advisory only (no automatic fix is safe).
 pub struct LintWarning {
     pub kind: &'static str,
     pub name: String,
     pub message: String,
+    /// USA-08 (#230): a suggested auto-fix command or description of
+    /// the edit that would resolve this finding. Printed by `dwara lint
+    /// --fix` as a hint. `None` for findings with no safe automatic fix.
+    pub auto_fix: Option<String>,
 }
 
 impl std::fmt::Display for LintWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}: {}", self.kind, self.name, self.message)
+        write!(f, "{}/{}: {}", self.kind, self.name, self.message)?;
+        if let Some(fix) = &self.auto_fix {
+            write!(f, "\n  fix: {fix}")?;
+        }
+        Ok(())
     }
 }
 
@@ -271,6 +282,7 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 gateway.version,
                 dwara_core::config::CURRENT_CONFIG_VERSION
             ),
+            auto_fix: Some("dwara migrate <config-file>".to_string()),
         });
     } else if gateway.version > dwara_core::config::CURRENT_CONFIG_VERSION {
         warnings.push(LintWarning {
@@ -281,6 +293,7 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 gateway.version,
                 dwara_core::config::CURRENT_CONFIG_VERSION
             ),
+            auto_fix: None,
         });
     }
 
@@ -298,6 +311,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                     "duplicate prefix pattern '{}' (an earlier prefix route wins equal-length ties; this route never matches)",
                     route.r#match.path.value
                 ),
+                auto_fix: Some(format!(
+                    "remove route '{}' or change its prefix pattern to a unique value",
+                    route.name
+                )),
             });
         }
     }
@@ -332,6 +349,9 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                      (exact lookup wins); those paths never reach this route",
                     path.value
                 ),
+                auto_fix: Some(format!(
+                    "remove exact route '{exact}' or tighten the regex to exclude its paths"
+                )),
             });
         }
     }
@@ -387,6 +407,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                     "unused: referenced by no authorization rule and bound to no jwt provider \
                           (advisory: runtime credential use is not statically visible)"
                         .to_string(),
+                auto_fix: Some(format!(
+                    "remove consumer '{}' or add it to an authorization rule / jwt provider",
+                    c.name
+                )),
             });
         }
     }
@@ -415,6 +439,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 message: "unused: attached to no consumer, route, service, listener, or \
                           gateway"
                     .to_string(),
+                auto_fix: Some(format!(
+                    "remove policy '{}' or attach it to a consumer, route, service, listener, or gateway",
+                    p.name
+                )),
             });
         }
     }
@@ -433,6 +461,10 @@ pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
                 kind: "upstream",
                 name: u.name.clone(),
                 message: "unreferenced: no service targets this upstream".to_string(),
+                auto_fix: Some(format!(
+                    "remove upstream '{}' or add a service that targets it",
+                    u.name
+                )),
             });
         }
     }

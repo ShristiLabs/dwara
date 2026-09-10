@@ -70,6 +70,17 @@
         }
       ]
     },
+    "default_security_headers": {
+      "description": "Gateway-level default security headers baseline (SEC-09, #213):\napplied to EVERY route that does not carry its own\n`security_headers` block and has not set\n`security_headers_opt_out: true`. Fail-secure defaults: a\nroute with no `security_headers` block inherits this posture\nrather than shipping without HSTS/nosniff. A route that needs\nto disable a header from the default sets its own\n`security_headers` block (which fully replaces the default\nfor that route), or sets `security_headers_opt_out: true` to\nopt out entirely. See [`SecurityHeaders`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SecurityHeaders"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "trusted_proxies": {
       "description": "IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims\nare trusted (gateway-level; the direct connection peer must be in\nthis list for an inbound XFF chain to be preserved and extended).\nEach entry must be an IP address (e.g. `10.1.2.3`) or a CIDR\n(e.g. `10.0.0.0/8`); anything else fails validation. Empty (the\ndefault) trusts nobody: every proxied request carries an XFF of\nexactly the direct peer, and inbound XFF values are discarded.",
       "type": "array",
@@ -932,6 +943,10 @@
               "type": "null"
             }
           ]
+        },
+        "security_headers_opt_out": {
+          "description": "Opt out of the gateway-level `default_security_headers`\nbaseline (SEC-09, #213): when true, a route with no\n`security_headers` block ships WITHOUT the gateway's default\nsecurity headers. A route that carries its own\n`security_headers` block always uses it (the block fully\nreplaces the default); this flag is for the rare route that\ndeliberately needs no security headers at all. Default:\nfalse (inherit the default when present).",
+          "type": "boolean"
         },
         "masking": {
           "description": "Response field masking (DW-029, feature analysis 5-Security):\nredacts the named RFC 6901 JSON pointers from the route's\nresponses — the floor `fields` for every consumer, plus the\n`groups` additions for members of each consumer group — before\nany other body-handling stage. The redaction is fail-closed: a\nresponse the gateway cannot prove clean (encoded, non-JSON,\nover the cap, unparseable, or missing a configured pointer)\nanswers 502, never a passthrough. See [`Masking`].",
@@ -3032,6 +3047,10 @@
             "null"
           ]
         },
+        "use_system_roots": {
+          "description": "REL-08 (#219): when true, the upstream's TLS connections trust the\nOS-native root CA store (loaded via `rustls-native-certs`) INSTEAD\nof the bundled webpki root set. Useful in deployments whose\nprivate CAs are provisioned through the host's trust store (e.g.\ncorporate PKI, cloud metadata CAs). Mutually exclusive with\n`trusted_ca_file` (validation rejects a configuration that sets\nboth). Only meaningful for the TLS protocols (`https`/`http2`/`h3`)\n— no TLS is negotiated toward `http1` endpoints, so validation\nrejects that combination. Active health probes for this upstream\nverify against the same roots. Defaults to `false` (webpki roots).",
+          "type": "boolean"
+        },
         "endpoints": {
           "description": "Static endpoint list for this upstream. When `dns_discovery` is\npresent, this becomes the initial/fallback set (used until the\nfirst DNS resolution completes and as a fallback when DNS fails\nand `fail_open` is true); it may be empty. When `dns_discovery`\nis absent, this is the complete endpoint set and must be\nnon-empty (validation rejects an empty list).",
           "type": "array",
@@ -3456,6 +3475,11 @@
           "description": "HTTP/1.1 GET to `path`; success = 2xx.",
           "type": "string",
           "const": "http"
+        },
+        {
+          "description": "HTTP/2 GET to `path` over a pooled H2 connection (REL-07, #218);\nfor HTTP/2-only and gRPC upstreams that refuse HTTP/1.1 on a\nseparate connection. Success = 2xx.",
+          "type": "string",
+          "const": "http2"
         },
         {
           "description": "TCP connect within the timeout.",
@@ -4706,6 +4730,15 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "stale_on_error_secs": {
+          "description": "How long to serve stale (cached) keys after a JWKS fetch failure\n(SEC-12, #215), in seconds (default: same as `refresh_secs`,\ncapped at 300). When a JWKS fetch fails, the cached key set\nkeeps serving for this duration before a new fetch is attempted,\nso a transient JWKS provider outage does not cascade into auth\nfailures. 0 disables stale-on-error (a fetch failure surfaces\nimmediately when the cache is empty; when the cache is non-empty\nthe existing degraded-mode behavior applies).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -5027,6 +5060,17 @@
               "type": "null"
             }
           ]
+        },
+        "sampled_degradation": {
+          "description": "REL-10 (#221): sampled degradation under channel pressure. When\nthe analytics channel's fill ratio exceeds `high_watermark`,\nthe offer path probabilistically drops records (keeping 1 in\n`sample_rate`) BEFORE the channel fills, so a sustained burst\ndegrades to sampled telemetry rather than a hard drop cliff.\nBelow `low_watermark` every record is kept. Defaults to off\n(no sampling); when enabled, `high_watermark` must be >\n`low_watermark` and both are in (0.0, 1.0].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsSampledDegradation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -5256,6 +5300,31 @@
         "capture_body": {
           "description": "Whether to capture the request body (default false — PII risk).\nBody capture is off by default; enabling it is an explicit\noperator decision to accept the PII exposure of stored bodies\n(even redacted bodies may carry residual sensitive content).",
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AnalyticsSampledDegradation": {
+      "description": "Sampled degradation config (REL-10, #221). See\n[`AnalyticsConfig::sampled_degradation`].",
+      "type": "object",
+      "properties": {
+        "high_watermark": {
+          "description": "Channel fill ratio above which sampling kicks in. Must be in\n(0.0, 1.0) and > `low_watermark`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "low_watermark": {
+          "description": "Channel fill ratio below which sampling stops (every record\nkept). Must be in (0.0, 1.0) and < `high_watermark`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.5
+        },
+        "keep_rate": {
+          "description": "Fraction of records to KEEP when sampling (1 in N). 1.0 keeps\nall (no sampling); 0.1 keeps 10%. Must be in (0.0, 1.0].",
+          "type": "number",
+          "format": "double",
+          "default": 0.1
         }
       },
       "additionalProperties": false
