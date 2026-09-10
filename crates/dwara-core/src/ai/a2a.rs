@@ -1207,6 +1207,7 @@ mod tests {
             stop: None,
             stream: false,
             stream_options_include_usage: false,
+            response_format: None,
             other: BTreeMap::new(),
         };
         let err = handle_a2a_request(&agent, &req).unwrap_err();

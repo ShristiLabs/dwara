@@ -86,6 +86,11 @@ impl ProviderAdapter for OpenAiAdapter {
                 body.insert("stream_options".into(), json!({"include_usage": true}));
             }
         }
+        // AI-06 (#196): serialize the typed response_format back to
+        // the OpenAI wire shape.
+        if let Some(rf) = &req.response_format {
+            body.insert("response_format".into(), response_format_to_openai(rf));
+        }
         // Dialect-specific parameters pass through verbatim (the
         // canonical surface preserved them for exactly this adapter).
         for (k, v) in &req.other {
@@ -367,5 +372,19 @@ fn parse_usage(v: &Value) -> Usage {
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64),
+    }
+}
+
+/// AI-06 (#196): Serialize the canonical `ResponseFormat` back to the
+/// OpenAI wire shape.
+fn response_format_to_openai(rf: &crate::ai::types::ResponseFormat) -> Value {
+    use crate::ai::types::ResponseFormat;
+    match rf {
+        ResponseFormat::Text => json!({"type": "text"}),
+        ResponseFormat::JsonObject => json!({"type": "json_object"}),
+        ResponseFormat::JsonSchema { name, schema } => json!({
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": schema}
+        }),
     }
 }

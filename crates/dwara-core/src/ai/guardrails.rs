@@ -705,6 +705,7 @@ mod tests {
             stop: None,
             stream: false,
             stream_options_include_usage: false,
+            response_format: None,
             other: Default::default(),
         }
     }

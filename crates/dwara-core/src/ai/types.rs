@@ -194,6 +194,30 @@ pub enum ToolChoice {
     Tool(String),
 }
 
+/// AI-06 (#196): Structured-output request format. Normalized across
+/// provider dialects so the gateway can translate `response_format`
+/// from OpenAI to Anthropic and Gemini.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseFormat {
+    /// Plain text output (no structure). OpenAI `{"type": "text"}`.
+    Text,
+    /// JSON object mode (no schema). OpenAI `{"type": "json_object"}`.
+    /// Anthropic translates this to a tool with a permissive schema;
+    /// Gemini translates to `responseMimeType: "application/json"`.
+    JsonObject,
+    /// JSON Schema mode. OpenAI
+    /// `{"type": "json_schema", "json_schema": {"name": ..., "schema": ...}}`.
+    /// Anthropic translates to a tool with the schema as
+    /// `input_schema`; Gemini translates to `responseMimeType` +
+    /// `responseSchema`.
+    JsonSchema {
+        /// The schema name (OpenAI `json_schema.name`).
+        name: String,
+        /// The JSON Schema object (OpenAI `json_schema.schema`).
+        schema: Value,
+    },
+}
+
 /// A canonical chat-completions request: what the facade parser
 /// produces and every adapter consumes.
 #[derive(Debug, Clone, PartialEq)]
@@ -216,9 +240,12 @@ pub struct ChatRequest {
     pub stream: bool,
     /// OpenAI `stream_options.include_usage` (streaming only).
     pub stream_options_include_usage: bool,
+    /// AI-06 (#196): structured-output format. Parsed from OpenAI
+    /// `response_format` and translated by each adapter.
+    pub response_format: Option<ResponseFormat>,
     /// Dialect-specific parameters the canonical surface does not model
-    /// (e.g. `response_format`, `seed`, `presence_penalty`). Carried
-    /// verbatim; only the OpenAI adapter re-emits them.
+    /// (e.g. `seed`, `presence_penalty`). Carried verbatim; only the
+    /// OpenAI adapter re-emits them.
     pub other: BTreeMap<String, Value>,
 }
 
