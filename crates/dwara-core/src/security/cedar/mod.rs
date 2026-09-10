@@ -1,4 +1,4 @@
-//! Cedar policy engine integration (DW-060).
+//! Cedar policy engine integration (DW-060, CFG-07 / #241: hot reload).
 //!
 //! This module provides a thin wrapper around the `cedar-policy` crate,
 //! offering:
@@ -8,6 +8,9 @@
 //! - [`CedarRequest`] — an authorization request (principal, action,
 //!   resource, context).
 //! - [`CedarDecision`] — the authorization decision (Allow or Deny).
+//! - [`HotReloadCedarAuthorizer`] — a hot-reloadable wrapper that swaps
+//!   the compiled policy set atomically without blocking the request
+//!   path (DP-07, #241).
 //!
 //! ## Design (section 6-Extensibility, §9.3)
 //!
@@ -16,13 +19,18 @@
 //! compiled once at config publish time and embedded in the snapshot.
 //! The request path only evaluates — it never parses or compiles.
 //!
-//! ## Feature gate
+//! ## Hot reload (CFG-07, #241)
 //!
-//! The `cedar` cargo feature must be enabled. Without it, the module
-//! is not compiled and config fields that reference Cedar policies are
-//! accepted but inert.
+//! The [`HotReloadCedarAuthorizer`] wraps a [`CedarAuthorizer`] in an
+//! `ArcSwap`, allowing the policy set to be swapped atomically without
+//! blocking the request path. The reload compiles the new policy set
+//! on a background task and then swaps the `Arc` in a single atomic
+//! operation. The request path always reads the current generation
+//! via `ArcSwap::load`, which is a single relaxed load.
 
 use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 pub mod opa;
 
@@ -41,6 +49,86 @@ pub struct CedarAuthorizer {
     policies: Arc<PolicySet>,
     entities: Arc<Entities>,
     schema: Option<Arc<Schema>>,
+}
+
+/// A hot-reloadable Cedar authorizer (CFG-07, #241). Wraps a
+/// [`CedarAuthorizer`] in an `ArcSwap` so the policy set can be
+/// swapped atomically without blocking the request path.
+///
+/// The reload compiles the new policy set on the calling thread (or
+/// a background task) and then swaps the `Arc` in a single atomic
+/// store. The request path's `is_authorized` call loads the current
+/// generation via `ArcSwap::load` (a single relaxed load) and
+/// evaluates against it — no lock, no I/O, no blocking.
+pub struct HotReloadCedarAuthorizer {
+    inner: ArcSwap<CedarAuthorizer>,
+}
+
+impl HotReloadCedarAuthorizer {
+    /// Create a new hot-reloadable authorizer from an initial
+    /// [`CedarAuthorizer`].
+    pub fn new(initial: CedarAuthorizer) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(initial),
+        }
+    }
+
+    /// Create from raw policy/entity/schema sources (convenience).
+    pub fn from_sources(
+        policies_src: &str,
+        entities_json: Option<&str>,
+        schema_json: Option<&str>,
+    ) -> Result<Self, CedarError> {
+        let authorizer = CedarAuthorizer::new(policies_src, entities_json, schema_json)?;
+        Ok(Self::new(authorizer))
+    }
+
+    /// Atomically swap the compiled policy set. The new authorizer
+    /// is compiled by the caller (typically on a background task)
+    /// and swapped in with a single atomic store. The request path
+    /// sees the new generation on its next `is_authorized` call.
+    ///
+    /// Returns the previous authorizer (for drop/cleanup).
+    pub fn reload(&self, new: CedarAuthorizer) -> CedarAuthorizer {
+        let prev = self.inner.swap(Arc::new(new));
+        // Unwrap the Arc back to owned — there may be in-flight
+        // readers holding clones, but the swap guarantees the
+        // returned value is the previous generation.
+        Arc::try_unwrap(prev).unwrap_or_else(|arc| (*arc).clone())
+    }
+
+    /// Reload from raw sources. Compiles the new policy set and swaps
+    /// it in. Returns an error if compilation fails (the currently
+    /// loaded generation is unchanged on error).
+    pub fn reload_from_sources(
+        &self,
+        policies_src: &str,
+        entities_json: Option<&str>,
+        schema_json: Option<&str>,
+    ) -> Result<(), CedarError> {
+        let new = CedarAuthorizer::new(policies_src, entities_json, schema_json)?;
+        self.reload(new);
+        Ok(())
+    }
+
+    /// Evaluate an authorization request against the currently loaded
+    /// policy set. Loads the current generation via `ArcSwap::load`
+    /// (a single relaxed atomic load) and evaluates — no lock, no I/O.
+    pub fn is_authorized(&self, req: &CedarRequest) -> Result<CedarDecision, CedarError> {
+        let authorizer = self.inner.load();
+        authorizer.is_authorized(req)
+    }
+
+    /// The number of policies in the currently loaded set.
+    pub fn policy_count(&self) -> usize {
+        self.inner.load().policy_count()
+    }
+
+    /// Get a clone of the currently loaded authorizer (for
+    /// inspection or testing).
+    pub fn current(&self) -> CedarAuthorizer {
+        (**self.inner.load()).clone()
+    }
 }
 
 /// A Cedar authorization request.
