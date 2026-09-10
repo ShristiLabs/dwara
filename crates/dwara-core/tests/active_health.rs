@@ -69,14 +69,15 @@ async fn serve_switchable(healthy: Arc<AtomicBool>) -> u16 {
 
 fn base_gateway(active: ActiveHealth, endpoints: Vec<Endpoint>) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints,
             connection_cap: None,
@@ -475,6 +476,7 @@ async fn readyz_is_503_before_first_publish_and_200_after() {
 
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
@@ -522,6 +524,7 @@ async fn reserved_paths_shadow_configured_routes() {
     let state = Arc::new(ConfigState::new());
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![
@@ -631,9 +634,9 @@ async fn reserved_paths_shadow_configured_routes() {
                 authorization: None,
             }],
             upstreams: vec![Upstream {
+                hash_on: None,
                 name: "up".into(),
                 load_balancer: LoadBalancer::RoundRobin,
-                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),

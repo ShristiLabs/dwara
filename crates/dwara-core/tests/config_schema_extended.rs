@@ -566,6 +566,7 @@ fn duplicate_keys_inside_a_listener_are_rejected() {
 fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
     use dwara_core::config::*;
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "l".into(),
@@ -639,9 +640,9 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         }],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "u".into(),
             load_balancer: LoadBalancer::IpHash,
-            hash_on: None,
             protocol: UpstreamProtocol::Https,
             endpoints: vec![Endpoint {
                 address: "10.0.0.1".into(),

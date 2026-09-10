@@ -29,6 +29,7 @@ use dwara_core::snapshot::ConfigState;
 fn snapshot_with(up: ConfigUpstream) -> std::sync::Arc<dwara_core::snapshot::Snapshot> {
     install_aws_lc_rs_provider();
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
@@ -78,9 +79,9 @@ fn test_upstream(
     connect_ms: Option<u64>,
 ) -> ConfigUpstream {
     ConfigUpstream {
+        hash_on: None,
         name: "backend".into(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol,
         endpoints: vec![Endpoint {
             address,
@@ -408,14 +409,15 @@ async fn https_upstream_rejects_untrusted_server_cert() {
 #[test]
 fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
     let issues = dwara_core::snapshot::validate(&Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "u".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),
@@ -505,6 +507,7 @@ fn with_root_certificates_rejects_malformed_root() {
     let state = ConfigState::new();
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],

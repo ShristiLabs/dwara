@@ -295,9 +295,9 @@ fn ttl_override_equal_to_base_is_unchanged() {
 
 fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
     Upstream {
+        hash_on: None,
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".into(),

@@ -37,6 +37,7 @@ const SEND_BOUND: Duration = Duration::from_secs(8);
 fn gateway_with(upstreams: Vec<ConfigUpstream>) -> Arc<dwara_core::snapshot::Snapshot> {
     dwara_core::tls::install_aws_lc_rs_provider();
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
@@ -87,9 +88,9 @@ fn upstream(
     connect_ms: Option<u64>,
 ) -> ConfigUpstream {
     ConfigUpstream {
+        hash_on: None,
         name: name.into(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol,
         endpoints: vec![Endpoint {
             address: address.into(),
@@ -703,14 +704,15 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
     ];
     for (field, timeouts) in cases {
         let issues = dwara_core::snapshot::validate(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
             upstreams: vec![ConfigUpstream {
+                hash_on: None,
                 name: "u".into(),
                 load_balancer: LoadBalancer::RoundRobin,
-                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),
@@ -776,14 +778,15 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
 #[test]
 fn validate_accepts_positive_connection_cap_and_timeouts() {
     let issues = dwara_core::snapshot::validate(&Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "u".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http2,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

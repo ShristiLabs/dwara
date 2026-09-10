@@ -95,9 +95,9 @@ fn service(name: &str, upstream: &str) -> Service {
 
 fn upstream(name: &str) -> Upstream {
     Upstream {
+        hash_on: None,
         name: name.into(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".into(),
@@ -130,6 +130,7 @@ fn upstream(name: &str) -> Upstream {
 /// one upstream.
 fn base_gateway() -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![listener("l", "0.0.0.0", 8080)],
         routes: vec![proxy_route("r", PathMatchKind::Exact, "/x")],

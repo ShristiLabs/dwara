@@ -9,6 +9,7 @@ use dwara_core::snapshot::*;
 
 fn good_gateway() -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "main".into(),
@@ -164,9 +165,9 @@ fn good_gateway() -> Gateway {
             authorization: None,
         }],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "users-pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

@@ -79,6 +79,7 @@ fn tls_cert(names: &[&str]) -> TlsCertificate {
 
 fn base_gateway(listener: Listener) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![listener],
         routes: vec![Route {

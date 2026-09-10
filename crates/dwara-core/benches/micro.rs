@@ -99,9 +99,9 @@ fn bench_gateway() -> Gateway {
         .collect();
     let upstreams = (0..5)
         .map(|u| Upstream {
+            hash_on: None,
             name: format!("upstream-{u}"),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: (0..5)
                 .map(|e| Endpoint {
@@ -132,6 +132,7 @@ fn bench_gateway() -> Gateway {
         })
         .collect();
     Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services,

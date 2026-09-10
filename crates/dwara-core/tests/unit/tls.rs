@@ -380,6 +380,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         acme: None,
     };
     let gateway = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![Listener {
             name: "edge".into(),
@@ -396,9 +397,9 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         routes: vec![],
         services: vec![],
         upstreams: vec![Upstream {
+            hash_on: None,
             name: "backend-a".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "10.0.0.5".into(),

@@ -97,9 +97,9 @@ fn load_case(text: &str) -> (String, RequestSpec, ExpectSpec, String) {
 /// define, so routing-focused case files need no service boilerplate.
 fn inject_default_services(gateway: &mut Gateway) {
     let pool = Upstream {
+        hash_on: None,
         name: "pool".into(),
         load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol: dwara_core::config::UpstreamProtocol::Http1,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".into(),

@@ -88,14 +88,15 @@ fn render_contains_families() {
     use dwara_core::config::{Endpoint, Gateway, LoadBalancer, Upstream};
     state
         .compile_and_publish(&Gateway {
+            version: 1,
             trusted_proxies: vec![],
             listeners: vec![],
             routes: vec![],
             services: vec![],
             upstreams: vec![Upstream {
+                hash_on: None,
                 name: "u".into(),
                 load_balancer: LoadBalancer::RoundRobin,
-                hash_on: None,
                 protocol: dwara_core::config::UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),

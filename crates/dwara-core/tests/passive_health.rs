@@ -570,14 +570,15 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
     ));
 
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![
                 Endpoint {
@@ -800,12 +801,12 @@ async fn serve_status(listener: TcpListener, hits: Arc<AtomicU64>, status: Statu
 fn upstream_cfg(
     endpoints: Vec<Endpoint>,
     load_balancer: LoadBalancer,
-    hash_on: None,
     health: PassiveHealth,
 ) -> ConfigUpstream {
     ConfigUpstream {
         name: "pool".into(),
         load_balancer,
+        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints,
         connection_cap: None,
@@ -830,6 +831,7 @@ fn upstream_cfg(
 
 fn publish_registry(upstreams: Vec<ConfigUpstream>) -> UpstreamRegistry {
     let gw = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
@@ -1087,14 +1089,15 @@ async fn persistent_503s_eject_the_endpoint() {
 
 fn gateway_with_health(h: PassiveHealth) -> Gateway {
     Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
         services: vec![],
         upstreams: vec![ConfigUpstream {
+            hash_on: None,
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

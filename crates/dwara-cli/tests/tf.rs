@@ -97,6 +97,7 @@ upstreams:
 
 fn empty_gateway() -> Gateway {
     Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes: Vec::new(),
         services: Vec::new(),
@@ -424,9 +425,9 @@ fn hcl_escapes_special_characters() {
         authorization: None,
     });
     gw.upstreams.push(Upstream {
+        hash_on: None,
         name: "up".to_string(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         trusted_ca_file: None,
         endpoints: vec![Endpoint {

@@ -421,9 +421,9 @@ fn single_candidate_half_open_consumes_probe_budget() {
 
 fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
     ConfigUpstream {
+        hash_on: None,
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
-        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![
             Endpoint {
@@ -470,6 +470,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
 async fn dataplane_reload_changes_weights_without_restart() {
     let st = Arc::new(ConfigState::new());
     let mut g = Gateway {
+        version: 1,
         trusted_proxies: vec![],
         listeners: vec![],
         routes: vec![],
