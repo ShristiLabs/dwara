@@ -1184,6 +1184,14 @@ where
                         );
                     }
                 }
+                // AI-09 (#198): record per-key health from rate-limit
+                // headers on every provider response (error or success).
+                // When remaining is 0, the pool proactively cools the
+                // key until the reset window, preventing the next 429.
+                if let (Some(pool), Some(idx)) = (&provider.credential_pool, pool_entry_index) {
+                    let health = parse_rate_limit_headers(&up_parts.headers, status.as_u16());
+                    pool.record_health(idx, health);
+                }
                 // 429/5xx is transient — try the next candidate; if
                 // none succeed, the LAST provider's answer is the one
                 // the client sees (closest to the truth of the outage).
@@ -1201,6 +1209,14 @@ where
             // Other 4xx (bad request, bad key) is deterministic —
             // retrying another provider would only re-diagnose it.
             return resp;
+        }
+        // AI-09 (#198): record per-key health from rate-limit headers
+        // on successful (non-retryable) provider responses too. This
+        // captures the remaining quota before a 429 occurs, enabling
+        // proactive cooldown.
+        if let (Some(pool), Some(idx)) = (&provider.credential_pool, pool_entry_index) {
+            let health = parse_rate_limit_headers(&up_parts.headers, status.as_u16());
+            pool.record_health(idx, health);
         }
         // Streaming pass-through (DW-077): a 200 SSE response streams
         // to the client frame-by-frame with zero added buffering. This
@@ -1936,6 +1952,113 @@ fn parse_ai_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     crate::config::versioning::parse_retry_after(s, now_unix_seconds)
+}
+
+/// AI-09 (#198): Parse provider rate-limit headers into per-key health.
+/// Covers the common header names used by OpenAI, Anthropic, and
+/// Gemini. Returns a `KeyHealth` with whatever fields were present.
+fn parse_rate_limit_headers(headers: &HeaderMap, status: u16) -> crate::ai::credentials::KeyHealth {
+    use crate::ai::credentials::KeyHealth;
+    use std::time::{Duration, Instant};
+
+    let mut health = KeyHealth {
+        last_status: Some(status),
+        updated_at: Some(Instant::now()),
+        ..Default::default()
+    };
+
+    // OpenAI: x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens
+    // Anthropic: anthropic-ratelimit-requests-remaining, anthropic-ratelimit-tokens-remaining
+    // Gemini: x-ratelimit-remaining (generic)
+    // We try all known header names and take the first that parses.
+    let remaining_request_headers = [
+        "x-ratelimit-remaining-requests",
+        "anthropic-ratelimit-requests-remaining",
+        "x-ratelimit-remaining",
+    ];
+    let remaining_token_headers = [
+        "x-ratelimit-remaining-tokens",
+        "anthropic-ratelimit-tokens-remaining",
+    ];
+    let reset_headers = [
+        "x-ratelimit-reset-requests",
+        "anthropic-ratelimit-requests-reset",
+        "x-ratelimit-reset",
+    ];
+
+    for name in &remaining_request_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                health.remaining_requests = Some(n);
+                break;
+            }
+            // Some providers send a duration like "1s" or "6m0s"
+            if let Some(n) = parse_duration_seconds(v) {
+                health.remaining_requests = Some(n);
+                break;
+            }
+        }
+    }
+
+    for name in &remaining_token_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                health.remaining_tokens = Some(n);
+                break;
+            }
+        }
+    }
+
+    for name in &reset_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Some(secs) = parse_duration_seconds(v) {
+                health.reset_at = Some(Instant::now() + Duration::from_secs(secs));
+                break;
+            }
+            // Try as integer seconds
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                health.reset_at = Some(Instant::now() + Duration::from_secs(secs));
+                break;
+            }
+        }
+    }
+
+    health
+}
+
+/// Parse a duration string like "1s", "6m0s", "1h2m3s" into seconds.
+fn parse_duration_seconds(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Try plain integer first
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    // Parse h/m/s suffixes
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else {
+            let n: u64 = num.parse().ok()?;
+            num.clear();
+            match ch {
+                'h' => total += n * 3600,
+                'm' => total += n * 60,
+                's' => total += n,
+                _ => return None,
+            }
+        }
+    }
+    // Trailing number without suffix = seconds
+    if !num.is_empty() {
+        let n: u64 = num.parse().ok()?;
+        total += n;
+    }
+    Some(total)
 }
 
 /// Build a JSON response. The provider's `x-request-id` (when sent) is
