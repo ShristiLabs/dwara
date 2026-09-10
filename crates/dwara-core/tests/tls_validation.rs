@@ -449,5 +449,6 @@ fn base_consumer_rest() -> dwara_core::config::Consumer {
         authorization: None,
         quotas: None,
         ai_logging: None,
+        agent: None,
     }
 }

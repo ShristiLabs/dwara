@@ -17,8 +17,8 @@
 
 use crate::ai::adapter::AiError;
 use crate::ai::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatRole, ContentPart, FinishReason, StreamEvent,
-    ToolCall, ToolChoice, ToolSpec,
+    ChatMessage, ChatRequest, ChatResponse, ChatRole, ContentPart, FinishReason, ResponseFormat,
+    StreamEvent, ToolCall, ToolChoice, ToolSpec,
 };
 use serde_json::{json, Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -116,6 +116,26 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
         .and_then(|o| o.get("include_usage"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // AI-06 (#196): parse response_format into the typed field so
+    // adapters can translate it across dialects.
+    let response_format = parse_response_format(obj.get("response_format"));
+    // AI-14 (#202): parse the server-side prompt template reference
+    // and variables. The gateway resolves the template, substitutes
+    // variables, and prepends the result as a system message.
+    let prompt = obj
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let prompt_variables = obj
+        .get("prompt_variables")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     // Preserve every parameter the canonical surface does not model so
     // an OpenAI-to-OpenAI path is lossless.
     const KNOWN: &[&str] = &[
@@ -129,6 +149,9 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
         "stop",
         "stream",
         "stream_options",
+        "response_format",  // AI-06: parsed into the typed field
+        "prompt",           // AI-14: parsed into the typed field
+        "prompt_variables", // AI-14: parsed into the typed field
     ];
     let other = obj
         .iter()
@@ -149,8 +172,31 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, AiError> {
         stop,
         stream,
         stream_options_include_usage,
+        response_format,
+        prompt,
+        prompt_variables,
         other,
     })
+}
+
+/// AI-06 (#196): Parse the OpenAI `response_format` field into the
+/// canonical `ResponseFormat` type. Returns `None` when absent or
+/// unparseable.
+fn parse_response_format(v: Option<&Value>) -> Option<ResponseFormat> {
+    let v = v?;
+    let obj = v.as_object()?;
+    let format_type = obj.get("type").and_then(Value::as_str)?;
+    match format_type {
+        "text" => Some(ResponseFormat::Text),
+        "json_object" => Some(ResponseFormat::JsonObject),
+        "json_schema" => {
+            let schema_obj = obj.get("json_schema")?.as_object()?;
+            let name = schema_obj.get("name")?.as_str()?.to_string();
+            let schema = schema_obj.get("schema")?.clone();
+            Some(ResponseFormat::JsonSchema { name, schema })
+        }
+        _ => None,
+    }
 }
 
 /// Parse one OpenAI message object.
@@ -502,7 +548,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(req.other.get("seed"), Some(&json!(7)));
-        assert!(req.other.contains_key("response_format"));
+        // AI-06 (#196): response_format is now parsed into the typed
+        // field, not preserved in `other`.
+        assert!(matches!(
+            req.response_format,
+            Some(ResponseFormat::JsonObject)
+        ));
+        assert!(!req.other.contains_key("response_format"));
     }
 
     #[test]

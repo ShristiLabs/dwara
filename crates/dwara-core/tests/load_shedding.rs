@@ -733,6 +733,7 @@ fn resolve_priority_prefers_consumer_then_route_then_default() {
         authorization: None,
         quotas: None,
         ai_logging: None,
+        agent: None,
     };
     assert_eq!(
         dwara_core::proxy::resolve_priority(Some(&consumer), &route),
@@ -751,6 +752,7 @@ fn resolve_priority_prefers_consumer_then_route_then_default() {
         authorization: None,
         quotas: None,
         ai_logging: None,
+        agent: None,
     };
     assert_eq!(
         dwara_core::proxy::resolve_priority(Some(&consumer), &route),

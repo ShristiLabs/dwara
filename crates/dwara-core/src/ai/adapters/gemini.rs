@@ -175,6 +175,11 @@ impl ProviderAdapter for GeminiAdapter {
         if let Some(stop) = &req.stop {
             generation.insert("stopSequences".into(), json!(stop));
         }
+        // AI-06 (#196): translate response_format to Gemini's
+        // responseMimeType and responseSchema in generationConfig.
+        if let Some(rf) = &req.response_format {
+            apply_gemini_response_format(&mut generation, rf);
+        }
         if !generation.is_empty() {
             body.insert("generationConfig".into(), Value::Object(generation));
         }
@@ -388,4 +393,25 @@ fn tool_name_for(history: &[ChatMessage], tool_msg: &ChatMessage) -> String {
         }
     }
     id.to_string()
+}
+
+/// AI-06 (#196): Translate the canonical `ResponseFormat` to Gemini's
+/// `generationConfig.responseMimeType` and `generationConfig.responseSchema`.
+/// Gemini uses `responseMimeType: "application/json"` for JSON output
+/// and `responseSchema` for the JSON Schema constraint.
+fn apply_gemini_response_format(
+    generation: &mut Map<String, Value>,
+    rf: &crate::ai::types::ResponseFormat,
+) {
+    use crate::ai::types::ResponseFormat;
+    match rf {
+        ResponseFormat::Text => { /* no-op; text is the default */ }
+        ResponseFormat::JsonObject => {
+            generation.insert("responseMimeType".into(), json!("application/json"));
+        }
+        ResponseFormat::JsonSchema { schema, .. } => {
+            generation.insert("responseMimeType".into(), json!("application/json"));
+            generation.insert("responseSchema".into(), schema.clone());
+        }
+    }
 }

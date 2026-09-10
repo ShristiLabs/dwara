@@ -145,6 +145,8 @@ Supported scorers:
 | `exact_match` | The output must exactly match `expected` (after trimming whitespace). Default when `scorer` is omitted. |
 | `contains` | The output must contain `expected` as a substring. |
 | `regex` | The output must match `expected` as a regex pattern. The pattern is compiled at publish time; an invalid regex is rejected by validation. |
+| `llm_judge` | An LLM evaluates the response quality against `expected` as a rubric. Uses a synchronous fallback (contains semantics) when a real LLM judge is not configured. |
+| `semantic_similarity` | Token-overlap (Jaccard) similarity between the output and `expected`. Passes when similarity exceeds a 0.5 threshold. |
 
 Each eval case result is stored in the `ai_eval_results` analytics
 table with: eval name, model, variant, prompt version, case index,
@@ -196,6 +198,34 @@ per-variant average latencies:
   "avg_latencies": [["control", 120.5], ["treatment", 95.0]]
 }
 ```
+
+## Auto-promotion
+
+Auto-promotion evaluates an A/B test's variants and automatically
+promotes the best one if it meets configurable quality thresholds.
+The decision is based on pass rate (primary) and average latency
+(tiebreaker). Promotion requires a minimum number of eval cases and
+a minimum improvement over the current best.
+
+```yaml
+ai:
+  experiments:
+    auto_promotion:
+      min_improvement: 0.05
+      min_cases: 10
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `min_improvement` | `0.05` | Minimum pass-rate improvement (0-1) required to promote. |
+| `min_cases` | `10` | Minimum number of eval cases per variant before promotion is considered. |
+
+The auto-promotion decision requires at least two variants. The
+variant with the highest pass rate is selected; on a tie, the lowest
+average latency wins. Promotion occurs only if the winner's pass rate
+exceeds the runner-up's by at least `min_improvement`. The decision
+includes a human-readable reason explaining why promotion was or was
+not triggered.
 
 ## Metrics
 

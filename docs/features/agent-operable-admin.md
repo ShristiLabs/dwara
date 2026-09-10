@@ -113,6 +113,29 @@ An agent's identity: name + permissions.
 A trait the caller implements to actually execute tools (calling the
 admin API, reading config, etc.).
 
+## M10 additions (AI-11, #200)
+
+The admin MCP server gained transport adapters for SSE and stdio in
+addition to the existing HTTP JSON-RPC transport. The `McpTransport`
+enum (`Http`, `Sse`, `Stdio`) selects the transport at serve time.
+SSE encoding helpers (`encode_sse_response`, `encode_sse_error`)
+format JSON-RPC responses as SSE frames (`data: <payload>\n\n`) for
+streaming responses over HTTP. Stdio transport uses newline-delimited
+JSON on stdin/stdout for local agent integrations.
+
+The MCP gateway (DW-087, the AI-side MCP router) gained four new
+JSON-RPC primitives: `resources/list`, `resources/read`,
+`prompts/list`, and `prompts/get`. Resources and prompts are
+configured statically under `ai.mcp.resources` and `ai.mcp.prompts`
+and served inline (no upstream proxy). Prompt templates support
+`{{arg}}` placeholder substitution from request arguments. See the
+[AI provider adapters](./ai-provider-adapters.md#ai-11-200--mcp-transport-and-primitive-breadth--admin-toolhandler)
+page for the implementation details.
+
+Code: `crates/dwara-core/src/mcp/mod.rs` (transport adapters),
+`crates/dwara-core/src/ai/mcp.rs` (gateway primitives),
+`crates/dwara-core/src/config/ai.rs` (resource/prompt config types).
+
 ## Feature gate
 
 MCP is compiled into the OSS build. The module is

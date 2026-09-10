@@ -34,6 +34,7 @@ use hyper::{Method, Request};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A compiled routing policy (DW-085). Built at AiRuntime compile
@@ -74,7 +75,64 @@ pub enum CompiledRoutingPolicy {
         /// Candidates sorted best-first by the preference (the first
         /// is the pick).
         candidates: Vec<RouteTarget>,
+        /// AI-15 (#203): the model alias for each candidate (for
+        /// live latency tracking). Parallel to `candidates`.
+        candidate_models: Vec<String>,
+        /// AI-15 (#203): the static cost scores for each candidate.
+        candidate_costs: Vec<u32>,
+        /// AI-15 (#203): the static latency scores for each candidate.
+        candidate_latencies: Vec<u32>,
+        /// AI-15 (#203): the selection preference.
+        preference: AiLatencyPreference,
+        /// AI-15 (#203): live latency tracker. None when `live` is
+        /// false (static selection).
+        live_tracker: Option<Arc<LiveLatencyTracker>>,
     },
+}
+
+/// AI-15 (#203): Live latency tracker for LatencyCost policies.
+/// Maintains a rolling window of latency observations per model alias.
+/// Thread-safe (wrapped in Arc<Mutex>).
+#[derive(Debug)]
+pub struct LiveLatencyTracker {
+    window: usize,
+    observations: Mutex<BTreeMap<String, Vec<f64>>>,
+}
+
+impl LiveLatencyTracker {
+    /// Create a new tracker with the given window size.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            observations: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Record a latency observation for a model alias.
+    pub fn record(&self, model: &str, latency_ms: f64) {
+        let mut obs = self
+            .observations
+            .lock()
+            .expect("live latency tracker poisoned");
+        let entry = obs.entry(model.to_string()).or_default();
+        entry.push(latency_ms);
+        if entry.len() > self.window {
+            let excess = entry.len() - self.window;
+            entry.drain(0..excess);
+        }
+    }
+
+    /// Get the average latency for a model alias. Returns None when
+    /// there are no observations.
+    pub fn avg_latency(&self, model: &str) -> Option<f64> {
+        let obs = self
+            .observations
+            .lock()
+            .expect("live latency tracker poisoned");
+        obs.get(model)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.iter().sum::<f64>() / v.len() as f64)
+    }
 }
 
 /// The decision a routing policy made for one request (DW-085). The
@@ -138,9 +196,24 @@ impl CompiledRoutingPolicy {
                         scored.sort_by_key(|(c, _)| c.cost + c.latency)
                     }
                 }
+                let candidate_models: Vec<String> =
+                    scored.iter().map(|(c, _)| c.model.clone()).collect();
+                let candidate_costs: Vec<u32> = scored.iter().map(|(c, _)| c.cost).collect();
+                let candidate_latencies: Vec<u32> = scored.iter().map(|(c, _)| c.latency).collect();
+                let live_tracker = if p.live {
+                    let window = p.live_window.unwrap_or(10);
+                    Some(Arc::new(LiveLatencyTracker::new(window)))
+                } else {
+                    None
+                };
                 Some(Self::LatencyCost {
                     name: name.to_string(),
                     candidates: scored.into_iter().map(|(_, t)| t).collect(),
+                    candidate_models,
+                    candidate_costs,
+                    candidate_latencies,
+                    preference: p.preference,
+                    live_tracker,
                 })
             }
         }
@@ -205,11 +278,52 @@ impl CompiledRoutingPolicy {
                     }
                 }
             }
-            Self::LatencyCost { candidates, .. } => {
-                // Pre-sorted at compile time; return the best
-                // candidate. The list is non-empty (validation
-                // rejects an empty candidates list).
-                (vec![candidates[0].clone()], PolicyDecision::LatencyCost)
+            Self::LatencyCost {
+                candidates,
+                candidate_models,
+                candidate_costs,
+                candidate_latencies,
+                preference,
+                live_tracker,
+                ..
+            } => {
+                // AI-15 (#203): when live tracking is enabled, use
+                // observed latencies to dynamically select the best
+                // candidate. Fall back to the static pre-sorted order
+                // when there are no observations.
+                if let Some(tracker) = live_tracker {
+                    // Compute a live score for each candidate. The
+                    // live score combines the observed latency (when
+                    // available) with the static cost score.
+                    let mut best_idx = 0;
+                    let mut best_score = f64::MAX;
+                    for (i, model) in candidate_models.iter().enumerate() {
+                        let live_latency = tracker.avg_latency(model);
+                        let score = match preference {
+                            AiLatencyPreference::Cost => candidate_costs[i] as f64,
+                            AiLatencyPreference::Latency => {
+                                live_latency.unwrap_or(candidate_latencies[i] as f64)
+                            }
+                            AiLatencyPreference::Balanced => {
+                                let latency = live_latency.unwrap_or(candidate_latencies[i] as f64);
+                                candidate_costs[i] as f64 + latency
+                            }
+                        };
+                        if score < best_score {
+                            best_score = score;
+                            best_idx = i;
+                        }
+                    }
+                    (
+                        vec![candidates[best_idx].clone()],
+                        PolicyDecision::LatencyCost,
+                    )
+                } else {
+                    // Pre-sorted at compile time; return the best
+                    // candidate. The list is non-empty (validation
+                    // rejects an empty candidates list).
+                    (vec![candidates[0].clone()], PolicyDecision::LatencyCost)
+                }
             }
         }
     }
@@ -218,6 +332,15 @@ impl CompiledRoutingPolicy {
     pub fn name(&self) -> &str {
         match self {
             Self::FallbackChain { name, .. } | Self::LatencyCost { name, .. } => name,
+        }
+    }
+
+    /// AI-15 (#203): Get the live latency tracker for this policy.
+    /// Returns None when live tracking is not enabled.
+    pub fn live_tracker(&self) -> Option<&Arc<LiveLatencyTracker>> {
+        match self {
+            Self::LatencyCost { live_tracker, .. } => live_tracker.as_ref(),
+            _ => None,
         }
     }
 }

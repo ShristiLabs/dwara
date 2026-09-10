@@ -464,6 +464,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
             authorization: None,
             quotas: None,
             ai_logging: None,
+            agent: None,
         });
     }
 

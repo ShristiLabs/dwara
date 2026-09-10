@@ -89,6 +89,10 @@ fn passthrough_path(endpoint: crate::config::AiEndpoint) -> &'static str {
         crate::config::AiEndpoint::Audio => "/v1/audio/speech",
         crate::config::AiEndpoint::Moderation => "/v1/moderations",
         crate::config::AiEndpoint::Chat => "/v1/chat/completions",
+        // AI-04 (#194): Batch API uses /v1/batches for create/status.
+        // The result file endpoint (/v1/batches/{id}/output) is handled
+        // separately in serve_ai_batch_results.
+        crate::config::AiEndpoint::Batch => "/v1/batches",
     }
 }
 
@@ -312,6 +316,215 @@ async fn serve_ai_passthrough(
         .expect("passthrough response is valid")
 }
 
+/// AI-05 (#195): chat passthrough mode. Forward the chat request body
+/// as-is to the provider (no adapter translation), but still apply
+/// governance and routing. The model is extracted from the body for
+/// routing. The response is returned as-is.
+#[allow(clippy::too_many_arguments)]
+async fn serve_ai_chat_passthrough(
+    json_body: serde_json::Value,
+    route_name: &str,
+    gen: &Arc<Generation>,
+    dp: &Arc<DataPlane>,
+    rid: &str,
+    rec: &mut crate::observability::AccessRecord,
+    identity: Option<&crate::security::authn::Identity>,
+) -> Response<ProxyBody> {
+    // Extract the model alias from the request body for governance and
+    // routing. The `model` field is present in all chat dialects.
+    let model_alias = json_body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+
+    // DW-084: model governance pre-route check (same as chat and
+    // non-chat passthrough).
+    let gateway = gen.snapshot.gateway();
+    let governance = dp.ai_governance();
+    if !governance.is_empty() {
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, &rec.listener);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let verdict = governance.check(
+            consumer,
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            &[],
+            model_alias,
+        );
+        if let crate::ai::governance::GovernanceVerdict::Deny { reason, .. } = &verdict {
+            dp.observability_arc().record_ai_governance_denied(reason);
+            return ai_error_response(
+                StatusCode::FORBIDDEN,
+                &format!("model '{}' is denied by policy: {reason}", model_alias),
+                "invalid_request_error",
+                Some("model_denied_by_policy"),
+                rid,
+            );
+        }
+    }
+
+    // Route the model alias to find the provider.
+    let Some(runtime) = gen.ai() else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no ai block configured",
+            "api_error",
+            Some("internal_error"),
+            rid,
+        );
+    };
+    let (candidates, _, _) = runtime
+        .route_with_policy_and_canary_index(model_alias, rid, "")
+        .await;
+    if candidates.is_empty() {
+        return ai_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("the model '{}' does not exist", model_alias),
+            "invalid_request_error",
+            Some("model_not_found"),
+            rid,
+        );
+    }
+
+    // Forward to the first candidate (no failover for passthrough).
+    let target = &candidates[0];
+    let version = target.version.as_deref().unwrap_or("default");
+    let Some(provider) = runtime.provider(&target.provider) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    let Some(handle) = gen.registry().get(&provider.upstream) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    rec.upstream = Some(provider.upstream.clone());
+    rec.attempts = 1;
+
+    // Build the outbound request: the chat path + the original body +
+    // the provider's auth headers.
+    let path = passthrough_path(crate::config::AiEndpoint::Chat);
+    let mut outbound = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(path);
+    outbound = outbound.header("content-type", "application/json");
+    let auth_pairs: Vec<(String, String)> = if let Some(pool) = &provider.credential_pool {
+        match pool.pick(rid) {
+            Some(entry) => vec![(entry.header.clone(), entry.value.clone())],
+            None => provider.auth_headers.clone(),
+        }
+    } else {
+        provider.auth_headers.clone()
+    };
+    for (name, value) in &auth_pairs {
+        if let (Ok(n), Ok(v)) = (
+            hyper::header::HeaderName::from_bytes(name.as_bytes()),
+            hyper::header::HeaderValue::from_str(value),
+        ) {
+            outbound = outbound.header(n, v);
+        }
+    }
+    let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
+    let outbound = match outbound.body(Full::new(Bytes::from(body_bytes))) {
+        Ok(r) => r,
+        Err(_) => {
+            return ai_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build provider request",
+                "api_error",
+                Some("internal_error"),
+                rid,
+            );
+        }
+    };
+
+    let obs = dp.observability_arc();
+    let started = std::time::Instant::now();
+    let upstream_resp = match handle.send(outbound).await {
+        Ok(r) => r,
+        Err(e) => {
+            obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                started.elapsed().as_secs_f64(),
+            );
+            tracing::warn!(
+                code = "ai_provider_unreachable",
+                request_id = %rid,
+                provider = %provider.name,
+                upstream = %provider.upstream,
+                "ai chat passthrough call failed: {e}"
+            );
+            return ai_error_response(
+                StatusCode::BAD_GATEWAY,
+                "no provider could serve the model",
+                "api_error",
+                Some("provider_unreachable"),
+                rid,
+            );
+        }
+    };
+
+    let status = upstream_resp.status();
+    let up_headers = upstream_resp.headers().clone();
+    let up_body = upstream_resp.into_body();
+    obs.record_ai_request(
+        &provider.name,
+        route_name,
+        if status.is_success() {
+            "success"
+        } else {
+            "error"
+        },
+        version,
+    );
+    obs.record_ai_request_duration(&provider.name, route_name, started.elapsed().as_secs_f64());
+
+    if !status.is_success() {
+        let err_bytes =
+            match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "error", rid).await {
+                Ok(b) => b,
+                Err(resp) => return resp,
+            };
+        let err_json: serde_json::Value = serde_json::from_slice(&err_bytes).unwrap_or(
+            serde_json::json!({"error": {"message": String::from_utf8_lossy(&err_bytes).to_string()}}),
+        );
+        return response_with_json(status, &err_json, &up_headers);
+    }
+
+    // Success: return the response body as-is (no translation).
+    let ok_bytes =
+        match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "response", rid).await {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(ProxyBody::Full(Full::new(ok_bytes)))
+        .expect("passthrough response is valid")
+}
+
 /// Serve one `ai` route action (called from `dispatch_action` in the
 /// proxy module). `rec` is the request's access record: the provider's
 /// upstream name is attributed there so analytics and the access log
@@ -335,6 +548,7 @@ pub(super) async fn serve_ai<B>(
     identity: Option<&crate::security::authn::Identity>,
     listener_name: &str,
     endpoint: crate::config::AiEndpoint,
+    dialect: crate::config::AiIngressDialect,
 ) -> Response<ProxyBody>
 where
     B: Body<Data = Bytes> + Send + 'static,
@@ -486,16 +700,61 @@ where
             .await;
     }
 
-    let mut chat_req: ChatRequest = match openai_compat::parse_chat_request(&json_body) {
-        Ok(r) => r,
-        Err(e) => {
-            return ai_error_response(
-                StatusCode::BAD_REQUEST,
-                &e.to_string(),
-                openai_compat::error_type_of(&e),
-                None,
-                rid,
-            )
+    // AI-05 (#195): multi-dialect ingress. Parse the request body
+    // using the route's configured dialect. The default is OpenAI
+    // (the historical behavior). Anthropic and Gemini dialects parse
+    // the native request format into the canonical ChatRequest.
+    // Passthrough mode forwards the body as-is (no translation).
+    let mut chat_req: ChatRequest = match dialect {
+        crate::config::AiIngressDialect::Openai => {
+            match openai_compat::parse_chat_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e.to_string(),
+                        openai_compat::error_type_of(&e),
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Anthropic => {
+            match crate::ai::ingress::parse_anthropic_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e,
+                        "invalid_request_error",
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Gemini => {
+            match crate::ai::ingress::parse_gemini_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e,
+                        "invalid_request_error",
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Passthrough => {
+            // AI-05 (#195): chat passthrough mode. Forward the request
+            // body as-is to the provider (no adapter translation), but
+            // still apply governance, metering, and budget enforcement.
+            // The model is extracted from the body for routing.
+            return serve_ai_chat_passthrough(json_body, route_name, gen, dp, rid, rec, identity)
+                .await;
         }
     };
 
@@ -752,6 +1011,18 @@ where
         }
     }
 
+    // AI-13 (#201): fetch remote image URLs for multimodal requests.
+    // When the request contains remote image URLs (OpenAI
+    // `image_url.url` convention) and the target adapter requires
+    // base64 data (Anthropic, Gemini), the gateway fetches the image,
+    // converts to base64, and fills `data_b64` + `media_type`. The
+    // OpenAI adapter continues to pass the URL through unchanged.
+    // The fetcher is skipped entirely when there are no remote images.
+    if crate::ai::image_fetch::has_remote_images(&chat_req) {
+        let cfg = crate::ai::image_fetch::ImageFetchConfig::default();
+        chat_req = crate::ai::image_fetch::fetch_remote_images(chat_req, &cfg).await;
+    }
+
     // 3. Streaming (DW-077): the request is passed through with
     // usage reporting FORCED on the provider call — the stream
     // metrics and the (upcoming) token budgets need provider-reported
@@ -856,6 +1127,35 @@ where
     // the variant and returned its target in `candidates`. Here we
     // inject the variant's system message into the request (if any)
     // and record the assignment to analytics for attribution.
+    // AI-14 (#202): server-side prompt template resolution. When the
+    // client references a prompt template by name, resolve it from
+    // the experiments config, substitute variables, and prepend the
+    // system message BEFORE any existing system message.
+    if let Some(prompt_ref) = &chat_req.prompt {
+        let experiments = runtime.experiments_config();
+        let overrides = runtime.prompt_overrides();
+        let system = if let Some((name, version)) = prompt_ref.split_once('/') {
+            // Explicit version reference.
+            experiments
+                .and_then(|exp| exp.prompts.get(name))
+                .and_then(|p| p.versions.get(version))
+                .map(|v| v.system.clone())
+        } else {
+            // Active version (with runtime override).
+            crate::ai::experiments::active_prompt_system(experiments, overrides, prompt_ref)
+        };
+        if let Some(mut system) = system {
+            // Substitute {{var}} placeholders with prompt_variables.
+            for (key, value) in &chat_req.prompt_variables {
+                let placeholder = format!("{{{{{key}}}}}");
+                system = system.replace(&placeholder, value);
+            }
+            chat_req.messages.insert(
+                0,
+                crate::ai::types::ChatMessage::text(crate::ai::types::ChatRole::System, system),
+            );
+        }
+    }
     if let Some(crate::ai::CompiledModel::Experiment(test)) = runtime.model(&chat_req.model) {
         let variant = test.pick(rid);
         // Record the variant selection as a metric.
@@ -1184,6 +1484,14 @@ where
                         );
                     }
                 }
+                // AI-09 (#198): record per-key health from rate-limit
+                // headers on every provider response (error or success).
+                // When remaining is 0, the pool proactively cools the
+                // key until the reset window, preventing the next 429.
+                if let (Some(pool), Some(idx)) = (&provider.credential_pool, pool_entry_index) {
+                    let health = parse_rate_limit_headers(&up_parts.headers, status.as_u16());
+                    pool.record_health(idx, health);
+                }
                 // 429/5xx is transient — try the next candidate; if
                 // none succeed, the LAST provider's answer is the one
                 // the client sees (closest to the truth of the outage).
@@ -1201,6 +1509,14 @@ where
             // Other 4xx (bad request, bad key) is deterministic —
             // retrying another provider would only re-diagnose it.
             return resp;
+        }
+        // AI-09 (#198): record per-key health from rate-limit headers
+        // on successful (non-retryable) provider responses too. This
+        // captures the remaining quota before a 429 occurs, enabling
+        // proactive cooldown.
+        if let (Some(pool), Some(idx)) = (&provider.credential_pool, pool_entry_index) {
+            let health = parse_rate_limit_headers(&up_parts.headers, status.as_u16());
+            pool.record_health(idx, health);
         }
         // Streaming pass-through (DW-077): a 200 SSE response streams
         // to the client frame-by-frame with zero added buffering. This
@@ -1938,6 +2254,113 @@ fn parse_ai_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
     crate::config::versioning::parse_retry_after(s, now_unix_seconds)
 }
 
+/// AI-09 (#198): Parse provider rate-limit headers into per-key health.
+/// Covers the common header names used by OpenAI, Anthropic, and
+/// Gemini. Returns a `KeyHealth` with whatever fields were present.
+fn parse_rate_limit_headers(headers: &HeaderMap, status: u16) -> crate::ai::credentials::KeyHealth {
+    use crate::ai::credentials::KeyHealth;
+    use std::time::{Duration, Instant};
+
+    let mut health = KeyHealth {
+        last_status: Some(status),
+        updated_at: Some(Instant::now()),
+        ..Default::default()
+    };
+
+    // OpenAI: x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens
+    // Anthropic: anthropic-ratelimit-requests-remaining, anthropic-ratelimit-tokens-remaining
+    // Gemini: x-ratelimit-remaining (generic)
+    // We try all known header names and take the first that parses.
+    let remaining_request_headers = [
+        "x-ratelimit-remaining-requests",
+        "anthropic-ratelimit-requests-remaining",
+        "x-ratelimit-remaining",
+    ];
+    let remaining_token_headers = [
+        "x-ratelimit-remaining-tokens",
+        "anthropic-ratelimit-tokens-remaining",
+    ];
+    let reset_headers = [
+        "x-ratelimit-reset-requests",
+        "anthropic-ratelimit-requests-reset",
+        "x-ratelimit-reset",
+    ];
+
+    for name in &remaining_request_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                health.remaining_requests = Some(n);
+                break;
+            }
+            // Some providers send a duration like "1s" or "6m0s"
+            if let Some(n) = parse_duration_seconds(v) {
+                health.remaining_requests = Some(n);
+                break;
+            }
+        }
+    }
+
+    for name in &remaining_token_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                health.remaining_tokens = Some(n);
+                break;
+            }
+        }
+    }
+
+    for name in &reset_headers {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Some(secs) = parse_duration_seconds(v) {
+                health.reset_at = Some(Instant::now() + Duration::from_secs(secs));
+                break;
+            }
+            // Try as integer seconds
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                health.reset_at = Some(Instant::now() + Duration::from_secs(secs));
+                break;
+            }
+        }
+    }
+
+    health
+}
+
+/// Parse a duration string like "1s", "6m0s", "1h2m3s" into seconds.
+fn parse_duration_seconds(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Try plain integer first
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    // Parse h/m/s suffixes
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else {
+            let n: u64 = num.parse().ok()?;
+            num.clear();
+            match ch {
+                'h' => total += n * 3600,
+                'm' => total += n * 60,
+                's' => total += n,
+                _ => return None,
+            }
+        }
+    }
+    // Trailing number without suffix = seconds
+    if !num.is_empty() {
+        let n: u64 = num.parse().ok()?;
+        total += n;
+    }
+    Some(total)
+}
+
 /// Build a JSON response. The provider's `x-request-id` (when sent) is
 /// carried through for correlation; every other provider header is
 /// dropped — the gateway authored this response.
@@ -2242,7 +2665,12 @@ impl AiStreamBody {
         if self.guardrails.is_empty() || self.guardrail_cut_off {
             return;
         }
-        if let Some(rule_name) = self.guardrails.check_stream_chunk(batch_text) {
+        // AI-08 (#197): PII redaction on streaming chunks. The
+        // redacted text replaces the batch text in the translated
+        // frames. This runs BEFORE the banned-content check so the
+        // banned patterns see the redacted text.
+        let batch_text = self.guardrails.redact_stream_chunk(batch_text);
+        if let Some(rule_name) = self.guardrails.check_stream_chunk(&batch_text) {
             self.guardrail_cut_off = true;
             // Drop the provider body NOW (eager upstream cancel).
             self.inner = None;

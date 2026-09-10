@@ -33,7 +33,13 @@ Feature areas written up so far (M1-M6 complete):
   DW-080 credential pools, DW-081 prompt logging, DW-082 guardrails,
   DW-083 semantic caching, DW-084 model governance, DW-085 routing
   policies, DW-086 prompt experimentation, DW-087 MCP gateway,
-  DW-113 agent principals.
+  DW-113 agent principals, the M6 expansion (AI-01 through AI-07,
+  PERF-01, PERF-02), and the M10 expansion (AI-04 through AI-16:
+  batch API, multi-dialect ingress, structured-output translation,
+  guardrails depth, credential-pool health, experimentation scorers,
+  MCP transport/primitive breadth, multimodal image fetching,
+  server-side prompt templates, live latency-vs-cost routing,
+  first-class agent principals).
 - [TLS](./features/tls.md) — termination (multi-SNI), passthrough, hot
   reload, outbound trust. Now also covers ACME certificate automation
   (SEC-02, #155).

@@ -23,7 +23,10 @@ Each consumer declares a `type` field (`user` or `agent`, defaults
 `user`). The type threads through the authenticated `Identity` into
 analytics records (`ai_spend.consumer_type`, `mcp_tool_calls.
 consumer_type`) so agent traffic is identifiable, governable, and
-billable separately from user traffic.
+billable separately from user traffic. The gateway also injects an
+`X-Consumer-Type` upstream header (`user` or `agent`) alongside
+`X-Consumer-Name` so upstreams can distinguish agent from user
+traffic.
 
 ```yaml
 consumers:
@@ -36,12 +39,35 @@ consumers:
     token_budget:
       tokens_per_min: 1000
       scope: consumer
+    agent:
+      display_name: Search Agent
+      description: Autonomous search and fetch bot
+      owner: platform-team
+      permissions: read_write
   - name: human-user
     type: user
     credentials:
       - type: api_key
         key: user-key
 ```
+
+### Agent principal metadata
+
+Agent consumers can declare first-class principal metadata under the
+`agent` field. This carries display name, description, owner, and
+permission level for attribution and audit.
+
+| Field | Default | Description |
+|---|---|---|
+| `agent.display_name` | consumer name | Human-readable agent name. |
+| `agent.description` | (none) | Human-readable description of the agent's purpose. |
+| `agent.owner` | (none) | The user or team that owns this agent. |
+| `agent.permissions` | `read_only` | Permission level: `read_only`, `read_write`, or `admin`. |
+
+The permission level mirrors the MCP `Permission` enum and is used
+for agent-operable admin access control. `read_only` allows list,
+get, stats, health, and config tools. `read_write` adds create,
+update, and delete. `admin` adds purge and full admin tools.
 
 ### Tool allowlist
 

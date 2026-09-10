@@ -4435,6 +4435,15 @@ pub enum RouteAction {
     Ai {
         #[serde(default)]
         endpoint: AiEndpoint,
+        /// AI-05 (#195): The client-facing request dialect. Defaults
+        /// to `openai` (the historical behavior). When set to
+        /// `anthropic` or `gemini`, the gateway parses the incoming
+        /// request using that dialect's native format and translates
+        /// to the canonical `ChatRequest`. When set to `passthrough`,
+        /// the request body is forwarded to the provider as-is (no
+        /// translation, still metered/governed).
+        #[serde(default)]
+        dialect: AiIngressDialect,
     },
     /// WASM route handler (nano-service, DW-106): instead of proxying
     /// to an upstream, the route action runs a WASM module that
@@ -4450,6 +4459,29 @@ pub enum RouteAction {
         #[serde(flatten)]
         nano: NanoServiceAction,
     },
+}
+
+/// AI-05 (#195): The client-facing request dialect for an AI route.
+/// Determines how the gateway parses the incoming request body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiIngressDialect {
+    /// OpenAI chat-completions shape (the historical default). The
+    /// request is parsed by `openai_compat::parse_chat_request`.
+    #[default]
+    Openai,
+    /// Anthropic Messages API shape. The request is parsed by
+    /// `ingress::parse_anthropic_request` and translated to the
+    /// canonical `ChatRequest`.
+    Anthropic,
+    /// Gemini generateContent shape. The request is parsed by
+    /// `ingress::parse_gemini_request` and translated to the
+    /// canonical `ChatRequest`.
+    Gemini,
+    /// Passthrough mode: the request body is forwarded to the
+    /// provider as-is (no translation, still metered/governed).
+    /// The response is returned as-is.
+    Passthrough,
 }
 
 /// AI-02: which AI endpoint a route serves. The `chat` endpoint (the
@@ -4481,6 +4513,12 @@ pub enum AiEndpoint {
     /// OpenAI moderation (`POST /v1/moderations`). Proxied as a
     /// passthrough.
     Moderation,
+    /// AI-04 (#194): OpenAI Batch API (`POST /v1/batches`). Proxied
+    /// as a passthrough for batch creation/status/cancel. When batch
+    /// results are retrieved (`GET /v1/batches/{id}/output`), the
+    /// JSONL result file is parsed and each line's `usage` is metered
+    /// at the batch (50% discount) rate.
+    Batch,
 }
 
 /// A WASM route handler (nano-service) action (DW-106,
@@ -5978,6 +6016,50 @@ pub struct Consumer {
     /// no stored prompts/responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_logging: Option<bool>,
+    /// AI-16 (#204): agent principal metadata. Only meaningful when
+    /// `consumer_type` is `agent`; ignored otherwise. Carries the
+    /// agent's display name, description, owner, and permission level
+    /// for first-class agent principal attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentPrincipal>,
+}
+
+/// AI-16 (#204): First-class agent principal metadata. Attached to a
+/// `Consumer` with `consumer_type: agent` to carry agent-specific
+/// attribution and permission data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPrincipal {
+    /// The agent's display name (human-readable). Defaults to the
+    /// consumer name when not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// A human-readable description of the agent's purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The owner of this agent (a user or team name). Used for
+    /// attribution and audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The agent's permission level. One of: `read_only`,
+    /// `read_write`, `admin`. Default `read_only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<AgentPermissionLevel>,
+}
+
+/// AI-16 (#204): Agent permission levels for first-class agent
+/// principals. Mirrors the `Permission` enum in the MCP module but
+/// lives in config for declarative assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionLevel {
+    /// Read-only access (list, get, stats, health, config).
+    #[default]
+    ReadOnly,
+    /// Read-write access (read + create, update, delete).
+    ReadWrite,
+    /// Full admin access (all tools including purge).
+    Admin,
 }
 
 /// Per-consumer request budgets (DW-033): daily and/or monthly request

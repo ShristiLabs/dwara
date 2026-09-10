@@ -658,6 +658,7 @@ mod tests {
             groups: vec![],
             authorization: None,
             ai_logging: None,
+            agent: None,
         }];
         g
     }

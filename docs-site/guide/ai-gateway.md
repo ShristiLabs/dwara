@@ -557,3 +557,69 @@ gateway: `demos/07-ai-gateway/` in the repository (test scripts:
 `test-01-provider-adapters.sh`, `test-02-model-alias.sh`,
 `test-14-streaming-sse.sh`). The category README covers prerequisites
 and teardown.
+
+## M10 features
+
+The M10 milestone (AI Gateway Maturity) added several capabilities to
+the AI gateway. This section covers the operator-facing configuration
+for each.
+
+### Batch API support
+
+Clients can submit bulk chat-completion requests that providers serve
+asynchronously at a discount (typically 50%). Batch results are metered
+with half-price token accounting. See the
+[batch API documentation](#) for details.
+
+### Multi-dialect ingress
+
+The AI gateway accepts Anthropic Messages API and Gemini
+`generateContent` request shapes in addition to the OpenAI facade.
+Each dialect is parsed into the canonical request and routed through
+the same adapter pipeline. Passthrough mode forwards the request body
+verbatim to the provider without canonical translation.
+
+### Structured-output translation
+
+Clients can request structured output using the `response_format`
+field. The gateway translates the format to each provider's native
+shape: OpenAI emits the original format; Anthropic uses forced tool
+calls; Gemini uses `generationConfig.responseMimeType` and
+`responseSchema`. Supported formats: `text`, `json_object`, and
+`json_schema` (with a custom schema).
+
+### Multimodal image URL fetching
+
+The Anthropic and Gemini adapters fetch image content from URLs in
+request messages before translating the request. This enables
+multimodal requests where the client references images by URL rather
+than embedding base64 directly. The fetched bytes are embedded inline
+in the provider request.
+
+### Server-side prompt templates
+
+Clients can reference a server-side prompt template by name in their
+chat request. The gateway resolves the template from
+`ai.experiments.prompts`, substitutes `{{var}}` placeholders with
+client-supplied variables, and prepends the result as a system
+message. Two request fields control this:
+
+| Field | Description |
+|---|---|
+| `prompt` | The template reference: `"name"` (active version) or `"name/version"`. |
+| `prompt_variables` | A map of variable names to values for `{{var}}` substitution. |
+
+```json
+{
+  "model": "gpt-4o-mini",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "prompt": "greeting",
+  "prompt_variables": {"name": "Alice"}
+}
+```
+
+The gateway resolves the `greeting` prompt template, substitutes
+`{{name}}` with `Alice`, and prepends the result as a system message
+before any existing system message. See
+[Prompt experimentation](./ai-prompt-experimentation) for prompt
+versioning configuration.

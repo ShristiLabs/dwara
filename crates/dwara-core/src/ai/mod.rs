@@ -45,12 +45,15 @@
 pub mod a2a;
 pub mod adapter;
 pub mod adapters;
+pub mod batch;
 pub mod budget;
 pub mod cost;
 pub mod credentials;
 pub mod experiments;
 pub mod governance;
 pub mod guardrails;
+pub mod image_fetch;
+pub mod ingress;
 pub mod logging;
 pub mod mcp;
 pub mod openai_compat;
@@ -149,6 +152,13 @@ pub struct AiRuntime {
     /// config block. None when the block is absent or inert (feature
     /// off / disabled).
     a2a: Option<Arc<a2a::CompiledA2a>>,
+    /// AI-14 (#202): The experiments config (prompt versioning, A/B
+    /// tests, evals). Stored for server-side prompt template
+    /// resolution at request time.
+    experiments_config: Option<Arc<crate::config::ai::AiExperiments>>,
+    /// AI-14 (#202): Runtime prompt overrides (prompt_name -> version).
+    /// Populated from the state store at compile time.
+    prompt_overrides: Vec<(String, String)>,
 }
 
 impl AiRuntime {
@@ -301,6 +311,8 @@ impl AiRuntime {
             models,
             mcp,
             a2a,
+            experiments_config: cfg.experiments.clone().map(Arc::new),
+            prompt_overrides: Vec::new(),
         })
     }
 
@@ -313,6 +325,17 @@ impl AiRuntime {
     /// or the block is inert (feature off / disabled).
     pub fn a2a(&self) -> Option<&Arc<a2a::CompiledA2a>> {
         self.a2a.as_ref()
+    }
+
+    /// AI-14 (#202): The experiments config (prompt versioning, A/B
+    /// tests, evals). None when no `ai.experiments` block.
+    pub fn experiments_config(&self) -> Option<&crate::config::ai::AiExperiments> {
+        self.experiments_config.as_deref()
+    }
+
+    /// AI-14 (#202): Runtime prompt overrides (prompt_name -> version).
+    pub fn prompt_overrides(&self) -> &[(String, String)] {
+        &self.prompt_overrides
     }
 
     /// Resolve a model alias to its provider and provider model id
@@ -545,6 +568,8 @@ impl AiRuntime {
             models: new_models,
             mcp: self.mcp.clone(),
             a2a: self.a2a.clone(),
+            experiments_config: self.experiments_config.clone(),
+            prompt_overrides: self.prompt_overrides.clone(),
         })
     }
 }

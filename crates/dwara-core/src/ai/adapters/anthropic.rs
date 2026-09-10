@@ -167,6 +167,14 @@ impl ProviderAdapter for AnthropicAdapter {
         if req.stream {
             body.insert("stream".into(), json!(true));
         }
+        // AI-06 (#196): translate response_format. Anthropic does not
+        // have a native response_format field. JsonObject and
+        // JsonSchema are translated to a forced tool call with the
+        // schema as input_schema; the model is forced to produce a
+        // tool_use block whose input conforms to the schema.
+        if let Some(rf) = &req.response_format {
+            apply_anthropic_response_format(&mut body, rf);
+        }
         Ok(ProviderRequest {
             method: http::Method::POST,
             path: "/v1/messages".to_string(),
@@ -497,4 +505,53 @@ fn merge_consecutive_turns(messages: Vec<Value>) -> Vec<Value> {
         merged.push(m);
     }
     merged
+}
+
+/// AI-06 (#196): Translate the canonical `ResponseFormat` to Anthropic.
+/// Anthropic has no native `response_format`. JsonObject and JsonSchema
+/// are translated to a forced tool call: a tool with the schema as
+/// `input_schema` and `tool_choice: {type: "any"}` to force the model
+/// to produce a tool_use block whose input conforms to the schema.
+/// Text is a no-op (the default).
+fn apply_anthropic_response_format(
+    body: &mut serde_json::Map<String, Value>,
+    rf: &crate::ai::types::ResponseFormat,
+) {
+    use crate::ai::types::ResponseFormat;
+    match rf {
+        ResponseFormat::Text => { /* no-op; text is the default */ }
+        ResponseFormat::JsonObject => {
+            // Force a tool call with a permissive schema.
+            let tool = serde_json::json!({
+                "name": "structured_output",
+                "description": "Output the result as a JSON object.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }
+            });
+            let tools = body
+                .entry("tools".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(arr) = tools.as_array_mut() {
+                arr.push(tool);
+            }
+            body.insert("tool_choice".into(), serde_json::json!({"type": "any"}));
+        }
+        ResponseFormat::JsonSchema { name, schema } => {
+            let tool = serde_json::json!({
+                "name": name,
+                "description": "Output the result conforming to the provided JSON schema.",
+                "input_schema": schema
+            });
+            let tools = body
+                .entry("tools".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(arr) = tools.as_array_mut() {
+                arr.push(tool);
+            }
+            body.insert("tool_choice".into(), serde_json::json!({"type": "any"}));
+        }
+    }
 }

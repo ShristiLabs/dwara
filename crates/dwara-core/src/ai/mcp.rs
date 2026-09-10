@@ -121,6 +121,46 @@ pub struct CompiledMcpTool {
     pub authz: Option<Authz>,
 }
 
+/// AI-11 (#200): One compiled MCP static resource. Served inline
+/// (no upstream proxy).
+#[derive(Debug, Clone)]
+pub struct CompiledMcpResource {
+    /// The resource name (the key in `ai.mcp.resources`).
+    pub name: String,
+    /// The resource URI.
+    pub uri: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The MIME type of the content.
+    pub mime_type: String,
+    /// The resource content (returned verbatim in `resources/read`).
+    pub content: String,
+}
+
+/// AI-11 (#200): One compiled MCP static prompt template.
+#[derive(Debug, Clone)]
+pub struct CompiledMcpPrompt {
+    /// The prompt name (the key in `ai.mcp.prompts`).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The prompt template body (with `{{arg}}` placeholders).
+    pub template: String,
+    /// The argument definitions.
+    pub arguments: Vec<CompiledMcpPromptArgument>,
+}
+
+/// AI-11 (#200): One compiled prompt argument definition.
+#[derive(Debug, Clone)]
+pub struct CompiledMcpPromptArgument {
+    /// The argument name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Whether the argument is required.
+    pub required: bool,
+}
+
 /// The compiled MCP gateway (DW-087): the tool table, session
 /// policy, and reserved path. Built at `AiRuntime` compile time
 /// from the `ai.mcp` config block; immutable once built.
@@ -128,6 +168,10 @@ pub struct CompiledMcpTool {
 pub struct CompiledMcp {
     /// The compiled tools, keyed by tool name.
     pub tools: BTreeMap<String, CompiledMcpTool>,
+    /// AI-11 (#200): The compiled static resources, keyed by name.
+    pub resources: BTreeMap<String, CompiledMcpResource>,
+    /// AI-11 (#200): The compiled static prompts, keyed by name.
+    pub prompts: BTreeMap<String, CompiledMcpPrompt>,
     /// Session TTL in seconds.
     pub sessions_ttl_secs: u64,
     /// Max concurrent sessions.
@@ -255,8 +299,49 @@ impl CompiledMcp {
                 },
             );
         }
+        // AI-11 (#200): compile static resources.
+        let mut resources = BTreeMap::new();
+        for (name, resource) in &config.resources {
+            resources.insert(
+                name.clone(),
+                CompiledMcpResource {
+                    name: name.clone(),
+                    uri: resource.uri.clone(),
+                    description: resource.description.clone(),
+                    mime_type: resource
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "text/plain".to_string()),
+                    content: resource.content.clone(),
+                },
+            );
+        }
+        // AI-11 (#200): compile static prompts.
+        let mut prompts = BTreeMap::new();
+        for (name, prompt) in &config.prompts {
+            let arguments = prompt
+                .arguments
+                .iter()
+                .map(|a| CompiledMcpPromptArgument {
+                    name: a.name.clone(),
+                    description: a.description.clone(),
+                    required: a.required,
+                })
+                .collect();
+            prompts.insert(
+                name.clone(),
+                CompiledMcpPrompt {
+                    name: name.clone(),
+                    description: prompt.description.clone(),
+                    template: prompt.template.clone(),
+                    arguments,
+                },
+            );
+        }
         Some(CompiledMcp {
             tools,
+            resources,
+            prompts,
             sessions_ttl_secs,
             sessions_max_concurrent,
             path,
@@ -333,6 +418,10 @@ impl CompiledMcp {
                 self.handle_tools_call(req, session_id, consumer, is_notification)
                     .await
             }
+            "resources/list" => self.handle_resources_list(req, is_notification),
+            "resources/read" => self.handle_resources_read(req, is_notification),
+            "prompts/list" => self.handle_prompts_list(req, is_notification),
+            "prompts/get" => self.handle_prompts_get(req, is_notification),
             "shutdown" => self.handle_shutdown(req, session_id, is_notification),
             _ => {
                 let response = if is_notification {
@@ -404,6 +493,164 @@ impl CompiledMcp {
             None
         } else {
             Some(json_rpc_result(req.id.clone(), result))
+        };
+        McpHandleResult {
+            response,
+            session_id: None,
+            tool_call: None,
+            session_initialized: false,
+            session_closed: false,
+        }
+    }
+
+    /// AI-11 (#200): Handle `resources/list` — returns all compiled
+    /// static resources.
+    fn handle_resources_list(
+        &self,
+        req: &JsonRpcRequest,
+        is_notification: bool,
+    ) -> McpHandleResult {
+        let mut resources_list = Vec::new();
+        for resource in self.resources.values() {
+            resources_list.push(json!({
+                "uri": resource.uri,
+                "name": resource.name,
+                "description": resource.description,
+                "mimeType": resource.mime_type,
+            }));
+        }
+        let result = json!({
+            "resources": resources_list,
+            "nextCursor": null,
+        });
+        let response = if is_notification {
+            None
+        } else {
+            Some(json_rpc_result(req.id.clone(), result))
+        };
+        McpHandleResult {
+            response,
+            session_id: None,
+            tool_call: None,
+            session_initialized: false,
+            session_closed: false,
+        }
+    }
+
+    /// AI-11 (#200): Handle `resources/read` — returns the content of
+    /// the resource at the given URI.
+    fn handle_resources_read(
+        &self,
+        req: &JsonRpcRequest,
+        is_notification: bool,
+    ) -> McpHandleResult {
+        let params = req.params.clone().unwrap_or(Value::Null);
+        let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+        let resource = self.resources.values().find(|r| r.uri == uri);
+        let response = if is_notification {
+            None
+        } else if let Some(resource) = resource {
+            let result = json!({
+                "contents": [{
+                    "uri": resource.uri,
+                    "mimeType": resource.mime_type,
+                    "text": resource.content,
+                }]
+            });
+            Some(json_rpc_result(req.id.clone(), result))
+        } else {
+            Some(json_rpc_error(
+                req.id.clone(),
+                error_code::INVALID_PARAMS,
+                &format!("resource not found: {uri}"),
+            ))
+        };
+        McpHandleResult {
+            response,
+            session_id: None,
+            tool_call: None,
+            session_initialized: false,
+            session_closed: false,
+        }
+    }
+
+    /// AI-11 (#200): Handle `prompts/list` — returns all compiled
+    /// static prompts.
+    fn handle_prompts_list(&self, req: &JsonRpcRequest, is_notification: bool) -> McpHandleResult {
+        let mut prompts_list = Vec::new();
+        for prompt in self.prompts.values() {
+            let arguments: Vec<Value> = prompt
+                .arguments
+                .iter()
+                .map(|a| {
+                    json!({
+                        "name": a.name,
+                        "description": a.description,
+                        "required": a.required,
+                    })
+                })
+                .collect();
+            prompts_list.push(json!({
+                "name": prompt.name,
+                "description": prompt.description,
+                "arguments": arguments,
+            }));
+        }
+        let result = json!({
+            "prompts": prompts_list,
+            "nextCursor": null,
+        });
+        let response = if is_notification {
+            None
+        } else {
+            Some(json_rpc_result(req.id.clone(), result))
+        };
+        McpHandleResult {
+            response,
+            session_id: None,
+            tool_call: None,
+            session_initialized: false,
+            session_closed: false,
+        }
+    }
+
+    /// AI-11 (#200): Handle `prompts/get` — returns the prompt
+    /// template with argument substitution.
+    fn handle_prompts_get(&self, req: &JsonRpcRequest, is_notification: bool) -> McpHandleResult {
+        let params = req.params.clone().unwrap_or(Value::Null);
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        let prompt = self.prompts.get(name);
+        let response = if is_notification {
+            None
+        } else if let Some(prompt) = prompt {
+            // Substitute {{arg}} placeholders with provided arguments.
+            let mut template = prompt.template.clone();
+            if let Some(args_obj) = arguments.as_object() {
+                for (key, value) in args_obj {
+                    if let Some(s) = value.as_str() {
+                        let placeholder = format!("{{{{{key}}}}}");
+                        template = template.replace(&placeholder, s);
+                    }
+                }
+            }
+            let result = json!({
+                "description": prompt.description,
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": template,
+                    }
+                }]
+            });
+            Some(json_rpc_result(req.id.clone(), result))
+        } else {
+            Some(json_rpc_error(
+                req.id.clone(),
+                error_code::INVALID_PARAMS,
+                &format!("prompt not found: {name}"),
+            ))
         };
         McpHandleResult {
             response,

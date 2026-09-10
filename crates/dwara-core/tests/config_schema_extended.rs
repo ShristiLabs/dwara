@@ -647,6 +647,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             authorization: None,
             quotas: None,
             ai_logging: None,
+            agent: None,
         }],
         policies: vec![Policy {
             name: "p".into(),
