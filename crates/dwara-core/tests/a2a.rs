@@ -15,7 +15,7 @@ use dwara_core::ai::a2a::{
     TaskLifecycle, TaskStateMachine,
 };
 use dwara_core::ai::adapter::ProviderAdapter;
-use dwara_core::ai::types::{ChatMessage, ChatRequest, ChatRole};
+use dwara_core::ai::types::{ChatMessage, ChatRequest, ChatRole, FinishReason};
 use dwara_core::config::ai::{A2aAgent, A2aAgentCard, A2aConfig, A2aSessions, AiProviderKind};
 use dwara_core::config::parse_gateway;
 use dwara_core::snapshot::validate;
@@ -127,35 +127,49 @@ fn adapter_kind_is_a2a() {
 }
 
 #[test]
-fn adapter_build_request_translates_to_task_submit() {
+fn adapter_build_request_translates_to_message_send() {
     let adapter = A2AAdapter;
     let req = user_request("Hello, agent");
     let provider_req = adapter
         .build_request(&req, "research-agent-v1")
         .expect("builds");
     assert_eq!(provider_req.method, http::Method::POST);
-    assert_eq!(provider_req.path, "/tasks/submit");
+    // v0.3 uses a single JSON-RPC endpoint; the adapter path is the
+    // base path appended to the upstream URL by ai_proxy.
+    assert_eq!(provider_req.path, "/");
     let body = &provider_req.body;
     assert_eq!(body["jsonrpc"], json!("2.0"));
-    assert_eq!(body["method"], json!("tasks/submit"));
-    assert_eq!(body["params"]["model"], json!("research-agent-v1"));
+    assert_eq!(body["method"], json!("message/send"));
+    // The message carries parts[] with kind-discriminated text parts.
     assert_eq!(body["params"]["message"]["role"], json!("user"));
-    assert_eq!(body["params"]["message"]["content"], json!("Hello, agent"));
-    assert_eq!(body["params"]["temperature"], json!(0.7));
-    assert_eq!(body["params"]["max_tokens"], json!(1024));
-    // Single-message request has no history.
-    assert!(body["params"].get("history").is_none());
+    let parts = body["params"]["message"]["parts"]
+        .as_array()
+        .expect("parts");
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["kind"], json!("text"));
+    assert_eq!(parts[0]["text"], json!("Hello, agent"));
+    // The message has a messageId.
+    assert!(body["params"]["message"]["messageId"].as_str().is_some());
+    // The JSON-RPC envelope has an id.
+    assert!(body["id"].as_str().is_some());
 }
 
 #[test]
-fn adapter_build_request_preserves_history() {
+fn adapter_build_request_stream_uses_message_stream() {
+    let adapter = A2AAdapter;
+    let mut req = user_request("Hello");
+    req.stream = true;
+    let provider_req = adapter.build_request(&req, "agent").expect("builds");
+    assert_eq!(provider_req.body["method"], json!("message/stream"));
+}
+
+#[test]
+fn adapter_build_request_folds_system_messages() {
     let adapter = A2AAdapter;
     let req = ChatRequest {
         model: "m".to_string(),
         messages: vec![
             ChatMessage::text(ChatRole::System, "You are helpful"),
-            ChatMessage::text(ChatRole::User, "first"),
-            ChatMessage::text(ChatRole::Assistant, "ok"),
             ChatMessage::text(ChatRole::User, "second"),
         ],
         tools: Vec::new(),
@@ -164,57 +178,124 @@ fn adapter_build_request_preserves_history() {
         top_p: None,
         max_tokens: None,
         stop: None,
-        stream: true,
+        stream: false,
         stream_options_include_usage: false,
         other: BTreeMap::new(),
     };
     let provider_req = adapter.build_request(&req, "agent").expect("builds");
-    let params = &provider_req.body["params"];
-    // The last message is the task message; the rest are history.
-    assert_eq!(params["message"]["content"], json!("second"));
-    let history = params["history"].as_array().expect("history is array");
-    assert_eq!(history.len(), 3);
-    assert_eq!(history[0]["role"], json!("system"));
-    assert_eq!(history[2]["role"], json!("assistant"));
-    assert_eq!(params["stream"], json!(true));
+    let parts = provider_req.body["params"]["message"]["parts"]
+        .as_array()
+        .expect("parts");
+    // System message folded as a text preamble, then the user message.
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["kind"], json!("text"));
+    assert_eq!(parts[0]["text"], json!("You are helpful"));
+    assert_eq!(parts[1]["kind"], json!("text"));
+    assert_eq!(parts[1]["text"], json!("second"));
 }
 
 // --- A2AAdapter parse_response (A2A JSON -> canonical) ------------------
 
 #[test]
-fn adapter_parse_response_envelope() {
+fn adapter_parse_response_message_result() {
     let adapter = A2AAdapter;
     let body = json!({
         "jsonrpc": "2.0",
-        "id": "task-1",
+        "id": "rpc-1",
         "result": {
-            "model": "research-agent-v1",
-            "state": "completed",
-            "message": {
-                "role": "assistant",
-                "content": "Here is your answer"
-            },
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+            "kind": "message",
+            "messageId": "msg-1",
+            "role": "assistant",
+            "parts": [{"kind": "text", "text": "Here is your answer"}]
         }
     });
     let resp = adapter.parse_response(&body).expect("parses");
-    assert_eq!(resp.id.as_deref(), Some("task-1"));
-    assert_eq!(resp.model.as_deref(), Some("research-agent-v1"));
+    assert_eq!(resp.id.as_deref(), Some("rpc-1"));
     assert_eq!(resp.choices.len(), 1);
     assert_eq!(resp.choices[0].message.role, ChatRole::Assistant);
     assert_eq!(
         resp.choices[0].message.text_content(),
         "Here is your answer"
     );
-    let usage = resp.usage.expect("usage present");
-    assert_eq!(usage.prompt_tokens, Some(10));
-    assert_eq!(usage.completion_tokens, Some(20));
-    assert_eq!(usage.total_tokens, Some(30));
+    assert_eq!(resp.choices[0].finish_reason, FinishReason::Stop);
 }
 
 #[test]
-fn adapter_parse_response_bare_message() {
+fn adapter_parse_response_task_result_completed() {
     let adapter = A2AAdapter;
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "rpc-2",
+        "result": {
+            "kind": "task",
+            "id": "task-abc",
+            "status": {
+                "state": "completed",
+                "message": {
+                    "role": "assistant",
+                    "parts": [{"kind": "text", "text": "Task done"}]
+                }
+            }
+        }
+    });
+    let resp = adapter.parse_response(&body).expect("parses");
+    assert_eq!(resp.id.as_deref(), Some("rpc-2"));
+    assert_eq!(resp.choices[0].message.text_content(), "Task done");
+    assert_eq!(resp.choices[0].finish_reason, FinishReason::Stop);
+}
+
+#[test]
+fn adapter_parse_response_task_result_failed() {
+    let adapter = A2AAdapter;
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "rpc-3",
+        "result": {
+            "kind": "task",
+            "status": {
+                "state": "failed",
+                "message": {
+                    "role": "assistant",
+                    "parts": [{"kind": "text", "text": "Something went wrong"}]
+                }
+            }
+        }
+    });
+    let resp = adapter.parse_response(&body).expect("parses");
+    assert_eq!(
+        resp.choices[0].message.text_content(),
+        "Something went wrong"
+    );
+    assert!(matches!(
+        resp.choices[0].finish_reason,
+        FinishReason::Other(ref s) if s == "failed"
+    ));
+}
+
+#[test]
+fn adapter_parse_response_task_result_from_artifacts() {
+    let adapter = A2AAdapter;
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "rpc-4",
+        "result": {
+            "kind": "task",
+            "status": {"state": "completed"},
+            "artifacts": [
+                {
+                    "parts": [{"kind": "text", "text": "Artifact text"}]
+                }
+            ]
+        }
+    });
+    let resp = adapter.parse_response(&body).expect("parses");
+    assert_eq!(resp.choices[0].message.text_content(), "Artifact text");
+}
+
+#[test]
+fn adapter_parse_response_bare_message_backward_compat() {
+    let adapter = A2AAdapter;
+    // Old shape: bare message with content (no parts).
     let body = json!({
         "message": {"role": "assistant", "content": "bare response"}
     });
@@ -230,10 +311,13 @@ fn adapter_parse_response_rejects_non_object() {
 }
 
 #[test]
-fn adapter_parse_response_rejects_missing_message() {
+fn adapter_parse_response_rejects_unknown_shape() {
     let adapter = A2AAdapter;
-    let err = adapter.parse_response(&json!({"result": {}})).unwrap_err();
-    assert!(err.to_string().contains("no message"));
+    // Neither a Message (no parts) nor a Task (no status).
+    let err = adapter
+        .parse_response(&json!({"result": {"foo": "bar"}}))
+        .unwrap_err();
+    assert!(err.to_string().contains("neither a Message nor a Task"));
 }
 
 #[test]
@@ -258,11 +342,16 @@ fn adapter_parse_error_falls_back_to_generic() {
 // --- A2AAdapter parse_stream_event --------------------------------------
 
 #[test]
-fn adapter_parse_stream_event_delta() {
+fn adapter_parse_stream_event_message_parts() {
     let adapter = A2AAdapter;
     let data = json!({
-        "delta": {"role": "assistant", "content": "chunk"},
-        "state": "working"
+        "jsonrpc": "2.0",
+        "id": "rpc-1",
+        "result": {
+            "kind": "message",
+            "role": "assistant",
+            "parts": [{"kind": "text", "text": "chunk"}]
+        }
     });
     let events = adapter.parse_stream_event(&data).expect("parses");
     assert_eq!(events.len(), 1);
@@ -276,15 +365,60 @@ fn adapter_parse_stream_event_delta() {
 }
 
 #[test]
-fn adapter_parse_stream_event_usage() {
+fn adapter_parse_stream_event_task_status_update() {
     let adapter = A2AAdapter;
-    let data = json!({"usage": {"prompt_tokens": 5, "completion_tokens": 5}});
+    let data = json!({
+        "jsonrpc": "2.0",
+        "id": "rpc-2",
+        "result": {
+            "kind": "status-update",
+            "status": {
+                "state": "completed",
+                "message": {
+                    "role": "assistant",
+                    "parts": [{"kind": "text", "text": "final"}]
+                }
+            }
+        }
+    });
+    let events = adapter.parse_stream_event(&data).expect("parses");
+    // Should emit a delta for the status message and a finish delta.
+    assert!(!events.is_empty());
+    let has_content = events.iter().any(|e| {
+        matches!(e,
+            dwara_core::ai::types::StreamEvent::Delta(d) if d.content.as_deref() == Some("final")
+        )
+    });
+    assert!(has_content, "should emit content delta");
+    let has_finish = events.iter().any(|e| {
+        matches!(e,
+            dwara_core::ai::types::StreamEvent::Delta(d) if d.finish_reason.is_some()
+        )
+    });
+    assert!(has_finish, "should emit finish delta");
+}
+
+#[test]
+fn adapter_parse_stream_event_artifact_update() {
+    let adapter = A2AAdapter;
+    let data = json!({
+        "jsonrpc": "2.0",
+        "id": "rpc-3",
+        "result": {
+            "kind": "artifact-update",
+            "artifact": {
+                "parts": [{"kind": "text", "text": "artifact chunk"}]
+            }
+        }
+    });
     let events = adapter.parse_stream_event(&data).expect("parses");
     assert_eq!(events.len(), 1);
-    assert!(matches!(
-        events[0],
-        dwara_core::ai::types::StreamEvent::Usage(_)
-    ));
+    match &events[0] {
+        dwara_core::ai::types::StreamEvent::Delta(d) => {
+            assert_eq!(d.content.as_deref(), Some("artifact chunk"));
+        }
+        other => panic!("expected Delta, got {other:?}"),
+    }
 }
 
 // --- A2A task lifecycle state machine (DW-114) ---------------------------

@@ -1,14 +1,12 @@
-//! A2A (agent-to-agent) protocol support (DW-114).
+//! A2A (agent-to-agent) protocol support (DW-114, AI-12 #252).
 //!
 //! This module implements the A2A protocol's task lifecycle state
-//! machine against the A2A Protocol Specification draft (the task
-//! state vocabulary: `submitted`, `working`, `completed`, `failed`,
-//! `canceled`). The draft is not a formally stable standard; the
-//! implemented contract is the task lifecycle state machine as
-//! documented in the A2A Protocol Specification repository
-//! (<https://github.com/a2aproject/A2A>) as of 2025-Q4. The state
-//! vocabulary and the legal transitions are stable in the draft; the
-//! wire format (JSON-RPC method names, envelope shapes) may evolve.
+//! machine and the v0.3 JSON-RPC wire format against the A2A Protocol
+//! Specification (<https://github.com/a2aproject/A2A>) as of 2025-Q4.
+//! The task state vocabulary (`submitted`, `working`, `completed`,
+//! `failed`, `canceled`) and the legal transitions are stable; the
+//! wire format (JSON-RPC method names, envelope shapes) is the v0.3
+//! shape (`message/send`, `message/stream`, `tasks/get`, etc.).
 //!
 //! # What is implemented
 //!
@@ -24,11 +22,17 @@
 //!     out). Illegal transitions return an [`A2AError`] naming the
 //!     attempted and target states.
 //! - The [`A2AAdapter`] struct implementing [`ProviderAdapter`]: it
-//!   translates a canonical [`ChatRequest`] into an A2A task-submit
-//!   JSON body ([`A2AAdapter::build_request`]) and parses an A2A task
-//!   response back into the canonical [`ChatResponse`]
-//!   ([`A2AAdapter::parse_response`]). Error and stream-event parsing
-//!   are wired too (the SSE framing reuses [`crate::ai::sse`]).
+//!   translates a canonical [`ChatRequest`] into an A2A v0.3 JSON-RPC
+//!   `message/send` (or `message/stream` for streaming) body
+//!   ([`A2AAdapter::build_request`]) and parses an A2A response back
+//!   into the canonical [`ChatResponse`]
+//!   ([`A2AAdapter::parse_response`]). The adapter handles both direct
+//!   `Message` results (with `parts[]` using the `kind` discriminator)
+//!   and `Task` results (extracting text from `status.message` or
+//!   `artifacts`). Error and stream-event parsing are wired too (the
+//!   SSE framing reuses [`crate::ai::sse`]); stream events cover
+//!   `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`, and direct
+//!   `Message` frames.
 //! - The [`AgentCard`] struct and [`AgentCardParser`]: parse the
 //!   JSON-LD-ish Agent Card discovery doc (name, description, url,
 //!   version, capabilities, authentication) from an inline JSON value
@@ -41,6 +45,30 @@
 //! - The [`handle_a2a_request`] function: routes an A2A call through
 //!   the existing `dataplane::ai_proxy` path (the transport is the
 //!   agent's named upstream, exactly like a regular provider).
+//!
+//! # v0.3 wire format (AI-12, #252)
+//!
+//! The adapter speaks the A2A v0.3 JSON-RPC binding:
+//!
+//! - **Request**: `message/send` (non-streaming) or `message/stream`
+//!   (streaming). The canonical `ChatRequest` is folded into
+//!   `params.message.parts[]` using the `kind`-discriminated part
+//!   shape (`text`, `file`, `data`). System messages are folded as a
+//!   text preamble (A2A has no system role). The message carries a
+//!   generated `messageId` and `role: "user"`.
+//! - **Response**: the adapter detects whether the JSON-RPC `result`
+//!   is a `Message` (has `parts` or `kind: "message"`) or a `Task`
+//!   (has `status` or `kind: "task"`). For Tasks, text is extracted
+//!   from `status.message.parts` or `artifacts[].parts`. The task
+//!   state maps to `FinishReason` (`completed` -> `Stop`, `failed` ->
+//!   `Other("failed")`, etc.).
+//! - **Streaming**: SSE frames carry JSON-RPC responses whose
+//!   `result` is one of `TaskStatusUpdateEvent` (has `status`),
+//!   `TaskArtifactUpdateEvent` (has `artifact`), or a direct
+//!   `Message` (has `parts`). Terminal states emit a finish delta.
+//! - **Backward compat**: the adapter still accepts the older
+//!   `content`/`type` message shape and the `result.message` wrapper
+//!   for agents that have not migrated to v0.3.
 //!
 //! # Dependency direction
 //!
@@ -60,7 +88,7 @@
 use crate::ai::adapter::{AiError, ProviderAdapter, ProviderErrorBody, ProviderRequest};
 use crate::ai::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatRole, Choice, ContentPart, FinishReason,
-    StreamDelta, StreamEvent, Usage,
+    StreamDelta, StreamEvent,
 };
 use crate::config::ai::{A2aAgentCard, A2aConfig, AiProviderKind};
 use crate::config::Gateway;
@@ -423,17 +451,17 @@ impl AgentCardParser {
     }
 }
 
-/// The A2A provider adapter (DW-114). A pure translator, like the
-/// OpenAI/Anthropic/Gemini adapters: it holds no state and opens no
-/// connections. The transport is the agent's named upstream, driven
-/// from `dataplane::ai_proxy`.
+/// The A2A provider adapter (DW-114, DP-12 #252). A pure translator,
+/// like the OpenAI/Anthropic/Gemini adapters: it holds no state and
+/// opens no connections. The transport is the agent's named upstream,
+/// driven from `dataplane::ai_proxy`.
 ///
 /// `build_request` translates a canonical [`ChatRequest`] into an A2A
-/// task-submit JSON body: the conversation is folded into the task's
-/// `message` field (the A2A spec models a task as a single message
-/// exchange; multi-turn history is preserved verbatim under
-/// `history`). `parse_response` parses an A2A task response back into
-/// the canonical [`ChatResponse`].
+/// v0.3 JSON-RPC `message/send` (or `message/stream` for streaming)
+/// body: the latest user message is folded into `params.message.parts`
+/// using the A2A `kind`-discriminated part shape. `parse_response`
+/// handles both direct `Message` results and `Task` results (extracting
+/// text from `status.message` or `artifacts`).
 pub struct A2AAdapter;
 
 impl ProviderAdapter for A2AAdapter {
@@ -444,53 +472,73 @@ impl ProviderAdapter for A2AAdapter {
     fn build_request(
         &self,
         req: &ChatRequest,
-        provider_model: &str,
+        _provider_model: &str,
     ) -> Result<ProviderRequest, AiError> {
-        // Fold the canonical conversation into the A2A task-submit
-        // shape. The latest user message becomes the task `message`;
-        // prior messages are preserved under `history` (the A2A spec
-        // is not frozen, so the shape is a reasonable projection that
-        // round-trips through parse_response).
-        let mut history: Vec<Value> = Vec::new();
-        let mut message: Option<Value> = None;
-        for (i, m) in req.messages.iter().enumerate() {
-            let wire = message_to_a2a(m);
-            if i + 1 == req.messages.len() {
-                message = Some(wire);
-            } else {
-                history.push(wire);
+        // A2A v0.3 JSON-RPC: the latest user message becomes
+        // `params.message`; prior messages are NOT carried (A2A uses
+        // `contextId` for multi-turn correlation, not an inline
+        // history). System messages are folded into the user message
+        // as a preamble since A2A has no system role.
+        let mut parts: Vec<Value> = Vec::new();
+        for m in &req.messages {
+            if matches!(m.role, ChatRole::System) {
+                // Fold system messages as a text part preamble.
+                let text = m.text_content();
+                if !text.is_empty() {
+                    parts.push(json!({"kind": "text", "text": text}));
+                }
             }
         }
+        // The latest user message's parts are the message body.
+        let last_user = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, ChatRole::User));
+        let user_parts = if let Some(m) = last_user {
+            canonical_to_a2a_parts(m)
+        } else {
+            // No user message: send an empty text part (A2A requires
+            // at least one part).
+            vec![json!({"kind": "text", "text": ""})]
+        };
+        parts.extend(user_parts);
+
+        // Generate a message ID and JSON-RPC request ID.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let message_id = format!("msg-{now_ms:x}");
+        let rpc_id = format!("rpc-{now_ms:x}");
+
+        let mut message = Map::new();
+        message.insert("messageId".into(), json!(message_id));
+        message.insert("role".into(), json!("user"));
+        message.insert("parts".into(), Value::Array(parts));
+
+        let mut params = Map::new();
+        params.insert("message".into(), Value::Object(message));
+
+        let method = if req.stream {
+            "message/stream"
+        } else {
+            "message/send"
+        };
+
         let mut body = Map::new();
         body.insert("jsonrpc".into(), json!("2.0"));
-        body.insert("method".into(), json!("tasks/submit"));
-        let mut params = Map::new();
-        params.insert("model".into(), json!(provider_model));
-        if let Some(msg) = message {
-            params.insert("message".into(), msg);
-        }
-        if !history.is_empty() {
-            params.insert("history".into(), Value::Array(history));
-        }
-        if let Some(t) = req.temperature {
-            params.insert("temperature".into(), json!(t));
-        }
-        if let Some(p) = req.top_p {
-            params.insert("top_p".into(), json!(p));
-        }
-        if let Some(m) = req.max_tokens {
-            params.insert("max_tokens".into(), json!(m));
-        }
-        if let Some(stop) = &req.stop {
-            params.insert("stop".into(), json!(stop));
-        }
-        if req.stream {
-            params.insert("stream".into(), json!(true));
-        }
+        body.insert("id".into(), json!(rpc_id));
+        body.insert("method".into(), json!(method));
         body.insert("params".into(), Value::Object(params));
+
         Ok(ProviderRequest {
             method: http::Method::POST,
-            path: "/tasks/submit".to_string(),
+            // v0.3 JSON-RPC uses a single endpoint; the upstream path
+            // is controlled by the provider/upstream config, not the
+            // adapter. The adapter's `path` is appended to the
+            // upstream's base URL by `ai_proxy`.
+            path: "/".to_string(),
             headers: vec![],
             body: Value::Object(body),
         })
@@ -500,35 +548,101 @@ impl ProviderAdapter for A2AAdapter {
         let obj = body
             .as_object()
             .ok_or_else(|| AiError::Translation("a2a response is not a JSON object".to_string()))?;
-        // The A2A task response carries the result under
-        // `result.message` (the JSON-RPC result envelope) or a bare
-        // `message` (a non-envelope response). Tolerate both.
-        let result = obj.get("result").and_then(Value::as_object).unwrap_or(obj);
-        let message = result
-            .get("message")
-            .ok_or_else(|| AiError::Translation("a2a response has no message".to_string()))?;
-        let content = parse_a2a_message(message)?;
+        // The JSON-RPC result envelope or a bare result object.
+        let result = obj.get("result").unwrap_or(body);
+        let result_obj = result
+            .as_object()
+            .ok_or_else(|| AiError::Translation("a2a result is not a JSON object".to_string()))?;
+
+        // Detect the result shape: a direct Message (has `parts` or
+        // `kind: "message"`) or a Task (has `status` or
+        // `kind: "task"`).
+        let is_message = result_obj.contains_key("parts")
+            || result_obj
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| k == "message");
+        let is_task = result_obj.contains_key("status")
+            || result_obj
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| k == "task");
+
         let id = obj.get("id").and_then(Value::as_str).map(String::from);
-        let model = result
-            .get("model")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let usage = result.get("usage").map(parse_usage);
-        let finish_reason = result
-            .get("state")
-            .and_then(Value::as_str)
-            .map(parse_finish_reason)
-            .unwrap_or(FinishReason::Stop);
-        Ok(ChatResponse {
-            id,
-            model,
-            choices: vec![Choice {
-                index: 0,
-                message: content,
-                finish_reason,
-            }],
-            usage,
-        })
+
+        if is_message {
+            let content = parse_a2a_message(result)?;
+            return Ok(ChatResponse {
+                id,
+                model: None,
+                choices: vec![Choice {
+                    index: 0,
+                    message: content,
+                    finish_reason: FinishReason::Stop,
+                }],
+                usage: None,
+            });
+        }
+
+        if is_task {
+            let state = result_obj
+                .get("status")
+                .and_then(|s| s.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let finish_reason = parse_finish_reason(state);
+            // Extract text from status.message or artifacts.
+            let content = extract_task_text(result_obj);
+            return Ok(ChatResponse {
+                id,
+                model: None,
+                choices: vec![Choice {
+                    index: 0,
+                    message: content,
+                    finish_reason,
+                }],
+                usage: None,
+            });
+        }
+
+        // Backward compat: old shape wraps the message under
+        // `result.message` (or a bare top-level `message`).
+        if let Some(msg) = result_obj.get("message") {
+            if let Ok(content) = parse_a2a_message(msg) {
+                return Ok(ChatResponse {
+                    id,
+                    model: None,
+                    choices: vec![Choice {
+                        index: 0,
+                        message: content,
+                        finish_reason: FinishReason::Stop,
+                    }],
+                    usage: None,
+                });
+            }
+        }
+
+        // Fallback: try to parse the result itself as a message
+        // (agents that return a bare message without `kind` or a
+        // `message` wrapper). Only accept it if it has content.
+        if let Ok(content) = parse_a2a_message(result) {
+            if !content.content.is_empty() {
+                return Ok(ChatResponse {
+                    id,
+                    model: None,
+                    choices: vec![Choice {
+                        index: 0,
+                        message: content,
+                        finish_reason: FinishReason::Stop,
+                    }],
+                    usage: None,
+                });
+            }
+        }
+
+        Err(AiError::Translation(
+            "a2a result is neither a Message nor a Task".to_string(),
+        ))
     }
 
     fn parse_error(&self, body: &Value) -> ProviderErrorBody {
@@ -561,77 +675,196 @@ impl ProviderAdapter for A2AAdapter {
     }
 
     fn parse_stream_event(&self, data: &Value) -> Result<Vec<StreamEvent>, AiError> {
-        // A2A streaming events are SSE-ish (reusing the shared
-        // `ai::sse` framer). Each event carries a `delta` with
-        // content fragments and an optional terminal `state`.
+        // A2A v0.3 streaming: SSE frames whose `data:` line is a
+        // JSON-RPC response whose `result` is one of:
+        // - TaskStatusUpdateEvent (has `status.state`, optional
+        //   `status.message`)
+        // - TaskArtifactUpdateEvent (has `artifact.parts`)
+        // - Message (has `parts`)
         let obj = data.as_object().ok_or_else(|| {
             AiError::Translation("a2a stream event is not a JSON object".to_string())
         })?;
+        let result = obj.get("result").unwrap_or(data);
+        let result_obj = result.as_object().ok_or_else(|| {
+            AiError::Translation("a2a stream result is not a JSON object".to_string())
+        })?;
+
         let mut out = Vec::new();
-        if let Some(delta) = obj.get("delta") {
-            let mut sd = StreamDelta {
-                index: 0,
-                role: None,
-                content: None,
-                tool_calls: Vec::new(),
-                finish_reason: None,
-            };
-            if let Some(role) = delta.get("role").and_then(Value::as_str) {
-                sd.role = match role {
-                    "assistant" => Some(ChatRole::Assistant),
-                    _ => None,
-                };
+
+        // Direct Message stream event (has `parts`).
+        if result_obj.contains_key("parts") {
+            if let Ok(msg) = parse_a2a_message(result) {
+                let text = msg.text_content();
+                if !text.is_empty() {
+                    out.push(StreamEvent::Delta(StreamDelta {
+                        index: 0,
+                        role: Some(ChatRole::Assistant),
+                        content: Some(text),
+                        tool_calls: Vec::new(),
+                        finish_reason: None,
+                    }));
+                }
             }
-            if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                sd.content = Some(text.to_string());
+        }
+
+        // TaskStatusUpdateEvent (has `status`).
+        if let Some(status) = result_obj.get("status").and_then(Value::as_object) {
+            let state = status.get("state").and_then(Value::as_str);
+            // Extract text from the status message if present.
+            if let Some(msg_val) = status.get("message") {
+                if let Ok(msg) = parse_a2a_message(msg_val) {
+                    let text = msg.text_content();
+                    if !text.is_empty() {
+                        out.push(StreamEvent::Delta(StreamDelta {
+                            index: 0,
+                            role: Some(ChatRole::Assistant),
+                            content: Some(text),
+                            tool_calls: Vec::new(),
+                            finish_reason: None,
+                        }));
+                    }
+                }
             }
-            sd.finish_reason = obj
-                .get("state")
-                .and_then(Value::as_str)
-                .map(parse_finish_reason);
-            out.push(StreamEvent::Delta(sd));
+            // Terminal state -> finish reason.
+            if let Some(s) = state {
+                let fr = parse_finish_reason(s);
+                if !matches!(fr, FinishReason::Other(_)) || is_terminal_state(s) {
+                    out.push(StreamEvent::Delta(StreamDelta {
+                        index: 0,
+                        role: None,
+                        content: None,
+                        tool_calls: Vec::new(),
+                        finish_reason: Some(fr),
+                    }));
+                }
+            }
         }
-        if let Some(usage) = obj.get("usage").filter(|u| !u.is_null()) {
-            out.push(StreamEvent::Usage(parse_usage(usage)));
+
+        // TaskArtifactUpdateEvent (has `artifact`).
+        if let Some(artifact) = result_obj.get("artifact").and_then(Value::as_object) {
+            if let Some(parts) = artifact.get("parts").and_then(Value::as_array) {
+                let text = extract_text_from_parts(parts);
+                if !text.is_empty() {
+                    out.push(StreamEvent::Delta(StreamDelta {
+                        index: 0,
+                        role: Some(ChatRole::Assistant),
+                        content: Some(text),
+                        tool_calls: Vec::new(),
+                        finish_reason: None,
+                    }));
+                }
+            }
         }
+
         Ok(out)
     }
 }
 
-/// Serialize a canonical message into the A2A wire shape (shared with
-/// the build_request path).
-fn message_to_a2a(m: &ChatMessage) -> Value {
-    let mut obj = Map::new();
-    obj.insert("role".into(), json!(m.role.as_str()));
-    let text = m.text_content();
-    if !text.is_empty() {
-        obj.insert("content".into(), json!(text));
-    } else if !m.content.is_empty() {
-        // Multimodal: preserve the parts verbatim (images are not
-        // expressible in the A2A text model today; the spec is not
-        // frozen).
-        let parts: Vec<Value> = m
-            .content
-            .iter()
-            .map(|p| match p {
-                ContentPart::Text { text } => json!({"type": "text", "text": text}),
-                ContentPart::Image { url, .. } => json!({
-                    "type": "image",
-                    "image_url": url.clone().unwrap_or_default()
-                }),
-            })
-            .collect();
-        obj.insert("content".into(), Value::Array(parts));
-    } else {
-        obj.insert("content".into(), Value::Null);
-    }
-    if let Some(name) = &m.name {
-        obj.insert("name".into(), json!(name));
-    }
-    Value::Object(obj)
+/// Whether an A2A task state is terminal (no further transitions).
+fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "canceled" | "rejected")
 }
 
-/// Parse an A2A wire message into the canonical shape.
+/// Extract text from a Task result: try `status.message.parts` first,
+/// then `artifacts[].parts`.
+fn extract_task_text(task_obj: &Map<String, Value>) -> ChatMessage {
+    // Try status.message.
+    if let Some(msg) = task_obj.get("status").and_then(|s| s.get("message")) {
+        if let Ok(content) = parse_a2a_message(msg) {
+            return content;
+        }
+    }
+    // Try artifacts.
+    if let Some(artifacts) = task_obj.get("artifacts").and_then(Value::as_array) {
+        let mut all_text = String::new();
+        for artifact in artifacts {
+            if let Some(parts) = artifact.get("parts").and_then(Value::as_array) {
+                all_text.push_str(&extract_text_from_parts(parts));
+            }
+        }
+        if !all_text.is_empty() {
+            return ChatMessage::text(ChatRole::Assistant, all_text);
+        }
+    }
+    // Fallback: empty assistant message.
+    ChatMessage::text(ChatRole::Assistant, "")
+}
+
+/// Extract concatenated text from A2A `parts[]` (v0.3 `kind`-discriminated).
+fn extract_text_from_parts(parts: &[Value]) -> String {
+    let mut text = String::new();
+    for p in parts {
+        match p.get("kind").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = p.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            Some("data") => {
+                // Data parts: serialize as JSON text for visibility.
+                if let Some(data) = p.get("data") {
+                    text.push_str(&data.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+/// Convert a canonical [`ChatMessage`] into A2A v0.3 `parts[]`.
+fn canonical_to_a2a_parts(m: &ChatMessage) -> Vec<Value> {
+    m.content
+        .iter()
+        .map(|p| match p {
+            ContentPart::Text { text } => json!({"kind": "text", "text": text}),
+            ContentPart::Image {
+                url,
+                media_type,
+                data_b64,
+            } => {
+                // A2A v0.3 file part: prefer inline bytes, fall back
+                // to URI.
+                if let Some(b64) = data_b64 {
+                    json!({
+                        "kind": "file",
+                        "file": {
+                            "name": "image",
+                            "mimeType": media_type.as_deref().unwrap_or("image/png"),
+                            "bytes": b64,
+                        }
+                    })
+                } else {
+                    json!({
+                        "kind": "file",
+                        "file": {
+                            "name": "image",
+                            "mimeType": media_type.as_deref().unwrap_or("image/png"),
+                            "uri": url.clone().unwrap_or_default(),
+                        }
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
+/// Parse an A2A task state into a finish reason.
+fn parse_finish_reason(s: &str) -> FinishReason {
+    match s {
+        "completed" => FinishReason::Stop,
+        "failed" => FinishReason::Other("failed".to_string()),
+        "canceled" => FinishReason::Other("canceled".to_string()),
+        "rejected" => FinishReason::Other("rejected".to_string()),
+        other => FinishReason::Other(other.to_string()),
+    }
+}
+
+/// Parse an A2A v0.3 wire message into the canonical shape. The A2A
+/// message uses `parts[]` with a `kind` discriminator (`text`, `file`,
+/// `data`). The `role` field is optional (defaults to `assistant` for
+/// responses). Backward-compatible with the older `content`/`type`
+/// shape for agents that have not migrated.
 fn parse_a2a_message(v: &Value) -> Result<ChatMessage, AiError> {
     let obj = v
         .as_object()
@@ -644,29 +877,82 @@ fn parse_a2a_message(v: &Value) -> Result<ChatMessage, AiError> {
         _ => ChatRole::Assistant,
     };
     let mut content = Vec::new();
-    match obj.get("content") {
-        Some(Value::String(s)) => content.push(ContentPart::Text { text: s.clone() }),
-        Some(Value::Array(parts)) => {
-            for p in parts {
-                match p.get("type").and_then(Value::as_str) {
-                    Some("text") => content.push(ContentPart::Text {
-                        text: p
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    }),
-                    Some("image") => content.push(ContentPart::Image {
-                        url: p.get("image_url").and_then(Value::as_str).map(String::from),
-                        media_type: None,
-                        data_b64: None,
-                    }),
-                    _ => {}
+
+    // v0.3: `parts[]` with `kind` discriminator.
+    if let Some(parts) = obj.get("parts").and_then(Value::as_array) {
+        for p in parts {
+            match p.get("kind").and_then(Value::as_str) {
+                Some("text") => content.push(ContentPart::Text {
+                    text: p
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }),
+                Some("file") => {
+                    if let Some(file) = p.get("file").and_then(Value::as_object) {
+                        // Prefer inline bytes, fall back to URI.
+                        if let Some(b64) = file.get("bytes").and_then(Value::as_str) {
+                            content.push(ContentPart::Image {
+                                url: None,
+                                media_type: file
+                                    .get("mimeType")
+                                    .and_then(Value::as_str)
+                                    .map(String::from),
+                                data_b64: Some(b64.to_string()),
+                            });
+                        } else if let Some(uri) = file.get("uri").and_then(Value::as_str) {
+                            content.push(ContentPart::Image {
+                                url: Some(uri.to_string()),
+                                media_type: file
+                                    .get("mimeType")
+                                    .and_then(Value::as_str)
+                                    .map(String::from),
+                                data_b64: None,
+                            });
+                        }
+                    }
                 }
+                Some("data") => {
+                    // Data parts: serialize as text for visibility.
+                    if let Some(data) = p.get("data") {
+                        content.push(ContentPart::Text {
+                            text: data.to_string(),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
-        _ => {}
     }
+
+    // Backward compat: old `content`/`type` shape.
+    if content.is_empty() {
+        match obj.get("content") {
+            Some(Value::String(s)) => content.push(ContentPart::Text { text: s.clone() }),
+            Some(Value::Array(parts)) => {
+                for p in parts {
+                    match p.get("type").and_then(Value::as_str) {
+                        Some("text") => content.push(ContentPart::Text {
+                            text: p
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        }),
+                        Some("image") => content.push(ContentPart::Image {
+                            url: p.get("image_url").and_then(Value::as_str).map(String::from),
+                            media_type: None,
+                            data_b64: None,
+                        }),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     Ok(ChatMessage {
         role,
         content,
@@ -674,29 +960,6 @@ fn parse_a2a_message(v: &Value) -> Result<ChatMessage, AiError> {
         tool_calls: Vec::new(),
         tool_call_id: None,
     })
-}
-
-/// Parse an A2A task state into a finish reason.
-fn parse_finish_reason(s: &str) -> FinishReason {
-    match s {
-        "completed" => FinishReason::Stop,
-        "failed" => FinishReason::Other("failed".to_string()),
-        "canceled" => FinishReason::Other("canceled".to_string()),
-        other => FinishReason::Other(other.to_string()),
-    }
-}
-
-/// Parse an A2A usage object (provider-reported only).
-fn parse_usage(v: &Value) -> Usage {
-    Usage {
-        prompt_tokens: v.get("prompt_tokens").and_then(Value::as_u64),
-        completion_tokens: v.get("completion_tokens").and_then(Value::as_u64),
-        total_tokens: v.get("total_tokens").and_then(Value::as_u64),
-        cached_tokens: v
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(Value::as_u64),
-    }
 }
 
 // --- Session management (mirrors MCP) ------------------------------------
