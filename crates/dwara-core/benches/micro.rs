@@ -83,6 +83,7 @@ fn bench_gateway() -> Gateway {
                 grpc_web: None,
                 translation: None,
                 oidc_login: None,
+                filter_chain: None,
             });
         }
     }
@@ -171,6 +172,8 @@ fn bench_gateway() -> Gateway {
         lifecycle: None,
         mesh: None,
         ssrf_filter: None,
+        filter_chain: None,
+        plugin_registry: None,
     }
 }
 

@@ -109,6 +109,49 @@ pub struct PbEdgeRegistration {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct PbAckResponse {}
 
+/// Wire: REL-15 (#250) trigger-fleet-upgrade request. The controller
+/// uses its attached `FleetConfig.upgrade` policy. `ack_timeout_ms`
+/// overrides the default per-wave ack wait (0 = use the controller
+/// default of 30s).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct PbTriggerFleetUpgradeRequest {
+    #[prost(uint64, tag = "1")]
+    pub ack_timeout_ms: u64,
+}
+
+/// Wire: a single wave's result in a fleet upgrade rollout.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct PbWaveResult {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(string, repeated, tag = "2")]
+    pub target_edges: Vec<String>,
+    #[prost(string, repeated, tag = "3")]
+    pub acked: Vec<String>,
+    #[prost(string, repeated, tag = "4")]
+    pub failed: Vec<String>,
+    #[prost(bool, tag = "5")]
+    pub success: bool,
+}
+
+/// Wire: REL-15 (#250) trigger-fleet-upgrade response. Carries the
+/// full rollout result (per-wave breakdown + summary).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct PbFleetUpgradeResult {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(uint64, tag = "2")]
+    pub waves: u64,
+    #[prost(uint64, tag = "3")]
+    pub edges_upgraded: u64,
+    #[prost(uint64, tag = "4")]
+    pub edges_failed: u64,
+    #[prost(message, repeated, tag = "5")]
+    pub wave_results: Vec<PbWaveResult>,
+    #[prost(string, tag = "6")]
+    pub summary: String,
+}
+
 // ---------------------------------------------------------------------------
 // Domain <-> wire conversions
 // ---------------------------------------------------------------------------
@@ -311,6 +354,14 @@ pub trait DwaraControlPlane: Send + Sync + 'static {
 
     /// Acknowledge an applied config generation.
     async fn ack(&self, request: Request<PbConfigAck>) -> Result<Response<PbAckResponse>, Status>;
+
+    /// REL-15 (#250): trigger a fleet rolling upgrade. The controller
+    /// runs the wave-by-wave rollout using its attached fleet config
+    /// and returns the full result.
+    async fn trigger_fleet_upgrade(
+        &self,
+        request: Request<PbTriggerFleetUpgradeRequest>,
+    ) -> Result<Response<PbFleetUpgradeResult>, Status>;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +583,71 @@ impl DwaraControlPlane for ControllerServer {
 
         Ok(Response::new(PbAckResponse {}))
     }
+
+    async fn trigger_fleet_upgrade(
+        &self,
+        request: Request<PbTriggerFleetUpgradeRequest>,
+    ) -> Result<Response<PbFleetUpgradeResult>, Status> {
+        let req = request.into_inner();
+
+        // Require a fleet config to be attached.
+        let Some(fleet) = &self.fleet_config else {
+            return Err(Status::failed_precondition(
+                "fleet_not_configured: no fleet block is active on this controller",
+            ));
+        };
+        if !fleet.enabled {
+            return Err(Status::failed_precondition(
+                "fleet_not_enabled: the fleet block is present but not enabled",
+            ));
+        }
+        let Some(upgrade) = &fleet.upgrade else {
+            return Err(Status::failed_precondition(
+                "fleet_upgrade_not_configured: no fleet.upgrade block is set",
+            ));
+        };
+
+        let ack_timeout = if req.ack_timeout_ms > 0 {
+            Duration::from_millis(req.ack_timeout_ms)
+        } else {
+            Duration::from_secs(30)
+        };
+
+        tracing::info!(
+            code = "fleet_upgrade_triggered",
+            ack_timeout_ms = ack_timeout.as_millis() as u64,
+            "fleet rolling upgrade triggered via gRPC"
+        );
+
+        let result = super::controller::run_fleet_upgrade(
+            Arc::clone(&self.state),
+            self.clone(),
+            upgrade.clone(),
+            ack_timeout,
+        )
+        .await;
+
+        let pb = PbFleetUpgradeResult {
+            success: result.success,
+            waves: result.waves as u64,
+            edges_upgraded: result.edges_upgraded as u64,
+            edges_failed: result.edges_failed as u64,
+            wave_results: result
+                .wave_results
+                .iter()
+                .map(|w| PbWaveResult {
+                    name: w.name.clone(),
+                    target_edges: w.target_edges.clone(),
+                    acked: w.acked.clone(),
+                    failed: w.failed.clone(),
+                    success: w.success,
+                })
+                .collect(),
+            summary: result.summary,
+        };
+
+        Ok(Response::new(pb))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +659,7 @@ pub const SERVICE_NAME: &str = "dwara.ControlPlane";
 pub const STREAM_CONFIG_UPDATES_PATH: &str = "/dwara.ControlPlane/StreamConfigUpdates";
 pub const ACK_PATH: &str = "/dwara.ControlPlane/Ack";
 pub const PUBLISH_ANALYTICS_PATH: &str = "/dwara.ControlPlane/PublishAnalytics";
+pub const TRIGGER_FLEET_UPGRADE_PATH: &str = "/dwara.ControlPlane/TriggerFleetUpgrade";
 
 impl NamedService for ControllerServer {
     const NAME: &'static str = SERVICE_NAME;
@@ -612,6 +729,20 @@ impl TowerService<http::Request<BoxBody>> for ControllerServer {
                         Ok(resp)
                     }
                 }
+                TRIGGER_FLEET_UPGRADE_PATH => {
+                    // REL-15 (#250): unary RPC that triggers a fleet
+                    // rolling upgrade. The controller runs the
+                    // wave-by-wave rollout and returns the result.
+                    let mut grpc = tonic::server::Grpc::new(ProstCodec::<
+                        PbFleetUpgradeResult,
+                        PbTriggerFleetUpgradeRequest,
+                    >::new());
+                    let service = TriggerFleetUpgradeSvc {
+                        server: server.clone(),
+                    };
+                    let resp = grpc.unary(service, req).await;
+                    Ok(resp)
+                }
                 _ => {
                     let resp = http::Response::builder()
                         .status(http::StatusCode::NOT_FOUND)
@@ -671,6 +802,26 @@ impl UnaryService<PbConfigAck> for AckSvc {
     fn call(&mut self, request: Request<PbConfigAck>) -> Self::Future {
         let server = self.server.clone();
         Box::pin(async move { server.ack(request).await })
+    }
+}
+
+/// A boxed future for the fleet-upgrade unary response (REL-15 #250).
+type FleetUpgradeFuture =
+    Pin<Box<dyn Future<Output = Result<Response<PbFleetUpgradeResult>, Status>> + Send + 'static>>;
+
+/// Wrapper that adapts `DwaraControlPlane::trigger_fleet_upgrade` to
+/// `UnaryService<PbTriggerFleetUpgradeRequest>` (REL-15 #250).
+struct TriggerFleetUpgradeSvc {
+    server: ControllerServer,
+}
+
+impl UnaryService<PbTriggerFleetUpgradeRequest> for TriggerFleetUpgradeSvc {
+    type Response = PbFleetUpgradeResult;
+    type Future = FleetUpgradeFuture;
+
+    fn call(&mut self, request: Request<PbTriggerFleetUpgradeRequest>) -> Self::Future {
+        let server = self.server.clone();
+        Box::pin(async move { server.trigger_fleet_upgrade(request).await })
     }
 }
 
@@ -860,6 +1011,32 @@ impl EdgeClient {
             .map_err(EdgeClientError::from)?;
 
         Ok(response.into_inner().accepted)
+    }
+
+    /// REL-15 (#250): trigger a fleet rolling upgrade on the controller.
+    /// Returns the full rollout result (per-wave breakdown + summary).
+    /// `ack_timeout_ms` overrides the controller's default per-wave ack
+    /// wait (0 = use the controller default of 30s).
+    pub async fn trigger_fleet_upgrade(
+        &self,
+        ack_timeout_ms: u64,
+    ) -> Result<PbFleetUpgradeResult, EdgeClientError> {
+        let codec = ProstCodec::<PbTriggerFleetUpgradeRequest, PbFleetUpgradeResult>::new();
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+
+        grpc.ready()
+            .await
+            .map_err(|e| EdgeClientError::Transport(e.to_string()))?;
+
+        let request = Request::new(PbTriggerFleetUpgradeRequest { ack_timeout_ms });
+        let path = http::uri::PathAndQuery::from_static(TRIGGER_FLEET_UPGRADE_PATH);
+
+        let response = grpc
+            .unary(request, path, codec)
+            .await
+            .map_err(EdgeClientError::from)?;
+
+        Ok(response.into_inner())
     }
 }
 

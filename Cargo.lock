@@ -1457,6 +1457,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
 ]

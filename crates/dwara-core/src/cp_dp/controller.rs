@@ -313,6 +313,272 @@ fn compile_config(text: &str) -> Result<String, String> {
     Ok(format!("{:x}", compiled.content_hash()))
 }
 
+// ---------------------------------------------------------------------------
+// REL-15 (#250): Fleet rolling-upgrade automation.
+// ---------------------------------------------------------------------------
+
+/// The result of a fleet rolling-upgrade run.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FleetUpgradeResult {
+    /// Whether the entire rollout completed successfully.
+    pub success: bool,
+    /// The total number of waves processed.
+    pub waves: usize,
+    /// The total number of edges upgraded.
+    pub edges_upgraded: usize,
+    /// The total number of edges that failed to ack.
+    pub edges_failed: usize,
+    /// Per-wave results.
+    pub wave_results: Vec<WaveResult>,
+    /// A human-readable summary.
+    pub summary: String,
+}
+
+/// The result of a single upgrade wave.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct WaveResult {
+    /// The wave name (from the fleet upgrade order config).
+    pub name: String,
+    /// The edge IDs targeted in this wave.
+    pub target_edges: Vec<String>,
+    /// The edge IDs that successfully acked.
+    pub acked: Vec<String>,
+    /// The edge IDs that failed to ack (timeout or applied=false).
+    pub failed: Vec<String>,
+    /// Whether this wave completed successfully.
+    pub success: bool,
+}
+
+/// Compute the upgrade waves from the fleet config and the currently
+/// registered edges. Each wave is a list of edge IDs that match the
+/// wave's label selector. Edges that don't match any wave entry are
+/// collected into a final "catch-all" wave (so no edge is left behind).
+///
+/// `max_concurrent` caps the number of edges per wave chunk. When 0,
+/// all matching edges are in one wave.
+pub fn compute_upgrade_waves(
+    upgrade: &crate::config::FleetUpgradeConfig,
+    edges: &[super::EdgeRegistration],
+) -> Vec<(String, Vec<String>)> {
+    let mut waves: Vec<(String, Vec<String>)> = Vec::new();
+    let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in &upgrade.order {
+        let mut wave_edges: Vec<String> = Vec::new();
+        for edge in edges {
+            if matched.contains(&edge.edge_id) {
+                continue;
+            }
+            // An edge matches when it has ALL the labels in the entry.
+            let matches = entry
+                .labels
+                .iter()
+                .all(|(k, v)| edge.labels.get(k).map(|ev| ev == v).unwrap_or(false));
+            if matches {
+                wave_edges.push(edge.edge_id.clone());
+                matched.insert(edge.edge_id.clone());
+            }
+        }
+        if !wave_edges.is_empty() {
+            // Apply max_concurrent by chunking.
+            if upgrade.max_concurrent > 0 && wave_edges.len() > upgrade.max_concurrent as usize {
+                for chunk in wave_edges.chunks(upgrade.max_concurrent as usize) {
+                    waves.push((entry.name.clone(), chunk.to_vec()));
+                }
+            } else {
+                waves.push((entry.name.clone(), wave_edges));
+            }
+        }
+    }
+
+    // Catch-all: edges that didn't match any order entry.
+    let remaining: Vec<String> = edges
+        .iter()
+        .filter(|e| !matched.contains(&e.edge_id))
+        .map(|e| e.edge_id.clone())
+        .collect();
+    if !remaining.is_empty() {
+        if upgrade.max_concurrent > 0 && remaining.len() > upgrade.max_concurrent as usize {
+            for chunk in remaining.chunks(upgrade.max_concurrent as usize) {
+                waves.push(("catch-all".to_string(), chunk.to_vec()));
+            }
+        } else {
+            waves.push(("catch-all".to_string(), remaining));
+        }
+    }
+
+    waves
+}
+
+/// Run a fleet rolling upgrade. For each wave, publishes a targeted
+/// `ConfigUpdate` to the wave's edges, waits for acks (up to
+/// `ack_timeout`), and proceeds to the next wave. When
+/// `halt_on_failure` is true, stops after the first wave with failures.
+///
+/// This function is ent-gated and runs on the controller. It does not
+/// block the gRPC server; it should be spawned as a tokio task.
+pub async fn run_fleet_upgrade(
+    state: Arc<ControllerState>,
+    server: ControllerServer,
+    upgrade: crate::config::FleetUpgradeConfig,
+    ack_timeout: Duration,
+) -> FleetUpgradeResult {
+    let edges = state.edges();
+    let waves = compute_upgrade_waves(&upgrade, &edges);
+
+    if waves.is_empty() {
+        return FleetUpgradeResult {
+            success: true,
+            waves: 0,
+            edges_upgraded: 0,
+            edges_failed: 0,
+            wave_results: Vec::new(),
+            summary: "no edges registered; nothing to upgrade".to_string(),
+        };
+    }
+
+    let generation = match state.current_generation() {
+        Some(g) => g,
+        None => {
+            return FleetUpgradeResult {
+                success: false,
+                waves: 0,
+                edges_upgraded: 0,
+                edges_failed: 0,
+                wave_results: Vec::new(),
+                summary: "no config generation published; publish a config first".to_string(),
+            };
+        }
+    };
+
+    let mut wave_results = Vec::new();
+    let mut total_upgraded = 0usize;
+    let mut total_failed = 0usize;
+    let mut aborted = false;
+
+    for (wave_name, target_edges) in &waves {
+        if aborted {
+            break;
+        }
+
+        tracing::info!(
+            code = "fleet_upgrade_wave_start",
+            wave = %wave_name,
+            edges = target_edges.len(),
+            "fleet upgrade wave '{}' targeting {} edges",
+            wave_name,
+            target_edges.len()
+        );
+
+        // Publish a targeted config update to this wave's edges.
+        let update = ConfigUpdate {
+            generation: generation.clone(),
+            target_edges: target_edges.clone(),
+        };
+        server.publish_update(update);
+
+        // Wait for acks from all target edges.
+        let mut acked = Vec::new();
+        let mut failed = Vec::new();
+        let deadline = tokio::time::Instant::now() + ack_timeout;
+
+        loop {
+            let unacked = state.unacked_edges(generation.generation);
+            let unacked_set: std::collections::HashSet<&str> =
+                unacked.iter().map(|s| s.as_str()).collect();
+
+            for edge_id in target_edges {
+                if !unacked_set.contains(edge_id.as_str()) {
+                    // Edge has acked (or was never registered).
+                    if !acked.contains(edge_id) {
+                        // Check if the ack was successful.
+                        if let Some(ack) = state.get_ack(edge_id, generation.generation) {
+                            if ack.applied {
+                                acked.push(edge_id.clone());
+                            } else {
+                                failed.push(edge_id.clone());
+                            }
+                        } else {
+                            // No ack record but not in unacked — edge may
+                            // have disconnected. Treat as acked (best
+                            // effort).
+                            acked.push(edge_id.clone());
+                        }
+                    }
+                }
+            }
+
+            let all_done = target_edges
+                .iter()
+                .all(|e| acked.contains(e) || failed.contains(e));
+            if all_done || tokio::time::Instant::now() >= deadline {
+                // Mark remaining as failed (timeout).
+                for edge_id in target_edges {
+                    if !acked.contains(edge_id) && !failed.contains(edge_id) {
+                        failed.push(edge_id.clone());
+                    }
+                }
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let wave_success = failed.is_empty();
+        total_upgraded += acked.len();
+        total_failed += failed.len();
+
+        tracing::info!(
+            code = "fleet_upgrade_wave_done",
+            wave = %wave_name,
+            acked = acked.len(),
+            failed = failed.len(),
+            success = wave_success,
+            "fleet upgrade wave '{}' complete: {} acked, {} failed",
+            wave_name,
+            acked.len(),
+            failed.len()
+        );
+
+        let wr = WaveResult {
+            name: wave_name.clone(),
+            target_edges: target_edges.clone(),
+            acked: acked.clone(),
+            failed: failed.clone(),
+            success: wave_success,
+        };
+        wave_results.push(wr);
+
+        if !wave_success && upgrade.halt_on_failure {
+            tracing::warn!(
+                code = "fleet_upgrade_halted",
+                wave = %wave_name,
+                "fleet upgrade halted: wave '{}' had failures and halt_on_failure is true",
+                wave_name
+            );
+            aborted = true;
+        }
+    }
+
+    let success = !aborted && total_failed == 0;
+    let summary = format!(
+        "fleet upgrade {}: {} waves, {} edges upgraded, {} failed",
+        if success { "complete" } else { "incomplete" },
+        wave_results.len(),
+        total_upgraded,
+        total_failed
+    );
+
+    FleetUpgradeResult {
+        success,
+        waves: wave_results.len(),
+        edges_upgraded: total_upgraded,
+        edges_failed: total_failed,
+        wave_results,
+        summary,
+    }
+}
+
 /// SHA-256 hex hash of a string.
 fn hex_hash(text: &str) -> String {
     let mut hasher = Sha256::new();

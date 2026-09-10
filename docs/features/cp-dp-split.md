@@ -261,6 +261,71 @@ DW-098 adds fleet-wide operational controls to the CP/DP split:
   proceeding to the next wave. This bounds the blast radius of a bad
   config to one wave.
 
+### Fleet rolling-upgrade automation (REL-15, #250)
+
+The `TriggerFleetUpgrade` gRPC RPC and the `dwara upgrade --fleet`
+CLI command automate fleet-wide rolling upgrades. The controller
+reads its attached `fleet.upgrade` policy (skew, order,
+`max_concurrent`, `halt_on_failure`) and drives the rollout
+wave-by-wave:
+
+1. Compute upgrade waves from the fleet config's `order` entries and
+   the currently registered edges. Each entry's label selector matches
+   a subset of edges; edges that don't match any entry are collected
+   into a final "catch-all" wave. `max_concurrent` caps the number of
+   edges per wave chunk.
+2. For each wave, publish a targeted `ConfigUpdate` (with
+   `target_edges` set to the wave's edge IDs) and wait for acks up to
+   the configured timeout.
+3. If `halt_on_failure` is true and any edge in a wave fails to ack
+   (timeout or `applied: false`), the rollout stops. Otherwise it
+   continues to the next wave.
+4. Return the full result: per-wave breakdown (targeted, acked,
+   failed) and a summary.
+
+The CLI command:
+
+```sh
+dwara upgrade --fleet --controller http://127.0.0.1:50051
+```
+
+Connects to the controller's gRPC endpoint (defaults to
+`DWARA_CP_ENDPOINT` or `http://127.0.0.1:50051`), calls
+`TriggerFleetUpgrade`, and prints the per-wave result. The
+`--ack-timeout-ms` flag overrides the controller's default per-wave
+ack wait (30s).
+
+The controller binary attaches the fleet config from the config
+source on startup (parsing the `fleet` block and calling
+`with_fleet_config`). When no fleet block is present, the
+`TriggerFleetUpgrade` RPC returns `failed_precondition`.
+
+Code: `crates/dwara-core/src/cp_dp/controller.rs`
+(`compute_upgrade_waves`, `run_fleet_upgrade`),
+`crates/dwara-core/src/cp_dp/transport.rs` (`TriggerFleetUpgrade`
+RPC, `PbTriggerFleetUpgradeRequest`, `PbFleetUpgradeResult`),
+`crates/dwara-cli/src/main.rs` (`run_upgrade_fleet`),
+`crates/dwara-cli/src/bin/dwara_controller.rs` (fleet config
+attachment).
+
+```mermaid
+sequenceDiagram
+    participant O as Operator (dwara CLI)
+    participant C as Controller (dwara-controller)
+    participant E1 as Edge wave 1 (canary)
+    participant E2 as Edge wave 2 (zone-b)
+
+    O->>C: TriggerFleetUpgrade RPC
+    C->>C: compute_upgrade_waves(fleet.upgrade, edges)
+    C->>E1: ConfigUpdate (target_edges = wave 1)
+    E1-->>C: ConfigAck (applied = true)
+    C->>C: wave 1 complete (all acked)
+    C->>E2: ConfigUpdate (target_edges = wave 2)
+    E2-->>C: ConfigAck (applied = true)
+    C->>C: wave 2 complete (all acked)
+    C-->>O: PbFleetUpgradeResult (success, 2 waves, 4 upgraded)
+```
+
 Code: `crates/dwara-core/src/cp_dp/mod.rs`
 (`check_edge_version_skew`, `edge_skew_status`),
 `crates/dwara-core/src/cp_dp/transport.rs` (fleet status RPCs),

@@ -70,8 +70,43 @@ fn main() {
     let bind_addr: SocketAddr = args.bind.parse().expect("invalid bind address");
     let config_source = PathBuf::from(args.config_source);
 
-    let config = ControllerConfig::from_env(bind_addr, config_source, args.leader);
-    let runtime = ControllerRuntime::new(config);
+    let config = ControllerConfig::from_env(bind_addr, config_source.clone(), args.leader);
+
+    // REL-15 (#250): parse the config source for a `fleet` block and
+    // attach it to the controller runtime. When present and enabled,
+    // the controller checks edge version skew on registration and the
+    // `TriggerFleetUpgrade` gRPC RPC can drive a wave-by-wave rollout.
+    let runtime = if let Ok(text) = std::fs::read_to_string(&config_source) {
+        match dwara_core::config::parse_gateway(&text) {
+            Ok(gateway) => {
+                if let Some(fleet) = gateway.fleet.clone() {
+                    tracing::info!(
+                        code = "cp_fleet_config_attached",
+                        enabled = fleet.enabled,
+                        "fleet config attached to controller runtime"
+                    );
+                    ControllerRuntime::new(config).with_fleet_config(fleet)
+                } else {
+                    ControllerRuntime::new(config)
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    code = "cp_fleet_config_parse_failed",
+                    error = %e,
+                    "failed to parse config source for fleet block; continuing without fleet config"
+                );
+                ControllerRuntime::new(config)
+            }
+        }
+    } else {
+        tracing::warn!(
+            code = "cp_fleet_config_read_failed",
+            path = %config_source.display(),
+            "failed to read config source for fleet block; continuing without fleet config"
+        );
+        ControllerRuntime::new(config)
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

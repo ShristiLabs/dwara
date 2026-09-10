@@ -458,3 +458,267 @@ async fn ack_returns_ok_not_missing_response_message() {
 
     task.abort();
 }
+
+// ---------------------------------------------------------------------------
+// REL-15 (#250): fleet rolling-upgrade automation tests.
+// ---------------------------------------------------------------------------
+
+/// Unit test: `compute_upgrade_waves` partitions edges by label
+/// selector, respects `max_concurrent` chunking, and collects
+/// unmatched edges into a catch-all wave.
+#[test]
+fn compute_upgrade_waves_partitions_by_label_and_caps_concurrency() {
+    use dwara_core::config::{FleetUpgradeConfig, FleetUpgradeOrderEntry};
+    use dwara_core::cp_dp::controller::compute_upgrade_waves;
+    use dwara_core::cp_dp::EdgeRegistration;
+
+    let mut edges = Vec::new();
+    for i in 0..6 {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(
+            "zone".to_string(),
+            if i < 2 { "a" } else { "b" }.to_string(),
+        );
+        edges.push(EdgeRegistration {
+            edge_id: format!("edge-{i}"),
+            current_generation: 0,
+            version: "0.1.0".to_string(),
+            labels,
+        });
+    }
+    // Two edges with no labels (catch-all).
+    for i in 6..8 {
+        edges.push(EdgeRegistration {
+            edge_id: format!("edge-{i}"),
+            current_generation: 0,
+            version: "0.1.0".to_string(),
+            labels: std::collections::HashMap::new(),
+        });
+    }
+
+    let mut order_a = std::collections::HashMap::new();
+    order_a.insert("zone".to_string(), "a".to_string());
+    let mut order_b = std::collections::HashMap::new();
+    order_b.insert("zone".to_string(), "b".to_string());
+
+    let upgrade = FleetUpgradeConfig {
+        skew: dwara_core::config::VersionSkewPolicyConfig::AllowMinorSkew,
+        order: vec![
+            FleetUpgradeOrderEntry {
+                name: "canary".to_string(),
+                labels: order_a,
+            },
+            FleetUpgradeOrderEntry {
+                name: "zone-b".to_string(),
+                labels: order_b,
+            },
+        ],
+        max_concurrent: 1,
+        halt_on_failure: true,
+    };
+
+    let waves = compute_upgrade_waves(&upgrade, &edges);
+
+    // zone-a has 2 edges, max_concurrent=1 => 2 chunks.
+    // zone-b has 4 edges, max_concurrent=1 => 4 chunks.
+    // catch-all has 2 edges, max_concurrent=1 => 2 chunks.
+    assert_eq!(
+        waves.len(),
+        8,
+        "2+4+2 = 8 wave chunks with max_concurrent=1"
+    );
+
+    // First two waves are canary (zone-a).
+    assert_eq!(waves[0].0, "canary");
+    assert_eq!(waves[0].1.len(), 1);
+    assert_eq!(waves[1].0, "canary");
+    assert_eq!(waves[1].1.len(), 1);
+
+    // Next four waves are zone-b.
+    for w in waves.iter().take(6).skip(2) {
+        assert_eq!(w.0, "zone-b");
+        assert_eq!(w.1.len(), 1);
+    }
+
+    // Last two waves are catch-all.
+    for w in waves.iter().take(8).skip(6) {
+        assert_eq!(w.0, "catch-all");
+        assert_eq!(w.1.len(), 1);
+    }
+}
+
+/// Unit test: `compute_upgrade_waves` with no order entries puts all
+/// edges in a single catch-all wave.
+#[test]
+fn compute_upgrade_waves_no_order_is_single_catch_all() {
+    use dwara_core::config::FleetUpgradeConfig;
+    use dwara_core::cp_dp::controller::compute_upgrade_waves;
+    use dwara_core::cp_dp::EdgeRegistration;
+
+    let edges: Vec<EdgeRegistration> = (0..3)
+        .map(|i| EdgeRegistration {
+            edge_id: format!("edge-{i}"),
+            current_generation: 0,
+            version: "0.1.0".to_string(),
+            labels: std::collections::HashMap::new(),
+        })
+        .collect();
+
+    let upgrade = FleetUpgradeConfig {
+        skew: dwara_core::config::VersionSkewPolicyConfig::AllowMinorSkew,
+        order: vec![],
+        max_concurrent: 0,
+        halt_on_failure: true,
+    };
+
+    let waves = compute_upgrade_waves(&upgrade, &edges);
+    assert_eq!(waves.len(), 1);
+    assert_eq!(waves[0].0, "catch-all");
+    assert_eq!(waves[0].1.len(), 3);
+}
+
+/// Integration test: `TriggerFleetUpgrade` RPC drives a wave-by-wave
+/// rollout. Two edges in zone-a (canary) upgrade first, then two edges
+/// in zone-b. All edges ack successfully.
+#[tokio::test]
+async fn trigger_fleet_upgrade_rolling_waves() {
+    use dwara_core::config::{
+        FleetConfig, FleetUpgradeConfig, FleetUpgradeOrderEntry, VersionSkewPolicyConfig,
+    };
+
+    let state = Arc::new(ControllerState::new());
+    state.become_leader();
+
+    // Publish a generation so the fleet upgrade has something to push.
+    state.publish_generation(test_config_yaml(), "hash-1".to_string());
+
+    // Build fleet config: canary (zone-a) then zone-b, max_concurrent=0
+    // (all matching edges in one wave), halt_on_failure=true.
+    let mut order_a = std::collections::HashMap::new();
+    order_a.insert("zone".to_string(), "a".to_string());
+    let mut order_b = std::collections::HashMap::new();
+    order_b.insert("zone".to_string(), "b".to_string());
+
+    let fleet = FleetConfig {
+        enabled: true,
+        upgrade: Some(FleetUpgradeConfig {
+            skew: VersionSkewPolicyConfig::AllowMinorSkew,
+            order: vec![
+                FleetUpgradeOrderEntry {
+                    name: "canary".to_string(),
+                    labels: order_a,
+                },
+                FleetUpgradeOrderEntry {
+                    name: "zone-b".to_string(),
+                    labels: order_b,
+                },
+            ],
+            max_concurrent: 0,
+            halt_on_failure: true,
+        }),
+        controller_version: Some("0.1.0".to_string()),
+        stale_timeout_secs: 60,
+    };
+
+    let server = ControllerServer::new(Arc::clone(&state)).with_fleet_config(fleet);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpListenerStream::new(listener);
+    let server_clone = server.clone();
+    let _handle =
+        tokio::spawn(async move { serve_controller_with_incoming(server_clone, incoming).await });
+
+    let endpoint = format!("http://{addr}");
+
+    // Connect 4 edges: 2 in zone-a, 2 in zone-b.
+    let mut edge_tasks = Vec::new();
+    for i in 0..4 {
+        let zone = if i < 2 { "a" } else { "b" };
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("zone".to_string(), zone.to_string());
+        let edge_id = format!("edge-{i}");
+        let edge_state = Arc::new(EdgeState::new(&edge_id, "0.1.0"));
+        // Override labels on the registration.
+        let registration = dwara_core::cp_dp::EdgeRegistration {
+            edge_id: edge_id.clone(),
+            current_generation: 0,
+            version: "0.1.0".to_string(),
+            labels,
+        };
+        let client = EdgeClient::connect(&endpoint).await.unwrap();
+        let mut stream = client.stream_config_updates(registration).await.unwrap();
+        let es = Arc::clone(&edge_state);
+        let cl = client.clone();
+        let task = tokio::spawn(async move {
+            while let Some(result) = stream.next().await {
+                if let Ok(pb_update) = result {
+                    if let Ok(update) = ConfigUpdate::try_from(pb_update) {
+                        if es.receive_update(update).is_ok() {
+                            let ack = es.ack_current(true, None);
+                            let _ = cl.ack(ack).await;
+                        }
+                    }
+                }
+            }
+        });
+        edge_tasks.push(task);
+    }
+
+    // Wait for all edges to register.
+    wait_for(Duration::from_secs(5), || async { state.edge_count() == 4 }).await;
+    assert_eq!(state.edge_count(), 4);
+
+    // Trigger the fleet upgrade via the gRPC RPC.
+    let client = EdgeClient::connect(&endpoint).await.unwrap();
+    let result = client
+        .trigger_fleet_upgrade(5000)
+        .await
+        .expect("fleet upgrade RPC should succeed");
+
+    assert!(
+        result.success,
+        "fleet upgrade should succeed: {}",
+        result.summary
+    );
+    assert_eq!(result.waves, 2, "should have 2 waves (canary + zone-b)");
+    assert_eq!(result.edges_upgraded, 4);
+    assert_eq!(result.edges_failed, 0);
+
+    // Wave 0 = canary (zone-a, 2 edges).
+    assert_eq!(result.wave_results[0].name, "canary");
+    assert_eq!(result.wave_results[0].target_edges.len(), 2);
+    assert_eq!(result.wave_results[0].acked.len(), 2);
+    assert!(result.wave_results[0].success);
+
+    // Wave 1 = zone-b (2 edges).
+    assert_eq!(result.wave_results[1].name, "zone-b");
+    assert_eq!(result.wave_results[1].target_edges.len(), 2);
+    assert_eq!(result.wave_results[1].acked.len(), 2);
+    assert!(result.wave_results[1].success);
+
+    for task in edge_tasks {
+        task.abort();
+    }
+}
+
+/// Integration test: `TriggerFleetUpgrade` returns
+/// `failed_precondition` when no fleet config is attached.
+#[tokio::test]
+async fn trigger_fleet_upgrade_no_fleet_config_returns_error() {
+    let state = Arc::new(ControllerState::new());
+    state.become_leader();
+    let (_handle, addr, _server) = spawn_controller(Arc::clone(&state)).await;
+
+    let endpoint = format!("http://{addr}");
+    let client = EdgeClient::connect(&endpoint).await.unwrap();
+    let result = client.trigger_fleet_upgrade(1000).await;
+
+    assert!(result.is_err(), "should fail without fleet config");
+    let err = result.unwrap_err();
+    match err {
+        dwara_core::cp_dp::transport::EdgeClientError::Status(s) => {
+            assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+        }
+        other => panic!("expected Status error, got {other:?}"),
+    }
+}

@@ -135,6 +135,34 @@ The TLS-enabled methods require the tonic `tls` feature (enabled in the
 workspace dependency). The existing plaintext methods remain available
 for compatibility.
 
+## Fleet rolling upgrades
+
+The `dwara upgrade --fleet` command automates fleet-wide rolling
+upgrades by driving the controller's wave-by-wave rollout policy.
+The controller reads its `fleet.upgrade` config block (order,
+`max_concurrent`, `halt_on_failure`) and pushes the current config
+generation to edges in label-selector waves, waiting for acks
+between waves.
+
+```sh
+dwara upgrade --fleet --controller http://127.0.0.1:50051
+```
+
+Flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--controller` | `DWARA_CP_ENDPOINT` or `http://127.0.0.1:50051` | Controller gRPC endpoint |
+| `--ack-timeout-ms` | `0` (controller default: 30s) | Per-wave ack timeout |
+
+The command prints a per-wave breakdown (targeted, acked, failed)
+and exits 0 on success, 1 on failure. When `halt_on_failure` is true
+in the fleet config, the controller stops after the first wave with
+failures.
+
+The controller must have a `fleet` block in its config source for
+the RPC to succeed; otherwise it returns `failed_precondition`.
+
 ## Not yet implemented
 
 - Production leader election (Redis/etcd distributed lock or Raft)

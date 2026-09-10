@@ -117,15 +117,34 @@ enum Command {
         #[command(subcommand)]
         kind: TfKind,
     },
-    /// Trigger a zero-downtime binary upgrade (sends SIGUSR2).
+    /// Trigger a zero-downtime binary upgrade (sends SIGUSR2), or
+    /// drive a fleet rolling upgrade via the controller's gRPC API
+    /// (REL-15, ent-only, when `--fleet` is set).
     Upgrade {
         /// PID of the running gateway to signal. If omitted, the PID is
         /// read from `--pid-file` (or the `DWARA_PID_FILE` env var).
+        /// Ignored when `--fleet` is set.
         #[arg(long)]
         pid: Option<u32>,
         /// Path to the gateway's PID file. Defaults to `DWARA_PID_FILE`.
+        /// Ignored when `--fleet` is set.
         #[arg(long)]
         pid_file: Option<String>,
+        /// REL-15 (#250, ent-only): drive a fleet rolling upgrade via
+        /// the controller's gRPC API instead of sending SIGUSR2 to a
+        /// single gateway. When set, `--controller` specifies the
+        /// controller endpoint.
+        #[arg(long)]
+        fleet: bool,
+        /// The controller gRPC endpoint for `--fleet` mode (e.g.
+        /// `http://127.0.0.1:50051`). Defaults to `DWARA_CP_ENDPOINT`
+        /// or `http://127.0.0.1:50051`.
+        #[arg(long)]
+        controller: Option<String>,
+        /// Per-wave ack timeout in milliseconds for `--fleet` mode. 0
+        /// means use the controller's default (30s).
+        #[arg(long, default_value_t = 0)]
+        ack_timeout_ms: u64,
     },
     /// Plugin scaffolding and management (DW-057).
     Plugin {
@@ -866,7 +885,13 @@ fn main() {
             },
         },
         Command::Tf { kind } => run_tf(kind),
-        Command::Upgrade { pid, pid_file } => run_upgrade(pid, pid_file),
+        Command::Upgrade {
+            pid,
+            pid_file,
+            fleet,
+            controller,
+            ack_timeout_ms,
+        } => run_upgrade(pid, pid_file, fleet, controller, ack_timeout_ms),
         Command::Plugin { kind } => match kind {
             PluginKind::New { name, dir } => {
                 match dwara_cli::plugin_scaffold::scaffold(&name, &dir) {
@@ -1005,7 +1030,21 @@ fn run_server(args: &[String]) -> i32 {
 /// takes over with no refused connections. This command only DELIVERS the
 /// signal — the hand-off is asynchronous; watch the gateway logs or the
 /// PID file to confirm the new process is live.
-fn run_upgrade(pid: Option<u32>, pid_file: Option<String>) -> i32 {
+///
+/// REL-15 (#250, ent-only): when `--fleet` is set, this instead connects
+/// to the controller's gRPC API and triggers a wave-by-wave fleet rolling
+/// upgrade. The controller drives the rollout using its attached
+/// `fleet.upgrade` policy (skew, order, max_concurrent, halt_on_failure).
+fn run_upgrade(
+    pid: Option<u32>,
+    pid_file: Option<String>,
+    fleet: bool,
+    controller: Option<String>,
+    ack_timeout_ms: u64,
+) -> i32 {
+    if fleet {
+        return run_upgrade_fleet(controller, ack_timeout_ms);
+    }
     let pid = match pid {
         Some(p) => p,
         None => {
@@ -1050,6 +1089,80 @@ fn run_upgrade(pid: Option<u32>, pid_file: Option<String>) -> i32 {
         eprintln!("upgrade: failed to signal PID {pid}: {err}");
         1
     }
+}
+
+/// REL-15 (#250, ent-only): drive a fleet rolling upgrade via the
+/// controller's gRPC `TriggerFleetUpgrade` RPC. The controller runs the
+/// wave-by-wave rollout and returns the full result.
+#[cfg(feature = "ent")]
+fn run_upgrade_fleet(controller: Option<String>, ack_timeout_ms: u64) -> i32 {
+    use dwara_core::cp_dp::transport::EdgeClient;
+
+    let endpoint = controller
+        .or_else(|| std::env::var("DWARA_CP_ENDPOINT").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:50051".to_string());
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("upgrade --fleet: failed to create runtime: {e}");
+            return 1;
+        }
+    };
+
+    rt.block_on(async move {
+        match EdgeClient::connect(&endpoint).await {
+            Ok(client) => match client.trigger_fleet_upgrade(ack_timeout_ms).await {
+                Ok(result) => {
+                    println!("fleet upgrade: {}", result.summary);
+                    println!(
+                        "  waves: {} | upgraded: {} | failed: {} | success: {}",
+                        result.waves, result.edges_upgraded, result.edges_failed, result.success
+                    );
+                    for wave in &result.wave_results {
+                        let status = if wave.success { "OK" } else { "FAILED" };
+                        println!(
+                            "  wave '{}' [{}]: {} targeted, {} acked, {} failed",
+                            wave.name,
+                            status,
+                            wave.target_edges.len(),
+                            wave.acked.len(),
+                            wave.failed.len()
+                        );
+                    }
+                    if result.success {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(e) => {
+                    eprintln!("upgrade --fleet: controller RPC failed: {e}");
+                    1
+                }
+            },
+            Err(e) => {
+                eprintln!("upgrade --fleet: cannot connect to controller at {endpoint}: {e}");
+                1
+            }
+        }
+    })
+}
+
+/// REL-15 (#250): OSS fallback when `--fleet` is set but the `ent`
+/// feature is not compiled in. The fleet upgrade RPC requires the
+/// CP/DP split (tonic + prost), which is ent-only.
+#[cfg(not(feature = "ent"))]
+fn run_upgrade_fleet(_controller: Option<String>, _ack_timeout_ms: u64) -> i32 {
+    eprintln!(
+        "upgrade --fleet: the fleet rolling-upgrade RPC requires the \
+         enterprise build (tonic + prost). Rebuild with --features ent."
+    );
+    1
 }
 
 /// DW-065: `dwara tf` subcommand dispatch. The tf tool exports/imports

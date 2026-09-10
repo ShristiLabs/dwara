@@ -59,6 +59,9 @@ sha2 = { workspace = true }
 # Optional + ent-gated so the default CLI build never pulls it in.
 # Already a workspace dependency of dwara-bin (MIT OR Apache-2.0).
 tracing-subscriber = { workspace = true, optional = true }
+# REL-15 (#250): tracing macros for the ent controller binary's fleet
+# config attachment logging. Optional + ent-gated.
+tracing = { workspace = true, optional = true }
 # PERF-06 (#171): HTTP/3 (QUIC) load generation in dwara-loadgen. quinn
 # is the QUIC transport, h3 is the HTTP/3 framing, h3-quinn bridges them;
 # rustls + webpki-roots are the TLS stack for the h3 client. All five are
@@ -78,7 +81,7 @@ notify = { workspace = true }
 # `dwara-controller` and `dwara-edge` binaries are compiled. Default
 # OFF: tonic + prost add binary size. Build with
 # `cargo build --features ent`.
-ent = ["dwara-core/ent", "dep:tracing-subscriber"]
+ent = ["dwara-core/ent", "dep:tracing-subscriber", "dep:tracing"]
 
 # DW-024 load generator (see src/loadgen.rs docs).
 [[bin]]
