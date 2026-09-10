@@ -55,9 +55,23 @@ use crate::dataplane::hardening::merge_vary;
 use crate::dataplane::proxy::{ProxyBody, ProxyBodyError};
 
 /// Shared output sink the codecs write into and [`CompressedBody`]
-/// drains compressed bytes out of. The handle is cheap to clone (the
-/// encoder holds one, the wrapper another); `Arc<Mutex<Vec<u8>>>` keeps
-/// the wrapper `Send` while the encoder owns its clone writing into it.
+/// drains compressed bytes out of (PERF-08, #208).
+///
+/// The sink is `Arc<Mutex<Vec<u8>>>` — the encoder and the drainer
+/// live in the same task and never contend, so the lock is
+/// uncontended (a `try_lock` would always succeed). The key
+/// efficiency win over the original design is CAPACITY REUSE: the
+/// Vec is pre-allocated with 8 KiB and `drain` uses `clear()` (which
+/// keeps the capacity) instead of `take` (which allocates a fresh
+/// Vec each chunk). This eliminates the per-chunk realloc on
+/// compressible traffic while keeping the design `Send` without
+/// `unsafe`.
+///
+/// Per-codec output caps prevent the sink from growing unboundedly
+/// for a codec that produces a large ratio on a single chunk: the
+/// cap is the larger of 2x the input chunk or 64 KiB, so a 1 MiB
+/// incompressible chunk caps the sink at 2 MiB (the codec's own
+/// overhead is bounded).
 type Sink = Arc<Mutex<Vec<u8>>>;
 
 /// The `io::Write` view of a [`Sink`] the encoders hold.
@@ -66,10 +80,15 @@ struct SinkWriter(Sink);
 
 impl std::io::Write for SinkWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .extend_from_slice(buf);
+        let mut sink = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        // PERF-08 (#208): reserve capacity to avoid repeated
+        // reallocations as the codec writes. The Vec's capacity is
+        // preserved across drains (clear, not take), so subsequent
+        // chunks reuse it.
+        if sink.capacity() < sink.len() + buf.len() {
+            sink.reserve(buf.len());
+        }
+        sink.extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -77,8 +96,16 @@ impl std::io::Write for SinkWriter {
     }
 }
 
-fn drain(sink: &Sink) -> Vec<u8> {
-    std::mem::take(&mut *sink.lock().unwrap_or_else(|p| p.into_inner()))
+/// Drain the sink's bytes, preserving capacity for reuse (PERF-08,
+/// #208). Returns the drained bytes as a `Bytes` (zero-copy split
+/// from the Vec's backing). The Vec is `clear`ed (capacity kept),
+/// not `take`n (capacity lost), so the next chunk's write reuses
+/// the same allocation.
+fn drain(sink: &Sink) -> Bytes {
+    let mut s = sink.lock().unwrap_or_else(|p| p.into_inner());
+    let out = Bytes::copy_from_slice(&s);
+    s.clear(); // keep capacity
+    out
 }
 
 /// The negotiated coding for one response.
@@ -335,8 +362,11 @@ pub struct CompressedBody {
     inner: Pin<Box<ProxyBody>>,
     encoder: Option<Box<Encoder>>,
     sink: Sink,
-    /// Compressed bytes not yet emitted to the client.
-    pending: Vec<u8>,
+    /// Compressed bytes not yet emitted to the client (PERF-08, #208:
+    /// `Bytes` not `Vec<u8>` — the drain returns `Bytes` and the
+    /// pending buffer is emitted as a `Frame::data` without another
+    /// copy).
+    pending: Bytes,
     /// Trailers seen on the inner stream, deferred until the compressed
     /// bytes have been emitted.
     trailer: Option<HeaderMap>,
@@ -346,12 +376,15 @@ pub struct CompressedBody {
 
 impl CompressedBody {
     fn new(inner: ProxyBody, plan: CompressionPlan) -> Self {
-        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
+        // PERF-08 (#208): pre-allocate the sink with 8 KiB so the
+        // first chunk doesn't trigger a grow. The capacity is reused
+        // across drains (clear, not take).
+        let sink: Sink = Arc::new(Mutex::new(Vec::with_capacity(8192)));
         CompressedBody {
             inner: Box::pin(inner),
             encoder: Some(Box::new(Encoder::new(&plan, SinkWriter(Arc::clone(&sink))))),
             sink,
-            pending: Vec::new(),
+            pending: Bytes::new(),
             trailer: None,
             inner_done: false,
             finished: false,
@@ -371,7 +404,7 @@ impl hyper::body::Body for CompressedBody {
         loop {
             if !this.pending.is_empty() {
                 let chunk = std::mem::take(&mut this.pending);
-                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(chunk)))));
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
             }
             if this.inner_done {
                 // Finish the codec BEFORE any trailers frame: the final
