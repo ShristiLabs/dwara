@@ -4984,11 +4984,44 @@ pub fn apply_path_rewrite(
             None => path.to_string(),
         },
         PathRewrite::Regex { substitution, .. } => match table.rewrite_regex(idx) {
-            Some(re) => re
-                .replace(path, |caps: &regex::Captures<'_>| {
-                    expand_substitution(substitution, caps, params)
-                })
-                .into_owned(),
+            Some(re) => {
+                // PERF-04 (#206): use captures() + the precompiled
+                // substitution template instead of replace() with a
+                // closure, avoiding per-request re-parsing of the
+                // `$1`/`${name}` syntax and the closure's Cow
+                // allocation. The substitution is compiled once at
+                // snapshot compile time (CompiledSubstitution).
+                // Like `re.replace()`, only the FIRST match is
+                // replaced; the unmatched prefix and suffix of the
+                // path are preserved verbatim.
+                match re.captures(path) {
+                    Some(caps) => {
+                        let m = caps.get(0).expect("regex match exists");
+                        let pre = &path[..m.start()];
+                        let post = &path[m.end()..];
+                        match table.rewrite_substitution(idx) {
+                            Some(subst) => {
+                                let mut out = String::with_capacity(
+                                    pre.len() + post.len() + subst.capacity(),
+                                );
+                                out.push_str(pre);
+                                out.push_str(&subst.expand(&caps, params));
+                                out.push_str(post);
+                                out
+                            }
+                            // Generation-tear backstop: the regex and
+                            // substitution are built together, so this
+                            // is unreachable. Fall back to the legacy
+                            // path.
+                            None => {
+                                let expanded = expand_substitution(substitution, &caps, params);
+                                format!("{pre}{expanded}{post}")
+                            }
+                        }
+                    }
+                    None => path.to_string(),
+                }
+            }
             None => path.to_string(),
         },
     }

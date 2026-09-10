@@ -7975,6 +7975,12 @@ pub struct RouteTable {
     /// the action carries no regex rewrite). Validation guarantees these
     /// compiled at config-compile time, never at request time.
     rewrite_regexes: Vec<Option<regex::Regex>>,
+    /// Precompiled `path_rewrite.regex.substitution` per route index
+    /// (PERF-04, #206): the `$1`/`${name}` syntax is parsed into
+    /// literal segments and capture references ONCE at compile time so
+    /// the request path never re-parses the substitution string. `None`
+    /// where the route carries no regex rewrite.
+    rewrite_substitutions: Vec<Option<CompiledSubstitution>>,
     /// Precompiled CORS origin matcher per route index (DW-027): `None`
     /// where the route carries no `cors` block, mirroring
     /// `Route::cors` exactly so the proxy's config read and matcher
@@ -8031,6 +8037,7 @@ impl RouteTable {
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
             rewrite_regexes: Vec::new(),
+            rewrite_substitutions: Vec::new(),
             cors_origins: Vec::new(),
             compression_types: Vec::new(),
             deprecations: Vec::new(),
@@ -8079,6 +8086,12 @@ impl RouteTable {
     /// carries a `path_rewrite.regex`.
     pub fn rewrite_regex(&self, idx: usize) -> Option<&regex::Regex> {
         self.rewrite_regexes.get(idx).and_then(|r| r.as_ref())
+    }
+
+    /// The precompiled substitution template for `idx` (PERF-04, #206),
+    /// if the route's proxy action carries a `path_rewrite.regex`.
+    pub fn rewrite_substitution(&self, idx: usize) -> Option<&CompiledSubstitution> {
+        self.rewrite_substitutions.get(idx).and_then(|s| s.as_ref())
     }
 
     /// The precompiled CORS origin matcher for route `idx` (`None`: the
@@ -8157,6 +8170,142 @@ impl RouteTable {
     /// mirroring `gateway().routes[idx].action.mock.body_file`).
     pub fn mock_body(&self, idx: usize) -> Option<&bytes::Bytes> {
         self.mock_bodies.get(idx).and_then(|b| b.as_ref())
+    }
+}
+
+/// A precompiled `path_rewrite.regex.substitution` (PERF-04, #206).
+///
+/// The `$1` / `${name}` substitution syntax is parsed ONCE at snapshot
+/// compile time into a list of segments — literal text or a named/numeric
+/// reference — so the per-request rewrite path never re-parses the
+/// substitution string. Each segment is expanded against the regex
+/// captures (and the route's `{param}` template captures) in a single
+/// pass with a pre-sized `String`.
+#[derive(Debug, Clone)]
+pub struct CompiledSubstitution {
+    segments: Vec<SubstSegment>,
+    /// The precomputed output capacity: sum of all literal segment
+    /// lengths, so the result `String` is allocated once at the right
+    /// size (capture expansions add to it, but the literal baseline is
+    /// the dominant cost for most templates).
+    capacity: usize,
+}
+
+/// One segment of a compiled substitution template.
+#[derive(Debug, Clone)]
+enum SubstSegment {
+    /// Literal text copied verbatim.
+    Literal(String),
+    /// A numeric capture-group reference (`$1`, `${1}`).
+    Numeric(usize),
+    /// A named reference (`$name`, `${name}`): resolved against the
+    /// regex's named capture groups first, then the route's `{param}`
+    /// template captures.
+    Named(String),
+}
+
+impl CompiledSubstitution {
+    /// Parse a `$1` / `${name}` substitution string into segments.
+    /// Mirrors the grammar of `expand_substitution` in
+    /// `dataplane/proxy.rs` exactly: `$` followed by digits, an
+    /// identifier, or `{...}`; a lone `$` (end of string or followed
+    /// by a non-identifier char) is kept literally.
+    pub fn compile(substitution: &str) -> Self {
+        let mut segments = Vec::new();
+        let mut capacity = 0;
+        let mut rest = substitution;
+        let mut literal = String::new();
+
+        while let Some(dollar) = rest.find('$') {
+            literal.push_str(&rest[..dollar]);
+            let after = &rest[dollar + 1..];
+            if after.is_empty() {
+                literal.push('$');
+                rest = after;
+                break;
+            }
+            if let Some(braced) = after.strip_prefix('{') {
+                match braced.find('}') {
+                    Some(end) => {
+                        if !literal.is_empty() {
+                            capacity += literal.len();
+                            segments.push(SubstSegment::Literal(std::mem::take(&mut literal)));
+                        }
+                        let name = &braced[..end];
+                        if let Ok(i) = name.parse::<usize>() {
+                            segments.push(SubstSegment::Numeric(i));
+                        } else {
+                            segments.push(SubstSegment::Named(name.to_string()));
+                        }
+                        rest = &braced[end + 1..];
+                    }
+                    None => {
+                        literal.push('$');
+                        rest = after;
+                    }
+                }
+            } else {
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                if end == 0 {
+                    literal.push('$');
+                    rest = after;
+                } else {
+                    if !literal.is_empty() {
+                        capacity += literal.len();
+                        segments.push(SubstSegment::Literal(std::mem::take(&mut literal)));
+                    }
+                    let name = &after[..end];
+                    if let Ok(i) = name.parse::<usize>() {
+                        segments.push(SubstSegment::Numeric(i));
+                    } else {
+                        segments.push(SubstSegment::Named(name.to_string()));
+                    }
+                    rest = &after[end..];
+                }
+            }
+        }
+        literal.push_str(rest);
+        if !literal.is_empty() {
+            capacity += literal.len();
+            segments.push(SubstSegment::Literal(literal));
+        }
+
+        CompiledSubstitution { segments, capacity }
+    }
+
+    /// Expand against regex captures and route `{param}` captures.
+    /// The result `String` is pre-sized to the compiled literal
+    /// capacity, so the common case (a template with mostly literal
+    /// text and a few short capture refs) allocates exactly once.
+    pub fn expand(&self, caps: &regex::Captures<'_>, params: &[(String, String)]) -> String {
+        let mut out = String::with_capacity(self.capacity);
+        for seg in &self.segments {
+            match seg {
+                SubstSegment::Literal(s) => out.push_str(s),
+                SubstSegment::Numeric(i) => {
+                    if let Some(m) = caps.get(*i) {
+                        out.push_str(m.as_str());
+                    }
+                }
+                SubstSegment::Named(name) => {
+                    if let Some(m) = caps.name(name) {
+                        out.push_str(m.as_str());
+                    } else if let Some((_, v)) = params.iter().find(|(n, _)| n == name) {
+                        out.push_str(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The precomputed literal capacity (PERF-04, #206): the sum of
+    /// all literal segment lengths, so a caller building a larger
+    /// string around the expansion can pre-size its own output.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -8344,6 +8493,8 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
     let mut regex_patterns = Vec::new();
     let mut regex_indices = Vec::new();
     let mut rewrite_regexes: Vec<Option<regex::Regex>> = vec![None; gateway.routes.len()];
+    let mut rewrite_substitutions: Vec<Option<CompiledSubstitution>> =
+        vec![None; gateway.routes.len()];
 
     for (idx, route) in gateway.routes.iter().enumerate() {
         let path = &route.r#match.path;
@@ -8372,7 +8523,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             }
         }
         if let RouteAction::Proxy {
-            rewrite: Some(PathRewrite::Regex { pattern, .. }),
+            rewrite:
+                Some(PathRewrite::Regex {
+                    pattern,
+                    substitution,
+                }),
         } = &route.action
         {
             let compiled = regex::Regex::new(pattern).map_err(|e| CompileError::InvalidRegex {
@@ -8381,6 +8536,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                 message: e.to_string(),
             })?;
             rewrite_regexes[idx] = Some(compiled);
+            rewrite_substitutions[idx] = Some(CompiledSubstitution::compile(substitution));
         }
     }
 
@@ -8533,6 +8689,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             regex_set,
             regex_indices,
             rewrite_regexes,
+            rewrite_substitutions,
             cors_origins,
             compression_types,
             deprecations,
