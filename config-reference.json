@@ -4217,26 +4217,8 @@
           "format": "uint32",
           "minimum": 0
         },
-        "http2_initial_stream_window_size": {
-          "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. (PERF-11, #244)",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
         "per_endpoint_cap": {
           "description": "SCALE-10 (#189): per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "http2_initial_connection_window_size": {
-          "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n(PERF-11, #244)",
           "type": [
             "integer",
             "null"
@@ -4251,6 +4233,24 @@
             "null"
           ],
           "format": "uint64",
+          "minimum": 0
+        },
+        "http2_initial_stream_window_size": {
+          "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. (PERF-11, #244)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "http2_initial_connection_window_size": {
+          "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n(PERF-11, #244)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
           "minimum": 0
         }
       },

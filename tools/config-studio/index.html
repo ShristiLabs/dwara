@@ -340,6 +340,28 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     }
    ]
   },
+  "default_security_headers": {
+   "description": "Gateway-level default security headers baseline:\napplied to EVERY route that does not carry its own\n`security_headers` block and has not set\n`security_headers_opt_out: true`. Fail-secure defaults: a\nroute with no `security_headers` block inherits this posture\nrather than shipping without HSTS/nosniff. A route that needs\nto disable a header from the default sets its own\n`security_headers` block (which fully replaces the default\nfor that route), or sets `security_headers_opt_out: true` to\nopt out entirely. See [`SecurityHeaders`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/SecurityHeaders"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
+  "waf": {
+   "description": ": Global WAF policy with CRS-compatible rules.\nWhen enabled, the rules are evaluated on every request\n(regardless of route-level WAF config). The anomaly score is\naccumulated across all matching rules; the request is blocked\nwhen the score exceeds the threshold. See [`GlobalWaf`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/GlobalWaf"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
   "trusted_proxies": {
    "description": "IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims\nare trusted (gateway-level; the direct connection peer must be in\nthis list for an inbound XFF chain to be preserved and extended).\nEach entry must be an IP address (e.g. `10.1.2.3`) or a CIDR\n(e.g. `10.0.0.0/8`); anything else fails validation. Empty (the\ndefault) trusts nobody: every proxied request carries an XFF of\nexactly the direct peer, and inbound XFF values are discarded.",
    "type": "array",
@@ -1284,6 +1306,10 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "type": "null"
       }
      ]
+    },
+    "security_headers_opt_out": {
+     "description": "Opt out of the gateway-level `default_security_headers`\nbaseline: when true, a route with no\n`security_headers` block ships WITHOUT the gateway's default\nsecurity headers. A route that carries its own\n`security_headers` block always uses it (the block fully\nreplaces the default); this flag is for the rare route that\ndeliberately needs no security headers at all. Default:\nfalse (inherit the default when present).",
+     "type": "boolean"
     },
     "masking": {
      "description": "Response field masking:\nredacts the named RFC 6901 JSON pointers from the route's\nresponses \u2014 the floor `fields` for every consumer, plus the\n`groups` additions for members of each consumer group \u2014 before\nany other body-handling stage. The redaction is fail-closed: a\nresponse the gateway cannot prove clean (encoded, non-JSON,\nover the cap, unparseable, or missing a configured pointer)\nanswers 502, never a passthrough. See [`Masking`].",
@@ -3510,6 +3536,10 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ]
     },
+    "use_system_roots": {
+     "description": ": when true, the upstream's TLS connections trust the\nOS-native root CA store (loaded via `rustls-native-certs`) INSTEAD\nof the bundled webpki root set. Useful in deployments whose\nprivate CAs are provisioned through the host's trust store (e.g.\ncorporate PKI, cloud metadata CAs). Mutually exclusive with\n`trusted_ca_file` (validation rejects a configuration that sets\nboth). Only meaningful for the TLS protocols (`https`/`http2`/`h3`)\n\u2014 no TLS is negotiated toward `http1` endpoints, so validation\nrejects that combination. Active health probes for this upstream\nverify against the same roots. Defaults to `false` (webpki roots).",
+     "type": "boolean"
+    },
     "endpoints": {
      "description": "Static endpoint list for this upstream. When `dns_discovery` is\npresent, this becomes the initial/fallback set (used until the\nfirst DNS resolution completes and as a fallback when DNS fails\nand `fail_open` is true); it may be empty. When `dns_discovery`\nis absent, this is the complete endpoint set and must be\nnon-empty (validation rejects an empty list).",
      "type": "array",
@@ -3872,6 +3902,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "format": "uint32",
      "minimum": 0,
      "default": 1
+    },
+    "recovery_ramp_ms": {
+     "description": "Recovery ramp window in milliseconds. When > 0,\nan endpoint that recovers from ejection (a half-open probe\nsucceeds) does NOT immediately return to full traffic. Instead\nit ramps its effective weight from a floor (1) to its\nconfigured weight over this window, reducing the blast radius\nof a partial recovery (the endpoint may still be slow or\npartially degraded). Default 0 = no ramp (v1 behavior: a\nsuccessful probe restores full weight immediately).",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0,
+     "default": 0
+    },
+    "body_completion_inflight": {
+     "description": "Whether the in-flight counter is held until the response body\ncompletes. Default false: the in-flight counter\nis released when response headers resolve (v1 behavior). When\ntrue, the counter is held until the body stream ends or is\ndropped, giving `least_requests`, `random`, and `peak_ewma` a\nmore accurate view of actual endpoint load. The trade-off is a\nslightly higher in-flight count under streaming workloads.",
+     "type": "boolean"
     }
    },
    "additionalProperties": false
@@ -3934,6 +3975,11 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "description": "HTTP/1.1 GET to `path`; success = 2xx.",
      "type": "string",
      "const": "http"
+    },
+    {
+     "description": "HTTP/2 GET to `path` over a pooled H2 connection;\nfor HTTP/2-only and gRPC upstreams that refuse HTTP/1.1 on a\nseparate connection. Success = 2xx.",
+     "type": "string",
+     "const": "http2"
     },
     {
      "description": "TCP connect within the timeout.",
@@ -4023,6 +4069,13 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ],
      "format": "uint64",
      "minimum": 0
+    },
+    "buffer_first_frame_bytes": {
+     "description": "Streaming failover first-frame buffer cap in bytes.\nWhen > 0, the proxy buffers up to this many bytes of the upstream\nresponse body BEFORE forwarding any bytes to the client. If the\nupstream fails (connection reset, read timeout, framing error)\nbefore the buffer fills or the body completes, the proxy can\nstill retry the request to a different endpoint \u2014 the client has\nnot yet received any bytes, so the response is not committed.\nOnce the buffer fills (or the body completes), the buffered\nprefix is flushed to the client and the rest of the body streams\nframe-by-frame (the stream is then committed; a later mid-body\nfailure is terminal, as in v1). Default 0 = no first-frame\nbuffering (v1 behavior: the response is committed as soon as\nheaders resolve). Requires `attempts > 0` and\n`buffer_max_bytes > 0` (the request body must be replayable).",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0,
+     "default": 0
     }
    },
    "additionalProperties": false
@@ -4434,26 +4487,8 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "format": "uint32",
      "minimum": 0
     },
-    "http2_initial_stream_window_size": {
-     "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. ",
-     "type": [
-      "integer",
-      "null"
-     ],
-     "format": "uint32",
-     "minimum": 0
-    },
     "per_endpoint_cap": {
      "description": ": per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
-     "type": [
-      "integer",
-      "null"
-     ],
-     "format": "uint32",
-     "minimum": 0
-    },
-    "http2_initial_connection_window_size": {
-     "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n",
      "type": [
       "integer",
       "null"
@@ -4468,6 +4503,24 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ],
      "format": "uint64",
+     "minimum": 0
+    },
+    "http2_initial_stream_window_size": {
+     "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. ",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "http2_initial_connection_window_size": {
+     "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
      "minimum": 0
     }
    },
@@ -5159,6 +5212,125 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     }
    ]
   },
+  "GlobalWaf": {
+   "description": ": Global WAF policy with CRS-compatible rules. When\nenabled, the rules are evaluated on every request (regardless of\nroute-level WAF config). The anomaly score is accumulated across\nall matching rules; the request is blocked when the score exceeds\nthe threshold. Rule exclusions can disable specific rules by ID or\ntag. The paranoia level controls which rules are active (1 =\ndefault, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).",
+   "type": "object",
+   "properties": {
+    "enabled": {
+     "description": "Master switch. Default false.",
+     "type": "boolean"
+    },
+    "dry_run": {
+     "description": "Audit-log-only mode (same semantics as RouteWaf::dry_run).",
+     "type": "boolean"
+    },
+    "paranoia_level": {
+     "description": "Paranoia level (1-4). Rules with a higher paranoia level than\nthis are skipped. Default 1.",
+     "type": "integer",
+     "format": "uint8",
+     "minimum": 0,
+     "maximum": 255
+    },
+    "anomaly_threshold": {
+     "description": "Anomaly score threshold for blocking. A request is blocked\nwhen the sum of matching rule severities reaches this value.\nDefault 5 (critical rules block immediately, warnings need\nmultiple hits).",
+     "type": "integer",
+     "format": "uint32",
+     "minimum": 0
+    },
+    "max_body_inspect_bytes": {
+     "description": "Maximum body bytes to inspect (same semantics as\nRouteWaf::max_body_inspect_bytes). Default 131072.",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0
+    },
+    "rules": {
+     "description": "CRS-compatible rules to evaluate.",
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/CrsRule"
+     }
+    },
+    "exclude_rule_ids": {
+     "description": "Rule IDs to exclude (skip even if the rule is in the rules\nlist). Useful for tuning false positives.",
+     "type": "array",
+     "items": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+     }
+    },
+    "exclude_tags": {
+     "description": "Tags to exclude (skip all rules carrying any of these tags).",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "additionalProperties": false
+  },
+  "CrsRule": {
+   "description": ": A single OWASP CRS-compatible WAF rule. Each rule\nhas a numeric ID (CRS convention: 9xxxx), a severity level, a\nphase (1 = request headers, 2 = request body), a list of tags, a\nregex pattern, and the inspection targets to apply the pattern\nto. Rules are evaluated in order; matching rules add their\nseverity to the request's anomaly score. The request is blocked\nwhen the score exceeds the configured threshold.",
+   "type": "object",
+   "properties": {
+    "id": {
+     "description": "Unique rule ID (CRS convention: 9xxxx). Used for exclusions\nand logging.",
+     "type": "integer",
+     "format": "uint32",
+     "minimum": 0
+    },
+    "severity": {
+     "description": "Rule severity: 1 = critical, 2 = warning, 3 = notice, 4 = info.\nHigher severity contributes more to the anomaly score.",
+     "type": "integer",
+     "format": "uint8",
+     "minimum": 0,
+     "maximum": 255,
+     "default": 2
+    },
+    "phase": {
+     "description": "Evaluation phase: 1 = request headers (path, query, headers),\n2 = request body. Default 1.",
+     "type": "integer",
+     "format": "uint8",
+     "minimum": 0,
+     "maximum": 255,
+     "default": 1
+    },
+    "tags": {
+     "description": "Tags for grouping and exclusion (e.g. \"OWASP_CRS\", \"SQL_INJECTION\").",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "pattern": {
+     "description": "The regex pattern to match against the target values.",
+     "type": "string"
+    },
+    "targets": {
+     "description": "Which request parts to inspect: \"path\", \"query\", \"header\",\n\"headers\" (all selected headers), \"body\". Default: [\"path\", \"query\"].",
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "default": [
+      "path",
+      "query"
+     ]
+    },
+    "transformations": {
+     "description": "Optional list of transformations to apply before matching\n(e.g. \"lowercase\", \"url_decode\", \"html_entity_decode\"). Default: [].",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "id",
+    "pattern"
+   ]
+  },
   "JwtProvider": {
    "description": "One JWT verification provider.",
    "type": "object",
@@ -5223,6 +5395,15 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     },
     "retired_key_grace_secs": {
      "description": "How long a key REMOVED from a fresh JWKS fetch keeps verifying, in seconds (default 86400 = 24 h; 0 disables). The\ndual-validity window for JWKS rotation: issuers drop the old\nkey from their JWKS the moment the new one appears, while\npreviously-issued tokens still carry the old `kid` \u2014 during\nthis grace the gateway honors the immediately-previous key set\nfor kids the fresh set no longer carries. Only ONE previous set\nis retained (rotation is one step at a time). Validation caps\nthe value at 7 days (604800).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "stale_on_error_secs": {
+     "description": "How long to serve stale (cached) keys after a JWKS fetch failure, in seconds (default: same as `refresh_secs`,\ncapped at 300). When a JWKS fetch fails, the cached key set\nkeeps serving for this duration before a new fetch is attempted,\nso a transient JWKS provider outage does not cascade into auth\nfailures. 0 disables stale-on-error (a fetch failure surfaces\nimmediately when the cache is empty; when the cache is non-empty\nthe existing degraded-mode behavior applies).",
      "type": [
       "integer",
       "null"
@@ -5550,6 +5731,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "type": "null"
       }
      ]
+    },
+    "sampled_degradation": {
+     "description": ": sampled degradation under channel pressure. When\nthe analytics channel's fill ratio exceeds `high_watermark`,\nthe offer path probabilistically drops records (keeping 1 in\n`sample_rate`) BEFORE the channel fills, so a sustained burst\ndegrades to sampled telemetry rather than a hard drop cliff.\nBelow `low_watermark` every record is kept. Defaults to off\n(no sampling); when enabled, `high_watermark` must be >\n`low_watermark` and both are in (0.0, 1.0].",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/AnalyticsSampledDegradation"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false,
@@ -5788,6 +5980,31 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "capture_body": {
      "description": "Whether to capture the request body (default false \u2014 PII risk).\nBody capture is off by default; enabling it is an explicit\noperator decision to accept the PII exposure of stored bodies\n(even redacted bodies may carry residual sensitive content).",
      "type": "boolean"
+    }
+   },
+   "additionalProperties": false
+  },
+  "AnalyticsSampledDegradation": {
+   "description": "Sampled degradation config. See\n[`AnalyticsConfig::sampled_degradation`].",
+   "type": "object",
+   "properties": {
+    "high_watermark": {
+     "description": "Channel fill ratio above which sampling kicks in. Must be in\n(0.0, 1.0) and > `low_watermark`.",
+     "type": "number",
+     "format": "double",
+     "default": 0.8
+    },
+    "low_watermark": {
+     "description": "Channel fill ratio below which sampling stops (every record\nkept). Must be in (0.0, 1.0) and < `high_watermark`.",
+     "type": "number",
+     "format": "double",
+     "default": 0.5
+    },
+    "keep_rate": {
+     "description": "Fraction of records to KEEP when sampling (1 in N). 1.0 keeps\nall (no sampling); 0.1 keeps 10%. Must be in (0.0, 1.0].",
+     "type": "number",
+     "format": "double",
+     "default": 0.1
     }
    },
    "additionalProperties": false
