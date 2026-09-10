@@ -43,6 +43,7 @@ fn open_store(dir: &tempfile::TempDir, retention: [i64; 5]) -> std::sync::Arc<Em
         retention,
         1000,
         0,
+    None,
     )
     .unwrap()
 }

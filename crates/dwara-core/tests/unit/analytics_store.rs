@@ -285,7 +285,7 @@ fn record_drops_when_channel_full_and_never_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("full.db");
     let store =
-        EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 100, 0).unwrap();
+        EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 100, 0, None).unwrap();
     // No workers spawned: nothing drains the channel.
     let rec = AccessRecord::new("rid".into(), "GET".into(), "/".into(), "edge".into());
     for _ in 0..5000 {
@@ -306,7 +306,7 @@ async fn writer_flushes_batches_and_drains_on_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("writer.db");
     let store =
-        EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 50, 0).unwrap();
+        EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 50, 0, None).unwrap();
     let (tx, rx) = tokio::sync::watch::channel(());
     let handles = store.spawn_workers(rx);
     for i in 0..25 {

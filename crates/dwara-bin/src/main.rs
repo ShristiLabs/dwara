@@ -916,7 +916,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(|r| r.effective())
                 .unwrap_or(dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS);
             let flush = cfg.flush_ms.unwrap_or(1000);
-            match dwara_core::analytics::EmbeddedAnalytics::open(&cfg.path, retention, flush, 0) {
+            // REL-10 (#221): resolve sampled degradation config.
+            let sampled_degradation = cfg.sampled_degradation.as_ref().map(|d| {
+                dwara_core::analytics::SampledDegradation::from_config(
+                    d.high_watermark,
+                    d.low_watermark,
+                    d.keep_rate,
+                )
+            });
+            match dwara_core::analytics::EmbeddedAnalytics::open(
+                &cfg.path,
+                retention,
+                flush,
+                0,
+                sampled_degradation,
+            ) {
                 Ok(store) => {
                     // DW-092: attach live in-process sketches when the
                     // config carries a `live_sketches` block (default

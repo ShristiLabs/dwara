@@ -55,7 +55,7 @@ pub mod rollup;
 pub mod schema;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
@@ -66,6 +66,28 @@ use crate::observability::AccessRecord;
 /// a burst of completions (or a briefly stalled writer transaction)
 /// queues rather than drops; drops are counted and throttled-logged.
 const CHANNEL_CAP: usize = 4096;
+
+/// REL-10 (#221): sampled degradation parameters, resolved from
+/// `AnalyticsConfig::sampled_degradation` at store build time. Stored
+/// inline in `EmbeddedAnalytics` so the offer path reads them without
+/// indirection.
+#[derive(Debug, Clone, Copy)]
+pub struct SampledDegradation {
+    high_watermark: f64,
+    low_watermark: f64,
+    keep_rate: f64,
+}
+
+impl SampledDegradation {
+    /// Build from the config-level struct.
+    pub fn from_config(high_watermark: f64, low_watermark: f64, keep_rate: f64) -> Self {
+        Self {
+            high_watermark,
+            low_watermark,
+            keep_rate,
+        }
+    }
+}
 
 /// Writer batch flush bound (records) — with the flush tick, whichever
 /// comes first.
@@ -768,6 +790,31 @@ pub struct EmbeddedAnalytics {
     flush_ms: u64,
     /// Records dropped on a full channel (the never-block counter).
     dropped: AtomicU64,
+    /// REL-10 (#221): records dropped by sampled degradation (the
+    /// probabilistic pre-full drop). Counted separately from `dropped`
+    /// so an operator can distinguish "channel was full" from
+    /// "sampling kicked in to avoid filling the channel".
+    sampled_dropped: AtomicU64,
+    /// REL-10 (#221): sampled degradation config. None = no sampling
+    /// (the pre-#221 behavior: keep everything until the channel is
+    /// full, then drop-and-count). When set, the offer path checks the
+    /// channel fill ratio and probabilistically drops records above
+    /// `high_watermark` to avoid a hard drop cliff.
+    sampled_degradation: Option<SampledDegradation>,
+    /// REL-10 (#221): in-flight record count (approximate). Incremented
+    /// on a successful `try_send` and decremented when the writer
+    /// drains a batch. The tokio `mpsc::Sender` does not expose a
+    /// len/capacity query, so we track it ourselves to compute the fill
+    /// ratio for sampled degradation. Approximate under concurrency
+    /// (the offer path reads it without a lock); the sampling decision
+    /// is probabilistic anyway, so a stale read only shifts the
+    /// threshold by one record.
+    in_flight: AtomicUsize,
+    /// REL-10 (#221): hysteresis flag — true when sampling is active.
+    /// Set when the fill ratio crosses `high_watermark`; cleared when
+    /// it drops below `low_watermark`. Prevents flapping around the
+    /// threshold.
+    sampling_active: AtomicBool,
     /// DW-092: live in-process sketches (sub-second-freshness per-route
     /// rolling window). None when `analytics.live_sketches` is absent
     /// or disabled — the `GET /analytics/live` endpoint answers
@@ -794,6 +841,7 @@ impl EmbeddedAnalytics {
         retention_ms: [i64; 5],
         flush_ms: u64,
         prompt_log_retention_ms: i64,
+        sampled_degradation: Option<SampledDegradation>,
     ) -> rusqlite::Result<Arc<Self>> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -838,6 +886,10 @@ impl EmbeddedAnalytics {
             retention_ms,
             flush_ms,
             dropped: AtomicU64::new(0),
+            sampled_dropped: AtomicU64::new(0),
+            sampled_degradation,
+            in_flight: AtomicUsize::new(0),
+            sampling_active: AtomicBool::new(false),
             live: Mutex::new(None),
             insights: Mutex::new(None),
         }))
@@ -907,6 +959,12 @@ impl EmbeddedAnalytics {
                         }
                     };
                     if drained {
+                        // REL-10 (#221): decrement the in-flight
+                        // counter by the batch size so the offer path's
+                        // fill-ratio check stays accurate.
+                        store
+                            .in_flight
+                            .fetch_sub(batch.len(), Ordering::Relaxed);
                         store.flush(&batch);
                         batch.clear();
                     }
@@ -1826,6 +1884,14 @@ impl EmbeddedAnalytics {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// REL-10 (#221): records dropped by sampled degradation (the
+    /// probabilistic pre-full drop). Counted separately from
+    /// [`Self::dropped_records`] so an operator can distinguish "channel
+    /// was full" from "sampling kicked in to avoid filling the channel".
+    pub fn dropped_sampled_records(&self) -> u64 {
+        self.sampled_dropped.load(Ordering::Relaxed)
+    }
+
     /// Run a short locked access against the store's connection (the
     /// admin read path, and the exports ledger's single-row record
     /// writes). The connection is shared with the writer behind one
@@ -1949,8 +2015,73 @@ impl EmbeddedAnalytics {
 
     /// Offer one raw record to the writer channel; drop-and-count on a
     /// full channel (the never-block policy shared by the hot path and
-    /// the extension-seam impl below).
+    /// the extension-seam impl below). REL-10 (#221): when sampled
+    /// degradation is configured, probabilistically drops records when
+    /// the channel fill ratio is above `high_watermark` to avoid a
+    /// hard drop cliff.
     fn offer(&self, raw: RawRecord) {
+        // REL-10 (#221): sampled degradation. Check the channel fill
+        // ratio and probabilistically drop records above the high
+        // watermark. Hysteresis: once sampling is active, it stays
+        // active until the fill ratio drops below `low_watermark`.
+        if let Some(cfg) = self.sampled_degradation {
+            let in_flight = self.in_flight.load(Ordering::Relaxed) as f64;
+            let fill_ratio = in_flight / CHANNEL_CAP as f64;
+            let mut active = self.sampling_active.load(Ordering::Relaxed);
+            // Update hysteresis state.
+            if !active && fill_ratio > cfg.high_watermark {
+                let _ = self.sampling_active.compare_exchange(
+                    false,
+                    true,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                active = true;
+            } else if active && fill_ratio < cfg.low_watermark {
+                let _ = self.sampling_active.compare_exchange(
+                    true,
+                    false,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                active = false;
+            }
+            if active {
+                // Sample: keep only `keep_rate` fraction of records.
+                // Use a fast thread-local PRNG to avoid lock contention.
+                use std::cell::Cell;
+                thread_local! {
+                    static SAMPLE_RNG: Cell<u64> = const { Cell::new(0x9E3779B97F4A7C15) };
+                }
+                let keep = SAMPLE_RNG.with(|rng| {
+                    let s = rng.get();
+                    // xorshift64 (never returns 0 after the first step).
+                    let mut x = s.wrapping_add(0x9E3779B97F4A7C15) | 1;
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    rng.set(x);
+                    x
+                });
+                // Map to [0, 1) and compare against keep_rate.
+                let unit = (keep >> 11) as f64 / (1u64 << 53) as f64;
+                if unit >= cfg.keep_rate {
+                    // Drop this record (sampled).
+                    let n = self.sampled_dropped.fetch_add(1, Ordering::Relaxed);
+                    if n.is_multiple_of(4096) {
+                        tracing::warn!(
+                            code = "analytics_sampled_drop",
+                            total_sampled_dropped = n + 1,
+                            fill_ratio,
+                            keep_rate = cfg.keep_rate,
+                            "analytics channel above high watermark; sampling records \
+                             (never blocking the dataplane)"
+                        );
+                    }
+                    return;
+                }
+            }
+        }
         if self.tx.try_send(raw).is_err() {
             let n = self.dropped.fetch_add(1, Ordering::Relaxed);
             if n.is_multiple_of(4096) {
@@ -1960,6 +2091,9 @@ impl EmbeddedAnalytics {
                     "analytics channel full; dropping records (never blocking the dataplane)"
                 );
             }
+        } else {
+            // Track in-flight for the fill-ratio check.
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
         }
     }
 

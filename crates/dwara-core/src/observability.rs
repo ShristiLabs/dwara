@@ -528,6 +528,10 @@ pub struct Observability {
     /// full or the stream disabled); scrape-time snapshot, same model
     /// as `dwara_events_dropped_total`.
     access_records_dropped: IntGauge,
+    /// REL-10 (#221): access records dropped by sampled degradation
+    /// (probabilistic pre-full drop). Scrape-time snapshot of the
+    /// analytics store's counter.
+    access_records_sampled_dropped: IntGauge,
     /// DW-039: WebSocket policy decisions — a CLOSED label set
     /// (`origin_denied`, `rate_closed`) over the route label space
     /// (config-bounded, the same cardinality class as
@@ -1059,6 +1063,16 @@ impl Observability {
              the stream disabled by the current generation); scrape-time \
              snapshot of the stream's monotonic counter (DW-121) — the \
              never-block posture's honest loss counter.",
+        )
+        .expect("valid metric definition");
+        let access_records_sampled_dropped = IntGauge::new(
+            "dwara_access_records_sampled_dropped_total",
+            "Access records dropped by sampled degradation (REL-10, #221): \
+             records probabilistically dropped when the analytics channel \
+             fill ratio exceeded the high watermark, before the channel \
+             was full. Scrape-time snapshot of the analytics store's \
+             monotonic counter — distinct from \
+             dwara_access_records_dropped_total (channel was full).",
         )
         .expect("valid metric definition");
         let split_picks_total = IntCounterVec::new(
@@ -1781,6 +1795,7 @@ impl Observability {
             Box::new(access_records_streamed_total.clone()),
             Box::new(access_records_offered.clone()),
             Box::new(access_records_dropped.clone()),
+            Box::new(access_records_sampled_dropped.clone()),
             Box::new(websocket_policy_total.clone()),
             Box::new(split_picks_total.clone()),
             Box::new(sticky_sessions_total.clone()),
@@ -1881,6 +1896,7 @@ impl Observability {
             access_records_streamed_total,
             access_records_offered,
             access_records_dropped,
+            access_records_sampled_dropped,
             websocket_policy_total,
             split_picks_total,
             sticky_sessions_total,
@@ -2773,6 +2789,14 @@ impl Observability {
     /// [`Self::set_access_records_offered`].
     pub fn set_access_records_dropped(&self, dropped: i64) {
         self.access_records_dropped.set(dropped);
+    }
+
+    /// Set the `dwara_access_records_sampled_dropped_total` gauge
+    /// (REL-10, #221): records dropped by sampled degradation.
+    /// Scrape-time snapshot setter; see
+    /// [`Self::set_access_records_dropped`].
+    pub fn set_access_records_sampled_dropped(&self, dropped: i64) {
+        self.access_records_sampled_dropped.set(dropped);
     }
 
     /// Count one split dispatch decision (DW-040) in

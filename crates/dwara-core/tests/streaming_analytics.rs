@@ -57,6 +57,7 @@ fn attach_analytics_with_live(dp: &Arc<DataPlane>, window_ms: u64) -> AnalyticsH
         DEFAULT_RETENTION_MS,
         100,
         0,
+    None,
     )
     .unwrap();
     let sketches = LiveSketches::new(window_ms);
@@ -89,6 +90,7 @@ fn attach_analytics_with_insights(
         DEFAULT_RETENTION_MS,
         100,
         0,
+    None,
     )
     .unwrap();
     let sketches = LiveSketches::new(window_ms);
@@ -556,6 +558,7 @@ async fn live_sketch_direct_record_and_snapshot() {
         DEFAULT_RETENTION_MS,
         100,
         0,
+    None,
     )
     .unwrap();
     let sketches = LiveSketches::new(60_000);

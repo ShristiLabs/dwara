@@ -1226,6 +1226,47 @@ pub struct AnalyticsConfig {
     /// See [`AnalyticsReplayCapture`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_capture: Option<AnalyticsReplayCapture>,
+    /// REL-10 (#221): sampled degradation under channel pressure. When
+    /// the analytics channel's fill ratio exceeds `high_watermark`,
+    /// the offer path probabilistically drops records (keeping 1 in
+    /// `sample_rate`) BEFORE the channel fills, so a sustained burst
+    /// degrades to sampled telemetry rather than a hard drop cliff.
+    /// Below `low_watermark` every record is kept. Defaults to off
+    /// (no sampling); when enabled, `high_watermark` must be >
+    /// `low_watermark` and both are in (0.0, 1.0].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampled_degradation: Option<AnalyticsSampledDegradation>,
+}
+
+/// Sampled degradation config (REL-10, #221). See
+/// [`AnalyticsConfig::sampled_degradation`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsSampledDegradation {
+    /// Channel fill ratio above which sampling kicks in. Must be in
+    /// (0.0, 1.0) and > `low_watermark`.
+    #[serde(default = "default_sampled_high_watermark")]
+    pub high_watermark: f64,
+    /// Channel fill ratio below which sampling stops (every record
+    /// kept). Must be in (0.0, 1.0) and < `high_watermark`.
+    #[serde(default = "default_sampled_low_watermark")]
+    pub low_watermark: f64,
+    /// Fraction of records to KEEP when sampling (1 in N). 1.0 keeps
+    /// all (no sampling); 0.1 keeps 10%. Must be in (0.0, 1.0].
+    #[serde(default = "default_sampled_keep_rate")]
+    pub keep_rate: f64,
+}
+
+fn default_sampled_high_watermark() -> f64 {
+    0.8
+}
+
+fn default_sampled_low_watermark() -> f64 {
+    0.5
+}
+
+fn default_sampled_keep_rate() -> f64 {
+    0.1
 }
 
 /// Live in-process sketches config (DW-092, `analytics.live_sketches`).

@@ -1408,6 +1408,41 @@ fn validate_analytics(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             ));
         }
     }
+    // REL-10 (#221): sampled degradation validation.
+    if let Some(d) = &a.sampled_degradation {
+        if !(0.0..=1.0).contains(&d.high_watermark) || d.high_watermark <= 0.0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.high_watermark",
+                "high_watermark must be in (0.0, 1.0]",
+            ));
+        }
+        if !(0.0..=1.0).contains(&d.low_watermark) {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.low_watermark",
+                "low_watermark must be in [0.0, 1.0)",
+            ));
+        }
+        if d.low_watermark >= d.high_watermark {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.low_watermark",
+                "low_watermark must be < high_watermark",
+            ));
+        }
+        if !(0.0..=1.0).contains(&d.keep_rate) || d.keep_rate <= 0.0 {
+            issues.push(issue(
+                "gateway",
+                "(root)",
+                "analytics.sampled_degradation.keep_rate",
+                "keep_rate must be in (0.0, 1.0]",
+            ));
+        }
+    }
     if let Some(r) = &a.retention {
         let e = r.effective();
         let names = ["raw_ms", "m1_ms", "m5_ms", "h1_ms", "d1_ms"];

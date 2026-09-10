@@ -1681,6 +1681,7 @@ async fn analytics_dashboard_top_and_query_serve_rollups() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1867,6 +1868,7 @@ async fn analytics_exports_list_is_newest_first_with_default_and_clamped_limits(
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -1960,6 +1962,7 @@ async fn analytics_exports_run_writes_files_ledger_and_a_parsable_statement() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -2071,6 +2074,7 @@ async fn analytics_exports_run_rejects_invalid_requests_without_side_effects() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -2134,6 +2138,7 @@ async fn analytics_exports_run_without_analytics_exports_block_is_400() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     server.dp.set_analytics(Arc::clone(&store));
@@ -2684,6 +2689,7 @@ async fn analytics_live_endpoint_returns_snapshot() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     // Attach live sketches.
@@ -2734,6 +2740,7 @@ async fn analytics_forecast_endpoint_returns_prediction() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     // Attach live sketches + insights engine with forecasting.
@@ -2778,6 +2785,7 @@ async fn analytics_anomalies_endpoint_returns_status() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     // Attach live sketches + insights engine with anomaly detection.
@@ -2822,6 +2830,7 @@ async fn analytics_live_forecast_anomalies_404_without_features() {
         dwara_core::analytics::DEFAULT_RETENTION_MS,
         1000,
         0,
+    None,
     )
     .unwrap();
     // Attach the store WITHOUT live sketches or insights — the
