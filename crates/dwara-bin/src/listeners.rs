@@ -243,8 +243,8 @@ pub(crate) async fn bind_listener(
             ListenerMode::L4 { config, sni_routes }
         }
         ListenerProtocol::Udp => {
-            // DW-103: UDP listeners bind a UDP socket (handled in
-            // main.rs, same skip pattern as H3). bind_listener is never
+            // DP-01 (#234): UDP listeners bind a UDP socket (handled in
+            // main.rs, same pattern as H3). bind_listener is never
             // called for UDP listeners; if reached, return an error.
             return Err(format!(
                 "udp listener {} should not reach bind_listener (handled in main.rs)",

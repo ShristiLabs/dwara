@@ -2560,6 +2560,17 @@ pub struct L4Config {
     /// closes). Bounded by validation to at most 1 hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_s: Option<u64>,
+    /// DP-01 (#234): UDP session idle timeout in seconds. A UDP session
+    /// (per-client upstream socket) that receives no datagrams for this
+    /// duration is evicted from the session table. Default 30s. UDP
+    /// only; ignored for TCP listeners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_timeout_s: Option<u64>,
+    /// DP-01 (#234): maximum concurrent UDP sessions. When the session
+    /// table is full, the oldest idle session is evicted (LRU). Default
+    /// 4096. UDP only; ignored for TCP listeners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
 }
 
 fn default_tls_mode() -> TlsMode {

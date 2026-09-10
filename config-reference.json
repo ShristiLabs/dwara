@@ -779,6 +779,24 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "session_timeout_s": {
+          "description": "DP-01 (#234): UDP session idle timeout in seconds. A UDP session\n(per-client upstream socket) that receives no datagrams for this\nduration is evicted from the session table. Default 30s. UDP\nonly; ignored for TCP listeners.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_sessions": {
+          "description": "DP-01 (#234): maximum concurrent UDP sessions. When the session\ntable is full, the oldest idle session is evicted (LRU). Default\n4096. UDP only; ignored for TCP listeners.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         }
       },
       "additionalProperties": false
