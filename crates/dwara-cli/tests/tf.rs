@@ -357,6 +357,7 @@ fn tfstate_with_consumer_round_trips() {
         authorization: None,
         quotas: None,
         ai_logging: None,
+        agent: None,
     });
     let state = gateway_to_state(&gw);
     let json = state_to_json(&state).unwrap();

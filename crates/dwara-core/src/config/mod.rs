@@ -5835,6 +5835,50 @@ pub struct Consumer {
     /// no stored prompts/responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_logging: Option<bool>,
+    /// AI-16 (#204): agent principal metadata. Only meaningful when
+    /// `consumer_type` is `agent`; ignored otherwise. Carries the
+    /// agent's display name, description, owner, and permission level
+    /// for first-class agent principal attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentPrincipal>,
+}
+
+/// AI-16 (#204): First-class agent principal metadata. Attached to a
+/// `Consumer` with `consumer_type: agent` to carry agent-specific
+/// attribution and permission data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPrincipal {
+    /// The agent's display name (human-readable). Defaults to the
+    /// consumer name when not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// A human-readable description of the agent's purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The owner of this agent (a user or team name). Used for
+    /// attribution and audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The agent's permission level. One of: `read_only`,
+    /// `read_write`, `admin`. Default `read_only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<AgentPermissionLevel>,
+}
+
+/// AI-16 (#204): Agent permission levels for first-class agent
+/// principals. Mirrors the `Permission` enum in the MCP module but
+/// lives in config for declarative assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionLevel {
+    /// Read-only access (list, get, stats, health, config).
+    #[default]
+    ReadOnly,
+    /// Read-write access (read + create, update, delete).
+    ReadWrite,
+    /// Full admin access (all tools including purge).
+    Admin,
 }
 
 /// Per-consumer request budgets (DW-033): daily and/or monthly request

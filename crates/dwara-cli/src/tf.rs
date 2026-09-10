@@ -217,6 +217,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
                     authorization: None,
                     quotas: None,
                     ai_logging: None,
+                    agent: None,
                 });
             }
             _ => {}

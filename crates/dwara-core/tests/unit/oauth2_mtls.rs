@@ -662,6 +662,7 @@ async fn mtls_map_subject_cn_takes_priority_over_fingerprint() {
         authorization: None,
         quotas: None,
         ai_logging: None,
+        agent: None,
     });
     let mut cn_map = std::collections::BTreeMap::new();
     cn_map.insert("shared-cn".into(), "acme".into());

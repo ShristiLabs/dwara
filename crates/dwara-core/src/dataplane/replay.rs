@@ -276,6 +276,7 @@ fn replay_identity(gateway: &Gateway, request: &ReplayRequest) -> Option<Identit
         groups: consumer.groups.clone(),
         claims: std::collections::BTreeMap::new(),
         body_digest: None,
+        agent: consumer.agent.clone(),
     })
 }
 

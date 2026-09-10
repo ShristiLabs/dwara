@@ -5376,9 +5376,18 @@ where
     // AFTER inbound X-Consumer-* headers were stripped in `handle`, so the
     // upstream can trust `X-Consumer-Name` as the authenticated consumer
     // (absent for anonymous traffic). Strip + inject, never pass-through.
+    // AI-16 (#204): also inject X-Consumer-Type for first-class agent
+    // principal attribution so upstreams can distinguish agent from
+    // user traffic.
     if let Some(identity) = identity {
         if let Ok(v) = HeaderValue::from_str(&identity.consumer_name) {
             parts.headers.insert(&X_CONSUMER_NAME, v);
+        }
+        let ctype = consumer_type_str(identity.consumer_type);
+        if let Ok(v) = HeaderValue::from_str(ctype) {
+            parts
+                .headers
+                .insert(http::HeaderName::from_static("x-consumer-type"), v);
         }
     }
 

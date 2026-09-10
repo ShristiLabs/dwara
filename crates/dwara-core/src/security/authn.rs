@@ -330,6 +330,11 @@ pub struct Identity {
     /// docs' canonical-string section). Not secret: it is a public hash
     /// that already traveled in a header. Every other family sets `None`.
     pub body_digest: Option<[u8; 32]>,
+    /// AI-16 (#204): agent principal metadata when the consumer is an
+    /// agent. None for user consumers or when no agent metadata is
+    /// configured. Carries display name, description, owner, and
+    /// permission level for first-class agent attribution.
+    pub agent: Option<crate::config::AgentPrincipal>,
 }
 
 /// The VERIFIED client certificate of a connection, as the authenticator
@@ -1936,6 +1941,7 @@ impl CompositeAuthenticator {
                     groups,
                     claims: BTreeMap::new(),
                     body_digest: None,
+                    agent: None,
                 }));
             }
         }
@@ -1984,6 +1990,7 @@ impl CompositeAuthenticator {
                         groups,
                         claims: BTreeMap::new(),
                         body_digest: None,
+                        agent: None,
                     }));
                 }
                 // Mapping enabled with entries but no match: the
@@ -2015,6 +2022,7 @@ impl CompositeAuthenticator {
                     groups,
                     claims: BTreeMap::new(),
                     body_digest: None,
+                    agent: None,
                 }));
             }
         }
@@ -2160,6 +2168,7 @@ impl CompositeAuthenticator {
                         groups,
                         claims,
                         body_digest: None,
+                        agent: None,
                     }));
                 }
                 Err(crate::security::oidc::OidcError::Inactive) => {
@@ -2326,6 +2335,7 @@ impl CompositeAuthenticator {
             groups,
             claims: identity_claims,
             body_digest: None,
+            agent: None,
         })
     }
 
@@ -2456,6 +2466,7 @@ impl CompositeAuthenticator {
             groups,
             claims: BTreeMap::new(),
             body_digest: Some(body_digest),
+            agent: None,
         }))
     }
 }
