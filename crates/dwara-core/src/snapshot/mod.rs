@@ -8167,6 +8167,10 @@ pub struct Compiled {
     gateway: Arc<Gateway>,
     routes: Arc<RouteTable>,
     content_hash: u64,
+    /// USA-12 (#233): the developer portal, built at compile time when
+    /// `lifecycle.portal.enabled` is true. `None` when the portal is
+    /// disabled or no lifecycle config is present.
+    portal: Option<crate::lifecycle::DevPortal>,
 }
 
 impl Compiled {
@@ -8181,6 +8185,11 @@ impl Compiled {
     pub fn content_hash(&self) -> u64 {
         self.content_hash
     }
+
+    /// USA-12 (#233): the developer portal, when built.
+    pub fn portal(&self) -> Option<&crate::lifecycle::DevPortal> {
+        self.portal.as_ref()
+    }
 }
 
 /// Immutable, fully compiled configuration generation, cheap to share.
@@ -8190,6 +8199,8 @@ pub struct Snapshot {
     content_hash: u64,
     gateway: Arc<Gateway>,
     routes: Arc<RouteTable>,
+    /// USA-12 (#233): the developer portal, when built.
+    portal: Option<crate::lifecycle::DevPortal>,
 }
 
 impl Snapshot {
@@ -8236,6 +8247,7 @@ impl Snapshot {
                 ssrf_filter: None,
             }),
             routes: Arc::new(RouteTable::empty()),
+            portal: None,
         }
     }
 
@@ -8254,6 +8266,7 @@ impl Snapshot {
             content_hash: compiled.content_hash,
             gateway: compiled.gateway,
             routes: compiled.routes,
+            portal: compiled.portal,
         }
     }
 
@@ -8267,6 +8280,11 @@ impl Snapshot {
 
     pub fn route_table(&self) -> &RouteTable {
         &self.routes
+    }
+
+    /// USA-12 (#233): the developer portal, when built.
+    pub fn portal(&self) -> Option<&crate::lifecycle::DevPortal> {
+        self.portal.as_ref()
     }
 
     /// Convenience: resolve a path to the matching route, if any.
@@ -8496,8 +8514,19 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
         })
         .collect();
 
+    // USA-12 (#233): build the developer portal at compile time when
+    // `lifecycle.portal.enabled` is true. The portal is a read-only
+    // static HTML page aggregating the configured OpenAPI specs.
+    let portal = gateway
+        .lifecycle
+        .as_ref()
+        .and_then(|l| l.portal.as_ref())
+        .filter(|p| p.enabled)
+        .map(crate::lifecycle::DevPortal::build);
+
     Ok(Compiled {
         gateway: Arc::new(gateway.clone()),
+        portal,
         routes: Arc::new(RouteTable {
             exact,
             prefixes,
@@ -8633,6 +8662,7 @@ impl ConfigState {
             content_hash: compiled.content_hash,
             gateway: compiled.gateway,
             routes: compiled.routes,
+            portal: compiled.portal,
         };
         let info = SnapshotInfo {
             generation,

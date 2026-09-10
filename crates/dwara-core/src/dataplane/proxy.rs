@@ -2113,6 +2113,27 @@ fn reserved_path(dp: &DataPlane, path: &str, rid: &str) -> Option<Response<Proxy
     }
 }
 
+/// USA-12 (#233): serve the developer portal at its configured path.
+/// The portal is built at compile time and stored in the snapshot.
+/// This check runs AFTER the fixed reserved paths (`/healthz`,
+/// `/readyz`, `/metrics`) and BEFORE route resolution, so the portal
+/// path shadows any configured route (like the other reserved paths).
+fn serve_portal(dp: &DataPlane, path: &str) -> Option<Response<ProxyBody>> {
+    let snapshot = dp.state.snapshot();
+    let portal = snapshot.portal()?;
+    if path != portal.path() {
+        return None;
+    }
+    let html = portal.render_html();
+    Some(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(ProxyBody::Full(Full::new(Bytes::from(html))))
+            .expect("portal html body is valid"),
+    )
+}
+
 /// The MCP session-id header name (DW-087).
 const MCP_SESSION_ID_HDR: hyper::header::HeaderName =
     hyper::header::HeaderName::from_static("mcp-session-id");
@@ -3055,6 +3076,13 @@ where
 
     // Reserved gateway paths first: they shadow any configured route.
     if let Some(resp) = reserved_path(dp, &path, rid) {
+        return resp;
+    }
+
+    // USA-12 (#233): the developer portal, served at its configured
+    // path (default /portal). Like the reserved paths, it shadows any
+    // configured route.
+    if let Some(resp) = serve_portal(dp, &path) {
         return resp;
     }
 
