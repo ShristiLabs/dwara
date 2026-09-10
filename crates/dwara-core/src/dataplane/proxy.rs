@@ -312,6 +312,11 @@ pub enum ProxyBody {
     /// buffering, gateway-owned terminator, infallible by
     /// construction (provider aborts become terminal error frames).
     Ai(Box<crate::dataplane::ai_proxy::AiStreamBody>),
+    /// Byte-counting wrapper (PERF-12, #209): wraps any of the above
+    /// to count outbound bytes as they stream to the client, and
+    /// fires the deferred access-log/analytics callback on stream
+    /// completion. Always the outermost layer (applied in `handle`).
+    Counted(Box<CountingBody>),
 }
 
 /// Error of a [`ProxyBody`]: upstream stream failure or a compression
@@ -352,6 +357,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => Pin::new(b.as_mut()).poll_frame(cx),
             ProxyBody::Passthrough(b) => Pin::new(b).poll_frame(cx),
             ProxyBody::Ai(b) => Pin::new(b.as_mut()).poll_frame(cx),
+            ProxyBody::Counted(b) => Pin::new(b.as_mut()).poll_frame(cx),
         }
     }
 
@@ -362,6 +368,7 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => b.is_end_stream(),
             ProxyBody::Passthrough(b) => b.is_end_stream(),
             ProxyBody::Ai(b) => b.is_end_stream(),
+            ProxyBody::Counted(b) => b.is_end_stream(),
         }
     }
 
@@ -372,7 +379,91 @@ impl hyper::body::Body for ProxyBody {
             ProxyBody::Compressed(b) => b.size_hint(),
             ProxyBody::Passthrough(b) => b.size_hint(),
             ProxyBody::Ai(b) => b.size_hint(),
+            ProxyBody::Counted(b) => b.size_hint(),
         }
+    }
+}
+
+/// A response body wrapper that counts outbound bytes as they stream
+/// to the client (PERF-12, #209), WITHOUT buffering. Each data frame
+/// that passes through `poll_frame` increments the shared
+/// `Arc<AtomicU64>` (the same one in [`AccessRecord::bytes_out`]).
+///
+/// When the body stream ends (end-of-stream or error), the
+/// `on_complete` callback is invoked exactly once. The callback
+/// performs the deferred access-log emission and analytics recording
+/// (which need the final byte count). The body is zero-retention:
+/// frames are forwarded immediately, only the byte COUNT is kept.
+pub struct CountingBody {
+    inner: ProxyBody,
+    /// The shared byte counter (same `Arc<AtomicU64>` as
+    /// `AccessRecord::bytes_out`).
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Fired once when the stream ends. Consumed on the first
+    /// end-of-stream or error poll.
+    on_complete: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl CountingBody {
+    /// Wrap a `ProxyBody` with byte counting and a completion callback.
+    pub fn new(
+        inner: ProxyBody,
+        counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        on_complete: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Self {
+        CountingBody {
+            inner,
+            counter,
+            on_complete: Some(on_complete),
+        }
+    }
+}
+
+impl hyper::body::Body for CountingBody {
+    type Data = Bytes;
+    type Error = ProxyBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, ProxyBodyError>>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_frame(cx);
+        match &poll {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.counter
+                        .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                if let Some(cb) = this.on_complete.take() {
+                    cb();
+                }
+            }
+            Poll::Pending => {}
+        }
+        poll
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl std::fmt::Debug for CountingBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountingBody")
+            .field(
+                "bytes_out",
+                &self.counter.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field("has_callback", &self.on_complete.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -3005,6 +3096,17 @@ where
         }
     }
     obs.active_requests().inc();
+    // PERF-12 (#209): record the declared request body size for traffic
+    // accounting. Chunked/streamed request bodies (no Content-Length)
+    // record 0 — counting them would require wrapping the upstream-
+    // forwarded body; the response-side count is the primary signal.
+    rec.bytes_in = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let bytes_out = Arc::clone(&rec.bytes_out);
     let mut resp = handle_inner(dp, peer, req, &request_id, &mut rec, &root)
         .instrument(root.clone())
         .await;
@@ -3014,13 +3116,27 @@ where
     rec.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     obs.record_request(&rec.route, &rec.listener, status, started.elapsed());
     obs.record_slo(&rec.route, status, rec.duration_ms);
-    dp.record_analytics(&rec);
-    dp.record_stream_offer(&rec);
     observability::stamp_request_id(resp.headers_mut(), &request_id);
     observability::stamp_correlation_id(resp.headers_mut(), &rec.correlation_id);
-    if obs.should_log_access(status) {
-        observability::emit_access(&rec);
-    }
+    // PERF-12 (#209): defer analytics recording and access-log emission
+    // to when the response body stream completes, so bytes_out (counted
+    // frame-by-frame by CountingBody) is included. The completion
+    // callback fires exactly once on end-of-stream or error.
+    let dp_clone = Arc::clone(dp);
+    let should_log = obs.should_log_access(status);
+    let on_complete = move || {
+        dp_clone.record_analytics(&rec);
+        dp_clone.record_stream_offer(&rec);
+        if should_log {
+            observability::emit_access(&rec);
+        }
+    };
+    let body = std::mem::replace(resp.body_mut(), ProxyBody::Full(Full::new(Bytes::new())));
+    *resp.body_mut() = ProxyBody::Counted(Box::new(CountingBody::new(
+        body,
+        bytes_out,
+        Box::new(on_complete),
+    )));
     resp
 }
 

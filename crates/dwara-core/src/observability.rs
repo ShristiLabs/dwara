@@ -323,6 +323,19 @@ pub struct AccessRecord {
     pub shed: bool,
     pub status: u16,
     pub duration_ms: f64,
+    /// Inbound request body bytes (PERF-12, #209): the declared
+    /// `Content-Length` when present, 0 for streamed/chunked request
+    /// bodies (counting streamed request bytes would require wrapping
+    /// the upstream-forwarded body; the response-side count is the
+    /// primary signal for capacity planning and top-talker reports).
+    pub bytes_in: u64,
+    /// Outbound response body bytes (PERF-12, #209): counted frame-by-
+    /// frame as the response body streams to the client, WITHOUT
+    /// buffering. An `Arc<AtomicU64>` so the `CountingBody` wrapper
+    /// can increment it from `poll_frame` while the access record is
+    /// held by the caller; the final value is read when the body
+    /// completes and the deferred access log / analytics are emitted.
+    pub bytes_out: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Custom analytics dimensions (DW-043): config-declared
     /// header-sourced tags, captured at record creation. Analytics-
     /// only — deliberately NOT part of `emit_access`'s redacted
@@ -348,6 +361,8 @@ impl AccessRecord {
             shed: false,
             status: 0,
             duration_ms: 0.0,
+            bytes_in: 0,
+            bytes_out: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             custom: Vec::new(),
         }
     }
@@ -356,7 +371,12 @@ impl AccessRecord {
 /// Emit one access-log event (one JSON line under the binary's
 /// subscriber). The field list is exhaustive and redacted by
 /// construction: no headers, no query string, no credentials.
+/// `bytes_in`/`bytes_out` (PERF-12, #209): `bytes_in` is the declared
+/// `Content-Length` (0 for chunked); `bytes_out` is the frame-counted
+/// response body size (read from the atomic the `CountingBody`
+/// wrapper updated as frames streamed to the client).
 pub fn emit_access(rec: &AccessRecord) {
+    let bytes_out = rec.bytes_out.load(std::sync::atomic::Ordering::Relaxed);
     tracing::info!(
         target: "dwara::access",
         request_id = %rec.request_id,
@@ -372,6 +392,8 @@ pub fn emit_access(rec: &AccessRecord) {
         rate_limited = rec.rate_limited,
         broken = rec.broken,
         shed = rec.shed,
+        bytes_in = rec.bytes_in,
+        bytes_out = bytes_out,
         "access"
     );
 }

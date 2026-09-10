@@ -107,6 +107,12 @@ struct RawRecord {
     rate_limited: bool,
     broken: bool,
     shed: bool,
+    /// PERF-12 (#209): inbound request body bytes (declared
+    /// Content-Length, 0 for chunked).
+    bytes_in: i64,
+    /// PERF-12 (#209): outbound response body bytes (frame-counted
+    /// as the body streamed to the client, no buffering).
+    bytes_out: i64,
     dims: String,
     /// DW-102: redacted request headers (opt-in, JSON object string),
     /// or `None` when replay capture is off or headers are not
@@ -357,6 +363,8 @@ impl RawRecord {
             rate_limited: event.rate_limited,
             broken: event.broken,
             shed: event.shed,
+            bytes_in: 0_i64,
+            bytes_out: 0_i64,
             dims: dims_json(&event.attributes),
             request_headers_redacted: None,
             auth_identity: None,
@@ -380,6 +388,8 @@ impl RawRecord {
             rate_limited: rec.rate_limited,
             broken: rec.broken,
             shed: rec.shed,
+            bytes_in: rec.bytes_in as i64,
+            bytes_out: rec.bytes_out.load(std::sync::atomic::Ordering::Relaxed) as i64,
             dims: dims_json(&rec.custom),
             request_headers_redacted: None,
             auth_identity: None,
@@ -1253,10 +1263,10 @@ impl EmbeddedAnalytics {
             "INSERT INTO raw (ts_ms, request_id, correlation_id, listener,
                               route, consumer, upstream, method, status,
                               status_class, duration_ms, attempts,
-                              rate_limited, broken, shed, dims,
-                              request_headers_redacted, auth_identity)
+                              rate_limited, broken, shed, bytes_in, bytes_out,
+                              dims, request_headers_redacted, auth_identity)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     ?13, ?14, ?15, ?16, ?17, ?18)",
+                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1285,6 +1295,8 @@ impl EmbeddedAnalytics {
                 r.rate_limited,
                 r.broken,
                 r.shed,
+                r.bytes_in,
+                r.bytes_out,
                 r.dims,
                 r.request_headers_redacted,
                 r.auth_identity,
