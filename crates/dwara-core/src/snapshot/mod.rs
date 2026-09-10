@@ -8024,14 +8024,81 @@ fn validate_json_schema(
 /// AFTER this resolution; a criteria miss does NOT fall through to the
 /// next candidate — the request is unmatched (404 in v1).
 ///
-/// Prefix lookup is a linear scan over the prefix list, O(n) in the number
-/// of prefix routes per request; fine at v1 route counts, revisit if route
-/// tables grow large.
+/// PERF-03 (#205): prefix lookup uses a radix trie (`PrefixTrie`) for
+/// O(k) longest-prefix-match where k is the path length, instead of the
+/// O(n) linear scan over all prefix routes.
+///
+/// PERF-03 (#205): A radix trie for longest-prefix matching. Each
+/// node stores an optional route index (set when a prefix ends at
+/// this node) and children keyed by the next byte. Lookup traverses
+/// the trie following the path bytes, recording the last node with
+/// a route index — that is the longest prefix match.
+///
+/// O(k) lookup where k is the path length, replacing the previous
+/// O(n) linear scan over all prefix routes.
+#[derive(Debug, Default)]
+struct PrefixTrie {
+    /// The route index stored at this node, if a prefix ends here.
+    /// `None` means this node is an internal node (no prefix ends
+    /// here, but longer prefixes pass through it).
+    route_idx: Option<usize>,
+    /// Child nodes keyed by the next byte of the prefix.
+    children: std::collections::HashMap<u8, Box<PrefixTrie>>,
+}
+
+impl PrefixTrie {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a prefix and its route index. The first-declared route
+    /// wins on equal-length ties, so we do NOT overwrite an existing
+    /// `route_idx` at the same node.
+    fn insert(&mut self, prefix: &str, idx: usize) {
+        let mut node = self;
+        for &byte in prefix.as_bytes() {
+            node = node
+                .children
+                .entry(byte)
+                .or_insert_with(|| Box::new(PrefixTrie::new()));
+        }
+        // First-declared wins: do not overwrite.
+        if node.route_idx.is_none() {
+            node.route_idx = Some(idx);
+        }
+    }
+
+    /// Longest-prefix-match: traverse the trie following the path
+    /// bytes, recording the last node with a route index. Returns
+    /// the route index of the longest matching prefix, or `None`.
+    fn longest_match(&self, path: &str) -> Option<usize> {
+        let mut node = self;
+        let mut best = node.route_idx;
+        for &byte in path.as_bytes() {
+            match node.children.get(&byte) {
+                Some(child) => {
+                    node = child;
+                    if node.route_idx.is_some() {
+                        best = node.route_idx;
+                    }
+                }
+                None => break,
+            }
+        }
+        best
+    }
+}
+
 #[derive(Debug)]
 pub struct RouteTable {
     exact: matchit::Router<usize>,
     /// (prefix, route index) for prefix-kind routes; longest prefix wins.
+    /// Kept for backward compatibility and Debug; the trie is the
+    /// primary lookup structure (PERF-03, #205).
+    #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
+    /// PERF-03 (#205): radix trie for O(k) longest-prefix-match.
+    prefix_trie: PrefixTrie,
     regex_set: regex::RegexSet,
     /// Route index per RegexSet member, in insertion order.
     regex_indices: Vec<usize>,
@@ -8104,6 +8171,7 @@ impl RouteTable {
         RouteTable {
             exact: matchit::Router::new(),
             prefixes: Vec::new(),
+            prefix_trie: PrefixTrie::new(),
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
             rewrite_regexes: Vec::new(),
@@ -8144,13 +8212,11 @@ impl RouteTable {
         if let Some(i) = matches.iter().next() {
             return Some((self.regex_indices[i], Vec::new()));
         }
-        let mut best: Option<(usize, usize)> = None; // (prefix len, index)
-        for (prefix, idx) in &self.prefixes {
-            if path.starts_with(prefix.as_str()) && best.is_none_or(|(len, _)| prefix.len() > len) {
-                best = Some((prefix.len(), *idx));
-            }
+        // PERF-03 (#205): O(k) trie lookup replaces O(n) linear scan.
+        if let Some(idx) = self.prefix_trie.longest_match(path) {
+            return Some((idx, Vec::new()));
         }
-        best.map(|(_, idx)| (idx, Vec::new()))
+        None
     }
 
     /// The compiled rewrite regex for `idx`, if the route's proxy action
@@ -8575,6 +8641,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
 
     let mut exact = matchit::Router::new();
     let mut prefixes = Vec::new();
+    let mut prefix_trie = PrefixTrie::new();
     let mut regex_patterns = Vec::new();
     let mut regex_indices = Vec::new();
     let mut rewrite_regexes: Vec<Option<regex::Regex>> = vec![None; gateway.routes.len()];
@@ -8595,6 +8662,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             }
             PathMatchKind::Prefix => {
                 let prefix = path.value.trim_end_matches('/').to_string();
+                // PERF-03 (#205): insert into the trie for O(k) lookup.
+                // First-declared wins on equal-length ties, so insert
+                // before pushing to the Vec (which preserves order for
+                // Debug output only).
+                prefix_trie.insert(&prefix, idx);
                 prefixes.push((prefix, idx));
             }
             PathMatchKind::Regex => {
@@ -8789,6 +8861,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
         routes: Arc::new(RouteTable {
             exact,
             prefixes,
+            prefix_trie,
             regex_set,
             regex_indices,
             rewrite_regexes,
