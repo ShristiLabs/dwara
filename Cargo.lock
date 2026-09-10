@@ -1446,6 +1446,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "notify",
  "quinn",
  "regex",
  "rusqlite",

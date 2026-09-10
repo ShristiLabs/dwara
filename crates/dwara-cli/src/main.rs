@@ -62,6 +62,10 @@ enum Command {
         /// `includes:` directives.
         #[arg(long)]
         profile: Option<String>,
+        /// Re-validate the file whenever it changes and print a live
+        /// status line (USA-10, #251).
+        #[arg(long)]
+        watch: bool,
     },
     /// Normalize a config file in place.
     Fmt {
@@ -520,39 +524,52 @@ fn main() {
                 }
             }
         }
-        Command::Validate { file, profile } => match read(&file) {
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-            Ok(text) => {
-                // CFG-01 (#180): resolve includes + profile before
-                // validating. The base_dir is the config file's parent.
-                let base_dir = std::path::Path::new(&file)
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .to_path_buf();
-                match dwara_core::config::includes::preprocess(&text, &base_dir, profile.as_deref())
-                {
+        Command::Validate {
+            file,
+            profile,
+            watch,
+        } => {
+            if watch {
+                dwara_cli::validate_watch(&file, profile.as_deref())
+            } else {
+                match read(&file) {
                     Err(e) => {
                         eprintln!("{e}");
                         1
                     }
-                    Ok(text) => match dwara_cli::validate_config_text(&text) {
-                        dwara_cli::ValidateOutcome::Valid { routes } => {
-                            println!("ok: {routes} routes");
-                            0
-                        }
-                        dwara_cli::ValidateOutcome::Invalid(issues) => {
-                            for i in issues {
-                                eprintln!("{i}");
+                    Ok(text) => {
+                        // CFG-01 (#180): resolve includes + profile before
+                        // validating. The base_dir is the config file's parent.
+                        let base_dir = std::path::Path::new(&file)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .to_path_buf();
+                        match dwara_core::config::includes::preprocess(
+                            &text,
+                            &base_dir,
+                            profile.as_deref(),
+                        ) {
+                            Err(e) => {
+                                eprintln!("{e}");
+                                1
                             }
-                            1
+                            Ok(text) => match dwara_cli::validate_config_text(&text) {
+                                dwara_cli::ValidateOutcome::Valid { routes } => {
+                                    println!("ok: {routes} routes");
+                                    0
+                                }
+                                dwara_cli::ValidateOutcome::Invalid(issues) => {
+                                    for i in issues {
+                                        eprintln!("{i}");
+                                    }
+                                    1
+                                }
+                            },
                         }
-                    },
+                    }
                 }
             }
-        },
+        }
         Command::Fmt { file } => match read(&file) {
             Err(e) => {
                 eprintln!("{e}");

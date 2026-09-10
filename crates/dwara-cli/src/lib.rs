@@ -123,6 +123,127 @@ pub fn migrate_config(text: &str) -> Result<(String, Vec<String>), String> {
     Ok((yaml, notes))
 }
 
+/// `validate --watch` mode (USA-10, #251): watch the config file and
+/// re-validate on every change, printing a live status line. Runs
+/// until the process is interrupted (Ctrl-C). Returns exit code 0.
+pub fn validate_watch(file: &str, profile: Option<&str>) -> i32 {
+    use notify::Watcher;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let path = Path::new(file);
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_owned)
+        .unwrap_or_default();
+
+    // Initial validation.
+    run_validate(file, profile);
+
+    // Set up the file watcher (same pattern as dwara-bin's
+    // spawn_file_watcher).
+    let (tx, rx) = mpsc::channel();
+    let mut watcher =
+        match notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+            let Ok(event) = event else { return };
+            match event.kind {
+                notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                | notify::EventKind::Access(_)
+                | notify::EventKind::Other => return,
+                _ => {}
+            }
+            let touches = event
+                .paths
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == name));
+            if touches {
+                let _ = tx.send(());
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("error: file watch unavailable: {e}");
+                return 1;
+            }
+        };
+
+    if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        eprintln!("error: cannot watch {dir:?}: {e}");
+        return 1;
+    }
+
+    // Debounce loop: wait for events, drain bursts, re-validate.
+    let debounce = Duration::from_millis(250);
+    loop {
+        if rx.recv().is_err() {
+            break;
+        }
+        std::thread::sleep(debounce);
+        while rx.try_recv().is_ok() {}
+        run_validate(file, profile);
+        // Keep the watcher alive.
+        let _ = &watcher;
+    }
+    0
+}
+
+fn run_validate(file: &str, profile: Option<&str>) {
+    use std::io::Write;
+    let timestamp = chrono_like_now();
+    match read_file(file) {
+        Err(e) => {
+            print!("\r[{timestamp}] {file}: read error: {e}                    ");
+            let _ = std::io::stdout().flush();
+        }
+        Ok(text) => {
+            let base_dir = std::path::Path::new(file)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            let text = match dwara_core::config::includes::preprocess(&text, &base_dir, profile) {
+                Ok(t) => t,
+                Err(e) => {
+                    print!("\r[{timestamp}] {file}: invalid (preprocess: {e})                    ");
+                    let _ = std::io::stdout().flush();
+                    return;
+                }
+            };
+            match validate_config_text(&text) {
+                ValidateOutcome::Valid { routes } => {
+                    print!("\r[{timestamp}] {file}: ok ({routes} routes)                    ");
+                    let _ = std::io::stdout().flush();
+                }
+                ValidateOutcome::Invalid(issues) => {
+                    let n = issues.len();
+                    print!("\r[{timestamp}] {file}: invalid ({n} issues)                    ");
+                    let _ = std::io::stdout().flush();
+                    eprintln!();
+                    for i in &issues {
+                        eprintln!("  {i}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn read_file(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("{e}"))
+}
+
+fn chrono_like_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
 /// Compile both documents and report route/upstream/consumer deltas as
 /// plain text: `+ kind name` (added), `- kind name` (removed), and
 /// `~ kind name` (present in both sides under the same name but with

@@ -69,6 +69,9 @@ h3 = { workspace = true }
 h3-quinn = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
+# USA-10 (#251): `validate --watch` file watcher. Already a workspace
+# dependency (dwara-bin uses it for config hot-reload). MIT OR Apache-2.0.
+notify = { workspace = true }
 
 [features]
 # DW-066: CP/DP split (Enterprise). When enabled, the
