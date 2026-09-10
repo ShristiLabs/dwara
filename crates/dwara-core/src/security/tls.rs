@@ -294,19 +294,25 @@ fn load_private_key_der(path: &str) -> Result<PrivateKeyDer<'static>, TlsError> 
 }
 
 /// DW-105: HTTP/1.1-ALPN rustls client config with post-quantum hybrid
-/// key exchange opt-in. When `pq` is `true` AND the `pq` cargo feature
-/// is ON, [`crate::security::pq::install_pq_kx_group`] is called to
-/// prepend the X25519+ML-KEM hybrid kx group to the provider's kx group
-/// list before building the config. The rustls PQ API is experimental;
-/// the call is a documented no-op when the API is not reachable (the
-/// config builds with the classical kx group list — no regression).
-/// When `pq` is `false` or the feature is off, this is identical to
+/// key exchange opt-in. When `pq` is `true`, the config is built with a
+/// provider that has the X25519+ML-KEM hybrid kx group prepended. The
+/// classical X25519 group remains as a fallback for non-PQ servers.
+/// When `pq` is `false`, this is identical to
 /// [`https_h1_client_config`].
 pub fn https_h1_client_config_pq(roots: rustls::RootCertStore, pq: bool) -> rustls::ClientConfig {
     if pq {
-        let _ = crate::security::pq::install_pq_kx_group();
+        let provider = Arc::new(crate::security::pq::pq_provider());
+        let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .expect("safe default protocol versions must be available")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        cfg
+    } else {
+        https_h1_client_config(roots)
     }
-    https_h1_client_config(roots)
 }
 
 /// HTTP/3-ALPN rustls client config over the given trust roots (DW-108):
@@ -841,17 +847,16 @@ impl TlsTermination {
     fn server_config(tls: &ListenerTls) -> Result<ServerConfig, TlsError> {
         let resolver = SniCertResolver::build(tls)?;
         // DW-105: when the listener opts in to post-quantum hybrid key
-        // exchange (`pq: true`) AND the `pq` cargo feature is ON, prepend
-        // the X25519+ML-KEM hybrid kx group to the provider's kx group
-        // list. The rustls PQ API is experimental; [`install_pq_kx_group`]
-        // is a documented no-op when the API is not reachable in the
-        // pinned rustls version (the config builds with the classical kx
-        // group list — no regression). When the `pq` feature is OFF, the
-        // call is inert (returns [`PqMode::Disabled`]). Validation
-        // rejects `pq: true` + FIPS mode (ML-KEM is not FIPS-validated).
-        if tls.pq {
-            let _ = crate::security::pq::install_pq_kx_group();
-        }
+        // exchange (`pq: true`), build the server config with a provider
+        // that has the X25519+ML-KEM hybrid kx group prepended. The
+        // classical X25519 group remains as a fallback for non-PQ
+        // clients. Validation rejects `pq: true` + FIPS mode (ML-KEM is
+        // not FIPS-validated).
+        let provider = if tls.pq {
+            Arc::new(crate::security::pq::pq_provider())
+        } else {
+            Arc::new(fips_provider())
+        };
         // #124 client-certificate authn: with a `client_ca_file` the
         // listener REQUESTS a client certificate and verifies any
         // presented one against the bundle (the admin mTLS verifier
@@ -869,7 +874,6 @@ impl TlsTermination {
         // allowlist in `security::fips`). Non-FIPS builds use the
         // default builder (rustls's modern cipher-suite policy).
         {
-            let provider = Arc::new(fips_provider());
             let mut config = match &tls.client_ca_file {
                 Some(client_ca) => {
                     let roots = root_store_from_pem_file(client_ca)?;

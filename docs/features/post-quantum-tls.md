@@ -32,31 +32,35 @@ group PREFERS it without removing the classical fallback.
 
 The rustls API for post-quantum key exchange is EXPERIMENTAL and not
 yet stable: the specific kx group type, its registration path, and the
-provider integration may change between rustls releases. DW-105 is
-therefore structured so the feature gate and config schema EXIST and
-COMPILE regardless of whether the experimental PQ API is available in
-the pinned rustls version. When the `pq` feature is ON but the
-experimental API is not reachable, `install_pq_kx_group` is a
-documented no-op: it logs a warning (`pq_kx_group_experimental`) and
-returns `PqMode::Disabled`, so the caller treats the config as inert
-and the handshake proceeds with the classical kx group list (no
-regression -- the default rustls behavior). When the API stabilizes,
-the real kx group construction lands in `install_pq_kx_group` without
-touching config, validation, or metrics. `pq_api_available` distinguishes
-"feature on but API inert" (warn) from "feature off" (warn) for
-validation messaging -- today it always returns `false`.
+provider integration may change between rustls releases. The rustls
+0.23.43 crate exposes the `X25519MLKEM768` hybrid kx group via the
+aws-lc-rs provider, so the PQ API IS reachable and the feature IS
+active. `install_pq_kx_group` builds a custom `CryptoProvider` with
+the hybrid kx group prepended and installs it as the default; the
+per-config path (`pq_provider()`) returns the same provider for
+`ServerConfig::builder_with_provider` and
+`ClientConfig::builder_with_provider`. `pq_api_available` returns
+`true` (the API is reachable).
 
 ## The kx group installation
 
-`install_pq_kx_group` is the wiring point. When the post-quantum TLS
-is ON and the experimental API is reachable, it will construct the
-hybrid group, prepend it to the provider's kx_groups vector, and return
-`PqMode::Enabled`. The canonical group name is `X25519MLKEM768`
-(`PQ_KX_GROUP_NAME`), used as the `kx_group` label on
-`PqHandshakeResult` and in logs. The install is a compile-time switch,
-not a runtime toggle (the same shape as `FipsMode`): `PqMode::current()`
-returns `Enabled` under `#[cfg(feature = "pq")]` and `Disabled`
-otherwise.
+`install_pq_kx_group` is the process-default wiring point: it calls
+`pq_provider()` and installs the returned provider as the process
+default. `pq_provider()` builds a `CryptoProvider` from the aws-lc-rs
+default provider with `X25519MLKEM768` prepended to the kx group list.
+The canonical group name is `X25519MLKEM768` (`PQ_KX_GROUP_NAME`),
+used as the `kx_group` label on `PqHandshakeResult` and in logs. The
+classical X25519 group remains in the list as a fallback, so a peer
+that does not support the hybrid group still completes a classical
+handshake (rustls's kx group list is a preference order: the first
+group the peer supports wins).
+
+The per-config path is used by the server and client config builders
+in `security/tls.rs`: when `pq: true` is set on a listener or
+upstream, the builder uses `pq_provider()` instead of the default
+provider, passing it to `ServerConfig::builder_with_provider` or
+`ClientConfig::builder_with_provider`. This matches the FIPS pattern
+(`fips_provider()` returns a per-config provider).
 
 ## The handshake outcome and metric
 

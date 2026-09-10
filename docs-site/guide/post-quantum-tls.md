@@ -22,23 +22,33 @@ hybrid adds handshake bytes and CPU cost for no practical benefit.
 
 ## Enabling
 
-Post-quantum key exchange is gated behind the experimental `pq` cargo
-feature (default OFF). The feature pulls in the ML-KEM implementation and
-adds the hybrid group to the TLS handshake:
+Post-quantum key exchange is available in every build (the rustls 0.23
+crate exposes the `X25519MLKEM768` hybrid kx group via the aws-lc-rs
+provider). No special cargo feature is required.
 
 ```sh
 cargo build -p dwara-bin
 ```
 
-In a default build the feature is absent and `upstream.pq: true` is
-accepted but inert -- the upstream connects with the standard classical
-key exchange only.
+The hybrid kx group is prepended to the provider's kx group list only
+when `pq: true` is set on a listener or upstream. Builds without any
+`pq: true` config use the classical kx group list (no handshake
+overhead).
 
 ## Configuration
 
-Enable the hybrid exchange per upstream:
+Enable the hybrid exchange per upstream and per listener:
 
 ```yaml
+listeners:
+  - name: ingress
+    address: 0.0.0.0
+    port: 8443
+    tls:
+      cert_file: /etc/dwara/ingress.crt
+      key_file: /etc/dwara/ingress.key
+      pq: true
+
 upstreams:
   - name: sensitive-api
     endpoints:
@@ -49,12 +59,11 @@ upstreams:
     trusted_ca_file: /etc/dwara/upstream-ca.pem
 ```
 
-When `pq: true`, the gateway advertises the X25519+ML-KEM hybrid group in
-the TLS ClientHello. If the upstream supports the hybrid group, the
-handshake completes with a combined shared secret. If the upstream does
-not support it, the gateway falls back to X25519 alone -- the connection
-still succeeds, just without the post-quantum component. This makes the
-flag safe to enable ahead of upstream support.
+When `pq: true`, the gateway builds the TLS config with a provider that
+has the `X25519MLKEM768` hybrid kx group prepended to the kx group list.
+The classical X25519 group remains as a fallback, so a peer that does
+not support the hybrid group still completes a classical handshake. This
+makes the flag safe to enable ahead of peer support.
 
 ## Security considerations
 
@@ -69,9 +78,26 @@ flag safe to enable ahead of upstream support.
 - The hybrid group adds roughly 1 KB to the ClientHello and a comparable
   amount to the ServerHello. This is negligible on modern links but
   visible on constrained or high-latency paths.
-- The `pq` flag is per-upstream, not per-listener. Inbound (listener-side)
-  post-quantum termination is not yet exposed; the feature today protects
-  the gateway-to-upstream hop.
+- The `pq` flag is available per-listener and per-upstream. Inbound
+  (listener-side) post-quantum termination builds the server config with
+  the PQ-capable provider; outbound (upstream-side) builds the client
+  config with the same provider.
+- ML-KEM is NOT on the FIPS-validated list for aws-lc-rs. Combining PQ
+  hybrid key exchange with FIPS mode is rejected at config validation:
+  a listener or upstream with `pq: true` while FIPS mode is active fails
+  validation naming the field.
+
+## How it works
+
+The `pq_provider()` function in `security/pq.rs` builds a
+`rustls::crypto::CryptoProvider` from the aws-lc-rs default provider
+with the `X25519MLKEM768` hybrid kx group prepended to the kx group
+list. The server and client config builders use this provider when
+`pq: true` is set, passing it to `ServerConfig::builder_with_provider`
+or `ClientConfig::builder_with_provider`. The classical X25519 group
+remains in the list as a fallback, so a peer that does not support the
+hybrid group still completes a classical handshake (rustls's kx group
+list is a preference order: the first group the peer supports wins).
 
 ## Experimental status
 

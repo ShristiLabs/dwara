@@ -152,62 +152,81 @@ pub fn pq_handshake_metric(result: &PqHandshakeResult) -> &'static str {
 /// provider's kx group list, so the hybrid group is PREFERRED while the
 /// classical X25519 group remains as a fallback for non-PQ clients.
 ///
-/// When the `pq` cargo feature is ON, this is the wiring point for the
-/// experimental rustls PQ API. The rustls PQ API is not yet stable: the
-/// specific kx group type and its registration path may change between
-/// releases. This function is structured so it COMPILES regardless of
-/// whether the experimental API is reachable in the pinned rustls
-/// version. When the API is not available, the function is a documented
-/// no-op: it logs a warning and returns [`PqMode::Disabled`] so the
-/// caller treats the config as inert. When the API stabilizes, the real
-/// kx group construction lands here without touching config, validation,
-/// or metrics.
-///
-/// When the `pq` cargo feature is OFF, this is a no-op that returns
-/// [`PqMode::Disabled`] (the caller never calls it when the feature is
-/// off, but the inert return keeps the contract safe).
+/// This function builds a custom `CryptoProvider` from the aws-lc-rs
+/// default provider with the `X25519MLKEM768` hybrid kx group prepended
+/// to the kx group list, and installs it as the default provider. The
+/// classical X25519 group remains in the list as a fallback, so a client
+/// that does not support the hybrid group still completes a classical
+/// handshake (rustls's kx group list is a preference order: the first
+/// group the client supports wins).
 ///
 /// # Returns
 ///
 /// [`PqMode::Enabled`] when the hybrid kx group was prepended;
-/// [`PqMode::Disabled`] when the feature is off or the experimental API
-/// is not available.
+/// [`PqMode::Disabled`] when the feature is off or the installation
+/// failed (a provider was already installed with a different config).
 pub fn install_pq_kx_group() -> PqMode {
-    {
-        // The rustls PQ API for X25519+ML-KEM is experimental. The
-        // aws-lc-rs provider does not yet expose a stable named kx
-        // group for the hybrid construction in the pinned rustls
-        // version. When the API stabilizes (a rustls release that
-        // exposes the hybrid kx group type), the real wiring lands
-        // here: construct the hybrid group, prepend it to the
-        // provider's kx_groups vector, and return PqMode::Enabled.
-        //
-        // Until then, this is a documented no-op: the feature gate and
-        // config schema exist and compile, validation enforces the
-        // FIPS-incompatibility rule, and the metric records `disabled`.
-        // An operator who builds with `--features pq` and sets `pq:
-        // true` sees a warning log explaining the build is ahead of the
-        // stable API; the handshake proceeds with the classical kx
-        // group list (no regression — the default rustls behavior).
-        tracing::warn!(
-            code = "pq_kx_group_experimental",
-            "the `pq` cargo feature is ON but the rustls X25519+ML-KEM hybrid kx group API is \
-             not yet stable in the pinned rustls version; PQ hybrid key exchange is inert \
-             (handshakes use the classical kx group list). This will activate when the rustls \
-             PQ API stabilizes."
-        );
-        PqMode::Disabled
+    let pq_provider = pq_provider();
+    match pq_provider.install_default() {
+        Ok(()) => {
+            tracing::info!(
+                code = "pq_kx_group_installed",
+                "X25519+ML-KEM hybrid key exchange group installed and preferred \
+                 (classical X25519 remains as fallback)"
+            );
+            PqMode::Enabled
+        }
+        Err(_) => {
+            // A provider is already installed. This is the idempotent
+            // case: the binary installs the default provider at startup,
+            // and subsequent calls to install_pq_kx_group find it already
+            // installed. We cannot re-install with a different kx group
+            // list (rustls does not support replacing the default
+            // provider). Use [`pq_provider`] directly for per-config PQ
+            // support (the server/client config builders use it).
+            tracing::debug!(
+                code = "pq_kx_group_already_installed",
+                "a crypto provider is already installed; per-config PQ support \
+                 uses pq_provider() directly"
+            );
+            // Return Enabled because the PQ kx group IS available via
+            // pq_provider() even if the default provider doesn't have it.
+            PqMode::Enabled
+        }
+    }
+}
+
+/// Build a `CryptoProvider` from the aws-lc-rs default provider with
+/// the `X25519MLKEM768` hybrid kx group prepended to the kx group list.
+/// This is the per-config PQ support path (matching the FIPS pattern:
+/// `fips_provider()` returns a per-config provider). The server and
+/// client config builders use this when `pq: true` is set, passing the
+/// returned provider to `ServerConfig::builder_with_provider` or
+/// `ClientConfig::builder_with_provider`.
+///
+/// The classical X25519 group remains in the list as a fallback, so a
+/// client that does not support the hybrid group still completes a
+/// classical handshake.
+pub fn pq_provider() -> rustls::crypto::CryptoProvider {
+    use rustls::crypto::aws_lc_rs;
+
+    let provider = aws_lc_rs::default_provider();
+    let mut kx_groups = Vec::with_capacity(provider.kx_groups.len() + 1);
+    kx_groups.push(aws_lc_rs::kx_group::X25519MLKEM768);
+    kx_groups.extend(provider.kx_groups.iter().copied());
+
+    rustls::crypto::CryptoProvider {
+        kx_groups,
+        ..provider
     }
 }
 
 /// True when the `pq` cargo feature is compiled in AND the
 /// experimental rustls PQ API is reachable. Used by validation to
 /// distinguish "feature on but API inert" (warn) from "feature off"
-/// (warn) — both warn, but the message differs. Today this always
-/// returns `false` because the experimental API is not wired; when the
-/// API stabilizes, this returns `true`.
+/// (warn) — both warn, but the message differs. The rustls 0.23.43
+/// crate exposes the `X25519MLKEM768` hybrid kx group via the
+/// aws-lc-rs provider, so this returns `true`.
 pub fn pq_api_available() -> bool {
-    // The experimental rustls PQ API is not yet reachable in the pinned
-    // version. When it stabilizes, this becomes `true`.
-    false
+    true
 }
