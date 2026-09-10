@@ -18,6 +18,28 @@ have native equivalents for, or handles via a different mechanism.
 | Envoy | `dwara import envoy <config>` | Envoy static config YAML |
 | OpenAPI | `dwara import openapi <spec>` | OpenAPI 3.x YAML or JSON |
 
+## OpenAPI import
+
+`dwara import openapi <spec> --output dwara.yaml` reads an OpenAPI 3.x
+spec (YAML or JSON) and generates a Dwara config with one route per
+unique path, a placeholder service and upstream, and an `openapi`
+extension on each route carrying the operationId, summary, tags,
+method, and path for traceability.
+
+### Mock mode (CFG-04, #240)
+
+`dwara import openapi <spec> --mock --output dwara.yaml` reads the
+OpenAPI `responses` examples and generates `mock` route actions with
+the example body and status code instead of `proxy` actions. This
+lets an operator scaffold a fully functional mock API from an OpenAPI
+spec without any backend.
+
+Example selection order:
+1. The lowest 2xx status code with an example.
+2. The `default` response with an example.
+3. The first response (any status) with an example.
+4. Fallback: 200 with an empty body.
+
 ## NGINX import
 
 See [nginx-import.md](nginx-import.md) for the full reference. The

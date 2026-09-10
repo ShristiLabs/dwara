@@ -70,10 +70,41 @@ traffic but likely doesn't do what the author meant:
 | `consumer-unused` | referenced by no authorization rule and bound to no JWT provider |
 | `policy-unused` | attached to nothing (no consumer, route, service, listener, or global) |
 | `upstream-unreferenced` | targeted by no service |
+| `config/version` | config `version` is older or newer than the current schema version |
 
 Exit codes: `0` clean, `2` warnings found, `1` the file didn't even
 parse/validate (fix that first — linting an invalid config would just
 be noise).
+
+## `migrate`
+
+```sh
+dwara-cli migrate path/to/dwara.yaml
+dwara-cli migrate path/to/dwara.yaml --in-place
+```
+
+Upgrades a config to the current schema version: parses the config,
+sets its `version` field to `CURRENT_CONFIG_VERSION`, and
+re-serializes. Without `--in-place`, the migrated config is printed to
+stdout; with `--in-place`, it is written back to the file. Migration
+notes are printed to stderr. Exit 0 on success, 1 on parse/serialize
+failure.
+
+## `explain`
+
+```sh
+dwara-cli explain --config path/to/dwara.yaml --method GET --path /api/v1/users
+dwara-cli explain --config dwara.yaml --method POST --path /orders --header "Authorization: Bearer token"
+dwara-cli explain --config dwara.yaml --method GET --path /api/users --consumer alice
+```
+
+Renders a human-readable explanation of what the gateway would do for
+a request matching the given method, path, headers, and consumer:
+route matching, authorization, rate limiting, transforms, upstream
+selection, and caching. Reuses the same pure decision logic the
+gateway runs at request time, so the explanation is always consistent
+with the gateway's actual behavior. Exit 0 on success, 2 on config
+parse/compile error.
 
 ## `schema`
 
@@ -108,12 +139,15 @@ dwara-cli import nginx  nginx.conf  --output dwara.yaml
 dwara-cli import kong   kong.yaml   --output dwara.yaml
 dwara-cli import envoy  envoy.yaml  --output dwara.yaml
 dwara-cli import openapi petstore.yaml --output dwara.yaml
+dwara-cli import openapi petstore.yaml --output dwara.yaml --mock
 ```
 
 Scaffolds a Dwara config from an existing NGINX, Kong, or Envoy
-config, or from an OpenAPI 3.x spec. Unsupported constructs are
-appended as YAML-comment warnings. See
-[Config import](./config-import) and
+config, or from an OpenAPI 3.x spec. With `--mock`, the OpenAPI import
+reads response examples and generates mock route actions instead of
+proxy actions, producing a fully functional mock API without any
+backend. Unsupported constructs are appended as YAML-comment warnings.
+See [Config import](./config-import) and
 [OpenAPI import and mock mode](./openapi-import).
 
 ## `tf`
