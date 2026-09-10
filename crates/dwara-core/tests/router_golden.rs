@@ -203,14 +203,21 @@ fn router_golden_suite() {
             .unwrap_or_else(|e| panic!("{name}: request does not build: {e}"));
 
         let path_only = req.uri().path().to_string();
-        let resolved = table.find_full(&path_only).and_then(|(idx, params)| {
-            let route = &gateway.routes[idx];
-            if route_applies(&route.r#match, table.accept_media_type(idx), &req) {
-                Some((idx, params, route.name.clone()))
-            } else {
-                None
+        // DP-06 (#254): use find_candidates for fall-through behavior.
+        // The candidate list is in precedence order; the first
+        // candidate whose non-path criteria pass is the winner.
+        let resolved = {
+            let candidates = table.find_candidates(&path_only);
+            let mut found = None;
+            for (idx, params) in &candidates {
+                let route = &gateway.routes[*idx];
+                if route_applies(&route.r#match, table.accept_media_type(*idx), &req) {
+                    found = Some((*idx, params.clone(), route.name.clone()));
+                    break;
+                }
             }
-        });
+            found
+        };
 
         let context = format!(
             "{name}: {} {}{}",

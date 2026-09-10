@@ -3241,20 +3241,36 @@ where
     // consume a cap slot — a deliberate change from DW-015's
     // admit-at-entry ordering — and unknown paths cost nothing under
     // saturation.
-    let Some((idx, params)) = gen.snapshot.route_table().find_full(&path) else {
+    //
+    // DP-06 (#254): route criteria fall-through. When the path resolves
+    // to a route but the non-path criteria (host, methods, headers,
+    // query, cookies, accept) fail, the router continues to the next
+    // lower-precedence matching route instead of immediately returning
+    // 404. The candidate list from `find_candidates` is in precedence
+    // order: exact, then regex by specificity, then prefix by length.
+    let candidates = gen.snapshot.route_table().find_candidates(&path);
+    let mut idx = None;
+    let mut params = Vec::new();
+    for (cand_idx, cand_params) in &candidates {
+        let Some(route) = gateway.routes.get(*cand_idx) else {
+            continue;
+        };
+        if route_applies(
+            &route.r#match,
+            gen.snapshot.route_table().accept_media_type(*cand_idx),
+            &req,
+        ) {
+            idx = Some(*cand_idx);
+            params = cand_params.clone();
+            break;
+        }
+    }
+    let Some(idx) = idx else {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
     let Some(route) = gateway.routes.get(idx) else {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
-
-    if !route_applies(
-        &route.r#match,
-        gen.snapshot.route_table().accept_media_type(idx),
-        &req,
-    ) {
-        return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
-    }
     rec.route = route.name.clone();
     root.record("route", route.name.as_str());
 

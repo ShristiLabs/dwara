@@ -1,5 +1,7 @@
-# name: regex-first-declared-wins
-# Two regexes both matching: the first-declared route wins.
+# name: regex-specificity-wins
+# Two regexes both matching: the more specific one wins (DP-06, #254).
+# regex-b ('/x/[0-9]+') has more literal characters than regex-a
+# ('/x/'), so it scores higher and wins.
 routes:
   - name: regex-a
     service: svc
@@ -10,4 +12,4 @@ routes:
     match: {path: {type: regex, value: '/x/[0-9]+'}}
     action: {type: proxy}
 request: {method: GET, path: /x/42}
-expect: {route: regex-a}
+expect: {route: regex-b}
