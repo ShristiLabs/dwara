@@ -89,6 +89,10 @@ fn passthrough_path(endpoint: crate::config::AiEndpoint) -> &'static str {
         crate::config::AiEndpoint::Audio => "/v1/audio/speech",
         crate::config::AiEndpoint::Moderation => "/v1/moderations",
         crate::config::AiEndpoint::Chat => "/v1/chat/completions",
+        // AI-04 (#194): Batch API uses /v1/batches for create/status.
+        // The result file endpoint (/v1/batches/{id}/output) is handled
+        // separately in serve_ai_batch_results.
+        crate::config::AiEndpoint::Batch => "/v1/batches",
     }
 }
 

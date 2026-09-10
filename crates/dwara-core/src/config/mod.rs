@@ -4325,6 +4325,12 @@ pub enum AiEndpoint {
     /// OpenAI moderation (`POST /v1/moderations`). Proxied as a
     /// passthrough.
     Moderation,
+    /// AI-04 (#194): OpenAI Batch API (`POST /v1/batches`). Proxied
+    /// as a passthrough for batch creation/status/cancel. When batch
+    /// results are retrieved (`GET /v1/batches/{id}/output`), the
+    /// JSONL result file is parsed and each line's `usage` is metered
+    /// at the batch (50% discount) rate.
+    Batch,
 }
 
 /// A WASM route handler (nano-service) action (DW-106,

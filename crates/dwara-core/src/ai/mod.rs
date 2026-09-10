@@ -45,6 +45,7 @@
 pub mod a2a;
 pub mod adapter;
 pub mod adapters;
+pub mod batch;
 pub mod budget;
 pub mod cost;
 pub mod credentials;
