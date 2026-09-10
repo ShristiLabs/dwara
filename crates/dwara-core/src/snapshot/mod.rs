@@ -8027,6 +8027,12 @@ pub struct RouteTable {
     /// so the request path never touches the filesystem. `None` where
     /// the route carries no mock action or uses an inline `body`.
     mock_bodies: Vec<Option<bytes::Bytes>>,
+    /// Effective security headers per route index (SEC-09, #213): the
+    /// route's own `security_headers` block when present, else the
+    /// gateway-level `default_security_headers` when the route has
+    /// not opted out, else `None`. Computed once at compile time so
+    /// the request path never re-merges.
+    effective_security_headers: Vec<Option<crate::config::transforms::SecurityHeaders>>,
 }
 
 impl RouteTable {
@@ -8047,6 +8053,7 @@ impl RouteTable {
             masking: Vec::new(),
             caches: Vec::new(),
             mock_bodies: Vec::new(),
+            effective_security_headers: Vec::new(),
         }
     }
 
@@ -8170,6 +8177,19 @@ impl RouteTable {
     /// mirroring `gateway().routes[idx].action.mock.body_file`).
     pub fn mock_body(&self, idx: usize) -> Option<&bytes::Bytes> {
         self.mock_bodies.get(idx).and_then(|b| b.as_ref())
+    }
+
+    /// The effective security headers for a route (SEC-09, #213): the
+    /// route's own `security_headers` block when present, else the
+    /// gateway-level `default_security_headers` when the route has
+    /// not opted out, else `None`.
+    pub fn effective_security_headers(
+        &self,
+        idx: usize,
+    ) -> Option<&crate::config::transforms::SecurityHeaders> {
+        self.effective_security_headers
+            .get(idx)
+            .and_then(|sh| sh.as_ref())
     }
 }
 
@@ -8370,6 +8390,7 @@ impl Snapshot {
                 policies: Vec::new(),
                 global_policies: Vec::new(),
                 authorization: None,
+                default_security_headers: None,
                 max_concurrent_requests: None,
                 load_shed_dry_run: false,
                 jwt_providers: Vec::new(),
@@ -8670,6 +8691,24 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
         })
         .collect();
 
+    // SEC-09 (#213): compute the effective security headers per route
+    // — the route's own block when present, else the gateway-level
+    // default when the route has not opted out, else None. Computed
+    // once here so the request path never re-merges.
+    let effective_security_headers = gateway
+        .routes
+        .iter()
+        .map(|r| {
+            if let Some(sh) = &r.security_headers {
+                Some(sh.clone())
+            } else if !r.security_headers_opt_out {
+                gateway.default_security_headers.clone()
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // USA-12 (#233): build the developer portal at compile time when
     // `lifecycle.portal.enabled` is true. The portal is a read-only
     // static HTML page aggregating the configured OpenAPI specs.
@@ -8699,6 +8738,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             masking,
             caches,
             mock_bodies,
+            effective_security_headers,
         }),
         content_hash,
     })

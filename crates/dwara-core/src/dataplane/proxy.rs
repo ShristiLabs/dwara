@@ -3318,7 +3318,10 @@ where
                     resp.headers_mut(),
                 );
             }
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     }
@@ -3364,7 +3367,10 @@ where
                         "request blocked by security filter",
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
             }
@@ -3407,7 +3413,10 @@ where
                             "request blocked by security filter",
                             rid,
                         );
-                        stamp_security_headers(&mut resp, route);
+                        stamp_security_headers(
+                            &mut resp,
+                            gen.snapshot.route_table().effective_security_headers(idx),
+                        );
                         return resp;
                     }
                 }
@@ -3467,7 +3476,10 @@ where
                     "request rejected by GraphQL check"
                 );
                 let mut resp = simple(StatusCode::BAD_REQUEST, code, msg, rid);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
             // The body was consumed by the check; reconstruct it from
@@ -3565,7 +3577,10 @@ where
                     "request blocked by anomaly scoring",
                     rid,
                 );
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         } else {
@@ -3623,7 +3638,10 @@ where
                     "request rejected by route limits"
                 );
                 let mut resp = simple(status, code, &msg, rid);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         }
@@ -3644,7 +3662,10 @@ where
                 let mut resp =
                     crate::dataplane::cors::preflight_response(cors, origins, req.headers())
                         .map(ProxyBody::Full);
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
                 return resp;
             }
         }
@@ -3687,7 +3708,10 @@ where
         Ok(id) => id,
         Err(AuthError::Invalid(_)) => {
             let mut resp = unauthorized(&authn.challenge(), rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
         Err(AuthError::Unavailable(msg)) => {
@@ -3702,13 +3726,19 @@ where
                 "authentication unavailable",
                 rid,
             );
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     };
     if route.auth_required && identity.is_none() {
         let mut resp = unauthorized(&authn.challenge(), rid);
-        stamp_security_headers(&mut resp, route);
+        stamp_security_headers(
+            &mut resp,
+            gen.snapshot.route_table().effective_security_headers(idx),
+        );
         return resp;
     }
     if let Some(id) = &identity {
@@ -3854,7 +3884,10 @@ where
             ..
         } => {
             let mut resp = unauthorized(&authn.challenge(), rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
         crate::security::authz::Decision::Deny { reason, .. } => {
@@ -3871,7 +3904,10 @@ where
                 "authorization denied: {reason}"
             );
             let mut resp = forbidden(rid);
-            stamp_security_headers(&mut resp, route);
+            stamp_security_headers(
+                &mut resp,
+                gen.snapshot.route_table().effective_security_headers(idx),
+            );
             return resp;
         }
     }
@@ -3947,7 +3983,10 @@ where
                         retry_after_s,
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
                 RateLimitOutcome::Allowed {
@@ -4015,7 +4054,10 @@ where
                         "quota store unavailable",
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
                 Ok(None) => warn_quota_consumer_unsynced(consumer_name),
@@ -4074,7 +4116,10 @@ where
                             );
                             let mut resp =
                                 rate_limited(limit, remaining, reset_epoch_s, retry_after_s, rid);
-                            stamp_security_headers(&mut resp, route);
+                            stamp_security_headers(
+                                &mut resp,
+                                gen.snapshot.route_table().effective_security_headers(idx),
+                            );
                             return resp;
                         }
                         crate::state::quotas::QuotaOutcome::Unavailable => {
@@ -4091,7 +4136,10 @@ where
                                 "quota store unavailable",
                                 rid,
                             );
-                            stamp_security_headers(&mut resp, route);
+                            stamp_security_headers(
+                                &mut resp,
+                                gen.snapshot.route_table().effective_security_headers(idx),
+                            );
                             return resp;
                         }
                         // NotQuotaed here means the consumer row was
@@ -4223,6 +4271,7 @@ where
                                     Some(aq.queue_timeout),
                                     gateway.load_shed_dry_run,
                                     identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                    gen.snapshot.route_table().effective_security_headers(idx),
                                 )
                             } else {
                                 // Reserve a queue slot. The timed acquire
@@ -4249,6 +4298,7 @@ where
                                 None,
                                 gateway.load_shed_dry_run,
                                 identity.as_ref().map(|id| id.consumer_name.as_str()),
+                                gen.snapshot.route_table().effective_security_headers(idx),
                             )
                         }
                     }
@@ -4286,6 +4336,7 @@ where
                         Some(timeout),
                         gateway.load_shed_dry_run,
                         identity.as_ref().map(|id| id.consumer_name.as_str()),
+                        gen.snapshot.route_table().effective_security_headers(idx),
                     );
                     match result {
                         AdmissionResult::Permit(p) => p,
@@ -4474,7 +4525,10 @@ where
                             ),
                             rid,
                         );
-                        stamp_security_headers(&mut resp, route);
+                        stamp_security_headers(
+                            &mut resp,
+                            gen.snapshot.route_table().effective_security_headers(idx),
+                        );
                         return resp;
                     }
                     tracing::warn!(
@@ -4490,7 +4544,10 @@ where
                         &format!("request body does not match the expected schema: {violation}"),
                         rid,
                     );
-                    stamp_security_headers(&mut resp, route);
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
                     return resp;
                 }
             }
@@ -4671,8 +4728,11 @@ where
     // upstream values AND over operator transforms (an operator who
     // needs per-route exceptions omits the field here and sets it via
     // transforms). REPLACE semantics: the gateway is the source of
-    // truth at its edge.
-    if let Some(sh) = &route.security_headers {
+    // truth at its edge. SEC-09 (#213): the effective posture is the
+    // route's own block when present, else the gateway-level default
+    // (when the route has not opted out), computed once at compile
+    // time.
+    if let Some(sh) = gen.snapshot.route_table().effective_security_headers(idx) {
         crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
     }
     // Admitted requests carry the binding constraint's rate headers (only
@@ -4692,8 +4752,11 @@ where
 /// (the deliberate asymmetry with deprecation stamps, which announce
 /// API lifecycle and stay off short-circuits; see
 /// `config::transforms::SecurityHeaders`).
-fn stamp_security_headers(resp: &mut Response<ProxyBody>, route: &Route) {
-    if let Some(sh) = &route.security_headers {
+fn stamp_security_headers(
+    resp: &mut Response<ProxyBody>,
+    sh: Option<&crate::config::transforms::SecurityHeaders>,
+) {
+    if let Some(sh) = sh {
         crate::dataplane::transforms::apply_security_headers(resp.headers_mut(), sh);
     }
 }
@@ -4733,7 +4796,10 @@ fn maintenance_response(
     }
     // Security headers (DW-028): the 503 is a route-matched response —
     // the edge policy stamps it like every other.
-    stamp_security_headers(&mut resp, route);
+    stamp_security_headers(
+        &mut resp,
+        gen.snapshot.route_table().effective_security_headers(idx),
+    );
     resp
 }
 
@@ -5626,7 +5692,12 @@ where
                     "oauth2 token endpoint unavailable",
                     rid,
                 );
-                stamp_security_headers(&mut resp, route);
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot
+                        .route_table()
+                        .effective_security_headers(route_idx),
+                );
                 return resp;
             }
         }
@@ -7507,6 +7578,7 @@ fn handle_shed(
     retry_after: Option<Duration>,
     dry_run: bool,
     consumer_name: Option<&str>,
+    effective_sh: Option<&crate::config::transforms::SecurityHeaders>,
 ) -> AdmissionResult {
     if dry_run {
         dp.priority_counters.record_admitted(priority);
@@ -7551,7 +7623,7 @@ fn handle_shed(
                 resp.headers_mut().insert(hyper::header::RETRY_AFTER, v);
             }
         }
-        stamp_security_headers(&mut resp, route);
+        stamp_security_headers(&mut resp, effective_sh);
         AdmissionResult::Shed(resp)
     }
 }

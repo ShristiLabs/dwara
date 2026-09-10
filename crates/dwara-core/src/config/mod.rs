@@ -141,6 +141,18 @@ pub struct Gateway {
     /// authorization; see [`Authz`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authz>,
+    /// Gateway-level default security headers baseline (SEC-09, #213):
+    /// applied to EVERY route that does not carry its own
+    /// `security_headers` block and has not set
+    /// `security_headers_opt_out: true`. Fail-secure defaults: a
+    /// route with no `security_headers` block inherits this posture
+    /// rather than shipping without HSTS/nosniff. A route that needs
+    /// to disable a header from the default sets its own
+    /// `security_headers` block (which fully replaces the default
+    /// for that route), or sets `security_headers_opt_out: true` to
+    /// opt out entirely. See [`SecurityHeaders`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_security_headers: Option<SecurityHeaders>,
     /// IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims
     /// are trusted (gateway-level; the direct connection peer must be in
     /// this list for an inbound XFF chain to be preserved and extended).
@@ -2725,6 +2737,16 @@ pub struct Route {
     /// [`SecurityHeaders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_headers: Option<SecurityHeaders>,
+    /// Opt out of the gateway-level `default_security_headers`
+    /// baseline (SEC-09, #213): when true, a route with no
+    /// `security_headers` block ships WITHOUT the gateway's default
+    /// security headers. A route that carries its own
+    /// `security_headers` block always uses it (the block fully
+    /// replaces the default); this flag is for the rare route that
+    /// deliberately needs no security headers at all. Default:
+    /// false (inherit the default when present).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub security_headers_opt_out: bool,
     /// Response field masking (DW-029, feature analysis 5-Security):
     /// redacts the named RFC 6901 JSON pointers from the route's
     /// responses — the floor `fields` for every consumer, plus the
