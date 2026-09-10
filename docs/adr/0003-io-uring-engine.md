@@ -1,8 +1,8 @@
-# ADR-0003: io_uring engine experiment (DW-096)
+# ADR-0003: io_uring engine experiment (DW-096, PERF-13 #245)
 
-- **Status:** Experiment (scaffold + decision: defer adoption, tokio remains default)
+- **Status:** Experiment (scaffold + decision: defer adoption, tokio remains default; PERF-13 revived the L4 thread-per-core + splice(2) seams)
 - **Date:** 2026-09-06
-- **Tracking:** DW-096
+- **Tracking:** DW-096, PERF-13 (#245)
 
 ## Context
 
@@ -121,6 +121,30 @@ No `monoio` or `tokio-uring` dependency is added in this scaffold. The
 crate compiles with no new dependencies and the default workspace build
 is unaffected.
 
+## PERF-13 (#245): L4 thread-per-core + splice(2) revival
+
+The PERF-13 issue revived the io_uring experiment as an L4-first
+research scaffold. The prerequisite (PERF-06 benchmark harness,
+`scripts/bench-macro.sh`) is in place, so the revival adds the
+trait-based seams a future monoio adapter would consume:
+
+- [`ThreadPerCoreAcceptConfig`] — the config for a thread-per-core
+  accept loop (one worker per core, SO_REUSEPORT, no work-stealing).
+- [`ThreadPerCoreAccept`] — the accept-loop trait. The tokio fallback
+  (`TokioAccept`) documents that the real accept loop lives in
+  `dataplane::l4`; a future monoio adapter would replace it.
+- [`SpliceAdapter`] — the L4 splice trait. The tokio fallback
+  (`TokioSplice`) uses `tokio::io::copy_bidirectional` (user-space
+  copy); a future monoio adapter would use `splice(2)` via io_uring
+  (kernel-space pipe, zero-copy).
+- [`engine_from_env`] — reads `DWARA_ENGINE` at startup (tokio
+  default; uring falls back to tokio on non-Linux).
+
+No `monoio` dependency is added; the seams are trait-based and the
+tokio fallbacks are no-ops that document where the real implementation
+lives. The L7 path (hyper, TLS) stays on tokio until the ecosystem
+bridges the trait gap (see the Decision section above).
+
 ## Consequences
 
 - tokio remains the sole runtime; no `uring` feature is added to the
@@ -129,3 +153,5 @@ is unaffected.
   so `cargo build --workspace` and the macOS CI lane never touch it.
 - The decision is recorded; a future revisit reopens this ADR with
   benchmark numbers from a Linux CI lane.
+- PERF-13 (#245) added the L4 thread-per-core + splice(2) seams; the
+  L7 path is unchanged.
