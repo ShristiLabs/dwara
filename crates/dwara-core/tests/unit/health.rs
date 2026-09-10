@@ -10,6 +10,7 @@ fn params() -> HealthParams {
         failure_min_volume: 4,
         eject_ms: 1_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     }
 }
 

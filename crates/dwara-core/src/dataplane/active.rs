@@ -136,6 +136,7 @@ pub fn report_params(active: &ActiveParams, passive: &HealthParams) -> HealthPar
         failure_min_volume: u32::MAX,
         eject_ms: passive.eject_ms,
         half_open_probes: passive.half_open_probes,
+        recovery_ramp_ms: passive.recovery_ramp_ms,
     }
 }
 

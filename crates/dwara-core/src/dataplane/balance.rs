@@ -264,6 +264,35 @@ impl LbState {
             ramped.max(1) as i64
         }
     }
+
+    /// REL-06 (#217): recovery ramp multiplier for an endpoint that
+    /// recently recovered from ejection. Returns a value in [0.0, 1.0]
+    /// representing the fraction of the endpoint's configured weight to
+    /// apply. 1.0 = full weight (ramp complete or disabled). The ramp
+    /// starts at a floor (proportional to 1/weight) and linearly
+    /// increases to 1.0 over `recovery_ramp_ms`.
+    fn recovery_ramp_factor(&self, e: &LbEndpoint) -> f64 {
+        let Some(params) = &self.health else {
+            return 1.0;
+        };
+        if params.recovery_ramp_ms == 0 {
+            return 1.0;
+        }
+        let Some(tracker) = &e.health else {
+            return 1.0;
+        };
+        let recovered_at = tracker.recovered_at_ms();
+        if recovered_at == 0 {
+            return 1.0;
+        }
+        let now = system_now_ms();
+        let elapsed = now.saturating_sub(recovered_at);
+        if elapsed >= params.recovery_ramp_ms {
+            return 1.0;
+        }
+        // Linear ramp from 0.1 (floor) to 1.0 over the window.
+        0.1 + 0.9 * (elapsed as f64 / params.recovery_ramp_ms as f64)
+    }
 }
 
 /// DW-094 (Ent): the result of locality-aware filtering in
@@ -582,6 +611,15 @@ fn smooth_weighted_rr(state: &LbState, cand: Option<&[usize]>) -> usize {
     for i in 0..n {
         let e = &state.endpoints[resolve(i)];
         let w = state.effective_weight(e);
+        // REL-06 (#217): apply the recovery ramp factor to reduce
+        // the effective weight of a recently-recovered endpoint.
+        let w = if w > 0 {
+            let factor = state.recovery_ramp_factor(e);
+            ((w as f64) * factor).round() as i64
+        } else {
+            w
+        };
+        let w = w.max(1);
         total += w;
         let cw = e.current_weight.fetch_add(w, Ordering::Relaxed) + w;
         // Strict >: ties keep the lowest index (deterministic).
@@ -980,7 +1018,7 @@ impl UpstreamLb {
             address: e.address.clone(),
             port: e.port,
             health,
-            guard: InflightGuard { state, idx },
+            guard: Some(InflightGuard { state, idx }),
         })
     }
 
@@ -1359,15 +1397,25 @@ pub struct Dispatch {
     /// outcome (transport error / status >= 500 = failure) when the
     /// response headers resolve.
     pub health: Option<HealthDispatch>,
-    guard: InflightGuard,
+    guard: Option<InflightGuard>,
 }
 
 impl Dispatch {
     /// Release the in-flight guard explicitly. Dropping the `Dispatch`
     /// has the same effect; this exists for call sites that want the
     /// release point named and to keep the guard field honest.
-    pub fn release(self) {
-        drop(self.guard);
+    pub fn release(mut self) {
+        self.guard.take();
+    }
+
+    /// REL-06 (#217): take the in-flight guard out of the dispatch
+    /// WITHOUT decrementing the counter. Used when the caller will
+    /// attach the guard to the response body so the counter is held
+    /// until the body stream completes (body-completion in-flight
+    /// accounting). After this call, `release()` and `Drop` are no-ops
+    /// for the guard.
+    pub fn take_guard(&mut self) -> Option<InflightGuard> {
+        self.guard.take()
     }
 }
 

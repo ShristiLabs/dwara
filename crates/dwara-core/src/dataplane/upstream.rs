@@ -357,6 +357,14 @@ pub struct UpstreamBody {
     /// polls constantly; a stalled one is bounded by the idle timer
     /// first). `None` = no deadline.
     deadline: Option<std::time::Instant>,
+    /// REL-06 (#217): optional in-flight guard held until the body
+    /// completes (or is dropped). When present, the in-flight counter
+    /// is decremented when the body stream ends (Poll::Ready(None)) or
+    /// when the body is dropped — NOT when headers resolve. This gives
+    /// `least_requests`, `random`, and `peak_ewma` a more accurate
+    /// view of actual endpoint load. Default behavior (when `None`)
+    /// remains header-resolution release (v1).
+    inflight_guard: Option<crate::dataplane::balance::InflightGuard>,
 }
 
 impl hyper::body::Body for UpstreamBody {
@@ -449,6 +457,7 @@ impl UpstreamBody {
             health,
             release: None,
             deadline: None,
+            inflight_guard: None,
         }
     }
 
@@ -469,6 +478,7 @@ impl UpstreamBody {
             health: None,
             release: None,
             deadline: None,
+            inflight_guard: None,
         }
     }
 
@@ -493,6 +503,14 @@ impl UpstreamBody {
         self.deadline = Some(deadline);
     }
 
+    /// REL-06 (#217): attach the in-flight guard so the endpoint's
+    /// in-flight counter is held until the body stream completes (or
+    /// the body is dropped). Used when `body_completion_inflight` is
+    /// enabled in the upstream's health config.
+    pub fn set_inflight_guard(&mut self, guard: crate::dataplane::balance::InflightGuard) {
+        self.inflight_guard = Some(guard);
+    }
+
     /// REL-05 (#216): create an empty body (used as a placeholder while
     /// the first-frame buffer drains the real body).
     pub fn empty() -> Self {
@@ -505,6 +523,7 @@ impl UpstreamBody {
             health: None,
             release: None,
             deadline: None,
+            inflight_guard: None,
         }
     }
 
@@ -538,6 +557,7 @@ impl UpstreamBody {
         let health = rest.health.take();
         let release = rest.release.take();
         let deadline = rest.deadline;
+        let inflight_guard = rest.inflight_guard.take();
         let rest_inner = std::mem::replace(
             &mut rest.inner,
             http_body_util::Empty::new()
@@ -555,6 +575,7 @@ impl UpstreamBody {
             health,
             release,
             deadline,
+            inflight_guard,
         }
     }
 }
@@ -1077,6 +1098,10 @@ pub struct UpstreamHandle {
     /// `protocol == H3` and this is `None`, the feature is off and every
     /// dispatch fails closed with [`UpstreamError::H3Unavailable`].
     h3: Option<Arc<crate::dataplane::upstream_h3::H3UpstreamHandle>>,
+    /// REL-06 (#217): whether the in-flight counter is held until the
+    /// response body completes (true) or released at header resolution
+    /// (false, the v1 default).
+    body_completion_inflight: bool,
 }
 
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
@@ -1295,7 +1320,7 @@ impl UpstreamHandle {
         // endpoint resolution, and in-flight acquisition all run against
         // ONE state snapshot (pick_for_dispatch), so a concurrent reload
         // cannot detach the guard from the picked endpoint.
-        let (dispatch, authority) = {
+        let (mut dispatch, authority) = {
             // DW-021: the pick phase is its own span so a full trace
             // shows pick separately from the attempt that contains it.
             let span = tracing::info_span!(
@@ -1454,11 +1479,26 @@ impl UpstreamHandle {
         // a timeout is a latency signal. No-op when the algorithm is not
         // peak_ewma (the tracker is absent).
         self.lb.record_latency(dispatch.idx, issued.elapsed());
+        // REL-06 (#217): when body-completion in-flight accounting is
+        // enabled, move the in-flight guard to the response body so
+        // the counter is held until the body stream completes. On
+        // error paths, the guard is released normally (the body never
+        // starts).
+        let body_guard = if self.body_completion_inflight {
+            dispatch.take_guard()
+        } else {
+            None
+        };
         dispatch.release();
         outcome.map_err(Into::into).map(|resp| {
             (
                 resp.map(|inner| {
-                    UpstreamBody::from_incoming(inner, self.write_timeout, body_health)
+                    let mut body =
+                        UpstreamBody::from_incoming(inner, self.write_timeout, body_health);
+                    if let Some(guard) = body_guard {
+                        body.set_inflight_guard(guard);
+                    }
+                    body
                 }),
                 (),
             )
@@ -1809,6 +1849,10 @@ fn build_handle(
         protocol: u.protocol,
         hash_on: u.hash_on.clone(),
         h3: h3_handle,
+        body_completion_inflight: u
+            .health
+            .as_ref()
+            .is_some_and(|h| h.body_completion_inflight),
     })
 }
 

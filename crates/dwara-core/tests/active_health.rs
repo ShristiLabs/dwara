@@ -1447,6 +1447,7 @@ fn window_purity_params() -> (HealthParams, HealthParams) {
         failure_min_volume: 3,
         eject_ms: 60_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     };
     let probe_report = HealthParams {
         window_ms: passive.window_ms,
@@ -1455,6 +1456,7 @@ fn window_purity_params() -> (HealthParams, HealthParams) {
         failure_min_volume: u32::MAX,
         eject_ms: passive.eject_ms,
         half_open_probes: passive.half_open_probes,
+        recovery_ramp_ms: 0,
     };
     (passive, probe_report)
 }

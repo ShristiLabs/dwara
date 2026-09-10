@@ -3413,6 +3413,17 @@
           "format": "uint32",
           "minimum": 0,
           "default": 1
+        },
+        "recovery_ramp_ms": {
+          "description": "Recovery ramp window in milliseconds (REL-06, #217). When > 0,\nan endpoint that recovers from ejection (a half-open probe\nsucceeds) does NOT immediately return to full traffic. Instead\nit ramps its effective weight from a floor (1) to its\nconfigured weight over this window, reducing the blast radius\nof a partial recovery (the endpoint may still be slow or\npartially degraded). Default 0 = no ramp (v1 behavior: a\nsuccessful probe restores full weight immediately).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "body_completion_inflight": {
+          "description": "Whether the in-flight counter is held until the response body\ncompletes (REL-06, #217). Default false: the in-flight counter\nis released when response headers resolve (v1 behavior). When\ntrue, the counter is held until the body stream ends or is\ndropped, giving `least_requests`, `random`, and `peak_ewma` a\nmore accurate view of actual endpoint load. The trade-off is a\nslightly higher in-flight count under streaming workloads.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

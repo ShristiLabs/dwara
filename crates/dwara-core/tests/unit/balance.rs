@@ -374,6 +374,8 @@ fn single_candidate_half_open_consumes_probe_budget() {
         failure_min_volume: 1000, // isolate the consecutive-failure path
         eject_ms: 1_000,
         half_open_probes: 2,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     };
     let lb = UpstreamLb::new_with_health(
         &eps(&[("solo", 80, 1)]),

@@ -5603,6 +5603,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn default_false() -> bool {
+    false
+}
+
 /// Passive health / outlier detection knobs (DW-012). All fields default;
 /// a `health:` block with no keys enables ejection with the defaults.
 ///
@@ -5637,6 +5641,25 @@ pub struct PassiveHealth {
     /// re-ejects for another `eject_ms`.
     #[serde(default = "default_health_half_open_probes")]
     pub half_open_probes: u32,
+    /// Recovery ramp window in milliseconds (REL-06, #217). When > 0,
+    /// an endpoint that recovers from ejection (a half-open probe
+    /// succeeds) does NOT immediately return to full traffic. Instead
+    /// it ramps its effective weight from a floor (1) to its
+    /// configured weight over this window, reducing the blast radius
+    /// of a partial recovery (the endpoint may still be slow or
+    /// partially degraded). Default 0 = no ramp (v1 behavior: a
+    /// successful probe restores full weight immediately).
+    #[serde(default)]
+    pub recovery_ramp_ms: u64,
+    /// Whether the in-flight counter is held until the response body
+    /// completes (REL-06, #217). Default false: the in-flight counter
+    /// is released when response headers resolve (v1 behavior). When
+    /// true, the counter is held until the body stream ends or is
+    /// dropped, giving `least_requests`, `random`, and `peak_ewma` a
+    /// more accurate view of actual endpoint load. The trade-off is a
+    /// slightly higher in-flight count under streaming workloads.
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub body_completion_inflight: bool,
 }
 
 impl Default for PassiveHealth {
@@ -5648,6 +5671,8 @@ impl Default for PassiveHealth {
             failure_min_volume: 20,
             eject_ms: 30_000,
             half_open_probes: 1,
+            recovery_ramp_ms: 0,
+            body_completion_inflight: false,
         }
     }
 }

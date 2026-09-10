@@ -65,6 +65,8 @@ fn health_cfg(consecutive_failures: u32, failure_min_volume: u32) -> PassiveHeal
         failure_min_volume,
         eject_ms: 5_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     }
 }
 
@@ -85,6 +87,8 @@ fn health_full(
         failure_min_volume,
         eject_ms,
         half_open_probes,
+        recovery_ramp_ms: 0,
+        body_completion_inflight: false,
     }
 }
 
@@ -316,6 +320,7 @@ fn edge_params(failure_ratio: f64, failure_min_volume: u32) -> HealthParams {
         failure_min_volume,
         eject_ms: 1_000,
         half_open_probes: 1,
+        recovery_ramp_ms: 0,
     }
 }
 
