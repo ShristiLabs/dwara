@@ -58,6 +58,7 @@ pub mod partition;
 pub mod query;
 pub mod rollup;
 pub mod schema;
+pub mod sketch;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -440,76 +441,21 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The maximum number of latency samples retained per route per window
-/// (DW-092). Capped to bound memory and snapshot-time sort cost
-/// (O(n log n) with n <= 1000 — fast enough for an admin-path
-/// snapshot, never on the request hot path).
-const MAX_LATENCY_SAMPLES: usize = 1000;
-
-/// One per-route sketch within the live rolling window (DW-092).
-/// Updated in place under atomics (counts) and a short mutex over a
-/// capped latency-sample vector. The route key is held by the parent
-/// map, not here.
+/// One per-route sketch within the live rolling window (DW-092,
+/// PERF-09 #242). Updated in place under atomics (counts) and a short
+/// mutex over a DDSketch (bounded-memory, relative-error quantile
+/// sketch). The route key is held by the parent map, not here.
 struct RouteSketch {
     /// Total requests in the current window.
     requests: AtomicU64,
     /// Total errors (status >= 500) in the current window.
     errors: AtomicU64,
-    /// Capped latency samples (ms) for percentile computation at
-    /// snapshot time. Once the cap is reached, new samples replace the
-    /// oldest (a simple ring) so the retained set stays representative
-    /// of the recent tail.
-    latency_samples: Mutex<LatencySamples>,
-}
-
-/// A capped latency-sample buffer with a write cursor (ring
-/// replacement once full). The retained set is sorted at snapshot
-/// time for nearest-rank percentile selection.
-struct LatencySamples {
-    samples: Vec<f64>,
-    cursor: usize,
-}
-
-impl LatencySamples {
-    fn new() -> Self {
-        LatencySamples {
-            samples: Vec::with_capacity(MAX_LATENCY_SAMPLES),
-            cursor: 0,
-        }
-    }
-
-    /// Record one latency sample. Once the cap is reached, the oldest
-    /// sample (by insertion order) is overwritten — a bounded ring
-    /// that keeps the most recent `MAX_LATENCY_SAMPLES` observations.
-    fn push(&mut self, ms: f64) {
-        if self.samples.len() < MAX_LATENCY_SAMPLES {
-            self.samples.push(ms);
-        } else {
-            self.samples[self.cursor] = ms;
-            self.cursor = (self.cursor + 1) % MAX_LATENCY_SAMPLES;
-        }
-    }
-
-    /// Nearest-rank percentile over the retained samples (sorted in
-    /// place). `p` is 0.0-1.0. Returns 0.0 when no samples are held.
-    fn percentile(&mut self, p: f64) -> f64 {
-        if self.samples.is_empty() {
-            return 0.0;
-        }
-        self.samples
-            .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let p = p.clamp(0.0, 1.0);
-        let rank = ((self.samples.len() as f64) * p).ceil() as usize;
-        self.samples[rank.clamp(1, self.samples.len()) - 1]
-    }
-
-    /// The arithmetic mean of the retained samples.
-    fn mean(&self) -> f64 {
-        if self.samples.is_empty() {
-            return 0.0;
-        }
-        self.samples.iter().sum::<f64>() / self.samples.len() as f64
-    }
+    /// DDSketch quantile sketch (PERF-09, #242): bounded-memory,
+    /// relative-error-guaranteed percentile estimation. Replaces the
+    /// previous ring-buffer + nearest-rank approach. The sketch is
+    /// updated under a short mutex; the DDSketch's bucket count is
+    /// bounded (default 8192) regardless of traffic volume.
+    latency: Mutex<sketch::DDSketch>,
 }
 
 impl RouteSketch {
@@ -517,7 +463,7 @@ impl RouteSketch {
         RouteSketch {
             requests: AtomicU64::new(0),
             errors: AtomicU64::new(0),
-            latency_samples: Mutex::new(LatencySamples::new()),
+            latency: Mutex::new(sketch::DDSketch::new()),
         }
     }
 }
@@ -619,7 +565,7 @@ impl LiveSketches {
             if status >= 500 {
                 sketch.errors.fetch_add(1, Ordering::Relaxed);
             }
-            sketch.latency_samples.lock().unwrap().push(duration_ms);
+            sketch.latency.lock().unwrap().add(duration_ms);
             return;
         }
         drop(map);
@@ -631,7 +577,7 @@ impl LiveSketches {
         if status >= 500 {
             sketch.errors.fetch_add(1, Ordering::Relaxed);
         }
-        sketch.latency_samples.lock().unwrap().push(duration_ms);
+        sketch.latency.lock().unwrap().add(duration_ms);
     }
 
     /// Rotate the window: snapshot the current aggregates, hand them
@@ -653,7 +599,7 @@ impl LiveSketches {
                 let err = sketch.errors.load(Ordering::Relaxed);
                 total_requests += req;
                 total_errors += err;
-                let mean = sketch.latency_samples.lock().unwrap().mean();
+                let mean = sketch.latency.lock().unwrap().mean();
                 latency_sum += mean * req as f64;
                 latency_count += req;
             }
@@ -698,12 +644,12 @@ impl LiveSketches {
                 let requests = sketch.requests.load(Ordering::Relaxed);
                 let errors = sketch.errors.load(Ordering::Relaxed);
                 let (p50, p95, p99, avg) = {
-                    let mut samples = sketch.latency_samples.lock().unwrap();
+                    let sketch = sketch.latency.lock().unwrap();
                     (
-                        samples.percentile(0.50),
-                        samples.percentile(0.95),
-                        samples.percentile(0.99),
-                        samples.mean(),
+                        sketch.quantile(0.50),
+                        sketch.quantile(0.95),
+                        sketch.quantile(0.99),
+                        sketch.mean(),
                     )
                 };
                 LiveRouteSnapshot {
