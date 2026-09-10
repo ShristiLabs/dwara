@@ -196,7 +196,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
             Upstream {
                 name: up.name.clone(),
                 load_balancer: LoadBalancer::RoundRobin,
-                        hash_on: None,
+                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 trusted_ca_file: None,
                 endpoints,

@@ -80,7 +80,7 @@ fn test_upstream(
     ConfigUpstream {
         name: "backend".into(),
         load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
+        hash_on: None,
         protocol,
         endpoints: vec![Endpoint {
             address,

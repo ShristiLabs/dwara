@@ -432,17 +432,17 @@ pub async fn run_aggregation(
 }
 
 /// Fetch a single fragment from its upstream service.
-async fn fetch_fragment(
-    fragment: &FragmentSpec,
-    resolver: &dyn ServiceResolver,
-) -> FragmentResult {
+async fn fetch_fragment(fragment: &FragmentSpec, resolver: &dyn ServiceResolver) -> FragmentResult {
     // Resolve the service to an upstream endpoint.
     let endpoint = match resolver.resolve(&fragment.service) {
         Some(e) => e,
         None => {
             return make_error_fragment_result(
                 fragment,
-                &format!("service '{}' not found or has no endpoint", fragment.service),
+                &format!(
+                    "service '{}' not found or has no endpoint",
+                    fragment.service
+                ),
             );
         }
     };
@@ -458,10 +458,7 @@ async fn fetch_fragment(
     let mut stream = match tokio::net::TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            return make_error_fragment_result(
-                fragment,
-                &format!("connect to {addr} failed: {e}"),
-            );
+            return make_error_fragment_result(fragment, &format!("connect to {addr} failed: {e}"));
         }
     };
 

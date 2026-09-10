@@ -633,7 +633,7 @@ async fn reserved_paths_shadow_configured_routes() {
             upstreams: vec![Upstream {
                 name: "up".into(),
                 load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
+                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),

@@ -93,7 +93,10 @@ pub struct Gateway {
     /// when the version is older than the current schema version; the
     /// `dwara migrate` command upgrades the config to the current
     /// version.
-    #[serde(default = "default_config_version", skip_serializing_if = "is_default_config_version")]
+    #[serde(
+        default = "default_config_version",
+        skip_serializing_if = "is_default_config_version"
+    )]
     pub version: u32,
     /// Entry points the gateway binds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

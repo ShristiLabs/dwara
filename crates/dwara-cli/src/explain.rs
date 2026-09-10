@@ -111,7 +111,10 @@ fn render_explanation(
                     out.push_str(&format!("  Host match: {host}\n"));
                 }
                 if !route.r#match.methods.is_empty() {
-                    out.push_str(&format!("  Methods: {}\n", route.r#match.methods.join(", ")));
+                    out.push_str(&format!(
+                        "  Methods: {}\n",
+                        route.r#match.methods.join(", ")
+                    ));
                 }
                 // Show the action type.
                 match &route.action {

@@ -671,17 +671,15 @@ fn main() {
             headers,
             consumer,
         } => {
-            let config_text =
-                std::fs::read_to_string(&config).unwrap_or_else(|e| {
-                    eprintln!("cannot read {config}: {e}");
-                    std::process::exit(2);
-                });
+            let config_text = std::fs::read_to_string(&config).unwrap_or_else(|e| {
+                eprintln!("cannot read {config}: {e}");
+                std::process::exit(2);
+            });
             let parsed_headers: Vec<(String, String)> = headers
                 .iter()
                 .filter_map(|h| {
-                    h.split_once(':').map(|(k, v)| {
-                        (k.trim().to_string(), v.trim().to_string())
-                    })
+                    h.split_once(':')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
                 })
                 .collect();
             let request = dwara_cli::explain::ExplainRequest {

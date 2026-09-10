@@ -800,7 +800,7 @@ async fn serve_status(listener: TcpListener, hits: Arc<AtomicU64>, status: Statu
 fn upstream_cfg(
     endpoints: Vec<Endpoint>,
     load_balancer: LoadBalancer,
-            hash_on: None,
+    hash_on: None,
     health: PassiveHealth,
 ) -> ConfigUpstream {
     ConfigUpstream {

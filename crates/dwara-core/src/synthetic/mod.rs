@@ -410,13 +410,7 @@ pub async fn run_probe(spec: &ProbeSpec) -> ProbeResult {
                 );
             }
             if let Err(msg) = check_body_assertions(spec, &body) {
-                return failure_result(
-                    &spec.route_name,
-                    started_at_ms,
-                    latency_ms,
-                    status,
-                    &msg,
-                );
+                return failure_result(&spec.route_name, started_at_ms, latency_ms, status, &msg);
             }
             success_result(&spec.route_name, started_at_ms, latency_ms, status)
         }
@@ -486,8 +480,7 @@ async fn run_journey(
                     );
                 }
                 // Extract values for subsequent steps.
-                if let (Some(name), Some(path)) = (&step.extract_name, &step.extract_jsonpath)
-                {
+                if let (Some(name), Some(path)) = (&step.extract_name, &step.extract_jsonpath) {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
                         if let Some(extracted_val) = jsonpath_get(&val, path) {
                             extracted.insert(name.clone(), extracted_val);
@@ -574,12 +567,12 @@ async fn execute_http(
         .map(|(a, p)| (a, format!("/{}", p)))
         .unwrap_or((rest, "/".to_string()));
     let (host, port) = if let Some((h, p)) = authority.rsplit_once(':') {
-        (h.to_string(), p.parse::<u16>().map_err(|e| format!("invalid port: {e}"))?)
-    } else {
         (
-            authority.to_string(),
-            if is_tls { 443 } else { 80 },
+            h.to_string(),
+            p.parse::<u16>().map_err(|e| format!("invalid port: {e}"))?,
         )
+    } else {
+        (authority.to_string(), if is_tls { 443 } else { 80 })
     };
 
     let connect_addr = format!("{}:{}", host, port);
@@ -691,9 +684,7 @@ impl ProbeScheduler {
             let emitter = emitter.clone();
             let handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(spec.interval);
-                interval.set_missed_tick_behavior(
-                    tokio::time::MissedTickBehavior::Delay,
-                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     interval.tick().await;
                     let result = run_probe(&spec).await;

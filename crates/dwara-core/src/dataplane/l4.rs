@@ -310,7 +310,9 @@ impl UdpDispatcher {
 
         let upstream_addr: SocketAddr = format!("{}:{}", upstream_host, upstream_port)
             .parse()
-            .map_err(|e| L4Error::Io(std::io::Error::other(format!("invalid upstream addr: {e}"))))?;
+            .map_err(|e| {
+                L4Error::Io(std::io::Error::other(format!("invalid upstream addr: {e}")))
+            })?;
 
         let mut sessions: HashMap<SocketAddr, UdpSession> = HashMap::new();
         let mut buf = vec![0u8; 65507]; // max UDP datagram payload
@@ -320,11 +322,8 @@ impl UdpDispatcher {
         loop {
             // Receive with a timeout so we can periodically evict idle
             // sessions even when traffic stops.
-            let recv_result = tokio::time::timeout(
-                Duration::from_secs(1),
-                listener.recv_from(&mut buf),
-            )
-            .await;
+            let recv_result =
+                tokio::time::timeout(Duration::from_secs(1), listener.recv_from(&mut buf)).await;
 
             // Evict idle sessions regardless of whether we received.
             let now_ms = std::time::SystemTime::now()
@@ -332,9 +331,8 @@ impl UdpDispatcher {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let timeout_ms = session_timeout.as_millis() as u64;
-            sessions.retain(|_, session| {
-                now_ms.saturating_sub(session.last_active_ms) < timeout_ms
-            });
+            sessions
+                .retain(|_, session| now_ms.saturating_sub(session.last_active_ms) < timeout_ms);
 
             match recv_result {
                 Ok(Ok((len, client_addr))) => {
@@ -358,9 +356,8 @@ impl UdpDispatcher {
                                 }
                             }
                             // Create a new upstream socket for this client.
-                            let upstream_sock = UdpSocket::bind("0.0.0.0:0")
-                        .await
-                        .map_err(L4Error::Io)?;
+                            let upstream_sock =
+                                UdpSocket::bind("0.0.0.0:0").await.map_err(L4Error::Io)?;
                             upstream_sock
                                 .connect(upstream_addr)
                                 .await

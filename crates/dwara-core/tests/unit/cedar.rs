@@ -170,8 +170,8 @@ permit (
 
 #[test]
 fn hot_reload_starts_with_initial_policy() {
-    let authz = HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None)
-        .unwrap();
+    let authz =
+        HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None).unwrap();
     let req = CedarRequest {
         principal: r#"User::"alice""#.to_string(),
         action: r#"Action::"read""#.to_string(),
@@ -183,8 +183,8 @@ fn hot_reload_starts_with_initial_policy() {
 
 #[test]
 fn hot_reload_swaps_policy_set_atomically() {
-    let authz = HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None)
-        .unwrap();
+    let authz =
+        HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None).unwrap();
 
     // Alice is allowed by the initial policy.
     let alice_req = CedarRequest {
@@ -193,14 +193,21 @@ fn hot_reload_swaps_policy_set_atomically() {
         resource: r#"Route::"api-v1""#.to_string(),
         context: None,
     };
-    assert_eq!(authz.is_authorized(&alice_req).unwrap(), CedarDecision::Allow);
+    assert_eq!(
+        authz.is_authorized(&alice_req).unwrap(),
+        CedarDecision::Allow
+    );
 
     // Reload with a policy that only allows Bob.
-    authz.reload_from_sources(BOB_POLICY, Some(ENTITIES_JSON), None)
+    authz
+        .reload_from_sources(BOB_POLICY, Some(ENTITIES_JSON), None)
         .unwrap();
 
     // Alice is now denied.
-    assert_eq!(authz.is_authorized(&alice_req).unwrap(), CedarDecision::Deny);
+    assert_eq!(
+        authz.is_authorized(&alice_req).unwrap(),
+        CedarDecision::Deny
+    );
 
     // Bob is now allowed.
     let bob_req = CedarRequest {
@@ -214,8 +221,8 @@ fn hot_reload_swaps_policy_set_atomically() {
 
 #[test]
 fn hot_reload_does_not_swap_on_compile_error() {
-    let authz = HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None)
-        .unwrap();
+    let authz =
+        HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None).unwrap();
     let alice_req = CedarRequest {
         principal: r#"User::"alice""#.to_string(),
         action: r#"Action::"read""#.to_string(),
@@ -228,13 +235,16 @@ fn hot_reload_does_not_swap_on_compile_error() {
     assert!(result.is_err());
 
     // The original policy is still active.
-    assert_eq!(authz.is_authorized(&alice_req).unwrap(), CedarDecision::Allow);
+    assert_eq!(
+        authz.is_authorized(&alice_req).unwrap(),
+        CedarDecision::Allow
+    );
 }
 
 #[test]
 fn hot_reload_policy_count_reflects_current_set() {
-    let authz = HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None)
-        .unwrap();
+    let authz =
+        HotReloadCedarAuthorizer::from_sources(SIMPLE_POLICY, Some(ENTITIES_JSON), None).unwrap();
     assert_eq!(authz.policy_count(), 1);
 
     // Reload with a policy set that has two policies.
@@ -250,7 +260,8 @@ permit (
     resource == Route::"api-v1"
 );
 "#;
-    authz.reload_from_sources(two_policies, Some(ENTITIES_JSON), None)
+    authz
+        .reload_from_sources(two_policies, Some(ENTITIES_JSON), None)
         .unwrap();
     assert_eq!(authz.policy_count(), 2);
 }

@@ -61,9 +61,7 @@ fn hash_on_cookie_and_header_parse() {
     );
 
     // Default: no hash_on = None (client IP).
-    let gw = parse_ok(
-        "upstreams:\n  - name: u\n    load_balancer: ip_hash\n    endpoints: []\n",
-    );
+    let gw = parse_ok("upstreams:\n  - name: u\n    load_balancer: ip_hash\n    endpoints: []\n");
     assert_eq!(gw.upstreams[0].hash_on, None);
 
     // Explicit client_ip.

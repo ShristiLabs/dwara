@@ -263,7 +263,10 @@ fn maglev_weights_skew_distribution() {
     let keys: Vec<String> = (0..300).map(|i| format!("192.0.2.{i}")).collect();
     let owned_b = owned_keys(&lb, &keys).iter().filter(|&&o| o == 1).count();
     // Weight-3 endpoint should own the clear majority.
-    assert!(owned_b > 150, "weight-3 maglev endpoint owned only {owned_b}/300");
+    assert!(
+        owned_b > 150,
+        "weight-3 maglev endpoint owned only {owned_b}/300"
+    );
 }
 
 #[test]
@@ -420,7 +423,7 @@ fn upstream_with_weights(w: (u32, u32)) -> ConfigUpstream {
     ConfigUpstream {
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
+        hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![
             Endpoint {

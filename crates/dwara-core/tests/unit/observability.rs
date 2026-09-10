@@ -95,7 +95,7 @@ fn render_contains_families() {
             upstreams: vec![Upstream {
                 name: "u".into(),
                 load_balancer: LoadBalancer::RoundRobin,
-            hash_on: None,
+                hash_on: None,
                 protocol: dwara_core::config::UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),

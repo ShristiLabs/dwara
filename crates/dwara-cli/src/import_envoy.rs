@@ -277,7 +277,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
             Upstream {
                 name: cluster.name.clone(),
                 load_balancer: LoadBalancer::RoundRobin,
-                        hash_on: None,
+                hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 trusted_ca_file: None,
                 endpoints,

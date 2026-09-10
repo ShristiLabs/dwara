@@ -296,13 +296,10 @@ async fn async_post(
     let connect_addr = format!("{}:{}", host, port);
 
     // Connect via TCP.
-    let stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(&connect_addr),
-    )
-    .await
-    .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
-    .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
+    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&connect_addr))
+        .await
+        .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
+        .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
 
     let _ = stream.set_nodelay(true);
 
@@ -342,19 +339,14 @@ async fn async_get(
     }
 
     let connect_addr = format!("{}:{}", host, port);
-    let stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(&connect_addr),
-    )
-    .await
-    .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
-    .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
+    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&connect_addr))
+        .await
+        .map_err(|_| OpaError::Http(format!("connect timeout to {}", connect_addr)))?
+        .map_err(|e| OpaError::Http(format!("connect: {e}")))?;
 
     let _ = stream.set_nodelay(true);
 
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
 
     if scheme == "https" {
         let tls_stream = tls_handshake(stream, &host).await?;
@@ -394,8 +386,7 @@ async fn tls_handshake(
     stream: tokio::net::TcpStream,
     server_name: &str,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, OpaError> {
-    let root_store =
-        rustls::RootCertStore::empty();
+    let root_store = rustls::RootCertStore::empty();
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
@@ -454,7 +445,10 @@ fn parse_url(url: &str) -> Result<(&str, String, u16, String), OpaError> {
             .map_err(|_| OpaError::Http(format!("invalid port in URL: {p}")))?;
         (h.to_string(), port)
     } else {
-        (authority.to_string(), if scheme == "https" { 443 } else { 80 })
+        (
+            authority.to_string(),
+            if scheme == "https" { 443 } else { 80 },
+        )
     };
 
     Ok((scheme, host, port, path))
