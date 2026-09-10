@@ -5435,6 +5435,22 @@ pub struct RetryConfig {
     /// `0` is rejected (omit the field for unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_deadline_ms: Option<u64>,
+    /// Streaming failover first-frame buffer cap in bytes (REL-05, #216).
+    /// When > 0, the proxy buffers up to this many bytes of the upstream
+    /// response body BEFORE forwarding any bytes to the client. If the
+    /// upstream fails (connection reset, read timeout, framing error)
+    /// before the buffer fills or the body completes, the proxy can
+    /// still retry the request to a different endpoint — the client has
+    /// not yet received any bytes, so the response is not committed.
+    /// Once the buffer fills (or the body completes), the buffered
+    /// prefix is flushed to the client and the rest of the body streams
+    /// frame-by-frame (the stream is then committed; a later mid-body
+    /// failure is terminal, as in v1). Default 0 = no first-frame
+    /// buffering (v1 behavior: the response is committed as soon as
+    /// headers resolve). Requires `attempts > 0` and
+    /// `buffer_max_bytes > 0` (the request body must be replayable).
+    #[serde(default)]
+    pub buffer_first_frame_bytes: u64,
 }
 
 impl Default for RetryConfig {
@@ -5450,6 +5466,7 @@ impl Default for RetryConfig {
             buffer_max_bytes: 0,
             hedge: None,
             total_deadline_ms: None,
+            buffer_first_frame_bytes: 0,
         }
     }
 }

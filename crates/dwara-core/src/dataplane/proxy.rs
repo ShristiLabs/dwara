@@ -6121,6 +6121,106 @@ where
                         );
                     }
                 }
+                // REL-05 (#216): streaming failover with buffered
+                // first-frame. When enabled and retries remain, buffer
+                // up to `buffer_first_frame_bytes` of the response body
+                // before committing. If the body errors before the
+                // buffer fills, retry to a different endpoint (the
+                // client has not yet received any bytes). If the buffer
+                // fills or the body completes, flush and continue.
+                if may_retry && rp.buffer_first_frame_bytes > 0 && !wants_upgrade {
+                    match buffer_first_frame(resp, rp.buffer_first_frame_bytes).await {
+                        Ok(FirstFrame::Complete(resp)) => {
+                            // Body completed within the buffer — the
+                            // full response is in memory. Finalize and
+                            // return (no streaming needed).
+                            let mut resp = finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                            if let Some(cookie) = sticky_set_cookie.take() {
+                                if let Ok(v) = HeaderValue::from_str(&cookie) {
+                                    resp.headers_mut().append(hyper::header::SET_COOKIE, v);
+                                }
+                                obs.record_sticky_session();
+                            }
+                            return resp;
+                        }
+                        Ok(FirstFrame::Partial { prefix, rest }) => {
+                            // Buffer filled — flush the prefix and
+                            // continue streaming. The response is now
+                            // committed. Wrap the prefix + rest's body
+                            // as a single body. `rest` is the response
+                            // with the remaining body attached.
+                            let resp = rest.map(|body| UpstreamBody::with_prefix(prefix, body));
+                            let mut resp = finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                            if let Some(cookie) = sticky_set_cookie.take() {
+                                if let Ok(v) = HeaderValue::from_str(&cookie) {
+                                    resp.headers_mut().append(hyper::header::SET_COOKIE, v);
+                                }
+                                obs.record_sticky_session();
+                            }
+                            return resp;
+                        }
+                        Err(resp) => {
+                            // Body errored before the buffer filled —
+                            // retryable. Drop the partial response and
+                            // continue the retry loop.
+                            tracing::warn!(
+                                code = "first_frame_buffer_error",
+                                request_id = %rid,
+                                upstream = handle.name(),
+                                attempt = done_tries,
+                                "upstream body failed during first-frame buffer; retrying"
+                            );
+                            let delay = crate::resilience::retries::jitter_delay(
+                                rp.backoff_base_ms,
+                                rp.backoff_cap_ms,
+                                done_tries,
+                            );
+                            if let Some(sleep) =
+                                crate::resilience::retries::retry_sleep_within_total(
+                                    rp.total_deadline,
+                                    retry_loop_started,
+                                    delay,
+                                )
+                            {
+                                if budget.try_reserve_retry(rp.budget_percent) {
+                                    obs.record_retry(handle.name());
+                                    tokio::time::sleep(sleep).await;
+                                    continue;
+                                }
+                            }
+                            // Budget exhausted or deadline exceeded —
+                            // fall through to return the error response.
+                            return finish_proxy_response(
+                                resp,
+                                wants_upgrade,
+                                on_client_upgrade,
+                                global_permit.take(),
+                                ws_police,
+                                obs_arc,
+                                grpc_deadline,
+                                rid,
+                            );
+                        }
+                    }
+                }
                 let mut resp = finish_proxy_response(
                     resp,
                     wants_upgrade,
@@ -6754,6 +6854,74 @@ where
             }
             Some(Err(_)) => return Err((buf.freeze(), body)),
             None => return Ok(buf.freeze()),
+        }
+    }
+}
+
+/// The result of buffering the first frame of an upstream response
+/// (REL-05, #216).
+enum FirstFrame {
+    /// The body completed within the buffer cap — the full response
+    /// body is in memory. No streaming needed.
+    Complete(Response<UpstreamBody>),
+    /// The buffer filled before the body completed — `prefix` is the
+    /// buffered bytes, `rest` is the remaining upstream body to
+    /// stream frame-by-frame.
+    Partial {
+        prefix: Bytes,
+        rest: Response<UpstreamBody>,
+    },
+}
+
+/// Buffer the first `cap` bytes of an upstream response body (REL-05,
+/// #216). Returns:
+/// - `Ok(FirstFrame::Complete(resp))` if the body completed within
+///   the cap (the response body is replaced with the fully-buffered
+///   bytes).
+/// - `Ok(FirstFrame::Partial { prefix, rest })` if the buffer filled
+///   — `prefix` is the buffered bytes, `rest` is the response with
+///   its original body still attached for continued streaming.
+/// - `Err(resp)` if the body errored before the buffer filled — the
+///   response (with its error-state body) is returned so the caller
+///   can retry or finalize as appropriate.
+async fn buffer_first_frame(
+    mut resp: Response<UpstreamBody>,
+    cap: u64,
+) -> Result<FirstFrame, Response<UpstreamBody>> {
+    use http_body_util::BodyExt as _;
+    let body = std::mem::replace(resp.body_mut(), UpstreamBody::empty());
+    let mut buf = bytes::BytesMut::new();
+    let mut body = Box::pin(body);
+    loop {
+        match body.as_mut().frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue; // trailer frame: dropped
+                };
+                if buf.len() as u64 + data.len() as u64 >= cap {
+                    // Buffer filled — return partial. The remaining
+                    // body stays attached for streaming. Re-box the
+                    // pinned body as a BoxBody.
+                    buf.extend_from_slice(&data);
+                    let remaining = body.boxed();
+                    resp.body_mut().set_inner(remaining);
+                    return Ok(FirstFrame::Partial {
+                        prefix: buf.freeze(),
+                        rest: resp,
+                    });
+                }
+                buf.extend_from_slice(&data);
+            }
+            Some(Err(_)) => {
+                // Body errored before the buffer filled.
+                return Err(resp);
+            }
+            None => {
+                // Body completed within the buffer.
+                let bytes = buf.freeze();
+                resp.body_mut().set_full(bytes);
+                return Ok(FirstFrame::Complete(resp));
+            }
         }
     }
 }

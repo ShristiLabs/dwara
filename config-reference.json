@@ -3569,6 +3569,13 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "buffer_first_frame_bytes": {
+          "description": "Streaming failover first-frame buffer cap in bytes (REL-05, #216).\nWhen > 0, the proxy buffers up to this many bytes of the upstream\nresponse body BEFORE forwarding any bytes to the client. If the\nupstream fails (connection reset, read timeout, framing error)\nbefore the buffer fills or the body completes, the proxy can\nstill retry the request to a different endpoint — the client has\nnot yet received any bytes, so the response is not committed.\nOnce the buffer fills (or the body completes), the buffered\nprefix is flushed to the client and the rest of the body streams\nframe-by-frame (the stream is then committed; a later mid-body\nfailure is terminal, as in v1). Default 0 = no first-frame\nbuffering (v1 behavior: the response is committed as soon as\nheaders resolve). Requires `attempts > 0` and\n`buffer_max_bytes > 0` (the request body must be replayable).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
         }
       },
       "additionalProperties": false

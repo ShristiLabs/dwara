@@ -134,6 +134,13 @@ pub struct RetryParams {
     /// time from the first attempt to the last, INCLUDING backoff delays.
     /// `None` leaves the cross-attempt budget unbounded (the default).
     pub total_deadline: Option<Duration>,
+    /// Streaming failover first-frame buffer cap in bytes (REL-05, #216).
+    /// When > 0, the proxy buffers up to this many bytes of the upstream
+    /// response body before forwarding any bytes to the client, so a
+    /// mid-body failure before the buffer fills can still trigger a
+    /// retry to a different endpoint. Default 0 = no first-frame
+    /// buffering (v1 behavior).
+    pub buffer_first_frame_bytes: u64,
 }
 
 impl Default for RetryParams {
@@ -149,6 +156,7 @@ impl Default for RetryParams {
             buffer_max_bytes: 0,
             hedge: HedgeParams::default(),
             total_deadline: None,
+            buffer_first_frame_bytes: 0,
         }
     }
 }
@@ -170,6 +178,7 @@ impl RetryParams {
                 buffer_max_bytes: c.buffer_max_bytes,
                 hedge: HedgeParams::from_config(c.hedge.as_ref()),
                 total_deadline: c.total_deadline_ms.map(Duration::from_millis),
+                buffer_first_frame_bytes: c.buffer_first_frame_bytes,
             },
         }
     }

@@ -492,6 +492,94 @@ impl UpstreamBody {
     pub fn set_deadline(&mut self, deadline: std::time::Instant) {
         self.deadline = Some(deadline);
     }
+
+    /// REL-05 (#216): create an empty body (used as a placeholder while
+    /// the first-frame buffer drains the real body).
+    pub fn empty() -> Self {
+        UpstreamBody {
+            inner: http_body_util::Empty::new()
+                .map_err(|e: std::convert::Infallible| match e {})
+                .boxed(),
+            idle: None,
+            sleep: None,
+            health: None,
+            release: None,
+            deadline: None,
+        }
+    }
+
+    /// REL-05 (#216): replace the inner body with a pinned boxed body
+    /// (the remaining stream after the first-frame buffer drained the
+    /// prefix). The idle/deadline/health knobs are preserved.
+    pub fn set_inner(
+        &mut self,
+        inner: http_body_util::combinators::BoxBody<Bytes, UpstreamBodyError>,
+    ) {
+        self.inner = inner;
+    }
+
+    /// REL-05 (#216): replace the inner body with a fully-buffered
+    /// `Bytes` (the body completed within the first-frame buffer).
+    pub fn set_full(&mut self, body: Bytes) {
+        self.inner = http_body_util::Full::new(body)
+            .map_err(|e: std::convert::Infallible| match e {})
+            .boxed();
+    }
+
+    /// REL-05 (#216): create a body that emits a `prefix` then continues
+    /// with `rest`. Used when the first-frame buffer filled: the prefix
+    /// is flushed to the client, then the remaining upstream body
+    /// streams frame-by-frame.
+    pub fn with_prefix(prefix: Bytes, mut rest: UpstreamBody) -> Self {
+        // We extract the inner body from `rest` and build a chained
+        // body that emits the prefix first, then the rest's inner.
+        // The idle/deadline/health knobs are preserved on the new body.
+        let idle = rest.idle;
+        let health = rest.health.take();
+        let release = rest.release.take();
+        let deadline = rest.deadline;
+        let rest_inner = std::mem::replace(
+            &mut rest.inner,
+            http_body_util::Empty::new()
+                .map_err(|e: std::convert::Infallible| match e {})
+                .boxed(),
+        );
+        let chained = http_body_util::combinators::BoxBody::new(PrefixBody {
+            prefix: Some(prefix),
+            rest: rest_inner,
+        });
+        UpstreamBody {
+            inner: chained,
+            idle,
+            sleep: None,
+            health,
+            release,
+            deadline,
+        }
+    }
+}
+
+/// REL-05 (#216): a body that emits a prefix `Bytes` frame first, then
+/// delegates to the rest of the upstream body. Used by
+/// [`UpstreamBody::with_prefix`] when the first-frame buffer filled.
+struct PrefixBody {
+    prefix: Option<Bytes>,
+    rest: http_body_util::combinators::BoxBody<Bytes, UpstreamBodyError>,
+}
+
+impl hyper::body::Body for PrefixBody {
+    type Data = Bytes;
+    type Error = UpstreamBodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, UpstreamBodyError>>> {
+        if let Some(prefix) = self.prefix.take() {
+            return Poll::Ready(Some(Ok(Frame::data(prefix))));
+        }
+        Pin::new(&mut self.rest).poll_frame(cx)
+    }
 }
 
 /// Live connection counters for one upstream; observability for pooling
