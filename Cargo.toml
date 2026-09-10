@@ -192,6 +192,20 @@ serial_test = "3"
 # (354K downloads). Feature-gated behind the `cel` feature on
 # dwara-core so the default build never pulls it in.
 cel-interpreter = { version = "0.10", default-features = false }
+# PERF-09 (#260): CEL JIT compilation via cranelift. cranelift-jit and
+# cranelift-module provide the JIT infrastructure for compiling CEL
+# expressions to native code. Apache-2.0 WITH LLVM-exception (allow-
+# listed in deny.toml). Optional so the default build never pulls them
+# in; enabled via the `cel-jit` feature on dwara-core. Version 0.134
+# matches the cranelift version pulled in by wasmtime.
+cranelift-jit = { version = "0.134", default-features = false }
+cranelift-module = { version = "0.134", default-features = false }
+cranelift-codegen = { version = "0.134", default-features = false }
+cranelift-frontend = { version = "0.134", default-features = false }
+cranelift-native = { version = "0.134", default-features = false }
+# cel-parser is a transitive dep of cel-interpreter; made direct so the
+# JIT compiler can access the AST. MIT (allow-listed in deny.toml).
+cel-parser = { version = "0.10", default-features = false }
 # DW-060: Cedar policy engine. cedar-policy is AWS's Rust-native
 # authorization policy language (Apache-2.0, allow-listed in
 # deny.toml). Version 4.12.0 published 2026-07-28, well-vetted

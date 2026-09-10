@@ -39,6 +39,11 @@ pub use cel_interpreter::{ExecutionError, ParseError, ParseErrors, Value};
 
 // DW-059: CEL everywhere -- one CEL surface across four use-sites.
 pub mod everywhere;
+// PERF-09 (#260): CEL JIT compilation via cranelift. Optional; when
+// the `cel-jit` feature is ON, simple CEL expressions can be
+// JIT-compiled to native code. Falls back to the tree-walking
+// interpreter for complex expressions.
+pub mod jit;
 
 /// A compiled CEL program.
 ///

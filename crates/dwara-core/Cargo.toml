@@ -93,6 +93,14 @@ wasmtime = { workspace = true }
 # provides parse, type-check, and interpret. MIT (allow-listed in
 # deny.toml). Unconditional in the OSS default build.
 cel-interpreter = { workspace = true }
+# PERF-09 (#260): CEL JIT compilation via cranelift. Optional deps for
+# the cel-jit feature. Apache-2.0 WITH LLVM-exception (allow-listed).
+cranelift-jit = { version = "0.134", default-features = false, optional = true }
+cranelift-module = { version = "0.134", default-features = false, optional = true }
+cranelift-codegen = { version = "0.134", default-features = false, optional = true }
+cranelift-frontend = { version = "0.134", default-features = false, optional = true }
+cranelift-native = { version = "0.134", default-features = false, optional = true }
+cel-parser = { version = "0.10", default-features = false, optional = true }
 # DW-060: Cedar policy engine. cedar-policy is AWS's Rust-native
 # authorization policy language. Apache-2.0 (allow-listed in deny.toml).
 # Unconditional in the OSS default build.
@@ -149,6 +157,17 @@ loom = ["dep:loom"]
 # builds (the default) compile without the licensing-core or redis
 # dependencies.
 ent = ["dep:licensing-core", "dep:redis", "dep:tonic", "dep:tokio-stream"]
+# PERF-09 (#260): CEL JIT compilation via cranelift. When enabled, CEL
+# expressions are JIT-compiled to native code for faster evaluation.
+# Falls back to the tree-walking interpreter for complex expressions.
+cel-jit = [
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-native",
+    "dep:cel-parser",
+]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
