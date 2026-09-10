@@ -189,3 +189,37 @@ a fixed budget, after which the admin listener is given up on with a
 loud ERROR log rather than silently going dark for the rest of the
 process lifetime. Its bind set, like the data-plane listeners', is
 fixed at startup — a change to `admin.bind` needs a restart.
+
+## OpenAPI spec and API versioning (#227)
+
+The admin API supports a `/v1/` path prefix for all endpoints. The
+`handle()` dispatcher strips a leading `/v1/` from the request path
+before route matching, so both `/v1/config` and `/config` resolve to
+the same handler. The legacy un-prefixed paths remain as
+backward-compatible aliases.
+
+Two metadata endpoints are available (under both `/v1/` and the
+legacy prefix):
+
+- `GET /v1/openapi.json` — returns a generated OpenAPI 3.0.3 spec
+  for the admin API. The spec is assembled programmatically in
+  `openapi_spec()` (not a static file) so it stays in sync with the
+  route table. It documents all admin endpoints with their HTTP
+  methods, brief summaries, and tags. Full request/response schemas
+  are intentionally omitted; those live in `config-reference.json`
+  for config-bearing endpoints.
+
+- `GET /v1/version` — returns API version metadata:
+  ```json
+  {
+    "api_version": "v1",
+    "versioned_paths": true,
+    "legacy_paths": true,
+    "spec": "/v1/openapi.json"
+  }
+  ```
+
+The spec includes a server URL of `/v1` (the canonical versioned base
+path). Entity CRUD routes (`/routes`, `/services`, `/upstreams`,
+`/consumers`, `/policies`) are documented with their list/create and
+get/replace/delete operations.

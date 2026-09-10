@@ -145,3 +145,70 @@ actual false-positive rate against real traffic before enforcing.
   integration (handle_inner → WAF check → handle_routed).
 - `crates/dwara-core/src/observability.rs` — the `dwara_waf_total`
   metric.
+
+## OWASP CRS-compatible WAF (#212)
+
+In addition to the per-route WAF-lite, the gateway supports a global
+CRS-compatible WAF policy. This is a rule-based engine with the OWASP
+Core Rule Set concepts needed for real-world WAF tuning: rule IDs,
+severity levels, evaluation phases, tags, transformations, anomaly
+scoring, paranoia levels, and rule exclusions.
+
+### Config
+
+The global WAF is configured at the gateway level under `waf`:
+
+```yaml
+waf:
+  enabled: true
+  dry_run: false
+  paranoia_level: 1
+  anomaly_threshold: 5
+  max_body_inspect_bytes: 131072
+  rules:
+    - id: 900001
+      severity: 2
+      phase: 1
+      tags: [SQL_INJECTION, OWASP_CRS]
+      pattern: "(?i)union\\s+select"
+      targets: [path, query]
+      transformations: [lowercase, url_decode]
+  exclude_rule_ids: [900002]
+  exclude_tags: [PARANOID]
+```
+
+### Rule structure
+
+Each `CrsRule` has:
+- `id` — unique rule ID (CRS convention: 9xxxx)
+- `severity` — 1 = critical, 2 = warning, 3 = notice, 4 = info
+- `phase` — 1 = request headers (path, query, headers), 2 = request body
+- `tags` — grouping/exclusion tags
+- `pattern` — regex pattern
+- `targets` — which request parts to inspect (path, query, header, headers, body)
+- `transformations` — applied before matching (lowercase, url_decode,
+  html_entity_decode, compress_whitespace, remove_whitespace, url_decode_uni)
+
+### Anomaly scoring
+
+Rules are evaluated in order. Each matching rule adds its severity to
+the request's anomaly score. The request is blocked when the total
+score reaches the `anomaly_threshold`. This allows fine-grained tuning:
+a single critical rule (severity 1) can block immediately with
+threshold 1, or multiple warning rules (severity 2) can accumulate
+with threshold 5.
+
+### Exclusions
+
+Rules can be excluded by ID (`exclude_rule_ids`) or by tag
+(`exclude_tags`). This is useful for tuning false positives without
+modifying the rule set.
+
+### Implementation
+
+- `crates/dwara-core/src/dataplane/waf.rs` — the CRS rule engine:
+  `CompiledCrsRule`, `CrsGeneration`, `CrsResult`, transformations.
+- `crates/dwara-core/src/config/mod.rs` — `CrsRule`, `GlobalWaf`
+  config structs.
+- `crates/dwara-core/src/snapshot/mod.rs` — validation (paranoia
+  level, anomaly threshold, rule severity/phase/pattern/targets).

@@ -85,6 +85,27 @@ dependencies), embedded at compile time via `include_str!`/
 - **Workspace switcher**: `GET /workspaces` lists available
   workspaces; the operator switches context in the console.
 
+## Web Console v3 (#226)
+
+Console v3 adds live charts, per-entity CRUD flows, and an AI ops
+view — all still a static SPA with no build step or dependencies.
+
+- **Live charts**: a "Live" view fetches `/analytics/dashboard`,
+  `/analytics/live`, and `/stats` in parallel, displaying stat cards
+  (active requests, RPS, p50/p95/p99, error rate) and a canvas-based
+  latency sparkline chart with a 60-point rolling history. A
+  per-route live table shows RPS, p50, p95, and error counts.
+- **CRUD flows**: the Routes and Upstreams views now use
+  `renderCrudEntity()` — a generic CRUD view with a table, "Create"
+  button (opens a modal with a JSON textarea), "Edit" button (opens
+  a modal pre-filled with the entity JSON), and "Delete" button
+  (confirms then calls `DELETE /<entity>/<name>`). Create calls
+  `POST /<entity>`, Edit calls `PUT /<entity>/<name>`.
+- **AI ops view**: an "AI Ops" view fetches `/ai/credential-pools`,
+  `/mcp/sessions`, `/mcp/tools`, and `/experiments/prompt-overrides`
+  in parallel, displaying credential pool health, MCP sessions and
+  tools, and experiment prompt overrides.
+
 Code: `crates/dwara-console/static/{index.html,style.css,app.js}`
 (the SPA), `crates/dwara-console/src/lib.rs` (embedding + path
 resolution).
