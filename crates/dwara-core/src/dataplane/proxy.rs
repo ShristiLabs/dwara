@@ -263,7 +263,7 @@ use hyper::header::{
 };
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument as _;
 use zeroize::Zeroizing;
@@ -5537,12 +5537,23 @@ where
                 crate::dataplane::websocket::Handshake::Allowed => {}
             }
         }
-        ws_policy
-            .and_then(|ws| ws.max_frames_per_sec)
-            .map(|rate| WsPoliceDecision {
+        // DP-05 (#253): create a policing decision when ANY post-upgrade
+        // policy is configured — rate limiting, frame size cap, or idle
+        // timeout. The policer wrapper handles each independently.
+        let ws = ws_policy.unwrap();
+        let has_policy = ws.max_frames_per_sec.is_some()
+            || ws.max_frame_size_bytes.is_some()
+            || ws.idle_timeout_s.is_some();
+        if has_policy {
+            Some(WsPoliceDecision {
                 route: route.name.clone(),
-                rate,
+                rate: ws.max_frames_per_sec,
+                max_frame_size: ws.max_frame_size_bytes,
+                idle_timeout: ws.idle_timeout_s.map(std::time::Duration::from_secs),
             })
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -6557,27 +6568,43 @@ fn finish_proxy_response(
                 match tokio::try_join!(client, on_upstream) {
                     Ok((client_io, upstream_io)) => match ws_police {
                         Some(policy) => {
-                            // DW-039: police the client side — count data
-                            // frames, close 1008 past the allowance. The
-                            // violation flag is shared with the wrapper so
-                            // the metric survives the tunnel consuming it.
+                            // DW-039 + DP-05 (#253): police the client
+                            // side — count data frames, enforce per-
+                            // frame size limits, reject reserved
+                            // opcodes, and close with the right code on
+                            // violation. The violation flag is shared
+                            // with the wrapper so the metric survives
+                            // the tunnel consuming it.
                             let flag = Arc::new(AtomicU64::new(0));
                             let policed = crate::dataplane::websocket::WsPoliceIo::with_flag(
                                 TokioIo::new(client_io),
                                 policy.rate,
+                                policy.max_frame_size,
                                 Arc::clone(&flag),
                             );
-                            tunnel(policed, TokioIo::new(upstream_io)).await;
-                            if flag.load(Ordering::Relaxed) == 1 {
-                                obs.record_websocket_policy(&policy.route, "rate_closed");
+                            let upstream_io = TokioIo::new(upstream_io);
+                            match policy.idle_timeout {
+                                Some(idle) => {
+                                    idle_tunnel(policed, upstream_io, idle).await;
+                                }
+                                None => tunnel(policed, upstream_io).await,
+                            }
+                            let flag_val = flag.load(Ordering::Relaxed);
+                            if flag_val != 0 {
+                                let label = crate::dataplane::websocket::flag_to_metric(flag_val);
+                                obs.record_websocket_policy(&policy.route, label);
                                 tracing::warn!(
-                                    code = "websocket_rate_closed",
+                                    code = label,
                                     route = %policy.route,
-                                    "websocket connection closed by frame-rate policy"
+                                    "websocket connection closed by post-upgrade policy"
                                 );
                             }
                         }
-                        None => tunnel(TokioIo::new(client_io), TokioIo::new(upstream_io)).await,
+                        None => {
+                            let client_io = TokioIo::new(client_io);
+                            let upstream_io = TokioIo::new(upstream_io);
+                            tunnel(client_io, upstream_io).await
+                        }
                     },
                     Err(err) => {
                         tracing::warn!("upgrade handshake failed: {err}");
@@ -7004,6 +7031,56 @@ where
         Ok(_) => {}
         Err(err) => tracing::warn!("upgrade tunnel ended with error: {err}"),
     }
+}
+
+/// Idle-aware 101 tunnel (DP-05, #253): splice the upgraded client and
+/// upstream byte-for-byte, but close both sides if no data flows in
+/// either direction for `idle`. Each successful read or write resets
+/// the idle timer. Uses `tokio::select!` with a resettable sleep rather
+/// than `copy_bidirectional` because the latter has no per-activity
+/// hook. Read futures are cancellation-safe: a dropped `read` future
+/// leaves the buffer unfilled and the underlying IO unchanged.
+async fn idle_tunnel<S1, S2>(mut client: S1, mut upstream: S2, idle: std::time::Duration)
+where
+    S1: AsyncRead + AsyncWrite + Unpin,
+    S2: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut cbuf = vec![0u8; 8192];
+    let mut ubuf = vec![0u8; 8192];
+    let sleep = tokio::time::sleep(idle);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            r = client.read(&mut cbuf) => match r {
+                Ok(0) => break,
+                Ok(n) => {
+                    if upstream.write_all(&cbuf[..n]).await.is_err() {
+                        break;
+                    }
+                    let _ = upstream.flush().await;
+                    sleep.as_mut().reset(tokio::time::Instant::now() + idle);
+                }
+                Err(_) => break,
+            },
+            r = upstream.read(&mut ubuf) => match r {
+                Ok(0) => break,
+                Ok(n) => {
+                    if client.write_all(&ubuf[..n]).await.is_err() {
+                        break;
+                    }
+                    let _ = client.flush().await;
+                    sleep.as_mut().reset(tokio::time::Instant::now() + idle);
+                }
+                Err(_) => break,
+            },
+            _ = &mut sleep => {
+                tracing::info!("websocket idle timeout reached, closing tunnel");
+                break;
+            }
+        }
+    }
+    let _ = client.shutdown().await;
+    let _ = upstream.shutdown().await;
 }
 
 fn redirect<B>(
@@ -7978,11 +8055,13 @@ pub fn parse_grpc_timeout(value: &str) -> Option<std::time::Duration> {
 }
 
 /// The post-upgrade WebSocket policing decision threaded to the
-/// tunnel (DW-039): the route label for the metric and the frame
-/// allowance.
+/// tunnel (DW-039 + DP-05 #253): the route label for the metric, the
+/// frame-rate allowance, the per-frame size cap, and the idle timeout.
 struct WsPoliceDecision {
     route: String,
-    rate: u64,
+    rate: Option<u64>,
+    max_frame_size: Option<u64>,
+    idle_timeout: Option<std::time::Duration>,
 }
 
 /// Deduplicated tokens across ALL `Connection` header lines (an HTTP/1

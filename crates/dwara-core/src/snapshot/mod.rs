@@ -5916,6 +5916,27 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+            // DP-05 (#253): idle timeout 1s..=86400s, frame size 1..=16MiB.
+            if let Some(idle) = ws.idle_timeout_s {
+                if idle == 0 || idle > 86400 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "websocket.idle_timeout_s",
+                        "idle_timeout_s must be in 1..=86400 (seconds, 1s to 24h)",
+                    ));
+                }
+            }
+            if let Some(sz) = ws.max_frame_size_bytes {
+                if sz == 0 || sz > 16_777_216 {
+                    issues.push(issue(
+                        "route",
+                        &r.name,
+                        "websocket.max_frame_size_bytes",
+                        "max_frame_size_bytes must be in 1..=16777216 (1 byte to 16 MiB)",
+                    ));
+                }
+            }
         }
         // WAF-lite (DW-051): when enabled, the filter list must be
         // either absent (defaults to all three) or a non-empty list of

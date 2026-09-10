@@ -685,6 +685,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "type": "null"
       }
      ]
+    },
+    "http2": {
+     "description": "HTTP/2 flow-control tuning for this listener.\nWhen set, the h2 server builder uses these values instead of\nthe process-wide defaults from `DWARA_H2_*` env vars. Only\nmeaningful on `http` and `https` listeners (h2 is negotiated\nvia ALPN or prior knowledge); ignored on `h3` (HTTP/3 has its\nown transport-level flow control) and `tcp`/`udp`.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Http2ListenerConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false,
@@ -1105,6 +1116,44 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ],
      "format": "uint",
+     "minimum": 0
+    }
+   },
+   "additionalProperties": false
+  },
+  "Http2ListenerConfig": {
+   "description": "HTTP/2 flow-control tuning for a listener (`listeners[].http2`). Every field is optional; an omitted field\nkeeps the process-wide default from `DWARA_H2_*` env vars. This\nallows per-listener tuning for streaming (SSE) workloads where\nlarger windows reduce flow-control stalls on long-lived streams.",
+   "type": "object",
+   "properties": {
+    "initial_stream_window_size": {
+     "description": "Initial stream-level window size in bytes (hyper\n`initial_stream_window_size`). Absent: process default\n(1 MiB via `DWARA_H2_STREAM_WINDOW_KIB`). Larger values\nreduce stalls on streaming responses but increase memory\nper stream. Bounds: at most 16 MiB.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "initial_connection_window_size": {
+     "description": "Initial connection-level window size in bytes (hyper\n`initial_connection_window_size`). Absent: process default\n(4 MiB via `DWARA_H2_CONNECTION_WINDOW_KIB`). Bounds: at\nmost 64 MiB.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "adaptive_window": {
+     "description": "Enable adaptive flow-control window (hyper\n`adaptive_window`). Absent: false. When true, the\nconnection window grows and shrinks based on throughput,\nwhich helps streaming workloads on high-BDP paths.",
+     "type": "boolean"
+    },
+    "max_concurrent_streams": {
+     "description": "Maximum number of concurrent streams per connection (hyper\n`max_concurrent_streams`). Absent: process default (128 via\n`DWARA_H2_MAX_CONCURRENT_STREAMS`). Bounds: at most 1_000_000.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
      "minimum": 0
     }
    },
@@ -2512,6 +2561,24 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ],
      "format": "uint64",
      "minimum": 0
+    },
+    "idle_timeout_s": {
+     "description": "Post-upgrade idle timeout in seconds. If no data\nflows in either direction for this duration, the tunnel is\nclosed. Absent: no idle timeout (the tunnel stays open until\none side closes, the prior default). Validation enforces\n1..=86400 (1 second to 24 hours).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
+    },
+    "max_frame_size_bytes": {
+     "description": "Maximum payload size of a single WebSocket DATA frame in bytes. A frame exceeding this limit causes the\nconnection to be closed with close code 1009 (message too big).\nAbsent: no frame size limit (the prior default). Validation\nenforces 1..=16777216 (1 byte to 16 MiB).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
+     "minimum": 0
     }
    },
    "additionalProperties": false
@@ -2596,6 +2663,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "type": "null"
       }
      ]
+    },
+    "federation": {
+     "description": "Federation passthrough config. When enabled, the\ngateway treats the route as a federation passthrough: it\nforwards GraphQL requests to a single federated upstream\n(subgraph or supergraph router) while preserving\nfederation-specific headers and allowing introspection queries\n(`_service`, `__schema`) to bypass depth/complexity checks.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/GraphqlFederation"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false,
@@ -2618,6 +2696,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "additionalProperties": {
       "type": "string"
      }
+    }
+   },
+   "additionalProperties": false
+  },
+  "GraphqlFederation": {
+   "description": "Federation passthrough config (`routes[].graphql.federation`). When `passthrough` is true, the gateway:\n- Preserves Apollo federation headers on the proxied request (`Apollo-Require-Preflight`, `x-apollo-operation-name`, `graphql-preflight`, `x-apollo-operation-id`).\n- Allows federation introspection queries (`_service { sdl }`, `__schema`, `__type`) to bypass depth and complexity checks.\n- Still applies persisted-query enforcement if configured. This is **passthrough mode**: the gateway does NOT implement query\nplanning or subgraph stitching. It proxies to a single upstream\nthat is expected to be either a federation router (subgraph-aware)\nor a single subgraph.",
+   "type": "object",
+   "properties": {
+    "passthrough": {
+     "description": "Master switch. Default false.",
+     "type": "boolean"
     }
    },
    "additionalProperties": false
@@ -2953,6 +3042,12 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "format": "uint8",
      "minimum": 0,
      "maximum": 255
+    },
+    "timeout_ms": {
+     "description": "Hard timeout for the mirror request in milliseconds. If the\nmirror upstream does not respond within this duration, the\nmirror request is abandoned. Default 2000 (2 seconds). The\nmirror is fire-and-forget, so this timeout never affects the\nprimary request.",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0
     }
    },
    "additionalProperties": false,
@@ -4339,8 +4434,26 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "format": "uint32",
      "minimum": 0
     },
+    "http2_initial_stream_window_size": {
+     "description": "Initial stream-level window size in bytes for the upstream h2\nclient (hyper `http2_initial_stream_window_size`). Absent:\nhyper's default. Larger values reduce flow-control stalls on\nstreaming (SSE) responses from the upstream but increase\nmemory per stream. Only meaningful for the `http2` protocol.\nBounds: at most 16 MiB. ",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
     "per_endpoint_cap": {
      "description": ": per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "http2_initial_connection_window_size": {
+     "description": "Initial connection-level window size in bytes for the upstream\nh2 client (hyper `http2_initial_connection_window_size`).\nAbsent: hyper's default. Bounds: at most 64 MiB.\n",
      "type": [
       "integer",
       "null"

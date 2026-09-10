@@ -2317,6 +2317,24 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "idle_timeout_s": {
+          "description": "Post-upgrade idle timeout in seconds (DP-05, #253). If no data\nflows in either direction for this duration, the tunnel is\nclosed. Absent: no idle timeout (the tunnel stays open until\none side closes, the prior default). Validation enforces\n1..=86400 (1 second to 24 hours).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_frame_size_bytes": {
+          "description": "Maximum payload size of a single WebSocket DATA frame in bytes\n(DP-05, #253). A frame exceeding this limit causes the\nconnection to be closed with close code 1009 (message too big).\nAbsent: no frame size limit (the prior default). Validation\nenforces 1..=16777216 (1 byte to 16 MiB).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false
