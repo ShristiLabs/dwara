@@ -144,6 +144,28 @@ enum Command {
         #[command(subcommand)]
         kind: K8sKind,
     },
+    /// Explain the gateway's decision path for a mock request (USA-09,
+    /// #231). Given a config file and a mock request (method, path,
+    /// optional headers and consumer identity), prints a structured
+    /// trace of which route matches, authorization, rate limiting,
+    /// transforms, upstream selection, and caching.
+    Explain {
+        /// Path to the gateway YAML config.
+        #[arg(long)]
+        config: String,
+        /// HTTP method (e.g. GET, POST).
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Request path (e.g. /api/v1/users).
+        #[arg(long)]
+        path: String,
+        /// Optional request headers (repeatable, format: "Name: Value").
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Optional authenticated consumer name.
+        #[arg(long)]
+        consumer: Option<String>,
+    },
     /// Show the running gateway's status (generation, health, breakers).
     Status {
         /// Admin API base URL (e.g. http://127.0.0.1:2019). Defaults to
@@ -598,6 +620,44 @@ fn main() {
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
         },
+        Command::Explain {
+            config,
+            method,
+            path,
+            headers,
+            consumer,
+        } => {
+            let config_text =
+                std::fs::read_to_string(&config).unwrap_or_else(|e| {
+                    eprintln!("cannot read {config}: {e}");
+                    std::process::exit(2);
+                });
+            let parsed_headers: Vec<(String, String)> = headers
+                .iter()
+                .filter_map(|h| {
+                    h.split_once(':').map(|(k, v)| {
+                        (k.trim().to_string(), v.trim().to_string())
+                    })
+                })
+                .collect();
+            let request = dwara_cli::explain::ExplainRequest {
+                method,
+                path,
+                headers: parsed_headers,
+                auth_identity: consumer,
+                timestamp_ms: None,
+            };
+            match dwara_cli::explain::run_explain(&config_text, &request) {
+                Ok(report) => {
+                    print!("{}", report.text);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
         Command::Status { admin } => run_status(admin),
         Command::Top { admin, interval } => run_top(admin, interval),
         Command::Completions { shell } => run_completions(shell),

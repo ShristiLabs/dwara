@@ -42,6 +42,8 @@ pub mod k8s_conformance;
 // USA-02 (#179): live operator views over the admin API
 // (`dwara status`, `dwara top`).
 pub mod status;
+// USA-09 (#231): `dwara explain` — decision trace for a mock request.
+pub mod explain;
 
 use dwara_core::config::{gateway_to_yaml, parse_gateway, Gateway, PathMatchKind};
 use dwara_core::snapshot::{compile, entity_content_hash, validate};
