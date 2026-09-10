@@ -284,8 +284,8 @@ fn retention_sweep_drops_expired_and_keeps_fresh() {
 fn record_drops_when_channel_full_and_never_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("full.db");
-    let store =
-        EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 100, 0, None).unwrap();
+    let store = EmbeddedAnalytics::open(path.to_str().unwrap(), DEFAULT_RETENTION_MS, 100, 0, None)
+        .unwrap();
     // No workers spawned: nothing drains the channel.
     let rec = AccessRecord::new("rid".into(), "GET".into(), "/".into(), "edge".into());
     for _ in 0..5000 {

@@ -962,9 +962,7 @@ impl EmbeddedAnalytics {
                         // REL-10 (#221): decrement the in-flight
                         // counter by the batch size so the offer path's
                         // fill-ratio check stays accurate.
-                        store
-                            .in_flight
-                            .fetch_sub(batch.len(), Ordering::Relaxed);
+                        store.in_flight.fetch_sub(batch.len(), Ordering::Relaxed);
                         store.flush(&batch);
                         batch.clear();
                     }

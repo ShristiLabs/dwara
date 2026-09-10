@@ -372,7 +372,7 @@ async fn the_stream_and_the_embedded_store_run_side_by_side() {
         dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS,
         100,
         0,
-    None,
+        None,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));

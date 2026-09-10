@@ -60,7 +60,7 @@ fn attach_analytics(dp: &Arc<DataPlane>) -> AnalyticsHandle {
         DEFAULT_RETENTION_MS,
         100,
         0,
-    None,
+        None,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));

@@ -119,7 +119,7 @@ fn attach_analytics(dp: &Arc<DataPlane>) -> AnalyticsHandle {
         ANALYTICS_DEFAULT_RETENTION_MS,
         100,
         0,
-    None,
+        None,
     )
     .unwrap();
     dp.set_analytics(Arc::clone(&store));
@@ -286,7 +286,7 @@ async fn prompt_log_direct_insert_and_query() {
         ANALYTICS_DEFAULT_RETENTION_MS,
         50,
         0,
-    None,
+        None,
     )
     .unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());
@@ -392,7 +392,7 @@ async fn prompt_log_query_respects_limit() {
         ANALYTICS_DEFAULT_RETENTION_MS,
         50,
         0,
-    None,
+        None,
     )
     .unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());

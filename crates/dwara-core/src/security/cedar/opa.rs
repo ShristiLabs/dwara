@@ -70,6 +70,12 @@ pub struct OpaClient {
     /// DP-07 (#241): the current bundle revision, if bundle download
     /// is configured. Used to skip re-downloading unchanged bundles.
     bundle_revision: Arc<Mutex<Option<String>>>,
+    /// REL-11 (#222): outage policy. When true (fail-open), an OPA
+    /// callout failure (network error, timeout, non-200) returns
+    /// `OpaDecision::Allow` instead of `Err(OpaError)`. When false
+    /// (fail-closed), the error is propagated. Default: true (fail-
+    /// open — an OPA outage should not take down the gateway).
+    fail_open: bool,
 }
 
 /// An OPA authorization request.
@@ -124,7 +130,16 @@ impl OpaClient {
             http_timeout,
             ssrf_filter: crate::config::ssrf::SsrfFilter::disabled(),
             bundle_revision: Arc::new(Mutex::new(None)),
+            fail_open: true,
         }
+    }
+
+    /// REL-11 (#222): set the outage policy. When true (fail-open), an
+    /// OPA callout failure returns `Allow` instead of an error. When
+    /// false (fail-closed), the error is propagated. Default: true.
+    pub fn with_fail_open(mut self, fail_open: bool) -> Self {
+        self.fail_open = fail_open;
+        self
     }
 
     /// SEC-13: set the SSRF egress filter for this OPA client. Called
@@ -161,7 +176,22 @@ impl OpaClient {
         }
 
         // Cache miss — make the async HTTP callout.
-        let decision = self.call_opa(req).await?;
+        // REL-11 (#222): on failure, apply the outage policy.
+        let decision = match self.call_opa(req).await {
+            Ok(d) => d,
+            Err(e) => {
+                if self.fail_open {
+                    tracing::warn!(
+                        code = "opa_outage_fail_open",
+                        error = %e,
+                        "OPA callout failed; failing open (allow) per outage policy"
+                    );
+                    return Ok(OpaDecision::Allow);
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         // Cache the result.
         {
