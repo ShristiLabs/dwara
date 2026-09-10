@@ -445,6 +445,41 @@ export default withMermaid(
               ],
             },
             {
+              text: "Troubleshooting",
+              link: "/guide/troubleshooting/",
+              collapsed: true,
+              items: [
+                {
+                  text: "Overview",
+                  link: "/guide/troubleshooting/",
+                },
+                {
+                  text: "503 Service Unavailable",
+                  link: "/guide/troubleshooting/503-upstream-health",
+                },
+                {
+                  text: "429 Too Many Requests",
+                  link: "/guide/troubleshooting/429-rate-limit-quota-budget",
+                },
+                {
+                  text: "Config reload failure",
+                  link: "/guide/troubleshooting/config-reload-failure",
+                },
+                {
+                  text: "High latency",
+                  link: "/guide/troubleshooting/high-latency",
+                },
+                {
+                  text: "AI request failures",
+                  link: "/guide/troubleshooting/ai-request-failures",
+                },
+                {
+                  text: "mTLS handshake failures",
+                  link: "/guide/troubleshooting/mtls-handshake-failures",
+                },
+              ],
+            },
+            {
               text: "Enterprise and fleet",
               link: "/guide/enterprise",
               collapsed: true,
