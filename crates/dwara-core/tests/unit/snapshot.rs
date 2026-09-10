@@ -203,6 +203,7 @@ fn good_gateway() -> Gateway {
         global_policies: vec![],
         authorization: None,
         default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

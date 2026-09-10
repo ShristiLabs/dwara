@@ -144,6 +144,7 @@ fn bench_gateway() -> Gateway {
         global_policies: Vec::new(),
         authorization: None,
         default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,

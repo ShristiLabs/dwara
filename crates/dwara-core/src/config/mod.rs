@@ -153,6 +153,13 @@ pub struct Gateway {
     /// opt out entirely. See [`SecurityHeaders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_security_headers: Option<SecurityHeaders>,
+    /// SEC-08 (#212): Global WAF policy with CRS-compatible rules.
+    /// When enabled, the rules are evaluated on every request
+    /// (regardless of route-level WAF config). The anomaly score is
+    /// accumulated across all matching rules; the request is blocked
+    /// when the score exceeds the threshold. See [`GlobalWaf`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waf: Option<GlobalWaf>,
     /// IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims
     /// are trusted (gateway-level; the direct connection peer must be in
     /// this list for an inbound XFF chain to be preserved and extended).
@@ -3262,6 +3269,121 @@ fn default_waf_max_body_inspect_bytes() -> u64 {
 
 fn is_default_waf_max_body_inspect_bytes(v: &u64) -> bool {
     *v == 131_072
+}
+
+/// SEC-08 (#212): A single OWASP CRS-compatible WAF rule. Each rule
+/// has a numeric ID (CRS convention: 9xxxx), a severity level, a
+/// phase (1 = request headers, 2 = request body), a list of tags, a
+/// regex pattern, and the inspection targets to apply the pattern
+/// to. Rules are evaluated in order; matching rules add their
+/// severity to the request's anomaly score. The request is blocked
+/// when the score exceeds the configured threshold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrsRule {
+    /// Unique rule ID (CRS convention: 9xxxx). Used for exclusions
+    /// and logging.
+    pub id: u32,
+    /// Rule severity: 1 = critical, 2 = warning, 3 = notice, 4 = info.
+    /// Higher severity contributes more to the anomaly score.
+    #[serde(default = "default_crs_severity")]
+    pub severity: u8,
+    /// Evaluation phase: 1 = request headers (path, query, headers),
+    /// 2 = request body. Default 1.
+    #[serde(default = "default_crs_phase")]
+    pub phase: u8,
+    /// Tags for grouping and exclusion (e.g. "OWASP_CRS", "SQL_INJECTION").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The regex pattern to match against the target values.
+    pub pattern: String,
+    /// Which request parts to inspect: "path", "query", "header",
+    /// "headers" (all selected headers), "body". Default: ["path", "query"].
+    #[serde(default = "default_crs_targets")]
+    pub targets: Vec<String>,
+    /// Optional list of transformations to apply before matching
+    /// (e.g. "lowercase", "url_decode", "html_entity_decode"). Default: [].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transformations: Vec<String>,
+}
+
+fn default_crs_severity() -> u8 {
+    2
+}
+
+fn default_crs_phase() -> u8 {
+    1
+}
+
+fn default_crs_targets() -> Vec<String> {
+    vec!["path".into(), "query".into()]
+}
+
+/// SEC-08 (#212): Global WAF policy with CRS-compatible rules. When
+/// enabled, the rules are evaluated on every request (regardless of
+/// route-level WAF config). The anomaly score is accumulated across
+/// all matching rules; the request is blocked when the score exceeds
+/// the threshold. Rule exclusions can disable specific rules by ID or
+/// tag. The paranoia level controls which rules are active (1 =
+/// default, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalWaf {
+    /// Master switch. Default false.
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Audit-log-only mode (same semantics as RouteWaf::dry_run).
+    #[serde(default = "default_false", skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Paranoia level (1-4). Rules with a higher paranoia level than
+    /// this are skipped. Default 1.
+    #[serde(
+        default = "default_crs_paranoia",
+        skip_serializing_if = "is_default_crs_paranoia"
+    )]
+    pub paranoia_level: u8,
+    /// Anomaly score threshold for blocking. A request is blocked
+    /// when the sum of matching rule severities reaches this value.
+    /// Default 5 (critical rules block immediately, warnings need
+    /// multiple hits).
+    #[serde(
+        default = "default_crs_threshold",
+        skip_serializing_if = "is_default_crs_threshold"
+    )]
+    pub anomaly_threshold: u32,
+    /// Maximum body bytes to inspect (same semantics as
+    /// RouteWaf::max_body_inspect_bytes). Default 131072.
+    #[serde(
+        default = "default_waf_max_body_inspect_bytes",
+        skip_serializing_if = "is_default_waf_max_body_inspect_bytes"
+    )]
+    pub max_body_inspect_bytes: u64,
+    /// CRS-compatible rules to evaluate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<CrsRule>,
+    /// Rule IDs to exclude (skip even if the rule is in the rules
+    /// list). Useful for tuning false positives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_rule_ids: Vec<u32>,
+    /// Tags to exclude (skip all rules carrying any of these tags).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_tags: Vec<String>,
+}
+
+fn default_crs_paranoia() -> u8 {
+    1
+}
+
+fn is_default_crs_paranoia(v: &u8) -> bool {
+    *v == 1
+}
+
+fn default_crs_threshold() -> u32 {
+    5
+}
+
+fn is_default_crs_threshold(v: &u32) -> bool {
+    *v == 5
 }
 
 /// Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).

@@ -4109,6 +4109,112 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         ));
     }
 
+    // SEC-08 (#212): Global WAF validation. When enabled, each CRS
+    // rule must have a valid regex pattern, a valid phase (1 or 2),
+    // a valid severity (1-4), and valid target names. The paranoia
+    // level must be 1-4, and the anomaly threshold must be > 0.
+    if let Some(waf) = &gateway.waf {
+        if waf.enabled {
+            if !(1..=4).contains(&waf.paranoia_level) {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.paranoia_level",
+                    format!(
+                        "paranoia_level {} is out of range: must be 1-4",
+                        waf.paranoia_level
+                    ),
+                ));
+            }
+            if waf.anomaly_threshold == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.anomaly_threshold",
+                    "anomaly_threshold must be > 0 (use dry_run for audit-only mode)",
+                ));
+            }
+            if waf.max_body_inspect_bytes > 1_048_576 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "waf.max_body_inspect_bytes",
+                    format!(
+                        "max_body_inspect_bytes {} is out of range: must be 0 \
+                         (no body inspection) or 1..=1048576 (1 MiB)",
+                        waf.max_body_inspect_bytes
+                    ),
+                ));
+            }
+            for (i, rule) in waf.rules.iter().enumerate() {
+                if !(1..=4).contains(&rule.severity) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].severity"),
+                        format!(
+                            "rule {} severity {} is out of range: must be 1-4",
+                            rule.id, rule.severity
+                        ),
+                    ));
+                }
+                if !(1..=2).contains(&rule.phase) {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].phase"),
+                        format!(
+                            "rule {} phase {} is out of range: must be 1 (request headers) or 2 (request body)",
+                            rule.id, rule.phase
+                        ),
+                    ));
+                }
+                if regex::Regex::new(&rule.pattern).is_err() {
+                    issues.push(issue(
+                        "gateway",
+                        "(root)",
+                        &format!("waf.rules[{i}].pattern"),
+                        format!("rule {} has an invalid regex pattern", rule.id),
+                    ));
+                }
+                for (j, target) in rule.targets.iter().enumerate() {
+                    if !matches!(
+                        target.as_str(),
+                        "path" | "query" | "header" | "headers" | "body"
+                    ) {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("waf.rules[{i}].targets[{j}]"),
+                            format!(
+                                "rule {} has unknown target '{}': must be path, query, header, headers, or body",
+                                rule.id, target
+                            ),
+                        ));
+                    }
+                }
+                for (j, t) in rule.transformations.iter().enumerate() {
+                    if !matches!(
+                        t.as_str(),
+                        "lowercase"
+                            | "url_decode"
+                            | "html_entity_decode"
+                            | "compress_whitespace"
+                            | "remove_whitespace"
+                            | "url_decode_uni"
+                    ) {
+                        issues.push(issue(
+                            "gateway",
+                            "(root)",
+                            &format!("waf.rules[{i}].transformations[{j}]"),
+                            format!("rule {} has unknown transformation '{}'", rule.id, t),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // Load-shed monitor mode (DW-041) is only meaningful with a cap: an
     // uncapped gateway never sheds, so the flag would be a silent no-op
     // that reads as monitoring coverage. Rejected rather than ignored so
@@ -8521,6 +8627,7 @@ impl Snapshot {
                 global_policies: Vec::new(),
                 authorization: None,
                 default_security_headers: None,
+                waf: None,
                 max_concurrent_requests: None,
                 load_shed_dry_run: false,
                 jwt_providers: Vec::new(),

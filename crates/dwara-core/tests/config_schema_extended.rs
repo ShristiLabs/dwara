@@ -704,6 +704,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
         global_policies: vec![],
         authorization: None,
         default_security_headers: None,
+        waf: None,
         max_concurrent_requests: None,
         load_shed_dry_run: false,
         jwt_providers: Vec::new(),

@@ -81,6 +81,17 @@
         }
       ]
     },
+    "waf": {
+      "description": "SEC-08 (#212): Global WAF policy with CRS-compatible rules.\nWhen enabled, the rules are evaluated on every request\n(regardless of route-level WAF config). The anomaly score is\naccumulated across all matching rules; the request is blocked\nwhen the score exceeds the threshold. See [`GlobalWaf`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GlobalWaf"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "trusted_proxies": {
       "description": "IP addresses / CIDR ranges of proxies whose `X-Forwarded-For` claims\nare trusted (gateway-level; the direct connection peer must be in\nthis list for an inbound XFF chain to be preserved and extended).\nEach entry must be an IP address (e.g. `10.1.2.3`) or a CIDR\n(e.g. `10.0.0.0/8`); anything else fails validation. Empty (the\ndefault) trusts nobody: every proxied request carries an XFF of\nexactly the direct peer, and inbound XFF values are discarded.",
       "type": "array",
@@ -4676,6 +4687,125 @@
           "type": "string",
           "const": "retry_after"
         }
+      ]
+    },
+    "GlobalWaf": {
+      "description": "SEC-08 (#212): Global WAF policy with CRS-compatible rules. When\nenabled, the rules are evaluated on every request (regardless of\nroute-level WAF config). The anomaly score is accumulated across\nall matching rules; the request is blocked when the score exceeds\nthe threshold. Rule exclusions can disable specific rules by ID or\ntag. The paranoia level controls which rules are active (1 =\ndefault, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default false.",
+          "type": "boolean"
+        },
+        "dry_run": {
+          "description": "Audit-log-only mode (same semantics as RouteWaf::dry_run).",
+          "type": "boolean"
+        },
+        "paranoia_level": {
+          "description": "Paranoia level (1-4). Rules with a higher paranoia level than\nthis are skipped. Default 1.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "anomaly_threshold": {
+          "description": "Anomaly score threshold for blocking. A request is blocked\nwhen the sum of matching rule severities reaches this value.\nDefault 5 (critical rules block immediately, warnings need\nmultiple hits).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_body_inspect_bytes": {
+          "description": "Maximum body bytes to inspect (same semantics as\nRouteWaf::max_body_inspect_bytes). Default 131072.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rules": {
+          "description": "CRS-compatible rules to evaluate.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CrsRule"
+          }
+        },
+        "exclude_rule_ids": {
+          "description": "Rule IDs to exclude (skip even if the rule is in the rules\nlist). Useful for tuning false positives.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "exclude_tags": {
+          "description": "Tags to exclude (skip all rules carrying any of these tags).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CrsRule": {
+      "description": "SEC-08 (#212): A single OWASP CRS-compatible WAF rule. Each rule\nhas a numeric ID (CRS convention: 9xxxx), a severity level, a\nphase (1 = request headers, 2 = request body), a list of tags, a\nregex pattern, and the inspection targets to apply the pattern\nto. Rules are evaluated in order; matching rules add their\nseverity to the request's anomaly score. The request is blocked\nwhen the score exceeds the configured threshold.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Unique rule ID (CRS convention: 9xxxx). Used for exclusions\nand logging.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "severity": {
+          "description": "Rule severity: 1 = critical, 2 = warning, 3 = notice, 4 = info.\nHigher severity contributes more to the anomaly score.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 2
+        },
+        "phase": {
+          "description": "Evaluation phase: 1 = request headers (path, query, headers),\n2 = request body. Default 1.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 1
+        },
+        "tags": {
+          "description": "Tags for grouping and exclusion (e.g. \"OWASP_CRS\", \"SQL_INJECTION\").",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pattern": {
+          "description": "The regex pattern to match against the target values.",
+          "type": "string"
+        },
+        "targets": {
+          "description": "Which request parts to inspect: \"path\", \"query\", \"header\",\n\"headers\" (all selected headers), \"body\". Default: [\"path\", \"query\"].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "path",
+            "query"
+          ]
+        },
+        "transformations": {
+          "description": "Optional list of transformations to apply before matching\n(e.g. \"lowercase\", \"url_decode\", \"html_entity_decode\"). Default: [].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "pattern"
       ]
     },
     "JwtProvider": {
