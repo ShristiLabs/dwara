@@ -130,6 +130,8 @@ pub fn import_traefik(text: &str) -> Result<ImportResult, String> {
             cert_pinning: None,
             mtls: None,
             pool: None,
+            hash_on: None,
+            use_system_roots: false,
         });
 
         services.insert(
@@ -218,11 +220,14 @@ pub fn import_traefik(text: &str) -> Result<ImportResult, String> {
             fault_injection: None,
             plugins: Vec::new(),
             oidc_login: None,
+            filter_chain: None,
+            security_headers_opt_out: false,
         });
     }
 
     let allow_empty_routes = routes.is_empty();
     let gateway = Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services: services.into_values().collect(),
@@ -231,6 +236,8 @@ pub fn import_traefik(text: &str) -> Result<ImportResult, String> {
         policies: Vec::new(),
         global_policies: Vec::new(),
         authorization: None,
+        default_security_headers: None,
+        waf: None,
         trusted_proxies: Vec::new(),
         max_concurrent_requests: None,
         load_shed_dry_run: false,
@@ -249,8 +256,11 @@ pub fn import_traefik(text: &str) -> Result<ImportResult, String> {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,

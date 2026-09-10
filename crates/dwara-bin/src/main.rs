@@ -1488,6 +1488,7 @@ pub(crate) fn configured_listeners(snapshot: &dwara_core::snapshot::Snapshot) ->
                 proxy_protocol: false,
                 alt_svc: None,
                 l4: None,
+                http2: None,
             }]
         }
         None => snapshot.gateway().listeners.clone(),
