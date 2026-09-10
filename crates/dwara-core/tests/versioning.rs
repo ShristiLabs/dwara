@@ -316,8 +316,8 @@ async fn accept_matcher_selects_on_type_subtype_ignoring_list_and_q() {
     assert_eq!(resp.status(), StatusCode::OK, "list + q + case-insensitive");
 
     // Wildcards and a missing Accept never select a version: the client
-    // must NAME the version. These 404 (the /media default route is a
-    // different path and does not fall through — the documented limit).
+    // must NAME the version. DP-06 (#254): with fall-through, these now
+    // fall through to the /media default route (200) instead of 404.
     for accept in [
         Some("*/*"),
         Some("application/*"),
@@ -325,7 +325,11 @@ async fn accept_matcher_selects_on_type_subtype_ignoring_list_and_q() {
         None,
     ] {
         let resp = send(&dp, get(accept)).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "accept: {accept:?}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "accept: {accept:?} (falls through to media-default)"
+        );
     }
 
     // The unversioned default path keeps serving unconstrained clients.
@@ -593,12 +597,13 @@ async fn short_circuit_responses_do_not_carry_deprecation_headers() {
         "request_body_too_large"
     );
 
-    // Unrouted traffic never matched the route at all.
+    // Unrouted traffic never matched the route at all. DP-06 (#254):
+    // /media/v2/item now falls through to /media default, so use a
+    // truly unrouted path to test the 404 short-circuit case.
     let resp = send(
         &dp,
         Request::builder()
-            .uri("/media/v2/item")
-            .header(hyper::header::ACCEPT, "application/json")
+            .uri("/nonexistent/path")
             .body(Full::new(Bytes::new()))
             .unwrap(),
     )
@@ -732,13 +737,13 @@ async fn preflight_on_accept_and_cors_route_needs_the_named_media_type() {
 }
 
 #[tokio::test]
-async fn equal_prefix_sibling_is_not_an_accept_fallback() {
+async fn equal_prefix_sibling_falls_through_on_accept_miss() {
     // Two routes, SAME prefix, one with the accept criterion and one
-    // without: path resolution picks the FIRST-declared (the frozen
-    // equal-length tie rule), and a criteria miss on the winner does
-    // not fall through to the sibling — the DW-010 model the versioning
-    // docs lean on for "the unversioned default must live on another
-    // path".
+    // without. DP-06 (#254): path resolution yields both candidates;
+    // the accept criterion miss on the first falls through to the
+    // sibling, which has no accept criterion and wins. This is the
+    // new fall-through behavior that replaces the old "no fall-through
+    // on criteria miss" model.
     let port = echo_backend().await;
     let dp = dataplane_from(&format!(
         r#"
@@ -775,6 +780,8 @@ upstreams:
     let (_, body) = body_of(resp).await;
     assert_eq!(body, "path:/sp/item");
 
+    // DP-06 (#254): the accept miss on `versioned` falls through to
+    // `plain`, which has no accept criterion.
     let resp = send(
         &dp,
         Request::builder()
@@ -786,8 +793,8 @@ upstreams:
     .await;
     assert_eq!(
         resp.status(),
-        StatusCode::NOT_FOUND,
-        "no fallback to the equal-prefix sibling"
+        StatusCode::OK,
+        "falls through to the equal-prefix sibling"
     );
 }
 

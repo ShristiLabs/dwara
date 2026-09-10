@@ -7920,6 +7920,11 @@ pub struct RouteTable {
     regex_set: regex::RegexSet,
     /// Route index per RegexSet member, in insertion order.
     regex_indices: Vec<usize>,
+    /// Specificity score per RegexSet member (DP-06, #254): higher =
+    /// more specific. When multiple regexes match, the most specific
+    /// one wins instead of the first declared. Scored by literal
+    /// character count in the pattern.
+    regex_scores: Vec<u32>,
     /// Compiled `path_rewrite.regex` pattern per route index (None where
     /// the action carries no regex rewrite). Validation guarantees these
     /// compiled at config-compile time, never at request time.
@@ -7979,6 +7984,7 @@ impl RouteTable {
             prefixes: Vec::new(),
             regex_set: regex::RegexSet::empty(),
             regex_indices: Vec::new(),
+            regex_scores: Vec::new(),
             rewrite_regexes: Vec::new(),
             cors_origins: Vec::new(),
             compression_types: Vec::new(),
@@ -7993,7 +7999,8 @@ impl RouteTable {
     }
 
     /// Resolve a request path to a route index. Precedence: exact template,
-    /// then first regex match, then longest prefix. `None` means no route.
+    /// then most-specific regex match, then longest prefix. `None` means no
+    /// route.
     pub fn find(&self, path: &str) -> Option<usize> {
         self.find_full(path).map(|(idx, _)| idx)
     }
@@ -8011,8 +8018,18 @@ impl RouteTable {
                 .collect();
             return Some((*m.value, params));
         }
+        // DP-06 (#254): when multiple regexes match, choose the most
+        // specific one (highest score), not the first declared. Ties
+        // break by declaration order (stable sort).
         let matches = self.regex_set.matches(path);
-        if let Some(i) = matches.iter().next() {
+        let mut best: Option<(u32, usize)> = None; // (score, regex_set_index)
+        for i in matches.iter() {
+            let score = self.regex_scores[i];
+            if best.is_none_or(|(s, _)| score > s) {
+                best = Some((score, i));
+            }
+        }
+        if let Some((_, i)) = best {
             return Some((self.regex_indices[i], Vec::new()));
         }
         let mut best: Option<(usize, usize)> = None; // (prefix len, index)
@@ -8022,6 +8039,54 @@ impl RouteTable {
             }
         }
         best.map(|(_, idx)| (idx, Vec::new()))
+    }
+
+    /// Yield all candidate route indices for a path in precedence order
+    /// (DP-06, #254): exact, then regex matches by specificity (highest
+    /// first), then prefix matches by longest prefix. Each candidate
+    /// also carries its path parameters (populated only for exact
+    /// matches). The caller is expected to test non-path criteria
+    /// (`route_applies`) on each candidate and stop at the first that
+    /// fully matches -- this is the "fall-through" behavior.
+    pub fn find_candidates(&self, path: &str) -> Vec<(usize, Vec<(String, String)>)> {
+        let mut candidates = Vec::new();
+
+        // 1. Exact match (at most one).
+        if let Ok(m) = self.exact.at(path) {
+            let params = m
+                .params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            candidates.push((*m.value, params));
+        }
+
+        // 2. Regex matches, most specific first.
+        let matches = self.regex_set.matches(path);
+        let mut regex_matches: Vec<(u32, usize)> = Vec::new();
+        for i in matches.iter() {
+            regex_matches.push((self.regex_scores[i], i));
+        }
+        // Sort by score descending; stable sort preserves declaration
+        // order for ties.
+        regex_matches.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, i) in regex_matches {
+            candidates.push((self.regex_indices[i], Vec::new()));
+        }
+
+        // 3. Prefix matches, longest first.
+        let mut prefix_matches: Vec<(usize, usize)> = Vec::new();
+        for (prefix, idx) in &self.prefixes {
+            if path.starts_with(prefix.as_str()) {
+                prefix_matches.push((prefix.len(), *idx));
+            }
+        }
+        prefix_matches.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, idx) in prefix_matches {
+            candidates.push((idx, Vec::new()));
+        }
+
+        candidates
     }
 
     /// The compiled rewrite regex for `idx`, if the route's proxy action
@@ -8259,6 +8324,31 @@ pub fn entity_content_hash<T: serde::Serialize>(entity: &T) -> Result<u64, Strin
     Ok(normalized_hash(&yaml))
 }
 
+/// Compute a specificity score for a regex pattern (DP-06, #254).
+///
+/// The score is the count of literal (non-meta) characters in the
+/// pattern. A pattern like `/x/[0-9]+` scores higher than `/x/`
+/// because it has more literal characters and is therefore more
+/// specific. This is a simple heuristic that avoids pulling in a
+/// regex AST crate; it is sufficient for the common case of
+/// distinguishing broad vs. narrow path patterns.
+///
+/// Meta characters counted as non-literal: `\`, `.`, `*`, `+`, `?`,
+/// `(`, `)`, `[`, `]`, `{`, `}`, `|`, `^`, `$`. Escaped characters
+/// (`\.`) count the escaped char as literal but the backslash as
+/// non-literal, which is the right relative ordering.
+fn regex_specificity_score(pattern: &str) -> u32 {
+    pattern
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
+            )
+        })
+        .count() as u32
+}
+
 /// Pure compile: validated [`Gateway`] -> [`Compiled`]. Fails with
 /// [`CompileError::Validation`] on semantic issues, or with
 /// [`CompileError::InvalidRegex`] / [`CompileError::RouteConflict`] when
@@ -8273,6 +8363,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
     let mut prefixes = Vec::new();
     let mut regex_patterns = Vec::new();
     let mut regex_indices = Vec::new();
+    let mut regex_scores = Vec::new();
     let mut rewrite_regexes: Vec<Option<regex::Regex>> = vec![None; gateway.routes.len()];
 
     for (idx, route) in gateway.routes.iter().enumerate() {
@@ -8297,6 +8388,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
                     pattern: path.value.clone(),
                     message: e.to_string(),
                 })?;
+                // DP-06 (#254): score the regex pattern for specificity.
+                // Higher score = more literal characters = more specific.
+                // When multiple regexes match a path, the most specific
+                // one wins instead of the first declared.
+                regex_scores.push(regex_specificity_score(&path.value));
                 regex_patterns.push(path.value.clone());
                 regex_indices.push(idx);
             }
@@ -8451,6 +8547,7 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             prefixes,
             regex_set,
             regex_indices,
+            regex_scores,
             rewrite_regexes,
             cors_origins,
             compression_types,
