@@ -4279,6 +4279,15 @@ pub enum RouteAction {
     Ai {
         #[serde(default)]
         endpoint: AiEndpoint,
+        /// AI-05 (#195): The client-facing request dialect. Defaults
+        /// to `openai` (the historical behavior). When set to
+        /// `anthropic` or `gemini`, the gateway parses the incoming
+        /// request using that dialect's native format and translates
+        /// to the canonical `ChatRequest`. When set to `passthrough`,
+        /// the request body is forwarded to the provider as-is (no
+        /// translation, still metered/governed).
+        #[serde(default)]
+        dialect: AiIngressDialect,
     },
     /// WASM route handler (nano-service, DW-106): instead of proxying
     /// to an upstream, the route action runs a WASM module that
@@ -4294,6 +4303,29 @@ pub enum RouteAction {
         #[serde(flatten)]
         nano: NanoServiceAction,
     },
+}
+
+/// AI-05 (#195): The client-facing request dialect for an AI route.
+/// Determines how the gateway parses the incoming request body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiIngressDialect {
+    /// OpenAI chat-completions shape (the historical default). The
+    /// request is parsed by `openai_compat::parse_chat_request`.
+    #[default]
+    Openai,
+    /// Anthropic Messages API shape. The request is parsed by
+    /// `ingress::parse_anthropic_request` and translated to the
+    /// canonical `ChatRequest`.
+    Anthropic,
+    /// Gemini generateContent shape. The request is parsed by
+    /// `ingress::parse_gemini_request` and translated to the
+    /// canonical `ChatRequest`.
+    Gemini,
+    /// Passthrough mode: the request body is forwarded to the
+    /// provider as-is (no translation, still metered/governed).
+    /// The response is returned as-is.
+    Passthrough,
 }
 
 /// AI-02: which AI endpoint a route serves. The `chat` endpoint (the

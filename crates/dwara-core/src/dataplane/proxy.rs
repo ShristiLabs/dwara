@@ -6547,7 +6547,7 @@ where
         RouteAction::Mock { mock } => {
             serve_mock(mock, gen.snapshot.route_table().mock_body(idx), rid).await
         }
-        RouteAction::Ai { endpoint } => {
+        RouteAction::Ai { endpoint, dialect } => {
             let listener_name = rec.listener.clone();
             crate::dataplane::ai_proxy::serve_ai(
                 req,
@@ -6559,6 +6559,7 @@ where
                 identity,
                 &listener_name,
                 *endpoint,
+                *dialect,
             )
             .await
         }

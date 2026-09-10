@@ -316,6 +316,215 @@ async fn serve_ai_passthrough(
         .expect("passthrough response is valid")
 }
 
+/// AI-05 (#195): chat passthrough mode. Forward the chat request body
+/// as-is to the provider (no adapter translation), but still apply
+/// governance and routing. The model is extracted from the body for
+/// routing. The response is returned as-is.
+#[allow(clippy::too_many_arguments)]
+async fn serve_ai_chat_passthrough(
+    json_body: serde_json::Value,
+    route_name: &str,
+    gen: &Arc<Generation>,
+    dp: &Arc<DataPlane>,
+    rid: &str,
+    rec: &mut crate::observability::AccessRecord,
+    identity: Option<&crate::security::authn::Identity>,
+) -> Response<ProxyBody> {
+    // Extract the model alias from the request body for governance and
+    // routing. The `model` field is present in all chat dialects.
+    let model_alias = json_body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+
+    // DW-084: model governance pre-route check (same as chat and
+    // non-chat passthrough).
+    let gateway = gen.snapshot.gateway();
+    let governance = dp.ai_governance();
+    if !governance.is_empty() {
+        let consumer = identity.map(|id| id.consumer_name.as_str());
+        let route_cfg = gateway.routes.iter().find(|r| r.name == route_name);
+        let route_policies: &[String] = route_cfg.map(|r| r.policies.as_slice()).unwrap_or(&[]);
+        let service_policies: &[String] = route_cfg
+            .map(|r| crate::ai::budget::service_policies_of(gateway, &r.service))
+            .unwrap_or(&[]);
+        let listener_policies = crate::ai::budget::listener_policies_of(gateway, &rec.listener);
+        let consumer_policies: &[String] = consumer
+            .map(|c| crate::ai::budget::consumer_policies_of(gateway, c))
+            .unwrap_or(&[]);
+        let verdict = governance.check(
+            consumer,
+            consumer_policies,
+            route_policies,
+            service_policies,
+            listener_policies,
+            &[],
+            model_alias,
+        );
+        if let crate::ai::governance::GovernanceVerdict::Deny { reason, .. } = &verdict {
+            dp.observability_arc().record_ai_governance_denied(reason);
+            return ai_error_response(
+                StatusCode::FORBIDDEN,
+                &format!("model '{}' is denied by policy: {reason}", model_alias),
+                "invalid_request_error",
+                Some("model_denied_by_policy"),
+                rid,
+            );
+        }
+    }
+
+    // Route the model alias to find the provider.
+    let Some(runtime) = gen.ai() else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no ai block configured",
+            "api_error",
+            Some("internal_error"),
+            rid,
+        );
+    };
+    let (candidates, _, _) = runtime
+        .route_with_policy_and_canary_index(model_alias, rid, "")
+        .await;
+    if candidates.is_empty() {
+        return ai_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("the model '{}' does not exist", model_alias),
+            "invalid_request_error",
+            Some("model_not_found"),
+            rid,
+        );
+    }
+
+    // Forward to the first candidate (no failover for passthrough).
+    let target = &candidates[0];
+    let version = target.version.as_deref().unwrap_or("default");
+    let Some(provider) = runtime.provider(&target.provider) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    let Some(handle) = gen.registry().get(&provider.upstream) else {
+        return ai_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no provider could serve the model",
+            "api_error",
+            Some("provider_unreachable"),
+            rid,
+        );
+    };
+    rec.upstream = Some(provider.upstream.clone());
+    rec.attempts = 1;
+
+    // Build the outbound request: the chat path + the original body +
+    // the provider's auth headers.
+    let path = passthrough_path(crate::config::AiEndpoint::Chat);
+    let mut outbound = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(path);
+    outbound = outbound.header("content-type", "application/json");
+    let auth_pairs: Vec<(String, String)> = if let Some(pool) = &provider.credential_pool {
+        match pool.pick(rid) {
+            Some(entry) => vec![(entry.header.clone(), entry.value.clone())],
+            None => provider.auth_headers.clone(),
+        }
+    } else {
+        provider.auth_headers.clone()
+    };
+    for (name, value) in &auth_pairs {
+        if let (Ok(n), Ok(v)) = (
+            hyper::header::HeaderName::from_bytes(name.as_bytes()),
+            hyper::header::HeaderValue::from_str(value),
+        ) {
+            outbound = outbound.header(n, v);
+        }
+    }
+    let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
+    let outbound = match outbound.body(Full::new(Bytes::from(body_bytes))) {
+        Ok(r) => r,
+        Err(_) => {
+            return ai_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build provider request",
+                "api_error",
+                Some("internal_error"),
+                rid,
+            );
+        }
+    };
+
+    let obs = dp.observability_arc();
+    let started = std::time::Instant::now();
+    let upstream_resp = match handle.send(outbound).await {
+        Ok(r) => r,
+        Err(e) => {
+            obs.record_ai_request(&provider.name, route_name, "transport_error", version);
+            obs.record_ai_request_duration(
+                &provider.name,
+                route_name,
+                started.elapsed().as_secs_f64(),
+            );
+            tracing::warn!(
+                code = "ai_provider_unreachable",
+                request_id = %rid,
+                provider = %provider.name,
+                upstream = %provider.upstream,
+                "ai chat passthrough call failed: {e}"
+            );
+            return ai_error_response(
+                StatusCode::BAD_GATEWAY,
+                "no provider could serve the model",
+                "api_error",
+                Some("provider_unreachable"),
+                rid,
+            );
+        }
+    };
+
+    let status = upstream_resp.status();
+    let up_headers = upstream_resp.headers().clone();
+    let up_body = upstream_resp.into_body();
+    obs.record_ai_request(
+        &provider.name,
+        route_name,
+        if status.is_success() {
+            "success"
+        } else {
+            "error"
+        },
+        version,
+    );
+    obs.record_ai_request_duration(&provider.name, route_name, started.elapsed().as_secs_f64());
+
+    if !status.is_success() {
+        let err_bytes =
+            match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "error", rid).await {
+                Ok(b) => b,
+                Err(resp) => return resp,
+            };
+        let err_json: serde_json::Value = serde_json::from_slice(&err_bytes).unwrap_or(
+            serde_json::json!({"error": {"message": String::from_utf8_lossy(&err_bytes).to_string()}}),
+        );
+        return response_with_json(status, &err_json, &up_headers);
+    }
+
+    // Success: return the response body as-is (no translation).
+    let ok_bytes =
+        match bounded_collect(up_body, MAX_AI_PROVIDER_RESPONSE_BYTES, "response", rid).await {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(ProxyBody::Full(Full::new(ok_bytes)))
+        .expect("passthrough response is valid")
+}
+
 /// Serve one `ai` route action (called from `dispatch_action` in the
 /// proxy module). `rec` is the request's access record: the provider's
 /// upstream name is attributed there so analytics and the access log
@@ -339,6 +548,7 @@ pub(super) async fn serve_ai<B>(
     identity: Option<&crate::security::authn::Identity>,
     listener_name: &str,
     endpoint: crate::config::AiEndpoint,
+    dialect: crate::config::AiIngressDialect,
 ) -> Response<ProxyBody>
 where
     B: Body<Data = Bytes> + Send + 'static,
@@ -490,16 +700,61 @@ where
             .await;
     }
 
-    let mut chat_req: ChatRequest = match openai_compat::parse_chat_request(&json_body) {
-        Ok(r) => r,
-        Err(e) => {
-            return ai_error_response(
-                StatusCode::BAD_REQUEST,
-                &e.to_string(),
-                openai_compat::error_type_of(&e),
-                None,
-                rid,
-            )
+    // AI-05 (#195): multi-dialect ingress. Parse the request body
+    // using the route's configured dialect. The default is OpenAI
+    // (the historical behavior). Anthropic and Gemini dialects parse
+    // the native request format into the canonical ChatRequest.
+    // Passthrough mode forwards the body as-is (no translation).
+    let mut chat_req: ChatRequest = match dialect {
+        crate::config::AiIngressDialect::Openai => {
+            match openai_compat::parse_chat_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e.to_string(),
+                        openai_compat::error_type_of(&e),
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Anthropic => {
+            match crate::ai::ingress::parse_anthropic_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e,
+                        "invalid_request_error",
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Gemini => {
+            match crate::ai::ingress::parse_gemini_request(&json_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e,
+                        "invalid_request_error",
+                        None,
+                        rid,
+                    );
+                }
+            }
+        }
+        crate::config::AiIngressDialect::Passthrough => {
+            // AI-05 (#195): chat passthrough mode. Forward the request
+            // body as-is to the provider (no adapter translation), but
+            // still apply governance, metering, and budget enforcement.
+            // The model is extracted from the body for routing.
+            return serve_ai_chat_passthrough(json_body, route_name, gen, dp, rid, rec, identity)
+                .await;
         }
     };
 
