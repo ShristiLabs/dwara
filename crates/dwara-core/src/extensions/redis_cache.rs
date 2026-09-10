@@ -150,38 +150,81 @@ impl CacheStore for RedisCacheStore {
 /// The callback receives the invalidated key. The listener is
 /// designed to run as a background task (e.g. via `tokio::spawn`).
 pub struct InvalidationListener {
-    conn: ConnectionManager,
+    client: redis::Client,
 }
 
 impl InvalidationListener {
-    /// Create a new invalidation listener.
-    pub fn new(conn: ConnectionManager) -> Self {
-        Self { conn }
+    /// Create a new invalidation listener from a Redis client.
+    /// The client is used to open a dedicated PubSub connection
+    /// (PubSub requires a dedicated connection — `ConnectionManager`
+    /// multiplexes commands but PubSub messages are push-based and
+    /// would interleave with command responses on a shared
+    /// connection).
+    pub fn new(client: redis::Client) -> Self {
+        Self { client }
+    }
+
+    /// Create a new invalidation listener from a Redis URL.
+    pub fn from_url(url: &str) -> Result<Self, ExtensionsError> {
+        let client = redis::Client::open(url)
+            .map_err(|e| ExtensionsError::Backend(format!("redis connect: {e}")))?;
+        Ok(Self { client })
     }
 
     /// Run the listener: subscribe to the invalidation channel and
     /// call `callback` for each invalidation message.
     ///
-    /// This runs forever (until the connection is closed). The caller
-    /// should run it in a background task.
-    pub async fn run<F>(&self, callback: F)
+    /// This runs forever (until the connection is closed or an
+    /// unrecoverable error occurs). The caller should run it in a
+    /// background task and abort it on shutdown.
+    pub async fn run<F>(&self, mut callback: F)
     where
         F: FnMut(String),
     {
-        let mut pubsub = self.conn.clone();
-        let _: Result<(), _> = redis::cmd("SUBSCRIBE")
-            .arg(INVALIDATION_CHANNEL)
-            .query_async(&mut pubsub)
-            .await;
-
-        // In a real implementation, we would use redis::aio::PubSub
-        // for proper async subscription. This is a simplified version
-        // that demonstrates the pattern. The actual implementation
-        // would use `into_pubsub()` and `on_message()`.
-        //
-        // For now, we just log that the listener started.
-        warn!("invalidation listener started (placeholder)");
-        let _ = callback;
+        use tokio_stream::StreamExt;
+        loop {
+            let pubsub = match self.client.get_async_pubsub().await {
+                Ok(p) => p,
+                Err(err) => {
+                    warn!(
+                        code = "cache_invalidation_connect_failed",
+                        "Redis Pub/Sub connect failed ({err}); retrying in 1s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let mut pubsub = pubsub;
+            if let Err(err) = pubsub.subscribe(INVALIDATION_CHANNEL).await {
+                warn!(
+                    code = "cache_invalidation_subscribe_failed",
+                    "Redis Pub/Sub subscribe failed ({err}); retrying in 1s"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            tracing::info!(
+                code = "cache_invalidation_listener_started",
+                "Redis cache invalidation listener started"
+            );
+            loop {
+                match pubsub.on_message().next().await {
+                    Some(msg) => {
+                        if let Some(key) = parse_invalidation(&msg) {
+                            callback(key);
+                        }
+                    }
+                    None => {
+                        warn!(
+                            code = "cache_invalidation_stream_closed",
+                            "Redis Pub/Sub stream closed; reconnecting in 1s"
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 

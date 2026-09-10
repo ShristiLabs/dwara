@@ -202,6 +202,31 @@ enum PluginKind {
         #[arg(long, short = 'o', default_value = ".")]
         dir: String,
     },
+    /// SCALE-12 (#192): Search the plugin registry for available plugins.
+    Search {
+        /// The registry URL to search. If absent, uses the
+        /// `DWARA_PLUGIN_REGISTRY` env var or the default registry.
+        #[arg(long)]
+        registry: Option<String>,
+        /// Optional search query (substring match on plugin names).
+        query: Option<String>,
+    },
+    /// SCALE-12 (#192): Download and verify a plugin from the registry.
+    Install {
+        /// The plugin name to install.
+        name: String,
+        /// The registry URL to install from. If absent, uses the
+        /// `DWARA_PLUGIN_REGISTRY` env var or the default registry.
+        #[arg(long)]
+        registry: Option<String>,
+        /// The expected SHA-256 digest (hex). If absent, the digest is
+        /// fetched from the registry manifest.
+        #[arg(long)]
+        digest: Option<String>,
+        /// Output directory for the downloaded .wasm file.
+        #[arg(long, short = 'o', default_value = ".")]
+        dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -293,6 +318,22 @@ enum TfKind {
         /// Optional path to a desired config YAML file (overrides state).
         #[arg(long)]
         config: Option<String>,
+        /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
+        #[arg(long)]
+        ca: Option<String>,
+    },
+    /// SCALE-12 (#193): Apply the desired state to the gateway using
+    /// per-entity CRUD operations (true provider behavior). Each
+    /// resource is managed independently via POST/PUT/DELETE against
+    /// the admin API's entity CRUD endpoints, instead of full-document
+    /// PATCH /config.
+    ApplyCrud {
+        /// Admin API base URL (e.g. http://127.0.0.1:2019).
+        #[arg(long)]
+        admin: String,
+        /// Path to the local tfstate JSON file.
+        #[arg(long)]
+        state: String,
         /// Path to the CA bundle for mTLS (follow-up; dev admin is plaintext).
         #[arg(long)]
         ca: Option<String>,
@@ -594,6 +635,43 @@ fn main() {
                     }
                 }
             }
+            PluginKind::Search { registry, query } => {
+                match dwara_cli::plugin_registry::search(registry.as_deref(), query.as_deref()) {
+                    Ok(output) => {
+                        println!("{output}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin search: {e}");
+                        1
+                    }
+                }
+            }
+            PluginKind::Install {
+                name,
+                registry,
+                digest,
+                dir,
+            } => {
+                match dwara_cli::plugin_registry::install(
+                    &name,
+                    registry.as_deref(),
+                    digest.as_deref(),
+                    &dir,
+                ) {
+                    Ok(result) => {
+                        println!(
+                            "installed plugin '{}' -> {} (digest: {})",
+                            result.name, result.path, result.digest
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin install: {e}");
+                        1
+                    }
+                }
+            }
         },
         Command::K8s { kind } => match kind {
             K8sKind::ConformanceReport { output } => run_conformance_report(output),
@@ -773,6 +851,20 @@ fn run_tf(kind: TfKind) -> i32 {
                 }
             }
         }
+        TfKind::ApplyCrud {
+            admin,
+            state,
+            ca: _,
+        } => match rt.block_on(dwara_cli::tf::apply_crud(&admin, &state)) {
+            Ok(summary) => {
+                println!("tf apply-crud: {summary}");
+                0
+            }
+            Err(e) => {
+                eprintln!("tf apply-crud: {e}");
+                1
+            }
+        },
     }
 }
 

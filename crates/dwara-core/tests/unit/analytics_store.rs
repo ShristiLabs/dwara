@@ -336,7 +336,9 @@ fn structured_query_validates_the_closed_grammar() {
         to_ms: to,
         gran,
         group_by: group_by.iter().map(|s| s.to_string()).collect(),
+        dim_group_by: None,
         filters: Default::default(),
+        dim_filters: Default::default(),
         limit: None,
     };
     assert!(q(&["consumer"], 0, 0, 1).validate().is_ok());
@@ -375,7 +377,9 @@ fn structured_query_dashboard_and_top_serve_seeded_rollups() {
         to_ms: 120_000,
         gran: 0,
         group_by: vec!["consumer".to_string()],
+        dim_group_by: None,
         filters: Default::default(),
+        dim_filters: Default::default(),
         limit: None,
     };
     let rows = structured(&conn, &q).unwrap();

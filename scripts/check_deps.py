@@ -60,6 +60,11 @@ ALLOWED = {
     # listener/upstream TLS config, so snapshot may depend on security.
     "snapshot": {"config", "events", "security"},
     "state": {"config"},
+    # SCALE-05 (#184): workspace persistence — the workspace manager
+    # delegates CRUD to the state store (SQLite for OSS, the same
+    # backend-neutral API surface for ent). The workspace domain owns
+    # the RBAC/audit types; the store serializes at the SQL boundary.
+    "workspace": {"config", "state"},
     "analytics": {"config", "observability", "extensions"},
     # DW-107: service mesh/SPIFFE. The mesh domain owns the sidecar
     # controller and SPIFFE client; security::tls imports mesh types
@@ -85,7 +90,10 @@ ALLOWED = {
     # DW-095: federated analytics — the controller-side collector
     # implements the AnalyticsSink trait and uses Event/ExtensionsError
     # from extensions, so cp_dp may depend on extensions.
-    "cp_dp": {"config", "snapshot", "extensions"},
+    # SCALE-06 (#185): leader election — the SqliteLeaderElector uses
+    # the StateStore for durable lease persistence, so cp_dp may depend
+    # on state.
+    "cp_dp": {"config", "snapshot", "extensions", "state"},
     # DW-075: AI provider-adapter pack. Pure translation over the
     # canonical chat types plus the compiled alias table; the config
     # block's schema lives in config. The HTTP transport is the

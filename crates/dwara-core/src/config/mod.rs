@@ -338,6 +338,20 @@ pub struct Gateway {
     /// rejects with 429.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_quotas: Option<RedisQuotaConfig>,
+    /// Distributed Redis-backed response cache (SCALE-04, #183, ent
+    /// feature). Absent (the default): the local in-memory moka cache
+    /// is used (one cache per instance, so a fleet of N instances has
+    /// N x cold caches). When present, the `ent` cargo feature is
+    /// compiled in, AND a valid license with the `redis_cache` feature
+    /// claim is loaded, the gateway uses a Redis-backed response cache
+    /// so two or more instances share one cache — fleet-wide hit
+    /// ratios. A local moka tier can front Redis (two-tier with Pub/Sub
+    /// invalidation) or be disabled for a pure Redis cache. When the
+    /// `ent` feature is NOT compiled in, or the license lacks the
+    /// claim, the block is accepted but inert (the local moka cache is
+    /// used and a one-line notice is logged at startup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_cache: Option<RedisCacheConfig>,
     /// Config convergence (DW-054, enterprise feature). Absent (the
     /// default): each gateway instance serves only its local config
     /// generation and never watches remote instances. When present,
@@ -362,6 +376,18 @@ pub struct Gateway {
     /// accepted but inert (plugins are not instantiated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
+    /// SCALE-12 (#192): remote/signed plugin registry configuration.
+    /// When present, plugin `source.url` references are resolved
+    /// against the registry's base URL and signatures are verified
+    /// against the registry's pinned public keys. See
+    /// [`PluginRegistryConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_registry: Option<PluginRegistryConfig>,
+    /// SCALE-12 (#191): global filter-chain ordering and dry-run
+    /// configuration. Per-route `filter_chain` overrides take
+    /// precedence. See [`FilterChainConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_chain: Option<FilterChainConfig>,
     /// The AI provider-adapter pack (DW-075): the provider pool and the
     /// model alias table behind every `ai` route action. Absent (the
     /// default): no AI surface — an `ai` route action is rejected by
@@ -736,6 +762,57 @@ fn default_redis_key_ttl_s() -> u64 {
 
 fn is_default_redis_key_ttl_s(v: &u64) -> bool {
     *v == 3600
+}
+
+/// Distributed Redis-backed response cache config (SCALE-04, #183,
+/// `gateway.redis_cache`, ent feature).
+///
+/// When present and the `ent` cargo feature is compiled in AND a valid
+/// license with the `redis_cache` feature claim is loaded, the gateway
+/// uses a Redis-backed response cache instead of (or in addition to)
+/// the local in-memory moka cache — so two or more gateway instances
+/// share one response cache. Fleet-wide cache hit ratios replace N x
+/// per-instance cold caches, particularly impactful for canary and
+/// rolling-deploy scenarios where new instances start empty. When the
+/// `ent` feature is NOT compiled in, or the license lacks the claim,
+/// the block is accepted but inert (the local moka cache is used and a
+/// one-line notice is logged at startup).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedisCacheConfig {
+    /// Redis connection URL (e.g. `redis://127.0.0.1:6379` or
+    /// `redis-cluster://...`). The connection is established once at
+    /// startup with the configured timeout.
+    pub url: String,
+    /// Prefix for cache keys in Redis (default `dwara:cache:`). Each
+    /// cached response is stored as `{prefix}{key}`.
+    #[serde(
+        default = "default_redis_cache_key_prefix",
+        skip_serializing_if = "is_default_redis_cache_key_prefix"
+    )]
+    pub key_prefix: String,
+    /// Connection timeout in milliseconds (default 1000; validated to
+    /// 100..=30 000).
+    #[serde(
+        default = "default_redis_connection_timeout_ms",
+        skip_serializing_if = "is_default_redis_connection_timeout_ms"
+    )]
+    pub connection_timeout_ms: u64,
+    /// Whether to keep a local fronting cache (two-tier: local moka +
+    /// Redis). Default true: the local cache fronts Redis for hot keys,
+    /// and Redis Pub/Sub invalidation evicts local entries when another
+    /// instance purges a key. Set to false for a pure Redis cache (no
+    /// local tier).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub local_tier: bool,
+}
+
+fn default_redis_cache_key_prefix() -> String {
+    "dwara:cache:".to_string()
+}
+
+fn is_default_redis_cache_key_prefix(p: &str) -> bool {
+    p == "dwara:cache:"
 }
 
 /// Config convergence config (DW-054, `gateway.config_convergence`).
@@ -1347,7 +1424,15 @@ pub enum AnalyticsExportWindow {
 }
 
 /// One export output format (DW-120, `analytics.exports.formats[]`).
-/// Closed set: `csv`, `json`.
+/// Closed set: `csv`, `json`, `parquet_csv`.
+///
+/// SCALE-12 (#190): `parquet_csv` writes a CSV file with a
+/// `.parquet.csv` extension and a JSON metadata header describing
+/// the schema in Parquet-compatible terms. The operator converts it
+/// to true Parquet using an external tool (e.g., `duckdb -c "COPY
+/// input.parquet.csv TO output.parquet (FORMAT PARQUET)"`). This
+/// avoids adding the heavy `arrow`/`parquet` crate stack while
+/// providing a clear path to Parquet output.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -1355,6 +1440,9 @@ pub enum AnalyticsExportWindow {
 pub enum AnalyticsExportFormat {
     Csv,
     Json,
+    /// SCALE-12 (#190): CSV with Parquet-compatible metadata header.
+    /// The file extension is `.parquet.csv`.
+    ParquetCsv,
 }
 
 /// Per-granularity retention (DW-043, `analytics.retention`).
@@ -1666,13 +1754,11 @@ pub struct AnalyticsStreamConfig {
 
 /// The access-record stream's sink (DW-121,
 /// `gateway.analytics_stream.sink`). Closed set, internally tagged
-/// (`type: webhook`): `webhook` ships today. A Kafka producer is the
-/// documented second slot, deliberately not shipped in v1 (the
-/// lean-deps rule — the same decision that deferred Parquet to the
-/// DW-156 backlog): a sink slot that pulls a client library must earn
-/// its dependency weight. The variant payloads carry their own
-/// `deny_unknown_fields`, so a misspelled knob inside a sink is still
-/// a rejected config.
+/// (`type: webhook` or `type: kafka`): `webhook` ships today; `kafka`
+/// (SCALE-08, #187) produces NDJSON batches to a Kafka topic via a
+/// Kafka REST Proxy (HTTP-based, no native client dependency). The
+/// variant payloads carry their own `deny_unknown_fields`, so a
+/// misspelled knob inside a sink is still a rejected config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AnalyticsStreamSink {
@@ -1681,6 +1767,16 @@ pub enum AnalyticsStreamSink {
     /// DW-044 webhook delivery engine's retry/budget shape — one
     /// delivery (with its retries) per batch.
     Webhook(AnalyticsStreamWebhook),
+    /// Produce each flushed batch as NDJSON messages to a Kafka topic
+    /// via a Kafka REST Proxy (SCALE-08, #187). The REST Proxy
+    /// endpoint receives the batch as an HTTP POST with the
+    /// `Content-Type: application/vnd.kafka.binary.v2+json` media
+    /// type; each NDJSON line becomes a Kafka message value (base64
+    /// encoded per the REST Proxy spec). TLS is via `https://`; SASL
+    /// auth is via headers. This avoids the native `rdkafka`
+    /// dependency while providing a production-usable Kafka
+    /// integration.
+    Kafka(AnalyticsStreamKafka),
 }
 
 /// The webhook batch sink (DW-121,
@@ -1728,6 +1824,61 @@ pub struct AnalyticsStreamWebhook {
     /// `backoff_cap_ms` (a `Retry-After` answer replaces the computed
     /// value for that wait). Default 250 — a batch retry is heavier
     /// than an alert retry, so it starts slower.
+    #[serde(
+        default = "default_stream_webhook_backoff_base_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_base_ms"
+    )]
+    pub backoff_base_ms: u64,
+    /// Upper bound on the computed backoff. Default 4000; must be >=
+    /// `backoff_base_ms`.
+    #[serde(
+        default = "default_stream_webhook_backoff_cap_ms",
+        skip_serializing_if = "is_default_stream_webhook_backoff_cap_ms"
+    )]
+    pub backoff_cap_ms: u64,
+}
+
+/// The Kafka batch sink (SCALE-08, #187,
+/// `gateway.analytics_stream.sink.kafka`). Produces each flushed
+/// batch as NDJSON messages to a Kafka topic via a Kafka REST Proxy
+/// (HTTP-based, no native client dependency). The REST Proxy
+/// endpoint receives the batch as an HTTP POST with the
+/// `Content-Type: application/vnd.kafka.binary.v2+json` media type;
+/// each NDJSON line becomes a Kafka message value (base64 encoded
+/// per the REST Proxy spec). TLS is via `https://`; SASL auth is via
+/// headers (e.g. `Authorization: Basic ...`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsStreamKafka {
+    /// Absolute `http://` or `https://` URL of the Kafka REST Proxy
+    /// endpoint for producing to the topic, e.g.
+    /// `https://kafka-rest:8082/topics/<topic>`. `https://` verifies
+    /// against the public webpki root set.
+    pub rest_proxy_url: String,
+    /// Headers sent on every batch delivery (e.g. the REST Proxy's
+    /// auth token, `Authorization: Basic ...` for SASL). Values may
+    /// be inline or `${ENV_NAME}` / `${file:/path}` secret references
+    /// (DW-045), resolved at config-compile time; inline values are
+    /// redacted in every config echo.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// TOTAL budget for one batch delivery (all retry attempts share
+    /// it), in milliseconds. Default 5000. Validation enforces
+    /// 1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's
+    /// bound).
+    #[serde(
+        default = "default_stream_webhook_timeout_ms",
+        skip_serializing_if = "is_default_stream_webhook_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+    /// Max delivery attempts per batch. Default 3.
+    #[serde(
+        default = "default_stream_webhook_attempts",
+        skip_serializing_if = "is_default_stream_webhook_attempts"
+    )]
+    pub max_attempts: u32,
+    /// First backoff between batch attempts, doubling per retry up to
+    /// `backoff_cap_ms`. Default 250.
     #[serde(
         default = "default_stream_webhook_backoff_base_ms",
         skip_serializing_if = "is_default_stream_webhook_backoff_base_ms"
@@ -2837,6 +2988,11 @@ pub struct Route {
     /// `wasm` cargo feature must be enabled for plugins to load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    /// SCALE-12 (#191): per-route filter-chain ordering and dry-run
+    /// overrides. When absent, the global `filter_chain` config (or
+    /// the default order) applies. See [`FilterChainConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_chain: Option<FilterChainConfig>,
     /// SEC-05: OIDC browser login flow as a route auth mode. When
     /// present, the gateway acts as an OIDC relying party: unauthenticated
     /// browser requests are redirected to the IdP's authorization
@@ -4937,6 +5093,31 @@ pub struct UpstreamPoolConfig {
     /// Bounds: at least 1, at most 1_000_000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_streams: Option<u32>,
+    /// SCALE-10 (#189): number of connections to pre-establish per
+    /// endpoint on startup/reload. Pre-warming removes cold-start
+    /// latency spikes after reloads and upgrade hand-offs. `0` or
+    /// absent: no pre-warming (the default — connections are
+    /// established on first use). Bounds: at most 64 per endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_warm: Option<u32>,
+    /// SCALE-10 (#189): per-endpoint connection cap, bounding
+    /// concurrent connections to a SINGLE endpoint (address:port)
+    /// within the upstream. The per-upstream `connection_cap` still
+    /// bounds the total across all endpoints; this knob prevents one
+    /// busy endpoint from monopolizing the upstream's connection
+    /// budget. Absent: no per-endpoint cap (only the per-upstream
+    /// cap applies). Bounds: at least 1, at most 1024.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_endpoint_cap: Option<u32>,
+    /// SCALE-10 (#189): maximum age of a pooled connection before it
+    /// is recycled. In milliseconds. Absent: no max-age (connections
+    /// live until the idle timeout or a peer-initiated close). A
+    /// positive value sets the pool idle timeout to the minimum of
+    /// this and `pool_idle_timeout_ms`, so connections are evicted
+    /// before they become stale. Bounds: at most 10 minutes
+    /// (600000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connection_age_ms: Option<u64>,
 }
 
 /// SEC-03: upstream mTLS client certificate configuration. Reuses the
@@ -6164,6 +6345,14 @@ pub struct PluginConfig {
     /// plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<String>,
+    /// SCALE-12 (#192): remote source for this plugin. When set, the
+    /// gateway downloads the .wasm artifact from the registry at
+    /// startup (and on reload), verifies its digest, and caches it
+    /// locally before loading. Mutually exclusive with `native`; when
+    /// `source` is set, `wasm` is the local cache path (created by
+    /// the download if absent). See [`PluginSourceConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginSourceConfig>,
     /// Phases this plugin hooks. Must be a non-empty subset of:
     /// `request_headers`, `request_body`, `response_headers`,
     /// `response_body`. The host calls the plugin's corresponding
@@ -6183,6 +6372,71 @@ pub struct PluginConfig {
     /// are bounded by the gateway's own resource limits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<PluginLimitsConfig>,
+}
+
+/// SCALE-12 (#192): remote/signed plugin source configuration. The
+/// gateway downloads the .wasm artifact from `url`, verifies its
+/// SHA-256 `digest`, and optionally verifies an Ed25519 `signature`
+/// against `public_key` before loading. The artifact is cached at
+/// `cache_path` (or a default location under the gateway's data
+/// directory if `cache_path` is absent).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginSourceConfig {
+    /// The registry URL to download the .wasm artifact from. Must be
+    /// `https://` or `oci://` (OCI artifact reference). For `https://`,
+    /// the gateway fetches the artifact via a simple HTTP GET. For
+    /// `oci://`, the gateway uses the OCI distribution spec (pull
+    /// manifest, pull layer). The URL is fetched at startup and on
+    /// reload; the cached artifact is reused if its digest matches.
+    pub url: String,
+    /// Expected SHA-256 digest of the downloaded artifact, hex-encoded.
+    /// The gateway verifies the downloaded bytes match this digest
+    /// before loading. Required (no unsigned remote plugins).
+    pub digest: String,
+    /// Optional Ed25519 signature over the artifact bytes, hex-encoded.
+    /// When set, `public_key` must also be set; the gateway verifies
+    /// the signature before loading. Absent means only the digest is
+    /// verified (suitable for trusted registries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Ed25519 public key (32 bytes, hex-encoded) for signature
+    /// verification. Required when `signature` is set; ignored
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// Local cache path for the downloaded artifact. When absent, the
+    /// gateway uses `<data_dir>/plugins/<name>.wasm`. The cached file
+    /// is reused if its digest matches `digest`; otherwise it is
+    /// re-downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_path: Option<String>,
+}
+
+/// SCALE-12 (#192): plugin registry configuration. When present, the
+/// gateway can resolve plugin `source.url` references against the
+/// registry's base URL and verify signatures against the registry's
+/// pinned public keys. This enables fleet-consistent plugin pinning:
+/// all gateways in a fleet reference the same registry and get the
+/// same signed artifacts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRegistryConfig {
+    /// Registry base URL (e.g., `https://registry.example.com/plugins`).
+    /// Plugin `source.url` values that are relative (no scheme) are
+    /// resolved against this base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Pinned Ed25519 public keys (hex-encoded, 32 bytes each). When
+    /// set, plugin signatures are verified against these keys in
+    /// addition to any per-plugin `public_key`. A plugin with no
+    /// signature is rejected when the registry has pinned keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_keys: Vec<String>,
+    /// Local cache directory for downloaded artifacts. Default:
+    /// `<data_dir>/plugins`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
 }
 
 /// The phases a plugin can hook (DW-055, §9.3 phase contract).
@@ -6207,6 +6461,87 @@ pub enum PluginPhase {
     ResponseHeaders,
     /// After masking, before compression.
     ResponseBody,
+}
+
+/// SCALE-12 (#191): formalized request-pipeline filter phases. The
+/// default order is the order the variants are declared (the same
+/// order the dataplane has always executed them). Per-route
+/// `filter_chain` overrides can reorder a subset of these phases;
+/// phases not listed in an override keep their default relative
+/// order.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterPhase {
+    /// IP ACL and consumer ACL checks.
+    Acl,
+    /// Rate limiting (per-consumer and per-route limiters).
+    RateLimit,
+    /// Authentication (API key, JWT, OIDC, mTLS).
+    Authn,
+    /// Authorization (route/service/listener/global policy chain).
+    Authz,
+    /// Request body validation (JSON schema, size limits).
+    Validate,
+    /// Request transforms (path rewrite, header/query transforms).
+    Transform,
+    /// Response cache lookup.
+    Cache,
+    /// Route dispatch (proxy, redirect, respond, ai, etc.).
+    Route,
+}
+
+impl FilterPhase {
+    /// The default pipeline order (the order the dataplane has
+    /// always executed the phases).
+    pub const DEFAULT_ORDER: [FilterPhase; 8] = [
+        FilterPhase::Acl,
+        FilterPhase::RateLimit,
+        FilterPhase::Authn,
+        FilterPhase::Authz,
+        FilterPhase::Validate,
+        FilterPhase::Transform,
+        FilterPhase::Cache,
+        FilterPhase::Route,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FilterPhase::Acl => "acl",
+            FilterPhase::RateLimit => "rate_limit",
+            FilterPhase::Authn => "authn",
+            FilterPhase::Authz => "authz",
+            FilterPhase::Validate => "validate",
+            FilterPhase::Transform => "transform",
+            FilterPhase::Cache => "cache",
+            FilterPhase::Route => "route",
+        }
+    }
+}
+
+/// SCALE-12 (#191): per-phase dry-run configuration. When dry-run is
+/// enabled for a phase, the phase executes its checks but does NOT
+/// enforce (reject/block). Failures are logged as warnings and the
+/// request continues. This enables safe policy rollout: enable a
+/// phase in dry-run mode, observe the would-be rejections, then
+/// switch to enforcement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FilterChainConfig {
+    /// Phases to run in dry-run mode (log but don't enforce). Each
+    /// entry is a phase name from [`FilterPhase`]. A phase in
+    /// dry-run mode still executes its logic; the difference is that
+    /// a rejection is logged as a warning and the request continues.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dry_run: Vec<FilterPhase>,
+    /// Optional ordering override: a list of phase names in the
+    /// order they should execute. Phases not listed keep their
+    /// default relative order. The override must contain exactly the
+    /// same set of phases as the default (no duplicates, no unknown
+    /// phases); validation rejects invalid overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<FilterPhase>>,
 }
 
 /// Resource limits for a proxy-wasm plugin (DW-055 decision 4; §9.3).

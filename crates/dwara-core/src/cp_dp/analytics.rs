@@ -84,6 +84,11 @@ pub struct PbAnalyticsRecord {
     /// embedded store's `dims` column).
     #[prost(string, tag = "14")]
     pub dims_json: String,
+    /// The edge instance ID this event originated from (SCALE-07,
+    /// #186). Set by the controller when forwarding federated events
+    /// to the aggregate store.
+    #[prost(string, tag = "15")]
+    pub edge_id: String,
 }
 
 /// Wire: a batch of analytics records from one edge.
@@ -136,6 +141,7 @@ impl From<Event> for PbAnalyticsRecord {
             broken: e.broken,
             shed: e.shed,
             dims_json,
+            edge_id: e.edge_id.unwrap_or_default(),
         }
     }
 }
@@ -191,6 +197,11 @@ impl From<PbAnalyticsRecord> for Event {
         } else {
             Some(pb.attempts)
         };
+        let edge_id = if pb.edge_id.is_empty() {
+            None
+        } else {
+            Some(pb.edge_id)
+        };
         Event {
             kind: pb.kind,
             timestamp_ms: pb.timestamp_ms,
@@ -205,6 +216,7 @@ impl From<PbAnalyticsRecord> for Event {
             rate_limited: pb.rate_limited,
             broken: pb.broken,
             shed: pb.shed,
+            edge_id,
             attributes,
         }
     }
@@ -254,9 +266,14 @@ impl EmbeddedCollector {
 
 #[async_trait]
 impl AnalyticsCollector for EmbeddedCollector {
-    async fn collect(&self, _edge_id: &str, records: Vec<Event>) -> u64 {
+    async fn collect(&self, edge_id: &str, records: Vec<Event>) -> u64 {
         let mut accepted = 0u64;
-        for record in records {
+        for mut record in records {
+            // Tag the event with the originating edge ID (SCALE-07,
+            // #186) so the aggregate store can filter by edge.
+            if record.edge_id.is_none() {
+                record.edge_id = Some(edge_id.to_string());
+            }
             match self.sink.record(record).await {
                 Ok(()) => accepted += 1,
                 Err(e) => {
@@ -499,6 +516,7 @@ mod tests {
             rate_limited: false,
             broken: false,
             shed: false,
+            edge_id: Some("edge-1".to_string()),
             attributes: vec![("region".to_string(), "us-east".to_string())],
         };
         let pb: PbAnalyticsRecord = event.clone().into();

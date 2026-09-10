@@ -500,6 +500,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     }
    ]
   },
+  "redis_cache": {
+   "description": "Distributed Redis-backed response cache (ent\nfeature). Absent (the default): the local in-memory moka cache\nis used (one cache per instance, so a fleet of N instances has\nN x cold caches). When present, the `ent` cargo feature is\ncompiled in, AND a valid license with the `redis_cache` feature\nclaim is loaded, the gateway uses a Redis-backed response cache\nso two or more instances share one cache \u2014 fleet-wide hit\nratios. A local moka tier can front Redis (two-tier with Pub/Sub\ninvalidation) or be disabled for a pure Redis cache. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local moka cache is\nused and a one-line notice is logged at startup).",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/RedisCacheConfig"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
   "config_convergence": {
    "description": "Config convergence (enterprise feature). Absent (the\ndefault): each gateway instance serves only its local config\ngeneration and never watches remote instances. When present,\nthe `ent` cargo feature is compiled in, AND a valid license\nwith the `config_convergence` feature claim is loaded, the\ngateway publishes its config generation to a shared backend\n(Redis in v1; etcd/Consul are deferred behind the\n`ConfigConvergenceBackend` trait) and polls for generations\npublished by other instances, converging to the highest\ngeneration within the poll interval. A drift report is emitted\nat `drift_check_interval_ms` when instances diverge. When the\n`ent` feature is NOT compiled in, or the license lacks the\nclaim, the block is accepted but inert (the local file watcher\nruns alone) and a one-line notice is logged at startup.",
    "anyOf": [
@@ -517,6 +528,28 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "items": {
     "$ref": "#/$defs/PluginConfig"
    }
+  },
+  "plugin_registry": {
+   "description": ": remote/signed plugin registry configuration.\nWhen present, plugin `source.url` references are resolved\nagainst the registry's base URL and signatures are verified\nagainst the registry's pinned public keys. See\n[`PluginRegistryConfig`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/PluginRegistryConfig"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
+  "filter_chain": {
+   "description": ": global filter-chain ordering and dry-run\nconfiguration. Per-route `filter_chain` overrides take\nprecedence. See [`FilterChainConfig`].",
+   "anyOf": [
+    {
+     "$ref": "#/$defs/FilterChainConfig"
+    },
+    {
+     "type": "null"
+    }
+   ]
   },
   "ai": {
    "description": "The AI provider-adapter pack: the provider pool and the\nmodel alias table behind every `ai` route action. Absent (the\ndefault): no AI surface \u2014 an `ai` route action is rejected by\nvalidation. When present, clients send OpenAI chat-completions\nshaped requests to an `ai` route and the gateway translates to\nthe target provider's wire format (OpenAI, Anthropic, Gemini),\nnormalizing responses (and streaming deltas) back to the OpenAI\nshape. See [`ai::AiConfig`] and the `ai` domain docs.",
@@ -1324,6 +1357,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "items": {
       "type": "string"
      }
+    },
+    "filter_chain": {
+     "description": ": per-route filter-chain ordering and dry-run\noverrides. When absent, the global `filter_chain` config (or\nthe default order) applies. See [`FilterChainConfig`].",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/FilterChainConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
     },
     "oidc_login": {
      "description": "OIDC browser login flow as a route auth mode. When\npresent, the gateway acts as an OIDC relying party: unauthenticated\nbrowser requests are redirected to the IdP's authorization\nendpoint, and the callback (`redirect_uri`) exchanges the\nauthorization code for tokens, sets a session cookie, and\nredirects the user back to the original URL. Subsequent requests\ncarry the session cookie (validated by the gateway). Absent (the\ndefault): no browser login flow (the route uses its normal auth\nmode). See [`OidcLoginConfig`].",
@@ -2936,6 +2980,75 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "fixed_ms"
    ]
   },
+  "FilterChainConfig": {
+   "description": ": per-phase dry-run configuration. When dry-run is\nenabled for a phase, the phase executes its checks but does NOT\nenforce (reject/block). Failures are logged as warnings and the\nrequest continues. This enables safe policy rollout: enable a\nphase in dry-run mode, observe the would-be rejections, then\nswitch to enforcement.",
+   "type": "object",
+   "properties": {
+    "dry_run": {
+     "description": "Phases to run in dry-run mode (log but don't enforce). Each\nentry is a phase name from [`FilterPhase`]. A phase in\ndry-run mode still executes its logic; the difference is that\na rejection is logged as a warning and the request continues.",
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/FilterPhase"
+     }
+    },
+    "order": {
+     "description": "Optional ordering override: a list of phase names in the\norder they should execute. Phases not listed keep their\ndefault relative order. The override must contain exactly the\nsame set of phases as the default (no duplicates, no unknown\nphases); validation rejects invalid overrides.",
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "$ref": "#/$defs/FilterPhase"
+     }
+    }
+   },
+   "additionalProperties": false
+  },
+  "FilterPhase": {
+   "description": ": formalized request-pipeline filter phases. The\ndefault order is the order the variants are declared (the same\norder the dataplane has always executed them). Per-route\n`filter_chain` overrides can reorder a subset of these phases;\nphases not listed in an override keep their default relative\norder.",
+   "oneOf": [
+    {
+     "description": "IP ACL and consumer ACL checks.",
+     "type": "string",
+     "const": "acl"
+    },
+    {
+     "description": "Rate limiting (per-consumer and per-route limiters).",
+     "type": "string",
+     "const": "rate_limit"
+    },
+    {
+     "description": "Authentication (API key, JWT, OIDC, mTLS).",
+     "type": "string",
+     "const": "authn"
+    },
+    {
+     "description": "Authorization (route/service/listener/global policy chain).",
+     "type": "string",
+     "const": "authz"
+    },
+    {
+     "description": "Request body validation (JSON schema, size limits).",
+     "type": "string",
+     "const": "validate"
+    },
+    {
+     "description": "Request transforms (path rewrite, header/query transforms).",
+     "type": "string",
+     "const": "transform"
+    },
+    {
+     "description": "Response cache lookup.",
+     "type": "string",
+     "const": "cache"
+    },
+    {
+     "description": "Route dispatch (proxy, redirect, respond, ai, etc.).",
+     "type": "string",
+     "const": "route"
+    }
+   ]
+  },
   "OidcLoginConfig": {
    "description": "OIDC browser login flow configuration for a route. The\ngateway redirects unauthenticated browser requests to the IdP,\nexchanges the authorization code for tokens, sets a session cookie,\nand validates the cookie on subsequent requests.",
    "type": "object",
@@ -4078,6 +4191,33 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ],
      "format": "uint32",
+     "minimum": 0
+    },
+    "pre_warm": {
+     "description": ": number of connections to pre-establish per\nendpoint on startup/reload. Pre-warming removes cold-start\nlatency spikes after reloads and upgrade hand-offs. `0` or\nabsent: no pre-warming (the default \u2014 connections are\nestablished on first use). Bounds: at most 64 per endpoint.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "per_endpoint_cap": {
+     "description": ": per-endpoint connection cap, bounding\nconcurrent connections to a SINGLE endpoint (address:port)\nwithin the upstream. The per-upstream `connection_cap` still\nbounds the total across all endpoints; this knob prevents one\nbusy endpoint from monopolizing the upstream's connection\nbudget. Absent: no per-endpoint cap (only the per-upstream\ncap applies). Bounds: at least 1, at most 1024.",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint32",
+     "minimum": 0
+    },
+    "max_connection_age_ms": {
+     "description": ": maximum age of a pooled connection before it\nis recycled. In milliseconds. Absent: no max-age (connections\nlive until the idle timeout or a peer-initiated close). A\npositive value sets the pool idle timeout to the minimum of\nthis and `pool_idle_timeout_ms`, so connections are evicted\nbefore they become stale. Bounds: at most 10 minutes\n(600000 ms).",
+     "type": [
+      "integer",
+      "null"
+     ],
+     "format": "uint64",
      "minimum": 0
     }
    },
@@ -5252,11 +5392,20 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    ]
   },
   "AnalyticsExportFormat": {
-   "description": "One export output format (`analytics.exports.formats[]`).\nClosed set: `csv`, `json`.",
-   "type": "string",
-   "enum": [
-    "csv",
-    "json"
+   "description": "One export output format (`analytics.exports.formats[]`).\nClosed set: `csv`, `json`, `parquet_csv`.: `parquet_csv` writes a CSV file with a\n`.parquet.csv` extension and a JSON metadata header describing\nthe schema in Parquet-compatible terms. The operator converts it\nto true Parquet using an external tool (e.g., `duckdb -c \"COPY\ninput.parquet.csv TO output.parquet (FORMAT PARQUET)\"`). This\navoids adding the heavy `arrow`/`parquet` crate stack while\nproviding a clear path to Parquet output.",
+   "oneOf": [
+    {
+     "type": "string",
+     "enum": [
+      "csv",
+      "json"
+     ]
+    },
+    {
+     "description": ": CSV with Parquet-compatible metadata header.\nThe file extension is `.parquet.csv`.",
+     "type": "string",
+     "const": "parquetcsv"
+    }
    ]
   },
   "AnalyticsLiveSketches": {
@@ -5365,7 +5514,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    ]
   },
   "AnalyticsStreamSink": {
-   "description": "The access-record stream's sink (`gateway.analytics_stream.sink`). Closed set, internally tagged\n(`type: webhook`): `webhook` ships today. A Kafka producer is the\ndocumented second slot, deliberately not shipped in v1 (the\nlean-deps rule \u2014 the same decision that deferred Parquet to the backlog): a sink slot that pulls a client library must earn\nits dependency weight. The variant payloads carry their own\n`deny_unknown_fields`, so a misspelled knob inside a sink is still\na rejected config.",
+   "description": "The access-record stream's sink (`gateway.analytics_stream.sink`). Closed set, internally tagged\n(`type: webhook` or `type: kafka`): `webhook` ships today; `kafka` produces NDJSON batches to a Kafka topic via a\nKafka REST Proxy (HTTP-based, no native client dependency). The\nvariant payloads carry their own `deny_unknown_fields`, so a\nmisspelled knob inside a sink is still a rejected config.",
    "oneOf": [
     {
      "description": "POST each flushed batch as one NDJSON body (one JSON object per\nline, one line per record) to the configured URL, reusing the webhook delivery engine's retry/budget shape \u2014 one\ndelivery (with its retries) per batch.",
@@ -5415,6 +5564,56 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "required": [
       "type",
       "url"
+     ]
+    },
+    {
+     "description": "Produce each flushed batch as NDJSON messages to a Kafka topic\nvia a Kafka REST Proxy. The REST Proxy\nendpoint receives the batch as an HTTP POST with the\n`Content-Type: application/vnd.kafka.binary.v2+json` media\ntype; each NDJSON line becomes a Kafka message value (base64\nencoded per the REST Proxy spec). TLS is via `https://`; SASL\nauth is via headers. This avoids the native `rdkafka`\ndependency while providing a production-usable Kafka\nintegration.",
+     "type": "object",
+     "properties": {
+      "rest_proxy_url": {
+       "description": "Absolute `http://` or `https://` URL of the Kafka REST Proxy\nendpoint for producing to the topic, e.g.\n`https://kafka-rest:8082/topics/<topic>`. `https://` verifies\nagainst the public webpki root set.",
+       "type": "string"
+      },
+      "headers": {
+       "description": "Headers sent on every batch delivery (e.g. the REST Proxy's\nauth token, `Authorization: Basic ...` for SASL). Values may\nbe inline or `${ENV_NAME}` / `${file:/path}` secret references, resolved at config-compile time; inline values are\nredacted in every config echo.",
+       "type": "object",
+       "additionalProperties": {
+        "type": "string"
+       }
+      },
+      "timeout_ms": {
+       "description": "TOTAL budget for one batch delivery (all retry attempts share\nit), in milliseconds. Default 5000. Validation enforces\n1..=[`limits::MAX_WEBHOOK_TIMEOUT_MS`] (the shared engine's\nbound).",
+       "type": "integer",
+       "format": "uint64",
+       "minimum": 0
+      },
+      "max_attempts": {
+       "description": "Max delivery attempts per batch. Default 3.",
+       "type": "integer",
+       "format": "uint32",
+       "minimum": 0
+      },
+      "backoff_base_ms": {
+       "description": "First backoff between batch attempts, doubling per retry up to\n`backoff_cap_ms`. Default 250.",
+       "type": "integer",
+       "format": "uint64",
+       "minimum": 0
+      },
+      "backoff_cap_ms": {
+       "description": "Upper bound on the computed backoff. Default 4000; must be >=\n`backoff_base_ms`.",
+       "type": "integer",
+       "format": "uint64",
+       "minimum": 0
+      },
+      "type": {
+       "type": "string",
+       "const": "kafka"
+      }
+     },
+     "additionalProperties": false,
+     "required": [
+      "type",
+      "rest_proxy_url"
      ]
     }
    ]
@@ -5679,6 +5878,34 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "url"
    ]
   },
+  "RedisCacheConfig": {
+   "description": "Distributed Redis-backed response cache config (`gateway.redis_cache`, ent feature). When present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `redis_cache` feature claim is loaded, the gateway\nuses a Redis-backed response cache instead of (or in addition to)\nthe local in-memory moka cache \u2014 so two or more gateway instances\nshare one response cache. Fleet-wide cache hit ratios replace N x\nper-instance cold caches, particularly impactful for canary and\nrolling-deploy scenarios where new instances start empty. When the\n`ent` feature is NOT compiled in, or the license lacks the claim,\nthe block is accepted but inert (the local moka cache is used and a\none-line notice is logged at startup).",
+   "type": "object",
+   "properties": {
+    "url": {
+     "description": "Redis connection URL (e.g. `redis://127.0.0.1:6379` or\n`redis-cluster:/...`). The connection is established once at\nstartup with the configured timeout.",
+     "type": "string"
+    },
+    "key_prefix": {
+     "description": "Prefix for cache keys in Redis (default `dwara:cache:`). Each\ncached response is stored as `{prefix}{key}`.",
+     "type": "string"
+    },
+    "connection_timeout_ms": {
+     "description": "Connection timeout in milliseconds (default 1000; validated to\n100..=30 000).",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0
+    },
+    "local_tier": {
+     "description": "Whether to keep a local fronting cache (two-tier: local moka +\nRedis). Default true: the local cache fronts Redis for hot keys,\nand Redis Pub/Sub invalidation evicts local entries when another\ninstance purges a key. Set to false for a pure Redis cache (no\nlocal tier).",
+     "type": "boolean"
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "url"
+   ]
+  },
   "ConfigConvergenceConfig": {
    "description": "Config convergence config (`gateway.config_convergence`). When present and the `ent` cargo feature is compiled in AND a valid\nlicense with the `config_convergence` feature claim is loaded, the\ngateway publishes its config generation to a shared backend and\npolls for generations published by other instances, converging to\nthe highest generation within `poll_interval_ms`. The backend is\nthe seam for etcd/Consul (deferred); v1 ships a Redis\nimplementation. The coordinator runs ALONGSIDE the local file\nwatcher: a local file change triggers a local reload plus a publish\nto the backend; a remote change (detected by polling) triggers a\nremote reload. Both go through `compile_and_publish`. When the\n`ent` feature is NOT compiled in, or the license lacks the claim,\nthe block is accepted but inert (the local file watcher runs\nalone).",
    "type": "object",
@@ -5746,6 +5973,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "null"
      ]
     },
+    "source": {
+     "description": ": remote source for this plugin. When set, the\ngateway downloads the .wasm artifact from the registry at\nstartup (and on reload), verifies its digest, and caches it\nlocally before loading. Mutually exclusive with `native`; when\n`source` is set, `wasm` is the local cache path (created by\nthe download if absent). See [`PluginSourceConfig`].",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/PluginSourceConfig"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
     "phases": {
      "description": "Phases this plugin hooks. Must be a non-empty subset of:\n`request_headers`, `request_body`, `response_headers`,\n`response_body`. The host calls the plugin's corresponding\n`proxy_on_*` export at each declared phase (WASM) or the\n`NativeFilter` trait method (native).",
      "type": "array",
@@ -5775,6 +6013,46 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
    "additionalProperties": false,
    "required": [
     "name"
+   ]
+  },
+  "PluginSourceConfig": {
+   "description": ": remote/signed plugin source configuration. The\ngateway downloads the .wasm artifact from `url`, verifies its\nSHA-256 `digest`, and optionally verifies an Ed25519 `signature`\nagainst `public_key` before loading. The artifact is cached at\n`cache_path` (or a default location under the gateway's data\ndirectory if `cache_path` is absent).",
+   "type": "object",
+   "properties": {
+    "url": {
+     "description": "The registry URL to download the .wasm artifact from. Must be\n`https://` or `oci://` (OCI artifact reference). For `https://`,\nthe gateway fetches the artifact via a simple HTTP GET. For\n`oci://`, the gateway uses the OCI distribution spec (pull\nmanifest, pull layer). The URL is fetched at startup and on\nreload; the cached artifact is reused if its digest matches.",
+     "type": "string"
+    },
+    "digest": {
+     "description": "Expected SHA-256 digest of the downloaded artifact, hex-encoded.\nThe gateway verifies the downloaded bytes match this digest\nbefore loading. Required (no unsigned remote plugins).",
+     "type": "string"
+    },
+    "signature": {
+     "description": "Optional Ed25519 signature over the artifact bytes, hex-encoded.\nWhen set, `public_key` must also be set; the gateway verifies\nthe signature before loading. Absent means only the digest is\nverified (suitable for trusted registries).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "public_key": {
+     "description": "Ed25519 public key (32 bytes, hex-encoded) for signature\nverification. Required when `signature` is set; ignored\notherwise.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "cache_path": {
+     "description": "Local cache path for the downloaded artifact. When absent, the\ngateway uses `<data_dir>/plugins/<name>.wasm`. The cached file\nis reused if its digest matches `digest`; otherwise it is\nre-downloaded.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "url",
+    "digest"
    ]
   },
   "PluginPhase": {
@@ -5832,6 +6110,34 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ],
      "format": "uint64",
      "minimum": 0
+    }
+   },
+   "additionalProperties": false
+  },
+  "PluginRegistryConfig": {
+   "description": ": plugin registry configuration. When present, the\ngateway can resolve plugin `source.url` references against the\nregistry's base URL and verify signatures against the registry's\npinned public keys. This enables fleet-consistent plugin pinning:\nall gateways in a fleet reference the same registry and get the\nsame signed artifacts.",
+   "type": "object",
+   "properties": {
+    "base_url": {
+     "description": "Registry base URL (e.g., `https://registry.example.com/plugins`).\nPlugin `source.url` values that are relative (no scheme) are\nresolved against this base URL.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "public_keys": {
+     "description": "Pinned Ed25519 public keys (hex-encoded, 32 bytes each). When\nset, plugin signatures are verified against these keys in\naddition to any per-plugin `public_key`. A plugin with no\nsignature is rejected when the registry has pinned keys.",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "cache_dir": {
+     "description": "Local cache directory for downloaded artifacts. Default:\n`<data_dir>/plugins`.",
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "additionalProperties": false
@@ -6312,6 +6618,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "default": {
       "replacement": ""
      }
+    },
+    "external_sink": {
+     "description": ": external sink for prompt/response logs. When\nconfigured, the analytics maintenance tick invokes the\nspecified command to sync exported prompt log files to an\nexternal storage system (S3, GCS, etc.). The command receives\nthe export directory as its first argument. This is a\nlean-dependency alternative to embedding S3/GCS SDKs \u2014 the\noperator provides the sync tool (e.g., `aws s3 sync`, `gsutil\nrsync`). The sink has its own retention (`retention_secs`\nabove); the local store prunes on its schedule, the external\nsink prunes on the operator's policy.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/AiLoggingExternalSink"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false
@@ -6334,6 +6651,34 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     }
    },
    "additionalProperties": false
+  },
+  "AiLoggingExternalSink": {
+   "description": ": external sink configuration for prompt/response\nlogs. The sync command is invoked by the analytics maintenance\ntick with the export directory as its first argument. Failures are\nlogged and silently ignored (best-effort sync).",
+   "type": "object",
+   "properties": {
+    "sync_command": {
+     "description": "The command to invoke for syncing prompt log files to external\nstorage. The export directory path is passed as the first\nargument. Example: `aws s3 sync` or `gsutil rsync -r`.",
+     "type": "string"
+    },
+    "extra_args": {
+     "description": "Optional additional arguments to pass to the sync command\n(after the export directory path).",
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "sync_interval_secs": {
+     "description": "How often to invoke the sync command, in seconds. Default\n3600 (1 hour). Minimum 60.",
+     "type": "integer",
+     "format": "uint64",
+     "minimum": 0,
+     "default": 3600
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "sync_command"
+   ]
   },
   "AiGuardrails": {
    "description": "Guardrails (`ai.guardrails`): a list of rules that inspect\nprompts and responses for prompt-injection, PII, banned content,\nand output schema conformance. Each rule is one check applied at\nthe prompt phase (before the provider call) and/or the response\nphase (after). Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies to\nall. See [`AiGuardrailRule`] for the per-rule shape.",

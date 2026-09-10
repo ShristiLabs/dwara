@@ -583,6 +583,43 @@ pub struct AiLogging {
     /// when redaction is on; custom patterns are added to the set.
     #[serde(default)]
     pub redaction: RedactionConfig,
+    /// SCALE-12 (#190): external sink for prompt/response logs. When
+    /// configured, the analytics maintenance tick invokes the
+    /// specified command to sync exported prompt log files to an
+    /// external storage system (S3, GCS, etc.). The command receives
+    /// the export directory as its first argument. This is a
+    /// lean-dependency alternative to embedding S3/GCS SDKs — the
+    /// operator provides the sync tool (e.g., `aws s3 sync`, `gsutil
+    /// rsync`). The sink has its own retention (`retention_secs`
+    /// above); the local store prunes on its schedule, the external
+    /// sink prunes on the operator's policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_sink: Option<AiLoggingExternalSink>,
+}
+
+/// SCALE-12 (#190): external sink configuration for prompt/response
+/// logs. The sync command is invoked by the analytics maintenance
+/// tick with the export directory as its first argument. Failures are
+/// logged and silently ignored (best-effort sync).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiLoggingExternalSink {
+    /// The command to invoke for syncing prompt log files to external
+    /// storage. The export directory path is passed as the first
+    /// argument. Example: `aws s3 sync` or `gsutil rsync -r`.
+    pub sync_command: String,
+    /// Optional additional arguments to pass to the sync command
+    /// (after the export directory path).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+    /// How often to invoke the sync command, in seconds. Default
+    /// 3600 (1 hour). Minimum 60.
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+}
+
+fn default_sync_interval_secs() -> u64 {
+    3600
 }
 
 /// PII redaction configuration (DW-081 `ai.logging.redaction`).

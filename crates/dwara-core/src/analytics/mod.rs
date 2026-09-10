@@ -34,9 +34,13 @@
 //! DW-121's raw-record firehose is NOT an implementation of this
 //! contract — it streams the completion-time access record (which
 //! carries `request_id` and the redacted path the extension event
-//! deliberately omits) through its own sink seam in `events::stream`;
-//! the federated analytics pipeline (DW-095) remains a future sibling
-//! implementation of THIS contract.
+//! deliberately omits) through its own sink seam in `events::stream`.
+//! The federated analytics pipeline (DW-095, SCALE-07 #186) IS an
+//! implementation of this contract: `cp_dp::analytics::FederatedAnalyticsSink`
+//! batches events on the edge and ships them to the controller over
+//! gRPC; the controller's `EmbeddedCollector` forwards them to the
+//! aggregate `EmbeddedAnalytics` store, tagging each event with the
+//! originating `edge_id` for fleet-wide query filtering.
 //!
 //! # Custom dimensions
 //!
@@ -50,6 +54,7 @@
 
 pub mod exports;
 pub mod insights;
+pub mod partition;
 pub mod query;
 pub mod rollup;
 pub mod schema;
@@ -334,6 +339,14 @@ impl RawRecord {
     /// The extension-event shape of the same record (the
     /// `extensions::analytics::AnalyticsSink` contract's input type).
     fn from_event(event: &crate::extensions::analytics::Event) -> Self {
+        // SCALE-07 (#186): include edge_id as a dimension so fleet-wide
+        // queries can filter by edge without a schema migration. The
+        // dims column is a JSON object string; the edge_id dimension
+        // is queryable alongside the config-declared custom dimensions.
+        let mut attrs = event.attributes.clone();
+        if let Some(ref edge_id) = event.edge_id {
+            attrs.push(("edge_id".to_string(), edge_id.clone()));
+        }
         RawRecord {
             ts_ms: event.timestamp_ms as i64,
             request_id: String::new(),
@@ -357,7 +370,7 @@ impl RawRecord {
             rate_limited: event.rate_limited,
             broken: event.broken,
             shed: event.shed,
-            dims: dims_json(&event.attributes),
+            dims: dims_json(&attrs),
             request_headers_redacted: None,
             auth_identity: None,
         }
@@ -791,6 +804,14 @@ impl EmbeddedAnalytics {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         schema::migrate(&conn)?;
+        // SCALE-09 (#188): ensure the raw_all view exists (it may not
+        // if the database was created before partitioning was added).
+        if let Err(e) = partition::refresh_raw_all_view(&conn) {
+            tracing::warn!(
+                code = "analytics_raw_all_view_failed",
+                "failed to create raw_all view: {e}"
+            );
+        }
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let (spend_tx, spend_rx) = mpsc::channel(CHANNEL_CAP);
         let (gov_tx, gov_rx) = mpsc::channel(CHANNEL_CAP);
@@ -1759,6 +1780,16 @@ impl EmbeddedAnalytics {
     fn maintain(&self) {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
+        // SCALE-09 (#188): rotate the raw table into a daily partition
+        // if it has rows from a previous day. This bounds the raw
+        // table to the current day and makes retention O(1) (DROP
+        // TABLE) for old partitions.
+        if let Err(e) = partition::maybe_rotate(&conn, now) {
+            tracing::warn!(
+                code = "analytics_partition_rotate_failed",
+                "raw partition rotation failed: {e}"
+            );
+        }
         let mut rolled = 0usize;
         match rollup::roll_raw_to_1m(&conn, now, ROLLUP_GRACE_MS) {
             Ok(n) => rolled = n,
@@ -1791,6 +1822,14 @@ impl EmbeddedAnalytics {
                 code = "analytics_rollup",
                 windows = rolled,
                 "rollup pass complete"
+            );
+        }
+        // SCALE-09 (#188): drop expired daily partition tables (O(1)
+        // DROP TABLE vs O(n) DELETE rows).
+        if let Err(e) = partition::drop_expired_partitions(&conn, self.retention_ms[0], now) {
+            tracing::warn!(
+                code = "analytics_partition_drop_failed",
+                "expired partition drop failed: {e}"
             );
         }
         // DW-081: prompt log retention sweep. Records older than the

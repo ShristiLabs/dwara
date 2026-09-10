@@ -350,6 +350,123 @@ impl RecordSink for WebhookRecordSink {
     }
 }
 
+/// The Kafka batch sink (SCALE-08, #187,
+/// `analytics_stream.sink.kafka`): produces each flushed batch as
+/// NDJSON messages to a Kafka topic via a Kafka REST Proxy. The REST
+/// Proxy endpoint receives the batch as an HTTP POST with the
+/// `Content-Type: application/vnd.kafka.binary.v2+json` media type;
+/// each NDJSON line becomes a Kafka message value (base64 encoded
+/// per the REST Proxy spec). Reuses the DW-044 webhook delivery
+/// engine's retry/budget shape — one delivery (with its retries) per
+/// batch.
+pub struct KafkaRecordSink {
+    target: WebhookTarget,
+    obs: Arc<Observability>,
+}
+
+impl KafkaRecordSink {
+    /// Compile the sink from its config block: URL decomposition and
+    /// secret-reference header resolution through the same
+    /// `WebhookTarget` bottom the webhook sink uses, so the two
+    /// sinks cannot drift on URL, header, or retry semantics. Fails
+    /// with a log-safe message (the caller skips the sink loudly,
+    /// fail closed).
+    pub fn compile(
+        cfg: &crate::config::AnalyticsStreamKafka,
+        obs: Arc<Observability>,
+        ssrf_filter: crate::config::ssrf::SsrfFilter,
+    ) -> Result<Self, String> {
+        let target = WebhookTarget::compile_endpoint(
+            &cfg.rest_proxy_url,
+            &cfg.headers,
+            cfg.timeout_ms,
+            cfg.max_attempts,
+            cfg.backoff_base_ms,
+            cfg.backoff_cap_ms,
+            ssrf_filter,
+        )?;
+        Ok(KafkaRecordSink { target, obs })
+    }
+
+    /// The configured REST Proxy URL (operator config, safe to log).
+    pub fn url(&self) -> &str {
+        self.target.url()
+    }
+}
+
+impl std::fmt::Debug for KafkaRecordSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaRecordSink")
+            .field("url", &self.url())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl RecordSink for KafkaRecordSink {
+    async fn deliver_batch(&self, batch: Bytes, records: usize) -> bool {
+        // Encode the NDJSON batch as a Kafka REST Proxy v2+json
+        // request body: each NDJSON line becomes a base64-encoded
+        // message value in the "records" array.
+        let body = kafka_rest_proxy_body(&batch);
+        match webhook::deliver_with_retry(
+            &self.target,
+            body,
+            "application/vnd.kafka.binary.v2+json",
+            USER_AGENT,
+        )
+        .await
+        {
+            webhook::DeliveryEnd::Delivered { attempts } => {
+                tracing::debug!(
+                    code = "record_stream_kafka_batch_delivered",
+                    url = %self.url(),
+                    records,
+                    attempt = attempts,
+                    "kafka record batch delivered"
+                );
+                self.obs.record_access_stream("delivered", records as u64);
+                true
+            }
+            webhook::DeliveryEnd::Failed { attempts, error } => {
+                tracing::warn!(
+                    code = "record_stream_kafka_batch_failed",
+                    url = %self.url(),
+                    records,
+                    attempt = attempts,
+                    "kafka record batch delivery failed: {error}"
+                );
+                self.obs.record_access_stream("failed", records as u64);
+                false
+            }
+        }
+    }
+}
+
+/// Encode an NDJSON batch as a Kafka REST Proxy v2+json request body.
+/// Each NDJSON line becomes a base64-encoded message value in the
+/// "records" array, per the Confluent REST Proxy spec:
+/// `{"records":[{"value":"<base64>"}]}`.
+fn kafka_rest_proxy_body(batch: &Bytes) -> Bytes {
+    use base64::Engine;
+    let lines: Vec<&[u8]> = batch
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut json = String::with_capacity(batch.len() * 2);
+    json.push_str("{\"records\":[");
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str("{\"value\":\"");
+        json.push_str(&base64::engine::general_purpose::STANDARD.encode(line));
+        json.push_str("\"}");
+    }
+    json.push_str("]}");
+    Bytes::from(json)
+}
+
 /// The per-generation compiled stream state (DW-121): pushed to the
 /// flusher over a watch channel by the dataplane's refresh. An empty
 /// `sinks` list is the disabled state — the offer path checks a flag
@@ -357,8 +474,7 @@ impl RecordSink for WebhookRecordSink {
 /// never queues a record.
 #[derive(Clone)]
 pub struct StreamTargets {
-    /// The compiled sinks, in delivery order (one today; the set is
-    /// the seam a `kafka` slot would extend).
+    /// The compiled sinks, in delivery order.
     pub sinks: Vec<Arc<dyn RecordSink>>,
     /// Maximum batch latency (ms), read live per flush cycle.
     pub flush_ms: u64,
@@ -398,6 +514,15 @@ pub fn compile_stream_targets(
                 Err(error) => tracing::error!(
                     code = "record_stream_sink_unusable",
                     "analytics_stream sink skipped for this generation (fail closed): {error}"
+                ),
+            }
+        }
+        AnalyticsStreamSink::Kafka(k) => {
+            match KafkaRecordSink::compile(k, Arc::clone(obs), ssrf_filter) {
+                Ok(sink) => sinks.push(Arc::new(sink) as Arc<dyn RecordSink>),
+                Err(error) => tracing::error!(
+                    code = "record_stream_kafka_sink_unusable",
+                    "analytics_stream kafka sink skipped for this generation (fail closed): {error}"
                 ),
             }
         }

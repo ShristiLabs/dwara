@@ -227,6 +227,8 @@ impl WindowKind {
 pub enum ExportFormat {
     Csv,
     Json,
+    /// SCALE-12 (#190): CSV with Parquet-compatible metadata header.
+    ParquetCsv,
 }
 
 impl ExportFormat {
@@ -234,11 +236,16 @@ impl ExportFormat {
         match self {
             ExportFormat::Csv => "csv",
             ExportFormat::Json => "json",
+            ExportFormat::ParquetCsv => "parquet_csv",
         }
     }
 
     fn extension(self) -> &'static str {
-        self.as_str()
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::ParquetCsv => "parquet.csv",
+        }
     }
 }
 
@@ -259,7 +266,7 @@ macro_rules! impl_from_config {
 }
 
 impl_from_config!(WindowKind, AnalyticsExportWindow, Hourly, Daily, Monthly);
-impl_from_config!(ExportFormat, AnalyticsExportFormat, Csv, Json);
+impl_from_config!(ExportFormat, AnalyticsExportFormat, Csv, Json, ParquetCsv);
 
 /// One per-consumer statement row (the JSON member shape; the CSV
 /// writer flattens the same fields in a fixed column order).
@@ -406,7 +413,9 @@ pub fn run_export(
                 to_ms,
                 gran,
                 group_by: vec!["consumer".to_string()],
+                dim_group_by: None,
                 filters: query::FiltersBody::default(),
+                dim_filters: Default::default(),
                 limit: Some(10_000),
             },
         )?;
@@ -417,7 +426,9 @@ pub fn run_export(
                 to_ms,
                 gran,
                 group_by: Vec::new(),
+                dim_group_by: None,
                 filters: query::FiltersBody::default(),
+                dim_filters: Default::default(),
                 limit: Some(1),
             },
         )?;
@@ -541,6 +552,7 @@ pub fn run_export(
                 }
             },
             ExportFormat::Csv => render_csv(&statement),
+            ExportFormat::ParquetCsv => render_parquet_csv(&statement),
         };
         if let Err(e) = write_atomic(dir, &filename, &bytes) {
             return record_run(
@@ -809,6 +821,42 @@ fn render_csv(s: &UsageStatement) -> Vec<u8> {
         fields.push(c.cost_micros.to_string());
         push_csv_row(&mut out, &fields);
     }
+    out.into_bytes()
+}
+
+/// SCALE-12 (#190): Render a usage statement as a CSV file with a
+/// Parquet-compatible JSON metadata header. The header is a JSON
+/// object on the first line (prefixed with `#`) describing the
+/// schema in Parquet-compatible terms (column names, types). The
+/// operator converts the file to true Parquet using an external tool
+/// like `duckdb` or `python pyarrow`.
+fn render_parquet_csv(s: &UsageStatement) -> Vec<u8> {
+    let mut out = String::new();
+    // Parquet-compatible schema metadata header (JSON, prefixed with #).
+    let schema = serde_json::json!({
+        "format": "parquet-csv",
+        "version": 1,
+        "columns": [
+            {"name": "consumer", "type": "string"},
+            {"name": "requests", "type": "int64"},
+            {"name": "errors", "type": "int64"},
+            {"name": "error_rate", "type": "double"},
+            {"name": "rate_limited", "type": "int64"},
+            {"name": "shed", "type": "int64"},
+            {"name": "avg_ms", "type": "double"},
+            {"name": "quota_daily_used", "type": "int64"},
+            {"name": "quota_daily_limit", "type": "int64"},
+            {"name": "quota_monthly_used", "type": "int64"},
+            {"name": "quota_monthly_limit", "type": "int64"},
+            {"name": "prompt_tokens", "type": "int64"},
+            {"name": "completion_tokens", "type": "int64"},
+            {"name": "total_tokens", "type": "int64"},
+            {"name": "cost_micros", "type": "int64"},
+        ]
+    });
+    out.push_str(&format!("#{}\n", schema));
+    // The CSV body is identical to the plain CSV format.
+    out.push_str(&String::from_utf8(render_csv(s)).unwrap_or_default());
     out.into_bytes()
 }
 

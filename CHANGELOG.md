@@ -30,6 +30,146 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Listener hot-reload (#182, SCALE-03): the listener bind set is now
+  diffed on every config reload. Added listeners are bound and spawned
+  without restart; removed listeners are drained (per-listener shutdown
+  watch + bounded drain timeout) and dropped; changed listeners
+  (address, port, protocol, proxy_protocol, or TLS mode) are drained
+  and re-bound. Unchanged listeners keep running — their TLS cert
+  material is refreshed separately by the cert watcher. This eliminates
+  downtime for listener changes: adding a new port, enabling H3,
+  changing TLS config, or removing a listener all take effect on
+  reload. H3 (QUIC) and UDP listeners remain restart-only (they bind
+  UDP, not TCP, and are managed separately). The
+  `DWARA_BIND` override is respected on reload so the listener manager
+  always diffs the same set.
+- Shared response cache via Redis (#183, SCALE-04, ent): the
+  `CacheStore` seam now has a Redis backend. Configure
+  `gateway.redis_cache` with a Redis URL and the `ent` edition + a
+  `redis_cache` license claim to share one response cache across a
+  fleet of N instances — fleet-wide hit ratios instead of N x cold
+  caches. A two-tier `CoordinatedCache` (local moka + Redis) is the
+  default; Redis Pub/Sub invalidation evicts local entries when another
+  instance purges a key. Set `local_tier: false` for a pure Redis
+  cache. The `ResponseCache` store is now swappable at startup via
+  `set_store` so the Redis backend drops in without rebuilding the
+  cache machinery.
+- Workspace persistence and admin API (#184, SCALE-05, ent): the
+  workspace manager (workspaces, RBAC roles, principals, audit log)
+  now persists to the state store. Migration 008 adds `workspaces`,
+  `rbac_roles`, `rbac_principals`, and `workspace_audit` tables
+  (SQLite for OSS, backend-neutral API for future PostgreSQL ent
+  backend). The manager loads state on startup (seeding the `default`
+  workspace if the table is empty) and persists every mutation
+  (workspace create/delete, role add, role assignment, audit append).
+  New admin API endpoints: `GET/POST /workspaces`,
+  `GET/DELETE /workspaces/:name`, `GET/POST /roles`,
+  `GET /principals`, `GET /principals/:identity`,
+  `POST /principals/:identity/roles`, and `GET /audit` (with
+  `workspace`, `since_ms`, `until_ms`, `limit` query params). Without
+  a state store the manager runs in-memory only (the pre-#184
+  behavior). The `ent` feature now forwards to `dwara-admin/ent` so
+  the workspace admin endpoints compile in.
+- CP/DP leader election and HA (#185, SCALE-06, ent): real leader
+  election with lease-based distributed locking, lease renewal, and
+  failover. The `LeaderElector` trait is a swappable seam; the
+  `SqliteLeaderElector` uses the state store's `controller_leader`
+  table (migration 009) for durable lease persistence. The
+  `election_loop` acquires leadership on startup, renews the lease
+  periodically, and steps down on loss or shutdown. The
+  `ControllerRuntime` now supports `with_elector` for HA mode; the
+  static `--leader` flag remains for single-controller deployments.
+  Durable generation counter persistence (`save_generation_counter` /
+  `load_generation_counter`) survives controller restarts so the
+  generation counter does not reset to 1. The `cp_dp` domain may now
+  depend on `state` for lease persistence.
+- Federated analytics edge-to-controller rollup (#186, SCALE-07,
+  ent): completes the federated analytics gRPC pipeline (DW-095).
+  The `ControllerRuntime` now supports `with_analytics_collector` to
+  attach an `AnalyticsCollector` that receives edge analytics batches
+  via the `PublishAnalytics` RPC. The `EdgeRuntime` supports
+  `with_federated_analytics` to attach a `FederatedAnalyticsSink`
+  that batches events and ships them to the controller. The
+  `EmbeddedCollector` tags each event with the originating `edge_id`
+  so fleet-wide queries can filter by edge. The `Event` struct gained
+  an `edge_id` field; the wire protocol (`PbAnalyticsRecord`) gained
+  a `edge_id` tag. The `from_event` conversion stores `edge_id` as a
+  dimension in the `dims` JSON column for queryability without a
+  schema migration.
+- Kafka analytics sink (#187, SCALE-08): adds a `kafka` variant to
+  `analytics_stream.sink` that produces NDJSON batches to a Kafka
+  topic via a Kafka REST Proxy (HTTP-based, no native client
+  dependency). The `KafkaRecordSink` implements `RecordSink` by
+  encoding each NDJSON line as a base64 message value in the
+  Confluent REST Proxy v2+json format. TLS is via `https://`; SASL
+  auth is via headers. Reuses the DW-044 webhook delivery engine's
+  retry/budget shape. Config validation enforces the same URL,
+  header, timeout, attempts, and backoff bounds as the webhook sink.
+  Config reference and config-studio rebuilt.
+- Analytics store partitioning and retention automation (#188,
+  SCALE-09): rotates the raw table daily into partition tables
+  (`raw_YYYYMMDD`) within the same SQLite database, making retention
+  enforcement O(1) (DROP TABLE) instead of O(n) (DELETE rows +
+  incremental vacuum). The `raw_all` view UNION ALLs the `raw` table
+  and all partition tables so the rollup and query layers read across
+  all partitions without per-query changes. The maintenance worker
+  calls `maybe_rotate` at each tick to move old rows to partitions,
+  and `drop_expired_partitions` to drop partitions older than the raw
+  retention period. Schema v11 adds the `raw_partitions` meta table.
+  The rollup and query layers now read from `raw_all` instead of
+  `raw`. The retention sweep only deletes intra-day rows from `raw`
+  (old partitions are dropped by the partition manager).
+- Connection pool pre-warm, per-endpoint caps, and max-connection-age
+  recycling (#189, SCALE-10): adds three optional `upstreams[].pool`
+  knobs. `pre_warm` pre-establishes connections per endpoint on
+  startup/reload, removing cold-start latency spikes. `per_endpoint_cap`
+  bounds connections to a single endpoint within the upstream's
+  connection cap. `max_connection_age_ms` sets the pool idle timeout
+  to the minimum of itself and `pool_idle_timeout_ms`, evicting
+  connections before they become stale. The registry's `pre_warm`
+  method spawns best-effort background HEAD requests; failures are
+  logged and silently ignored. Config reference and config-studio
+  rebuilt.
+- Analytics query and export breadth (#190, SCALE-12): opens ad-hoc
+  grouping/filtering over captured custom dimensions via
+  `dim_group_by` and `dim_filters` on the structured query endpoint.
+  When `dim_group_by` is set, the query reads from `rollup_dim`
+  instead of `rollup_fixed`, grouping by the dimension's values.
+  `dim_filters` apply as semi-join subqueries against `rollup_dim`.
+  Adds `parquet_csv` export format (CSV with Parquet-compatible JSON
+  metadata header; the operator converts to true Parquet using an
+  external tool like `duckdb`). Adds `ai.logging.external_sink`
+  configuration for syncing prompt/response logs to S3/GCS via an
+  external command (lean-dependency alternative to embedding S3/GCS
+  SDKs). Config reference and config-studio rebuilt.
+- Configurable filter-chain ordering (#191, CFG-05): formalizes the
+  request pipeline phases (acl, rate_limit, authn, authz, validate,
+  transform, cache, route) with a `FilterPhase` enum. Adds
+  `filter_chain` config block at both the gateway and route level
+  with `dry_run` (per-phase dry-run mode: log but don't enforce) and
+  `order` (optional ordering override: a permutation of the default
+  phase set). Validation rejects invalid orderings (duplicates,
+  missing phases, wrong count). Config reference and config-studio
+  rebuilt.
+- Remote/signed plugin registry (#192, CFG-06): adds `source` block
+  to `PluginConfig` for remote plugin artifacts (URL, SHA-256 digest,
+  optional Ed25519 signature + public key, cache path). Adds
+  `plugin_registry` block to `Gateway` for fleet-consistent pinning
+  (base URL, pinned public keys, cache directory). Validation
+  enforces digest presence, URL scheme (https/oci), and
+  signature/public_key pairing. CLI gains `dwara plugin search` and
+  `dwara plugin install` commands (downloads via curl, verifies
+  SHA-256 digest with sha2). Config reference and config-studio
+  rebuilt.
+- True Terraform provider (#193, CFG-08): adds `dwara tf apply-crud`
+  subcommand that uses the admin API's per-entity CRUD endpoints
+  (POST/PUT/DELETE for routes, services, upstreams, consumers,
+  policies) instead of full-document PATCH /config. Each resource is
+  managed independently — the same behavior a real Terraform provider
+  would exhibit. The existing `dwara tf apply` (full-document PATCH)
+  is retained for backward compatibility. AdminClient gains
+  list_entities, get_entity, create_entity, replace_entity, and
+  delete_entity methods.
 - Admin entity CRUD + optimistic concurrency (#181, CFG-02):
   per-entity endpoints for routes, services, upstreams, consumers, and
   policies. Each entity type supports GET (list/get), POST (create,

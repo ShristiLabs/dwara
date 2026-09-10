@@ -70,7 +70,7 @@ console-subscriber = { workspace = true }
 # OFF: OSS builds keep the license block inert (the gate is always
 # none()). Build with `cargo build --features ent` (or
 # `--features dwara-bin/ent`) to enable license verification.
-ent = ["dwara-core/ent", "dep:redis"]
+ent = ["dwara-core/ent", "dwara-admin/ent", "dep:redis"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

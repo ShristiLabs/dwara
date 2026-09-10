@@ -61,6 +61,7 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 graphql: None,
                 grpc_web: None,
                 translation: None,
@@ -104,6 +105,7 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 graphql: None,
                 grpc_web: None,
                 translation: None,
@@ -147,6 +149,7 @@ fn good_gateway() -> Gateway {
                 security_headers: None,
                 masking: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 graphql: None,
                 grpc_web: None,
                 translation: None,
@@ -213,8 +216,11 @@ fn good_gateway() -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,
@@ -670,6 +676,9 @@ fn validate_accepts_in_bounds_pool_block() {
         http2_keep_alive_timeout_ms: Some(5_000),
         http2_adaptive_window: true,
         max_concurrent_streams: Some(128),
+        pre_warm: None,
+        per_endpoint_cap: None,
+        max_connection_age_ms: None,
     });
     let issues = validate(&gw);
     assert!(
@@ -688,6 +697,9 @@ fn validate_rejects_pool_zero_and_over_cap_values() {
         http2_keep_alive_timeout_ms: Some(700_000),
         http2_adaptive_window: false,
         max_concurrent_streams: Some(0),
+        pre_warm: None,
+        per_endpoint_cap: None,
+        max_connection_age_ms: None,
     });
     let issues = validate(&gw);
     for field in [

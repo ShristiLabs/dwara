@@ -92,6 +92,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod entity_crud;
+mod workspace_admin;
 
 use bytes::Bytes;
 use dwara_core::config::{gateway_to_yaml, parse_gateway, AdminConfig, Gateway};
@@ -121,14 +122,17 @@ const MAX_PURGE_BODY: usize = 4096;
 
 /// Everything the admin handlers need: the published-config state, the
 /// dataplane (for refresh/health/stats), the config file path (for
-/// atomic writes), the write lock serializing PATCHes, and the process
-/// start instant (for `/runtime_info` uptime, DW-072).
+/// atomic writes), the write lock serializing PATCHes, the process
+/// start instant (for `/runtime_info` uptime, DW-072), and optionally
+/// the workspace manager (SCALE-05, #184, ent only).
 pub struct AdminContext {
     state: Arc<ConfigState>,
     dp: Arc<DataPlane>,
     config_path: PathBuf,
     patch_lock: Arc<Mutex<()>>,
     started: std::time::Instant,
+    #[cfg(feature = "ent")]
+    workspace: Option<Arc<dwara_core::workspace::WorkspaceManager>>,
 }
 
 impl AdminContext {
@@ -139,7 +143,20 @@ impl AdminContext {
             config_path,
             patch_lock: Arc::new(Mutex::new(())),
             started: std::time::Instant::now(),
+            #[cfg(feature = "ent")]
+            workspace: None,
         }
+    }
+
+    /// Attach a workspace manager (SCALE-05, #184, ent only). When
+    /// present, the admin API exposes workspace/role/audit endpoints.
+    #[cfg(feature = "ent")]
+    pub fn with_workspace(
+        mut self,
+        workspace: Arc<dwara_core::workspace::WorkspaceManager>,
+    ) -> Self {
+        self.workspace = Some(workspace);
+        self
     }
 }
 
@@ -1969,6 +1986,27 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         return entity_crud::try_crud(Arc::clone(&ctx), req, method.as_str(), &path, &request_id)
             .await
             .unwrap_or_else(|| envelope(404, "not_found", "entity not found", &request_id));
+    }
+    // SCALE-05 (#184): workspace/role/audit admin endpoints (ent
+    // only). try_workspace returns Some(response) when the path
+    // matches a workspace route, None otherwise (fall through).
+    if workspace_admin::is_workspace_path(&path) {
+        return workspace_admin::try_workspace(
+            Arc::clone(&ctx),
+            req,
+            method.as_str(),
+            &path,
+            &request_id,
+        )
+        .await
+        .unwrap_or_else(|| {
+            envelope(
+                404,
+                "not_found",
+                "workspace endpoint not found",
+                &request_id,
+            )
+        });
     }
     match (method.as_str(), path.as_str()) {
         // GET /config (the config-dump surface, DW-045): the TYPED-redacted

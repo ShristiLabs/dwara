@@ -101,7 +101,7 @@ pub fn roll_raw_range(conn: &Connection, lo: i64, hi: i64) -> rusqlite::Result<u
 /// so SUM(b_i) is the non-cumulative bucket histogram.
 fn roll_raw_fixed(conn: &Connection, lo: i64, hi: i64) -> rusqlite::Result<usize> {
     let before: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT (ts_ms / 60000)) FROM raw WHERE ts_ms >= ?1 AND ts_ms < ?2",
+        "SELECT COUNT(DISTINCT (ts_ms / 60000)) FROM raw_all WHERE ts_ms >= ?1 AND ts_ms < ?2",
         [lo, hi],
         |r| r.get(0),
     )?;
@@ -132,7 +132,7 @@ fn roll_raw_fixed(conn: &Connection, lo: i64, hi: i64) -> rusqlite::Result<usize
             SUM(CASE WHEN duration_ms > 1000.0 AND duration_ms <= 2500.0 THEN 1 ELSE 0 END),
             SUM(CASE WHEN duration_ms > 2500.0 AND duration_ms <= 5000.0 THEN 1 ELSE 0 END),
             SUM(CASE WHEN duration_ms > 5000.0 THEN 1 ELSE 0 END)
-        FROM raw
+        FROM raw_all
         WHERE ts_ms >= ?1 AND ts_ms < ?2
         GROUP BY (ts_ms / 60000), listener, route, upstream, consumer,
                  method, status_class",
@@ -157,7 +157,7 @@ fn roll_raw_dims(conn: &Connection, lo: i64, hi: i64) -> rusqlite::Result<()> {
     let mut groups: BTreeMap<(i64, String, String), Acc> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT ts_ms, dims, status, duration_ms FROM raw
+            "SELECT ts_ms, dims, status, duration_ms FROM raw_all
              WHERE ts_ms >= ?1 AND ts_ms < ?2",
         )?;
         let mut rows = stmt.query([lo, hi])?;
@@ -299,7 +299,11 @@ pub fn cascade_range(conn: &Connection, from: usize, lo: i64, hi: i64) -> rusqli
 }
 
 /// Retention sweep: delete expired rows per table and incrementally
-/// vacuum up to `vacuum_pages` pages. Returns rows deleted.
+/// vacuum up to `vacuum_pages` pages. For the `raw` table, only
+/// intra-day rows older than the retention are deleted (SCALE-09
+/// #188: daily partition tables are dropped by
+/// `partition::drop_expired_partitions`, which is O(1) DROP TABLE
+/// vs O(n) DELETE). Returns rows deleted.
 pub fn sweep_retention(
     conn: &Connection,
     raw_keep_ms: i64,
@@ -309,6 +313,8 @@ pub fn sweep_retention(
 ) -> rusqlite::Result<usize> {
     let mut deleted = 0usize;
     let tx = conn.unchecked_transaction()?;
+    // Only delete from the current raw table (intra-day cleanup).
+    // Old daily partitions are dropped by partition::drop_expired_partitions.
     deleted += tx.execute(
         "DELETE FROM raw WHERE ts_ms < ?1",
         [now_ms.saturating_sub(raw_keep_ms)],

@@ -1776,20 +1776,33 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
         }
         let has_wasm = p.wasm.is_some();
         let has_native = p.native.is_some();
-        if !has_wasm && !has_native {
+        let has_source = p.source.is_some();
+        // SCALE-12 (#192): source is a remote variant of wasm. A plugin
+        // with `source` is a WASM plugin whose artifact is downloaded
+        // from the registry; `wasm` is the optional local cache path.
+        let has_wasm_or_source = has_wasm || has_source;
+        if !has_wasm_or_source && !has_native {
             issues.push(issue(
                 "plugin",
                 &p.name,
                 "wasm",
-                "plugin must set exactly one of `wasm` or `native` (both are absent)",
+                "plugin must set exactly one of `wasm`, `source`, or `native` (all are absent)",
             ));
         }
-        if has_wasm && has_native {
+        if has_wasm_or_source && has_native {
             issues.push(issue(
                 "plugin",
                 &p.name,
                 "native",
-                "plugin must set exactly one of `wasm` or `native` (both are set)",
+                "plugin must set exactly one of `wasm`/`source` or `native` (both are set)",
+            ));
+        }
+        if has_wasm && has_source {
+            issues.push(issue(
+                "plugin",
+                &p.name,
+                "source",
+                "plugin must not set both `wasm` and `source` (use `source` with optional `cache_path`)",
             ));
         }
         if p.phases.is_empty() {
@@ -1799,6 +1812,110 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 "phases",
                 "phases must be a non-empty subset of request_headers, \
                  request_body, response_headers, response_body",
+            ));
+        }
+        // SCALE-12 (#192): validate remote source config.
+        if let Some(src) = &p.source {
+            if src.digest.is_empty() {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.digest",
+                    "source digest must be a non-empty SHA-256 hex string",
+                ));
+            }
+            if !src.url.starts_with("https://") && !src.url.starts_with("oci://") {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.url",
+                    "source url must use https:// or oci:// scheme",
+                ));
+            }
+            if src.signature.is_some() && src.public_key.is_none() {
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.public_key",
+                    "source.public_key is required when source.signature is set",
+                ));
+            }
+        }
+    }
+    // SCALE-12 (#192): validate plugin registry config.
+    if let Some(reg) = &gateway.plugin_registry {
+        for pk in &reg.public_keys {
+            if pk.len() != 64 {
+                issues.push(issue(
+                    "plugin_registry",
+                    "gateway",
+                    "public_keys",
+                    "each public key must be a 32-byte Ed25519 key hex-encoded (64 chars)",
+                ));
+            }
+        }
+    }
+}
+
+/// SCALE-12 (#191): validate a filter-chain config block. The `order`
+/// override, if present, must be a permutation of the default phase
+/// set (no duplicates, no unknown phases, all phases present).
+fn validate_filter_chain(
+    fc: &crate::config::FilterChainConfig,
+    entity: &str,
+    name: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Some(order) = &fc.order {
+        let default = crate::config::FilterPhase::DEFAULT_ORDER;
+        if order.len() != default.len() {
+            issues.push(issue(
+                entity,
+                name,
+                "filter_chain.order",
+                format!(
+                    "order must contain exactly {} phases, got {}",
+                    default.len(),
+                    order.len()
+                ),
+            ));
+        } else {
+            let mut seen = std::collections::BTreeSet::new();
+            for phase in order {
+                if !seen.insert(*phase) {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        "filter_chain.order",
+                        format!("duplicate phase '{}' in filter_chain.order", phase.as_str()),
+                    ));
+                }
+            }
+            // Check all default phases are present.
+            for dp in &default {
+                if !order.contains(dp) {
+                    issues.push(issue(
+                        entity,
+                        name,
+                        "filter_chain.order",
+                        format!("filter_chain.order is missing phase '{}'", dp.as_str()),
+                    ));
+                }
+            }
+        }
+    }
+    // dry_run: check for duplicates.
+    let mut seen = std::collections::BTreeSet::new();
+    for phase in &fc.dry_run {
+        if !seen.insert(*phase) {
+            issues.push(issue(
+                entity,
+                name,
+                "filter_chain.dry_run",
+                format!(
+                    "duplicate phase '{}' in filter_chain.dry_run",
+                    phase.as_str()
+                ),
             ));
         }
     }
@@ -1942,6 +2059,51 @@ fn validate_redis_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             "(root)",
             "redis_quotas.key_prefix",
             "redis_quotas.key_prefix must be a non-empty string",
+        ));
+    }
+}
+
+/// Validate the `gateway.redis_cache` block (SCALE-04, #183): the URL
+/// must be non-empty, the connection timeout must be in 100..=30 000 ms,
+/// and the key prefix must be non-empty. The license check (does the
+/// license grant `redis_cache`?) is NOT a validation concern — it runs
+/// at startup in dwara-bin (where a missing claim logs a warning and
+/// falls back to the local moka cache), not in the compile pipeline.
+fn validate_redis_cache(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
+    let Some(rc) = &gateway.redis_cache else {
+        return;
+    };
+    if rc.url.trim().is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_cache.url",
+            "redis_cache.url must be a non-empty Redis URL",
+        ));
+    }
+    let timeout = rc.connection_timeout_ms;
+    if !(crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS
+        ..=crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS)
+        .contains(&timeout)
+    {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_cache.connection_timeout_ms",
+            format!(
+                "redis_cache.connection_timeout_ms {} is out of range: must be {}..={}",
+                timeout,
+                crate::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS,
+                crate::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS,
+            ),
+        ));
+    }
+    if rc.key_prefix.is_empty() {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            "redis_cache.key_prefix",
+            "redis_cache.key_prefix must be a non-empty string",
         ));
     }
 }
@@ -2572,6 +2734,55 @@ fn validate_analytics_stream(gateway: &Gateway, issues: &mut Vec<ValidationIssue
                     "gateway",
                     "(root)",
                     "analytics_stream.sink.webhook.backoff_cap_ms",
+                    "backoff_cap_ms must be >= backoff_base_ms",
+                ));
+            }
+        }
+        crate::config::AnalyticsStreamSink::Kafka(k) => {
+            validate_delivery_url(
+                "analytics_stream.sink.kafka.rest_proxy_url",
+                &k.rest_proxy_url,
+                issues,
+            );
+            validate_delivery_headers("analytics_stream.sink.kafka", &k.headers, issues);
+            if k.timeout_ms == 0 || k.timeout_ms > crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.timeout_ms",
+                    format!(
+                        "timeout_ms must be in 1..={} (one total budget per batch \
+                         delivery, shared by every retry attempt — the shared \
+                         webhook engine's bound)",
+                        crate::config::limits::MAX_WEBHOOK_TIMEOUT_MS
+                    ),
+                ));
+            }
+            if k.max_attempts == 0 || k.max_attempts > crate::config::limits::MAX_WEBHOOK_ATTEMPTS {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.max_attempts",
+                    format!(
+                        "max_attempts must be in 1..={} (total attempts per batch \
+                         delivery)",
+                        crate::config::limits::MAX_WEBHOOK_ATTEMPTS
+                    ),
+                ));
+            }
+            if k.backoff_base_ms == 0 {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.backoff_base_ms",
+                    "backoff_base_ms must be > 0",
+                ));
+            }
+            if k.backoff_cap_ms < k.backoff_base_ms {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    "analytics_stream.sink.kafka.backoff_cap_ms",
                     "backoff_cap_ms must be >= backoff_base_ms",
                 ));
             }
@@ -4196,6 +4407,12 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // the local SQLite checker).
     validate_redis_quotas(gateway, &mut issues);
 
+    // SCALE-04 (#183): Redis response cache config (URL non-empty,
+    // timeout bounds, key prefix non-empty; the license claim check is
+    // NOT validation — it runs at startup in dwara-bin, where a missing
+    // claim logs a warning and falls back to the local moka cache).
+    validate_redis_cache(gateway, &mut issues);
+
     // DW-054: config convergence (backend type, redis_url presence,
     // interval bounds; the license claim check is NOT validation — it
     // runs at startup in dwara-bin, where a missing claim logs a
@@ -4334,6 +4551,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // DW-055/DW-119: plugin definitions -- exactly one of wasm/native,
     // non-empty phases, duplicate names.
     validate_plugins(gateway, &mut issues);
+
+    // SCALE-12 (#191): global filter-chain ordering and dry-run.
+    if let Some(fc) = &gateway.filter_chain {
+        validate_filter_chain(fc, "gateway", "filter_chain", &mut issues);
+    }
+
+    // SCALE-12 (#191): per-route filter-chain overrides.
+    for route in &gateway.routes {
+        if let Some(fc) = &route.filter_chain {
+            validate_filter_chain(fc, "route", &route.name, &mut issues);
+        }
+    }
 
     // JWT providers (DW-019): url shape, algorithm allowlist, refresh
     // cadence, and consumer references are compile-time checked — a
@@ -6576,6 +6805,54 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+            // SCALE-10 (#189): pre-warm, per-endpoint cap, max-age.
+            if let Some(n) = p.pre_warm {
+                if n > 64 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.pre_warm",
+                        "pre_warm must be at most 64 per endpoint",
+                    ));
+                }
+            }
+            if let Some(n) = p.per_endpoint_cap {
+                if n == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.per_endpoint_cap",
+                        "per_endpoint_cap must be > 0 (omit the field for no per-endpoint cap)",
+                    ));
+                } else if n > 1024 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.per_endpoint_cap",
+                        "per_endpoint_cap must be at most 1024",
+                    ));
+                }
+            }
+            if let Some(ms) = p.max_connection_age_ms {
+                if ms == 0 {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_connection_age_ms",
+                        "max_connection_age_ms must be > 0 (omit the field for no max-age)",
+                    ));
+                } else if ms > crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS {
+                    issues.push(issue(
+                        "upstream",
+                        &u.name,
+                        "pool.max_connection_age_ms",
+                        format!(
+                            "max_connection_age_ms must be at most {}",
+                            crate::config::limits::MAX_POOL_IDLE_TIMEOUT_MS
+                        ),
+                    ));
+                }
+            }
         }
         if let Some(r) = &u.retries {
             if r.attempts > crate::config::limits::MAX_RETRY_ATTEMPTS {
@@ -8175,8 +8452,11 @@ impl Snapshot {
                 oidc_providers: Vec::new(),
                 redis_rate_limiter: None,
                 redis_quotas: None,
+                redis_cache: None,
                 config_convergence: None,
                 plugins: Vec::new(),
+                filter_chain: None,
+                plugin_registry: None,
                 ai: None,
                 fleet: None,
                 mesh: None,

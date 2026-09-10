@@ -26,6 +26,8 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use super::analytics::AnalyticsCollector;
+use super::leader_election::{election_loop, LeaderElector};
 use super::transport::{serve_controller, ControllerServer};
 use super::{ConfigUpdate, ControllerState};
 
@@ -74,6 +76,16 @@ pub struct ControllerRuntime {
     config: ControllerConfig,
     state: Arc<ControllerState>,
     server: ControllerServer,
+    /// SCALE-06 (#185): optional leader elector for HA. When set,
+    /// the runtime uses `election_loop` instead of the static
+    /// `--leader` flag.
+    elector: Option<Arc<dyn LeaderElector>>,
+    /// The instance ID for leader election.
+    instance_id: String,
+    /// SCALE-07 (#186): optional analytics collector for federated
+    /// analytics. When set, the gRPC server forwards edge analytics
+    /// batches to this collector.
+    analytics_collector: Option<Arc<dyn AnalyticsCollector>>,
 }
 
 impl ControllerRuntime {
@@ -81,11 +93,35 @@ impl ControllerRuntime {
     pub fn new(config: ControllerConfig) -> Self {
         let state = Arc::new(ControllerState::new());
         let server = ControllerServer::new(Arc::clone(&state));
+        let instance_id = std::env::var("DWARA_CP_INSTANCE_ID")
+            .unwrap_or_else(|_| format!("cp-{}", std::process::id()));
         Self {
             config,
             state,
             server,
+            elector: None,
+            instance_id,
+            analytics_collector: None,
         }
+    }
+
+    /// SCALE-06 (#185): attach a leader elector for HA. When set,
+    /// the runtime uses `election_loop` for leader election with
+    /// lease renewal and failover, instead of the static `--leader`
+    /// flag.
+    pub fn with_elector(mut self, elector: Arc<dyn LeaderElector>) -> Self {
+        self.elector = Some(elector);
+        self
+    }
+
+    /// SCALE-07 (#186): attach an analytics collector for federated
+    /// analytics. When set, the gRPC server forwards edge analytics
+    /// batches to this collector, enabling fleet-wide dashboards and
+    /// spend reports.
+    pub fn with_analytics_collector(mut self, collector: Arc<dyn AnalyticsCollector>) -> Self {
+        self.analytics_collector = Some(Arc::clone(&collector));
+        self.server = self.server.with_analytics_collector(collector);
+        self
     }
 
     /// The controller state (for inspection / testing).
@@ -110,37 +146,95 @@ impl ControllerRuntime {
     ///
     /// Returns when the gRPC server shuts down (or on fatal error).
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.config.leader {
-            self.state.become_leader();
-            tracing::info!(code = "cp_leader_acquired", "controller became leader");
-        } else {
-            tracing::info!(code = "cp_standby", "controller running as standby");
-        }
+        let has_elector = self.elector.is_some();
 
-        let server = self.server.clone();
-        let bind_addr = self.config.bind_addr;
-
-        // Spawn the gRPC server.
-        let server_handle = tokio::spawn(async move {
-            if let Err(e) = serve_controller(server, bind_addr).await {
-                tracing::error!(code = "cp_server_error", "gRPC server error: {e}");
-            }
-        });
-
-        // Run the config watch loop (only if leader).
-        if self.config.leader {
+        if has_elector {
+            // SCALE-06 (#185): use the election loop for HA.
             let state = Arc::clone(&self.state);
             let server = self.server.clone();
             let config_source = self.config.config_source.clone();
             let poll_interval = self.config.poll_interval;
+            let elector = self.elector.unwrap();
+            let instance_id = self.instance_id.clone();
 
+            // Spawn the gRPC server.
+            let server_handle = {
+                let server = self.server.clone();
+                let bind_addr = self.config.bind_addr;
+                tokio::spawn(async move {
+                    if let Err(e) = serve_controller(server, bind_addr).await {
+                        tracing::error!(code = "cp_server_error", "gRPC server error: {e}");
+                    }
+                })
+            };
+
+            // Spawn the config watch loop (it checks is_leader
+            // internally, so it runs on all controllers but only
+            // publishes when this instance is the leader).
             tokio::spawn(async move {
                 config_watch_loop(state, server, config_source, poll_interval).await;
             });
-        }
 
-        // Wait for the server to shut down.
-        server_handle.await?;
+            // Run the election loop. On acquire, become leader; on
+            // lose, step down. The config watch loop picks up the
+            // is_leader flag.
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let election_state = Arc::clone(&self.state);
+            let election_state2 = Arc::clone(&election_state);
+            let election_handle = tokio::spawn(async move {
+                election_loop(
+                    elector,
+                    instance_id,
+                    shutdown_rx,
+                    move |_lease| {
+                        election_state.become_leader();
+                    },
+                    move || {
+                        election_state2.step_down();
+                    },
+                )
+                .await;
+            });
+
+            // Wait for the gRPC server to shut down, then signal the
+            // election loop to stop.
+            server_handle.await?;
+            let _ = shutdown_tx.send(true);
+            let _ = election_handle.await;
+        } else {
+            // Static leader mode (the pre-#185 behavior).
+            if self.config.leader {
+                self.state.become_leader();
+                tracing::info!(code = "cp_leader_acquired", "controller became leader");
+            } else {
+                tracing::info!(code = "cp_standby", "controller running as standby");
+            }
+
+            let server = self.server.clone();
+            let bind_addr = self.config.bind_addr;
+
+            // Spawn the gRPC server.
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = serve_controller(server, bind_addr).await {
+                    tracing::error!(code = "cp_server_error", "gRPC server error: {e}");
+                }
+            });
+
+            // Run the config watch loop (only if leader).
+            if self.config.leader {
+                let state = Arc::clone(&self.state);
+                let server = self.server.clone();
+                let config_source = self.config.config_source.clone();
+                let poll_interval = self.config.poll_interval;
+
+                tokio::spawn(async move {
+                    config_watch_loop(state, server, config_source, poll_interval).await;
+                });
+            }
+
+            // Wait for the server to shut down.
+            server_handle.await?;
+        }
         Ok(())
     }
 }

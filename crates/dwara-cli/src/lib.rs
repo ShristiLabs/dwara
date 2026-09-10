@@ -32,6 +32,8 @@ pub mod import_envoy;
 pub mod loadgen;
 // DW-057: Plugin scaffolding (`dwara plugin new`).
 pub mod plugin_scaffold;
+// SCALE-12 (#192): Remote/signed plugin registry (`dwara plugin search/install`).
+pub mod plugin_registry;
 // DW-102: Replay time-travel debugging (`dwara replay`).
 pub mod replay;
 // DW-065: Terraform-compatible state tool (`dwara tf`).

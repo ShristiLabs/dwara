@@ -11,6 +11,19 @@
 //! new external dependencies (hyper, serde_json, serde_yaml_ng, serde,
 //! clap, tokio are all already workspace deps).
 //!
+//! ## SCALE-12 (#193): True provider behavior via per-entity CRUD
+//!
+//! The original `apply` command pushes the full desired config as a
+//! single `PATCH /config` (full-document replacement). The
+//! `apply-crud` command (added in #193) uses the admin API's
+//! per-entity CRUD endpoints (`POST /routes`, `PUT /routes/<name>`,
+//! `DELETE /routes/<name>`, etc.) to manage each resource
+//! independently — the same behavior a real Terraform provider would
+//! exhibit. This makes the tool a "true provider" in behavior, even
+//! without the gRPC plugin protocol. The existing `apply` (full-document
+//! PATCH) is retained for backward compatibility and bulk-replace
+//! workflows.
+//!
 //! ## State model
 //!
 //! The tfstate JSON follows Terraform's state file structure (version,
@@ -251,8 +264,11 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,
@@ -437,6 +453,7 @@ fn parse_route_attrs(v: &Value) -> Result<Route, String> {
         mirror: None,
         fault_injection: None,
         plugins: Vec::new(),
+        filter_chain: None,
         oidc_login: None,
     })
 }
@@ -1007,6 +1024,129 @@ impl AdminClient {
         }
         Ok(String::from_utf8_lossy(&resp_body).to_string())
     }
+
+    // --- SCALE-12 (#193): per-entity CRUD methods -----------------------
+
+    /// Issue a generic CRUD request to the admin API's entity CRUD
+    /// endpoints. `method` is GET/POST/PUT/DELETE, `path` is the entity
+    /// path (e.g. `/routes/my-route`), `body` is the JSON request body
+    /// (None for GET/DELETE). Returns the response body as a string.
+    async fn crud_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), String> {
+        let stream = TcpStream::connect(&self.authority)
+            .await
+            .map_err(|e| format!("connect to {}: {e}", self.authority))?;
+        let (mut tx, rx) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|e| format!("handshake: {e}"))?;
+        let driver = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+        let body_bytes = Bytes::from(body.unwrap_or("").as_bytes().to_vec());
+        let req = hyper::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(hyper::header::HOST, &self.authority)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header(hyper::header::CONTENT_LENGTH, body_bytes.len().to_string())
+            .header(hyper::header::CONNECTION, "close")
+            .body(Full::new(body_bytes))
+            .map_err(|e| format!("build request: {e}"))?;
+        let res = tx
+            .send_request(req)
+            .await
+            .map_err(|e| format!("send request: {e}"))?;
+        let status = res.status().as_u16();
+        let resp_body = res
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| format!("read body: {e}"))?
+            .to_bytes();
+        driver.abort();
+        Ok((status, String::from_utf8_lossy(&resp_body).to_string()))
+    }
+
+    /// GET /<entity> — list all entities of a kind. Returns the JSON
+    /// array as a string.
+    pub async fn list_entities(&self, entity_kind: &str) -> Result<String, String> {
+        let (status, body) = self
+            .crud_request("GET", &format!("/{entity_kind}"), None)
+            .await?;
+        if status != 200 {
+            return Err(format!("GET /{entity_kind} returned {status}: {body}"));
+        }
+        Ok(body)
+    }
+
+    /// GET /<entity>/<name> — get one entity as JSON.
+    pub async fn get_entity(
+        &self,
+        entity_kind: &str,
+        name: &str,
+    ) -> Result<Option<String>, String> {
+        let (status, body) = self
+            .crud_request("GET", &format!("/{entity_kind}/{name}"), None)
+            .await?;
+        if status == 404 {
+            return Ok(None);
+        }
+        if status != 200 {
+            return Err(format!(
+                "GET /{entity_kind}/{name} returned {status}: {body}"
+            ));
+        }
+        Ok(Some(body))
+    }
+
+    /// POST /<entity> — create one entity. `body` is the entity JSON.
+    pub async fn create_entity(&self, entity_kind: &str, body: &str) -> Result<String, String> {
+        let (status, resp_body) = self
+            .crud_request("POST", &format!("/{entity_kind}"), Some(body))
+            .await?;
+        if status != 200 {
+            return Err(format!(
+                "POST /{entity_kind} returned {status}: {resp_body}"
+            ));
+        }
+        Ok(resp_body)
+    }
+
+    /// PUT /<entity>/<name> — replace one entity. `body` is the entity
+    /// JSON.
+    pub async fn replace_entity(
+        &self,
+        entity_kind: &str,
+        name: &str,
+        body: &str,
+    ) -> Result<String, String> {
+        let (status, resp_body) = self
+            .crud_request("PUT", &format!("/{entity_kind}/{name}"), Some(body))
+            .await?;
+        if status != 200 {
+            return Err(format!(
+                "PUT /{entity_kind}/{name} returned {status}: {resp_body}"
+            ));
+        }
+        Ok(resp_body)
+    }
+
+    /// DELETE /<entity>/<name> — delete one entity.
+    pub async fn delete_entity(&self, entity_kind: &str, name: &str) -> Result<String, String> {
+        let (status, resp_body) = self
+            .crud_request("DELETE", &format!("/{entity_kind}/{name}"), None)
+            .await?;
+        if status != 200 {
+            return Err(format!(
+                "DELETE /{entity_kind}/{name} returned {status}: {resp_body}"
+            ));
+        }
+        Ok(resp_body)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1206,153 @@ pub async fn apply(
     client.patch_config(&desired_yaml).await
 }
 
+// ---------------------------------------------------------------------------
+// SCALE-12 (#193): True Terraform provider — per-entity CRUD apply
+// ---------------------------------------------------------------------------
+
+/// The entity kinds managed by the CRUD-based apply, matching the
+/// admin API's entity CRUD endpoints.
+const CRUD_ENTITY_KINDS: &[&str] = &["routes", "services", "upstreams", "consumers", "policies"];
+
+/// Map a tfstate resource type (e.g. `dwara_route`) to the admin API
+/// entity kind (e.g. `routes`). Returns `None` for unmanaged types
+/// (e.g. `dwara_listener`, which has no CRUD endpoint).
+fn tf_type_to_entity_kind(tf_type: &str) -> Option<&'static str> {
+    match tf_type {
+        "dwara_route" => Some("routes"),
+        "dwara_service" => Some("services"),
+        "dwara_upstream" => Some("upstreams"),
+        "dwara_consumer" => Some("consumers"),
+        _ => None,
+    }
+}
+
+/// Apply the desired state to the gateway using per-entity CRUD
+/// operations instead of full-document PATCH. This is the "true
+/// provider" behavior: each resource is managed independently via
+/// POST (create), PUT (replace), or DELETE (remove) against the
+/// admin API's entity CRUD endpoints.
+///
+/// The flow:
+/// 1. Read the desired tfstate.
+/// 2. Fetch the current config from the gateway.
+/// 3. Compute the diff (added/removed/changed entities).
+/// 4. For each added entity: POST /<entity_kind> with the entity JSON.
+/// 5. For each changed entity: PUT /<entity_kind>/<name> with the
+///    entity JSON.
+/// 6. For each removed entity: DELETE /<entity_kind>/<name>.
+///
+/// Returns a human-readable summary of the operations performed.
+pub async fn apply_crud(admin_url: &str, state_path: &str) -> Result<String, String> {
+    let state_text = std::fs::read_to_string(state_path)
+        .map_err(|e| format!("cannot read state file {state_path}: {e}"))?;
+    let state = state_from_json(&state_text)?;
+    let client = AdminClient::new(admin_url)?;
+    let yaml = client.get_config().await?;
+    let current_gateway = dwara_core::config::parse_gateway(&yaml)
+        .map_err(|e| format!("parse gateway config: {e}"))?;
+    let current_state = gateway_to_state(&current_gateway);
+
+    // Index desired and current resources by (type, name).
+    let desired = index_state_resources(&state);
+    let current = index_state_resources(&current_state);
+
+    let mut operations = Vec::new();
+
+    // Process each entity kind in order.
+    for &kind in CRUD_ENTITY_KINDS {
+        let tf_type = entity_kind_to_tf_type(kind);
+
+        // Added + changed: in desired but not in current, or different.
+        for (name, desired_attrs) in desired.get(tf_type).into_iter().flatten() {
+            match current.get(tf_type).and_then(|m| m.get(name)) {
+                None => {
+                    // Create: POST /<kind> with the entity JSON.
+                    let body = attrs_to_entity_json(kind, name, desired_attrs)?;
+                    client.create_entity(kind, &body).await?;
+                    operations.push(format!("+ {tf_type}.{name} (created)"));
+                }
+                Some(current_attrs) if current_attrs != desired_attrs => {
+                    // Replace: PUT /<kind>/<name> with the entity JSON.
+                    let body = attrs_to_entity_json(kind, name, desired_attrs)?;
+                    client.replace_entity(kind, name, &body).await?;
+                    operations.push(format!("~ {tf_type}.{name} (replaced)"));
+                }
+                _ => {}
+            }
+        }
+
+        // Removed: in current but not in desired.
+        for (name, _) in current.get(tf_type).into_iter().flatten() {
+            if !desired
+                .get(tf_type)
+                .into_iter()
+                .flatten()
+                .any(|(n, _)| n == name)
+            {
+                client.delete_entity(kind, name).await?;
+                operations.push(format!("- {tf_type}.{name} (deleted)"));
+            }
+        }
+    }
+
+    if operations.is_empty() {
+        Ok("No changes. Infrastructure is up-to-date.".to_string())
+    } else {
+        Ok(format!(
+            "Applied {} change(s):\n{}",
+            operations.len(),
+            operations
+                .iter()
+                .map(|op| format!("  {op}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+}
+
+/// Map an admin API entity kind to the tfstate resource type.
+fn entity_kind_to_tf_type(kind: &str) -> &'static str {
+    match kind {
+        "routes" => "dwara_route",
+        "services" => "dwara_service",
+        "upstreams" => "dwara_upstream",
+        "consumers" => "dwara_consumer",
+        "policies" => "dwara_policy",
+        _ => "dwara_unknown",
+    }
+}
+
+/// Index tfstate resources by (type -> name -> attributes). Returns a
+/// map from resource type to a map from resource name to attributes.
+fn index_state_resources(state: &TfState) -> BTreeMap<&'static str, BTreeMap<String, Value>> {
+    let mut idx: BTreeMap<&'static str, BTreeMap<String, Value>> = BTreeMap::new();
+    for res in &state.resources {
+        let kind = match tf_type_to_entity_kind(&res.r#type) {
+            Some(k) => k,
+            None => continue,
+        };
+        let tf_type = entity_kind_to_tf_type(kind);
+        for inst in &res.instances {
+            if let Some(name) = inst.attributes.get("name").and_then(|v| v.as_str()) {
+                idx.entry(tf_type)
+                    .or_default()
+                    .insert(name.to_string(), inst.attributes.clone());
+            }
+        }
+    }
+    idx
+}
+
+/// Convert tfstate attributes for an entity into the JSON body for
+/// the admin API's POST/PUT endpoints. The admin API expects the
+/// entity JSON (e.g., a `Route` object). The tfstate attributes are
+/// already a subset of the entity fields; we wrap them in the
+/// expected shape.
+fn attrs_to_entity_json(_kind: &str, _name: &str, attrs: &Value) -> Result<String, String> {
+    serde_json::to_string(attrs).map_err(|e| format!("serialize entity JSON: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,6 +1409,7 @@ mod tests {
                 mirror: None,
                 fault_injection: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 graphql: None,
                 grpc_web: None,
                 translation: None,
@@ -1197,8 +1485,11 @@ mod tests {
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
             redis_quotas: None,
+            redis_cache: None,
             config_convergence: None,
             plugins: Vec::new(),
+            filter_chain: None,
+            plugin_registry: None,
             ai: None,
             fleet: None,
             lifecycle: None,
@@ -1378,8 +1669,11 @@ mod tests {
             oidc_providers: Vec::new(),
             redis_rate_limiter: None,
             redis_quotas: None,
+            redis_cache: None,
             config_convergence: None,
             plugins: Vec::new(),
+            filter_chain: None,
+            plugin_registry: None,
             ai: None,
             fleet: None,
             lifecycle: None,

@@ -403,6 +403,7 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
                 mirror: None,
                 fault_injection: None,
                 plugins: Vec::new(),
+                filter_chain: None,
                 oidc_login: None,
             });
         }
@@ -494,8 +495,11 @@ fn build_gateway_from_kong(kong: &KongConfig) -> (Gateway, Vec<String>) {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,

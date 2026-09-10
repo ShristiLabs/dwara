@@ -1125,6 +1125,484 @@ impl StateStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    // ----------------------------------------------------------------------
+    // SCALE-05 (#184): workspace persistence — workspaces, RBAC roles,
+    // principals, and the append-only audit log. The SQL schema lives
+    // in migration 008; these methods are the store's typed CRUD over
+    // it. The workspace manager owns the domain types and calls these
+    // methods; the store stays backend-neutral (no upward import of
+    // workspace types — the record structs here are plain data,
+    // serialized to/from JSON at the boundary).
+    // ----------------------------------------------------------------------
+
+    /// Insert or replace a workspace row. The `default` workspace is
+    /// seeded by the manager on first open; this method is the
+    /// manager's persistence path for create/update.
+    pub fn upsert_workspace(&self, name: &str, description: &str, active: bool) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO workspaces (name, description, active, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (name) DO UPDATE SET \
+             description = excluded.description, \
+             active = excluded.active",
+            params![name, description, active as i64, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a workspace row. Returns true if a row was deleted.
+    pub fn delete_workspace_row(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute("DELETE FROM workspaces WHERE name = ?1", params![name])?;
+        Ok(n > 0)
+    }
+
+    /// List all workspace rows.
+    pub fn list_workspace_rows(&self) -> Result<Vec<WorkspaceRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, description, active, created_at FROM workspaces ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorkspaceRow {
+                name: r.get(0)?,
+                description: r.get(1)?,
+                active: r.get::<_, i64>(2)? != 0,
+                created_at: r.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Get a single workspace row by name.
+    pub fn get_workspace_row(&self, name: &str) -> Result<Option<WorkspaceRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, description, active, created_at FROM workspaces WHERE name = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![name], |r| {
+                Ok(WorkspaceRow {
+                    name: r.get(0)?,
+                    description: r.get(1)?,
+                    active: r.get::<_, i64>(2)? != 0,
+                    created_at: r.get(3)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Insert or replace an RBAC role row. The permissions are stored
+    /// as a JSON array of `{"action":"...","workspace":"..."}`.
+    pub fn upsert_role(&self, name: &str, permissions_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO rbac_roles (name, permissions, created_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT (name) DO UPDATE SET permissions = excluded.permissions",
+            params![name, permissions_json, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete an RBAC role row. Returns true if a row was deleted.
+    pub fn delete_role_row(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let n = conn.execute("DELETE FROM rbac_roles WHERE name = ?1", params![name])?;
+        Ok(n > 0)
+    }
+
+    /// List all RBAC role rows.
+    pub fn list_role_rows(&self) -> Result<Vec<RoleRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt =
+            conn.prepare("SELECT name, permissions, created_at FROM rbac_roles ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RoleRow {
+                name: r.get(0)?,
+                permissions_json: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Insert or replace a principal row. The roles are stored as a
+    /// JSON array of role-name strings.
+    pub fn upsert_principal(&self, identity: &str, roles_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO rbac_principals (identity, roles, created_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT (identity) DO UPDATE SET roles = excluded.roles",
+            params![identity, roles_json, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Get a single principal row by identity.
+    pub fn get_principal_row(&self, identity: &str) -> Result<Option<PrincipalRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let row = conn
+            .query_row(
+                "SELECT identity, roles, created_at FROM rbac_principals WHERE identity = ?1",
+                params![identity],
+                |r| {
+                    Ok(PrincipalRow {
+                        identity: r.get(0)?,
+                        roles_json: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List all principal rows.
+    pub fn list_principal_rows(&self) -> Result<Vec<PrincipalRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut stmt = conn
+            .prepare("SELECT identity, roles, created_at FROM rbac_principals ORDER BY identity")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PrincipalRow {
+                identity: r.get(0)?,
+                roles_json: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Append an audit entry. Returns the assigned sequence number.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_workspace_audit(
+        &self,
+        timestamp_ms: i64,
+        principal: &str,
+        action: &str,
+        workspace: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        request_id: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        conn.execute(
+            "INSERT INTO workspace_audit \
+             (timestamp_ms, principal, action, workspace, before_state, after_state, request_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                timestamp_ms,
+                principal,
+                action,
+                workspace,
+                before,
+                after,
+                request_id
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Query audit entries, optionally filtered by workspace and
+    /// bounded by a time range. Returns entries ordered by seq
+    /// descending (newest first), capped at `limit`.
+    pub fn query_workspace_audit(
+        &self,
+        workspace: Option<&str>,
+        since_ms: Option<i64>,
+        until_ms: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<AuditRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let mut sql = String::from(
+            "SELECT seq, timestamp_ms, principal, action, workspace, before_state, after_state, request_id \
+             FROM workspace_audit WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ws) = workspace {
+            sql.push_str(" AND workspace = ?");
+            params_vec.push(Box::new(ws.to_string()));
+        }
+        if let Some(since) = since_ms {
+            sql.push_str(" AND timestamp_ms >= ?");
+            params_vec.push(Box::new(since));
+        }
+        if let Some(until) = until_ms {
+            sql.push_str(" AND timestamp_ms <= ?");
+            params_vec.push(Box::new(until));
+        }
+        sql.push_str(" ORDER BY seq DESC LIMIT ?");
+        params_vec.push(Box::new(limit));
+        let mut stmt = conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok(AuditRow {
+                seq: r.get(0)?,
+                timestamp_ms: r.get(1)?,
+                principal: r.get(2)?,
+                action: r.get(3)?,
+                workspace: r.get(4)?,
+                before_state: r.get(5)?,
+                after_state: r.get(6)?,
+                request_id: r.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    // ------------------------------------------------------------------
+    // SCALE-06 (#185): leader election for CP/DP HA. The
+    // controller_leader table (migration 009) holds a single row
+    // with the current leader's instance ID, epoch, and lease expiry.
+    // ------------------------------------------------------------------
+
+    /// Try to acquire leadership. Returns `Ok(LeaderRow)` if this
+    /// instance now holds the lease; returns `Err(String)` with
+    /// "instance_id:expires_at_ms" of the current holder if another
+    /// instance holds a valid (non-expired) lease.
+    pub fn try_acquire_leader(&self, instance_id: &str, ttl_ms: i64) -> Result<LeaderRow> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let expires_at = now + ttl_ms;
+
+        // Check if there's an existing valid lease.
+        let existing: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT instance_id, epoch, expires_at_ms \
+                 FROM controller_leader WHERE key = 'leader'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+
+        match existing {
+            Some((id, _epoch, expires)) if expires > now && id != instance_id => {
+                // Another instance holds a valid lease.
+                Err(StoreError::Sqlite(format!("{id}:{expires}")))
+            }
+            Some((id, epoch, _)) if id == instance_id => {
+                // We already hold the lease; renew it.
+                let new_epoch = epoch;
+                conn.execute(
+                    "UPDATE controller_leader \
+                     SET expires_at_ms = ?1 \
+                     WHERE key = 'leader' AND instance_id = ?2",
+                    params![expires_at, instance_id],
+                )?;
+                Ok(LeaderRow {
+                    instance_id: instance_id.to_string(),
+                    epoch: new_epoch as u64,
+                    acquired_at_ms: now,
+                    expires_at_ms: expires_at,
+                })
+            }
+            _ => {
+                // No lease or expired lease: acquire it.
+                let epoch = existing.map(|(_, e, _)| e + 1).unwrap_or(1);
+                conn.execute(
+                    "INSERT OR REPLACE INTO controller_leader \
+                     (key, instance_id, epoch, acquired_at_ms, expires_at_ms) \
+                     VALUES ('leader', ?1, ?2, ?3, ?4)",
+                    params![instance_id, epoch, now, expires_at],
+                )?;
+                Ok(LeaderRow {
+                    instance_id: instance_id.to_string(),
+                    epoch: epoch as u64,
+                    acquired_at_ms: now,
+                    expires_at_ms: expires_at,
+                })
+            }
+        }
+    }
+
+    /// Renew the leader lease. Returns `Ok(LeaderRow)` with the new
+    /// expiry if this instance still holds the lease; `Err` if the
+    /// lease was lost (expired or stolen).
+    pub fn renew_leader_lease(&self, instance_id: &str, ttl_ms: i64) -> Result<LeaderRow> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let expires_at = now + ttl_ms;
+
+        let updated = conn.execute(
+            "UPDATE controller_leader \
+             SET expires_at_ms = ?1 \
+             WHERE key = 'leader' AND instance_id = ?2 AND expires_at_ms > ?3",
+            params![expires_at, instance_id, now],
+        )?;
+
+        if updated == 0 {
+            // Either no row, or the lease was stolen/expired.
+            return Err(StoreError::Sqlite(
+                "lease lost: no valid lease held by this instance".to_string(),
+            ));
+        }
+
+        // Read back the full row.
+        let row = conn.query_row(
+            "SELECT instance_id, epoch, acquired_at_ms, expires_at_ms \
+             FROM controller_leader WHERE key = 'leader'",
+            [],
+            |r| {
+                Ok(LeaderRow {
+                    instance_id: r.get(0)?,
+                    epoch: r.get::<_, i64>(1)? as u64,
+                    acquired_at_ms: r.get(2)?,
+                    expires_at_ms: r.get(3)?,
+                })
+            },
+        )?;
+        Ok(row)
+    }
+
+    /// Voluntarily release the lease (graceful shutdown). Returns
+    /// `Ok(())` if the lease was released, `Err` if this instance
+    /// did not hold the lease.
+    pub fn step_down_leader(&self, instance_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let deleted = conn.execute(
+            "DELETE FROM controller_leader \
+             WHERE key = 'leader' AND instance_id = ?1",
+            params![instance_id],
+        )?;
+        if deleted == 0 {
+            return Err(StoreError::Sqlite(
+                "step_down failed: this instance does not hold the lease".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get the current leader (if any), or `None` if no valid
+    /// (non-expired) lease exists.
+    pub fn current_leader(&self) -> Result<Option<LeaderRow>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        let row = conn
+            .query_row(
+                "SELECT instance_id, epoch, acquired_at_ms, expires_at_ms \
+                 FROM controller_leader WHERE key = 'leader' AND expires_at_ms > ?1",
+                params![now],
+                |r| {
+                    Ok(LeaderRow {
+                        instance_id: r.get(0)?,
+                        epoch: r.get::<_, i64>(1)? as u64,
+                        acquired_at_ms: r.get(2)?,
+                        expires_at_ms: r.get(3)?,
+                    })
+                },
+            )
+            .ok();
+        // Distinguish "no row" from "query error".
+        match row {
+            Some(r) => Ok(Some(r)),
+            None => {
+                // Check if a row exists at all (expired or not).
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM controller_leader WHERE key = 'leader'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if count == 0 {
+                    Ok(None)
+                } else {
+                    // Row exists but expired.
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Persist the current config generation counter (SCALE-06, #185).
+    /// This survives controller restarts so the generation counter
+    /// does not reset to 1.
+    pub fn save_generation_counter(&self, generation: u64) -> Result<()> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let now = now_unix_ms();
+        conn.execute(
+            "INSERT OR REPLACE INTO generation_counter (key, generation, updated_at_ms) \
+             VALUES ('cp', ?1, ?2)",
+            params![generation as i64, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load the persisted config generation counter (SCALE-06, #185).
+    /// Returns `None` if no counter has been persisted (fresh store).
+    pub fn load_generation_counter(&self) -> Result<Option<u64>> {
+        let conn = self.conn.lock().expect("store connection poisoned");
+        let row = conn
+            .query_row(
+                "SELECT generation FROM generation_counter WHERE key = 'cp'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok();
+        Ok(row.map(|v| v as u64))
+    }
+}
+
+/// One workspace row (SCALE-05, #184). Plain data — the workspace
+/// domain types live in [`crate::workspace`]; the store serializes
+/// at the SQL boundary so it never imports upward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub name: String,
+    pub description: String,
+    pub active: bool,
+    pub created_at: i64,
+}
+
+/// One RBAC role row (SCALE-05, #184). `permissions_json` is a JSON
+/// array of `{"action":"read|write|admin","workspace":"<name or *>"}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleRow {
+    pub name: String,
+    pub permissions_json: String,
+    pub created_at: i64,
+}
+
+/// One principal row (SCALE-05, #184). `roles_json` is a JSON array
+/// of role-name strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalRow {
+    pub identity: String,
+    pub roles_json: String,
+    pub created_at: i64,
+}
+
+/// One audit log row (SCALE-05, #184). `before_state` and
+/// `after_state` are optional JSON strings (None for create/delete).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub seq: i64,
+    pub timestamp_ms: i64,
+    pub principal: String,
+    pub action: String,
+    pub workspace: String,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub request_id: String,
+}
+
+/// One leader row (SCALE-06, #185). The current leader's instance ID,
+/// epoch, and lease expiry. Plain data — the leader election module
+/// owns the domain types; the store stays backend-neutral.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderRow {
+    pub instance_id: String,
+    pub epoch: u64,
+    pub acquired_at_ms: i64,
+    pub expires_at_ms: i64,
 }
 
 /// Row mapper for `used` counters (SQLite INTEGER -> u64). rusqlite 0.38
@@ -1184,6 +1662,14 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Wall-clock Unix milliseconds (SCALE-06, #185).
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 

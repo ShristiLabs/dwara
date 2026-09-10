@@ -184,6 +184,10 @@ export default withMermaid(
                 },
                 { text: "Response caching", link: "/guide/caching" },
                 { text: "API versioning", link: "/guide/api-versioning" },
+                {
+                  text: "Filter-chain ordering",
+                  link: "/guide/filter-chain-ordering",
+                },
               ],
             },
             {
@@ -367,6 +371,10 @@ export default withMermaid(
                 {
                   text: "Plugin lifecycle",
                   link: "/guide/plugin-lifecycle",
+                },
+                {
+                  text: "Plugin registry",
+                  link: "/guide/plugin-registry",
                 },
                 {
                   text: "Plugin SDK",

@@ -70,6 +70,11 @@ pub struct Event {
     pub broken: bool,
     /// The request was shed by admission control (DW-043).
     pub shed: bool,
+    /// The edge instance ID this event originated from (SCALE-07,
+    /// #186). `None` for single-process (OSS) deployments; set by
+    /// the controller's `EmbeddedCollector` when forwarding federated
+    /// events from edges to the aggregate store.
+    pub edge_id: Option<String>,
     /// Additional string key/value data (custom dimensions ride here).
     pub attributes: Vec<(String, String)>,
 }
@@ -94,6 +99,7 @@ impl Event {
             rate_limited: false,
             broken: false,
             shed: false,
+            edge_id: None,
             attributes: Vec::new(),
         }
     }

@@ -188,6 +188,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
             mirror: None,
             fault_injection: None,
             plugins: Vec::new(),
+            filter_chain: None,
             oidc_login: None,
         };
         routes.push(route);
@@ -258,8 +259,11 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         oidc_providers: Vec::new(),
         redis_rate_limiter: None,
         redis_quotas: None,
+        redis_cache: None,
         config_convergence: None,
         plugins: Vec::new(),
+        filter_chain: None,
+        plugin_registry: None,
         ai: None,
         fleet: None,
         lifecycle: None,
