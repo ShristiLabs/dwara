@@ -1903,6 +1903,33 @@ impl EmbeddedAnalytics {
         f(&conn)
     }
 
+    /// REL-13 (#224): back up the analytics database to `dest_path`
+    /// using SQLite's online backup API. The backup is a consistent
+    /// snapshot taken under the connection mutex (the writer is
+    /// briefly blocked). The destination file is created or
+    /// overwritten.
+    pub fn backup_to(&self, dest_path: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut dst = rusqlite::Connection::open(dest_path)?;
+        let backup = rusqlite::backup::Backup::new(&conn, &mut dst)?;
+        backup.run_to_completion(100, std::time::Duration::from_millis(10), None)?;
+        Ok(())
+    }
+
+    /// REL-13 (#224): restore the analytics database from `src_path`.
+    /// The source file is opened and its contents are copied into the
+    /// live connection via the online backup API. The writer is
+    /// briefly blocked under the connection mutex. After restore, the
+    /// in-memory state (live sketches, insights) is NOT reset — they
+    /// continue from their current window.
+    pub fn restore_from(&self, src_path: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let src = rusqlite::Connection::open(src_path)?;
+        let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
+        backup.run_to_completion(100, std::time::Duration::from_millis(10), None)?;
+        Ok(())
+    }
+
     /// The request-completion hot path (DW-043): fire-and-forget record
     /// of one finished request. NEVER blocks — a bounded-channel
     /// `try_send` that drops and counts on full. DW-092: also feeds the
