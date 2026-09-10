@@ -14,6 +14,10 @@ fn make_spec(route: &str, threshold: u32) -> ProbeSpec {
         headers: vec![],
         body: None,
         failure_threshold: threshold,
+        body_contains: None,
+        body_jsonpath: None,
+        journey: None,
+        probe_from: None,
     }
 }
 
@@ -149,4 +153,118 @@ fn probe_result_constructors() {
     assert!(!failure.success);
     assert_eq!(failure.status, 0);
     assert!(failure.error.is_some());
+}
+
+// --- Body assertions (DP-10, #238) ---------------------------------------
+
+#[test]
+fn body_contains_passes_when_substring_present() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_contains: Some("ok".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec, "{\"status\":\"ok\"}").is_ok());
+}
+
+#[test]
+fn body_contains_fails_when_substring_absent() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_contains: Some("missing".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec, "{\"status\":\"ok\"}").is_err());
+}
+
+#[test]
+fn body_jsonpath_passes_when_path_resolves() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_jsonpath: Some("$.status".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec, "{\"status\":\"ok\"}").is_ok());
+}
+
+#[test]
+fn body_jsonpath_fails_when_path_missing() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_jsonpath: Some("$.missing".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec, "{\"status\":\"ok\"}").is_err());
+}
+
+#[test]
+fn body_jsonpath_handles_nested_paths() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_jsonpath: Some("$.data.id".to_string()),
+        ..spec
+    };
+    let body = "{\"data\":{\"id\":42,\"name\":\"test\"}}";
+    assert!(check_body_assertions(&spec, body).is_ok());
+
+    let spec2 = ProbeSpec {
+        body_jsonpath: Some("$.data.missing".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec2, body).is_err());
+}
+
+#[test]
+fn body_jsonpath_handles_array_index() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_jsonpath: Some("$.items[0].id".to_string()),
+        ..spec
+    };
+    let body = "{\"items\":[{\"id\":1},{\"id\":2}]}";
+    assert!(check_body_assertions(&spec, body).is_ok());
+}
+
+#[test]
+fn body_jsonpath_fails_on_invalid_json() {
+    use dwara_core::synthetic::check_body_assertions;
+    let spec = make_spec("api", 1);
+    let spec = ProbeSpec {
+        body_jsonpath: Some("$.status".to_string()),
+        ..spec
+    };
+    assert!(check_body_assertions(&spec, "not json").is_err());
+}
+
+// --- Executor (DP-10, #238) ---------------------------------------------
+
+#[tokio::test]
+async fn run_probe_fails_without_url() {
+    use dwara_core::synthetic::run_probe;
+    let spec = ProbeSpec {
+        url: None,
+        ..make_spec("api", 1)
+    };
+    let result = run_probe(&spec).await;
+    assert!(!result.success);
+    assert!(result.error.as_deref().unwrap().contains("no url"));
+}
+
+#[tokio::test]
+async fn run_probe_fails_on_connection_error() {
+    use dwara_core::synthetic::run_probe;
+    let spec = ProbeSpec {
+        url: Some("http://127.0.0.1:1".to_string()),
+        timeout: std::time::Duration::from_millis(100),
+        ..make_spec("api", 1)
+    };
+    let result = run_probe(&spec).await;
+    assert!(!result.success);
+    assert!(result.error.is_some());
 }
