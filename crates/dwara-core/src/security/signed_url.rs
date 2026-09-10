@@ -178,13 +178,16 @@ impl NonceCache {
 
     /// Check and record a nonce. Returns `true` if the nonce is fresh
     /// (not seen before, or the previous entry has expired), `false`
-    /// if it is a replay within the validity window.
-    fn check_and_record(&mut self, nonce: &str, expires: u64) -> bool {
+    /// if it is a replay within the validity window. SEC-11 (#214):
+    /// the purge compares the stored expiry against `now` (the
+    /// current time), not against the new nonce's `expires`, so
+    /// entries with the same expiry are not incorrectly purged.
+    fn check_and_record(&mut self, nonce: &str, expires: u64, now: u64) -> bool {
         // Purge expired entries (cheap: we check the front of the
         // queue, which holds the oldest entries).
         while let Some(front) = self.order.front() {
             if let Some(&exp) = self.entries.get(front) {
-                if exp <= expires {
+                if exp <= now {
                     self.entries.remove(front);
                     self.order.pop_front();
                     continue;
@@ -330,7 +333,7 @@ impl SignedUrlVerifier {
                 None => return SignedUrlResult::NonceError,
             };
             let mut cache = self.nonces.lock().expect("nonce cache poisoned");
-            if !cache.check_and_record(nonce, expires) {
+            if !cache.check_and_record(nonce, expires, now) {
                 return SignedUrlResult::NonceError;
             }
         }
@@ -402,14 +405,14 @@ impl SignedUrlVerifier {
                             "distributed nonce store error; falling back to in-process cache"
                         );
                         let mut cache = self.nonces.lock().expect("nonce cache poisoned");
-                        if !cache.check_and_record(nonce, expires) {
+                        if !cache.check_and_record(nonce, expires, now) {
                             return SignedUrlResult::NonceError;
                         }
                     }
                 }
             } else {
                 let mut cache = self.nonces.lock().expect("nonce cache poisoned");
-                if !cache.check_and_record(nonce, expires) {
+                if !cache.check_and_record(nonce, expires, now) {
                     return SignedUrlResult::NonceError;
                 }
             }

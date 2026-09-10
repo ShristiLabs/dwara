@@ -59,3 +59,11 @@ name = "fuzz_cidr"
 path = "fuzz_targets/fuzz_cidr.rs"
 test = false
 doc = false
+
+# SEC-11 (#214): fuzz the signed URL verifier with arbitrary query
+# strings. Only panic-freedom is asserted.
+[[bin]]
+name = "fuzz_signed_url"
+path = "fuzz_targets/fuzz_signed_url.rs"
+test = false
+doc = false
