@@ -911,6 +911,26 @@ pub struct AiLatencyCostPolicy {
     /// The selection preference: `cost` (cheapest), `latency`
     /// (fastest), or `balanced` (best cost/latency sum).
     pub preference: AiLatencyPreference,
+    /// AI-15 (#203): when true, the policy uses live latency
+    /// observations to dynamically adjust candidate ordering. The
+    /// static `latency` scores are used as priors; observed latencies
+    /// from recent requests refine the selection. Default false
+    /// (static selection, the DW-085 behavior).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub live: bool,
+    /// AI-15 (#203): the window size for live latency tracking
+    /// (number of recent observations to average). Default 10. Only
+    /// used when `live` is true.
+    #[serde(
+        default = "default_live_window",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub live_window: Option<usize>,
+}
+
+/// AI-15 (#203): default live latency window size.
+fn default_live_window() -> Option<usize> {
+    Some(10)
 }
 
 /// One candidate in a latency-vs-cost policy (DW-085
