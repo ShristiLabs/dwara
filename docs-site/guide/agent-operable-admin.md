@@ -11,12 +11,14 @@ The MCP server is a compile-time capability (`mcp`, default OFF; see
 [Editions](./editions#compile-time-feature-packs)) and is not included
 in the published OSS binaries. It is currently a library surface in
 `dwara-core`: the server, protocol types, standard tools, and RBAC
-checks are complete and test-covered, but no transport is mounted yet
--- there is no `/mcp` endpoint on the admin listener and no stdio
-bridge. An embedding (or a future Dwara release) constructs the
-`McpServer`, connects it to a transport, and supplies a `ToolHandler`
-that performs the actual operations. Until a transport ships, this
-page documents the tool surface such an integration exposes.
+checks are complete and test-covered. Transport adapters for HTTP
+JSON-RPC, SSE (server-sent events), and stdio are available so an
+embedding (or a future Dwara release) can mount the `McpServer` on
+the admin listener or a local stdio bridge. The `McpTransport` enum
+selects the transport; SSE helpers (`encode_sse_response`,
+`encode_sse_error`) format JSON-RPC responses as SSE frames. Until a
+transport is mounted by an embedding, this page documents the tool
+surface such an integration exposes.
 :::
 
 ## The tool surface

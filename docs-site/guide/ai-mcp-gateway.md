@@ -122,6 +122,77 @@ duration, error code, and status (`success`, `error`, or `denied`).
 The session id correlates calls within one agent session. Records are
 written fire-and-forget (never blocks the request path).
 
+## Resources and prompts
+
+In addition to tools, the MCP gateway serves static resources and
+prompt templates. These are configured under `ai.mcp.resources` and
+`ai.mcp.prompts` and served inline (no upstream proxy).
+
+### Resources
+
+```yaml
+ai:
+  mcp:
+    resources:
+      docs-index:
+        uri: dwara://docs/index
+        name: docs-index
+        description: Index of available documentation
+        mime_type: text/plain
+        content: |
+          Welcome to the documentation index.
+          Available topics: routing, budgets, guardrails.
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `uri` | (required) | The resource URI. |
+| `name` | (required) | The resource name (key in the config map). |
+| `description` | (required) | Human-readable description. |
+| `mime_type` | `text/plain` | The MIME type of the content. |
+| `content` | (required) | The resource content, returned verbatim in `resources/read`. |
+
+`resources/list` returns all configured resources with their URI,
+name, description, and MIME type. `resources/read` returns the
+content for a given URI. Unknown URIs return an MCP JSON-RPC error.
+
+### Prompts
+
+```yaml
+ai:
+  mcp:
+    prompts:
+      summarize:
+        description: Summarize a document
+        template: |
+          Please summarize the following document:
+
+          {{document}}
+
+          Provide a concise summary in {{length}} sentences.
+        arguments:
+          - name: document
+            description: The document text to summarize
+            required: true
+          - name: length
+            description: Number of sentences for the summary
+            required: false
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `description` | (required) | Human-readable description. |
+| `template` | (required) | The prompt body with `{{arg}}` placeholders. |
+| `arguments` | (empty) | Argument definitions. |
+| `arguments[].name` | (required) | The argument name. |
+| `arguments[].description` | (required) | Human-readable description. |
+| `arguments[].required` | `false` | Whether the argument is required. |
+
+`prompts/list` returns all configured prompts with their description
+and argument definitions. `prompts/get` returns the prompt with
+`{{arg}}` placeholders substituted from the request arguments. Unknown
+prompt names return an MCP JSON-RPC error.
+
 ## Admin API endpoints
 
 - `GET /mcp/sessions` -- list active (non-expired) MCP sessions from

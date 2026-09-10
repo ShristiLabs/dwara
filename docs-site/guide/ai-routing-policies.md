@@ -82,6 +82,46 @@ ai:
 | `latency` | Lowest `latency` score (fastest) |
 | `balanced` | Lowest `cost + latency` sum |
 
+### Live latency tracking
+
+When `live: true` is set, the policy uses observed latencies from
+recent requests to dynamically adjust candidate ordering. The static
+`latency` scores serve as priors; once enough observations accumulate,
+the live data takes over. Falls back to static scores when no
+observations exist.
+
+```yaml
+ai:
+  routing_policies:
+    balanced-live:
+      kind: latency_cost
+      preference: balanced
+      live: true
+      live_window: 10
+      candidates:
+        - model: gpt-4o-mini
+          cost: 1
+          latency: 3
+        - model: gpt-4o
+          cost: 5
+          latency: 2
+  models:
+    smart-router:
+      routing_policy: balanced-live
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `live` | `false` | When true, use observed latencies to adjust selection. |
+| `live_window` | `10` | Number of recent observations to average per candidate. |
+
+Live tracking maintains a rolling window of latency observations per
+model alias. The average observed latency replaces the static
+`latency` score in the preference calculation. For the `cost`
+preference, live data has no effect (cost is static). For `latency`
+and `balanced` preferences, the live average is used when available,
+falling back to the static score when no observations exist.
+
 ## Metrics
 
 - `dwara_ai_routing_policy_escalations_total{policy}` -- FallbackChain

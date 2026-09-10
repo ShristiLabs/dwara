@@ -54,7 +54,7 @@ ai:
 | `action` | `block` / `redact` / `log` | `redact` is prompt-phase only; `log` is dry-run (records and continues) |
 | `phase` | `prompt` / `response` / `both` (default) | When the rule runs |
 | `patterns` | list of regex strings | Custom patterns; `injection` and `pii` also have built-in patterns |
-| `schema` | JSON Schema object | Required for `kind: schema`; validated with the `openapi_validation` feature |
+| `schema` | JSON Schema object | Required for `kind: schema`; validated unconditionally |
 | `policies` | list of policy names | Empty = applies to all consumers; non-empty = only consumers with a matching policy |
 
 ## Kinds
@@ -73,10 +73,25 @@ ai:
   text; for streaming responses, banned-content checks run per-chunk
   and cut the stream off on a match.
 - **Schema**: validates the response text as JSON against a JSON
-  Schema. Non-JSON responses are treated as violations. Requires the
-  `openapi_validation` feature; without it, schema rules are inert
-  (always allow). Response-phase only (partial streaming content
-  cannot be validated).
+  Schema. Non-JSON responses are treated as violations. Schema
+  validation runs unconditionally (no feature flag required).
+  Response-phase only (partial streaming content cannot be validated).
+
+### Streaming redaction
+
+PII redaction applies to streaming responses as well as buffered
+ones. Each streamed chunk is scrubbed before it reaches the client,
+using the same Redactor as the prompt phase. This ensures PII in
+streamed content is caught in real time without buffering the entire
+response.
+
+### MCP tool-call output inspection
+
+When the MCP gateway returns tool-call results to the caller, the
+guardrails engine inspects the output against configured schema rules
+before returning it. A tool-call result that violates a schema rule
+is rejected with an MCP JSON-RPC error, preventing malformed tool
+output from reaching the agent.
 
 ## Actions
 

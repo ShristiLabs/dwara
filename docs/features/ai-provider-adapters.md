@@ -677,3 +677,138 @@ accounting. Code: `crates/dwara-core/src/ai/token_estimator.rs`.
 
 See the [DW-083](#dw-083--semantic-caching-ent) section above for the
 M6 improvements. Code: `crates/dwara-core/src/ai/semantic_cache.rs`.
+
+## M10 additions (AI-04 through AI-16)
+
+The M10 milestone (AI Gateway Maturity) added eleven capabilities on
+top of the M4/M5/M6 AI spine. The end-user guides at
+[docs-site: AI gateway](../../docs-site/guide/ai-gateway.md) and
+related pages have the configuration reference; this section describes
+the implementation approach and where the code lives.
+
+### AI-04 (#194) — Batch API support + half-price metering
+
+Batch API support lets clients submit bulk chat-completion requests
+that providers serve asynchronously at a discount (typically 50%).
+The `ai::batch` module parses batch request/response files, meters
+batch results with half-price token accounting, and records batch
+spend to the analytics store. Code: `crates/dwara-core/src/ai/batch.rs`.
+
+### AI-05 (#195) — Multi-dialect ingress + passthrough mode
+
+The ingress layer accepts Anthropic Messages API and Gemini
+`generateContent` request shapes in addition to the OpenAI facade.
+Each dialect is parsed into the canonical `ChatRequest` and routed
+through the same adapter pipeline. Passthrough mode forwards the
+request body verbatim to the provider without canonical translation,
+useful for provider-specific features the canonical surface does not
+model. Code: `crates/dwara-core/src/ai/ingress.rs`.
+
+### AI-06 (#196) — Structured-output translation
+
+A typed `ResponseFormat` enum (`Text`, `JsonObject`, `JsonSchema`) on
+`ChatRequest` replaces the raw `response_format` field in `other`.
+Each adapter translates the typed format to its provider-native shape:
+OpenAI emits the original `response_format`; Anthropic uses forced
+tool calls (permissive for `JsonObject`, schema-validated for
+`JsonSchema`); Gemini uses `generationConfig.responseMimeType` and
+`responseSchema`. Code: `crates/dwara-core/src/ai/types.rs`
+(`ResponseFormat`), `crates/dwara-core/src/ai/openai_compat.rs`
+(parsing), `crates/dwara-core/src/ai/adapters/{openai,anthropic,gemini}.rs`
+(translation).
+
+### AI-08 (#197) — Guardrails depth
+
+Schema validation is decoupled from the `openapi_validation` feature
+flag (it was effectively unconditional before). SSE streaming
+redaction applies PII scrubbing to each streamed chunk before it
+reaches the client. MCP tool-call output inspection validates tool
+results against configured schemas before returning them to the
+caller. Code: `crates/dwara-core/src/ai/guardrails.rs`.
+
+### AI-09 (#198) — Credential-pool health from provider headers
+
+The credential pool reads provider rate-limit headers (e.g.
+`X-RateLimit-Remaining`, `Retry-After`) from upstream responses to
+proactively quarantine keys before a 429 occurs. Health state is
+tracked per-key and exposed via the admin API. Code:
+`crates/dwara-core/src/ai/credentials.rs`.
+
+### AI-10 (#199) — Experimentation scorers and auto-promotion
+
+The `EvalScorer` enum gained `LlmJudge` and `SemanticSimilarity`
+modes. `LlmJudge` uses an LLM to evaluate response quality (with a
+synchronous fallback). `SemanticSimilarity` uses token-overlap/Jaccard
+similarity with a configurable threshold. Auto-promotion logic
+(`AutoPromotionConfig`, `evaluate_auto_promotion`) selects the best
+variant by pass rate and latency, then promotes it if the improvement
+meets a configurable threshold with a minimum case count. Code:
+`crates/dwara-core/src/ai/experiments.rs`.
+
+### AI-11 (#200) — MCP transport and primitive breadth + admin ToolHandler
+
+The MCP gateway (DW-087) gained `resources/list`, `resources/read`,
+`prompts/list`, and `prompts/get` primitives. Resources and prompts
+are configured statically under `ai.mcp.resources` and `ai.mcp.prompts`
+and served inline (no upstream proxy). Prompt templates support
+`{{arg}}` placeholder substitution from request arguments.
+
+The agent-operable admin MCP server (DW-112) gained SSE and stdio
+transport adapters (`McpTransport` enum, `encode_sse_response` /
+`encode_sse_error` helpers) so the admin MCP server can be served over
+HTTP with server-sent events or over stdio.
+
+Code: `crates/dwara-core/src/ai/mcp.rs` (gateway primitives),
+`crates/dwara-core/src/config/ai.rs` (resource/prompt config types),
+`crates/dwara-core/src/mcp/mod.rs` (transport adapters).
+
+### AI-13 (#201) — Multimodal image URL fetching for Anthropic/Gemini
+
+The Anthropic and Gemini adapters fetch image content from URLs in
+`ContentPart::Image` entries before translating the request. The
+fetched bytes are embedded inline in the provider request (Anthropic
+base64, Gemini inline data). This enables multimodal requests where
+the client references images by URL rather than embedding base64
+directly. Code: `crates/dwara-core/src/ai/image_fetch.rs`,
+`crates/dwara-core/src/ai/adapters/{anthropic,gemini}.rs`.
+
+### AI-14 (#202) — Server-side prompt templates
+
+Clients can reference a server-side prompt template by name in their
+chat request. The gateway resolves the template from
+`ai.experiments.prompts`, substitutes `{{var}}` placeholders with
+client-supplied variables, and prepends the result as a system message
+before any existing system message. Two new `ChatRequest` fields:
+`prompt` (the template reference, `"name"` or `"name/version"`) and
+`prompt_variables` (the substitution map). The `AiRuntime` stores the
+experiments config and prompt overrides for request-time resolution.
+Code: `crates/dwara-core/src/ai/types.rs` (`prompt`,
+`prompt_variables`), `crates/dwara-core/src/ai/mod.rs`
+(`experiments_config`, `prompt_overrides`), 
+`crates/dwara-core/src/dataplane/ai_proxy.rs` (resolution).
+
+### AI-15 (#203) — Live latency-vs-cost routing
+
+The `LatencyCost` routing policy gained optional live latency tracking.
+When `live: true` is configured, the policy maintains a rolling window
+of observed latencies per model alias (`LiveLatencyTracker`) and uses
+the average observed latency to dynamically adjust candidate selection.
+The static `latency` scores serve as priors; once enough observations
+accumulate, the live data takes over. Falls back to static scores
+when no observations exist. Code: `crates/dwara-core/src/ai/policy.rs`
+(`LiveLatencyTracker`, `CompiledRoutingPolicy::LatencyCost` live
+fields), `crates/dwara-core/src/config/ai.rs` (`live`, `live_window`).
+
+### AI-16 (#204) — First-class agent principals
+
+Agent consumers are promoted to first-class principals with dedicated
+metadata. A new `AgentPrincipal` config type carries `display_name`,
+`description`, `owner`, and `permissions` (permission level:
+`read_only`, `read_write`, `admin`). The `Identity` struct gains an
+`agent: Option<AgentPrincipal>` field populated from the consumer
+config during authentication. The gateway injects `X-Consumer-Type`
+upstream (alongside `X-Consumer-Name`) so upstreams can distinguish
+agent from user traffic. Code: `crates/dwara-core/src/config/mod.rs`
+(`AgentPrincipal`, `AgentPermissionLevel`), 
+`crates/dwara-core/src/security/authn.rs` (`Identity.agent`),
+`crates/dwara-core/src/dataplane/proxy.rs` (`X-Consumer-Type` header).
