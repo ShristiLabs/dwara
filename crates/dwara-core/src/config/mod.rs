@@ -5707,6 +5707,10 @@ fn default_probe_jitter_ms() -> u64 {
 pub enum ProbeKind {
     /// HTTP/1.1 GET to `path`; success = 2xx.
     Http,
+    /// HTTP/2 GET to `path` over a pooled H2 connection (REL-07, #218);
+    /// for HTTP/2-only and gRPC upstreams that refuse HTTP/1.1 on a
+    /// separate connection. Success = 2xx.
+    Http2,
     /// TCP connect within the timeout.
     Tcp,
 }
