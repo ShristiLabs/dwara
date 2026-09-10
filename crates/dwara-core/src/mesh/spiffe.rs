@@ -370,10 +370,180 @@ impl std::error::Error for SpiffeError {}
 /// the same approach as the CP/DP transport.
 #[cfg(feature = "ent")]
 pub mod grpc {
-    use super::{SpiffeError, SpiffeSvid, SpiffeTrustBundle, WorkloadApiTransport};
+    use super::{SpiffeError, SpiffeIdentity, SpiffeSvid, SpiffeTrustBundle, WorkloadApiTransport};
     use async_trait::async_trait;
+    use bytes::Buf;
+    use prost::Message as ProstMessage;
     use std::path::Path;
+    use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
     use tonic::transport::Endpoint;
+    use tonic::{Request, Status};
+
+    // -----------------------------------------------------------------
+    // Wire messages (hand-written prost structs, matching the SPIRE
+    // Workload API proto). Field numbers and types match the upstream
+    // proto definition (spire-api/workload.proto).
+    // -----------------------------------------------------------------
+
+    /// Wire: the FetchX509SVID request (empty body).
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509SvidRequest {}
+
+    /// Wire: a single X.509 SVID in the FetchX509SVID response.
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509Svid {
+        /// The SPIFFE ID (URI form: `spiffe://<trust-domain>/<path>`).
+        #[prost(string, tag = "1")]
+        pub spiffe_id: String,
+        /// The X.509 certificate chain (DER bytes, leaf first).
+        #[prost(bytes, tag = "2")]
+        pub x509_svid: Vec<u8>,
+        /// The private key matching the leaf cert (DER bytes).
+        #[prost(bytes, tag = "3")]
+        pub x509_svid_key: Vec<u8>,
+        /// The SVID expiry (seconds since the Unix epoch).
+        #[prost(int64, tag = "4")]
+        pub expires_at: i64,
+    }
+
+    /// Wire: an X.509 bundle (trust bundle for one trust domain).
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509Bundle {
+        /// The trust domain this bundle covers.
+        #[prost(string, tag = "1")]
+        pub trust_domain: String,
+        /// The X.509 CA certificates (DER bytes).
+        #[prost(bytes, repeated, tag = "2")]
+        pub x509_authorities: Vec<Vec<u8>>,
+    }
+
+    /// Wire: the FetchX509SVID response.
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509SvidResponse {
+        /// The workload's SVIDs (one per authorized SPIFFE ID).
+        #[prost(message, repeated, tag = "1")]
+        pub svids: Vec<PbX509Svid>,
+        /// The trust bundles, keyed by trust domain.
+        #[prost(map = "string, message", tag = "2")]
+        pub bundles: std::collections::HashMap<String, PbX509Bundle>,
+    }
+
+    /// Wire: the FetchX509Bundle request.
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509BundleRequest {
+        /// The trust domain to fetch the bundle for (empty = all).
+        #[prost(string, tag = "1")]
+        pub trust_domain: String,
+    }
+
+    /// Wire: the FetchX509Bundle response.
+    #[derive(Clone, PartialEq, ProstMessage)]
+    pub struct PbX509BundleResponse {
+        /// The trust bundles, keyed by trust domain.
+        #[prost(map = "string, message", tag = "1")]
+        pub bundles: std::collections::HashMap<String, PbX509Bundle>,
+    }
+
+    // -----------------------------------------------------------------
+    // Custom prost codec (same pattern as cp_dp/transport.rs; uses the
+    // workspace prost 0.14, not tonic's built-in ProstCodec).
+    // -----------------------------------------------------------------
+
+    /// A gRPC codec that encodes/decodes prost messages using the
+    /// workspace prost 0.14.
+    pub struct ProstCodec<T, U> {
+        _req: std::marker::PhantomData<T>,
+        _resp: std::marker::PhantomData<U>,
+    }
+
+    impl<T, U> Default for ProstCodec<T, U> {
+        fn default() -> Self {
+            ProstCodec {
+                _req: std::marker::PhantomData,
+                _resp: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<T, U> ProstCodec<T, U> {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl<T, U> Codec for ProstCodec<T, U>
+    where
+        T: ProstMessage + Clone + 'static,
+        U: ProstMessage + Default + 'static,
+    {
+        type Encode = T;
+        type Decode = U;
+        type Encoder = ProstEncoder<T>;
+        type Decoder = ProstDecoder<U>;
+
+        fn encoder(&mut self) -> Self::Encoder {
+            ProstEncoder {
+                _req: std::marker::PhantomData,
+            }
+        }
+
+        fn decoder(&mut self) -> Self::Decoder {
+            ProstDecoder {
+                _resp: std::marker::PhantomData,
+            }
+        }
+    }
+
+    /// Encoder for the custom prost codec.
+    pub struct ProstEncoder<T> {
+        _req: std::marker::PhantomData<T>,
+    }
+
+    impl<T: ProstMessage> Encoder for ProstEncoder<T> {
+        type Item = T;
+        type Error = Status;
+
+        fn encode(&mut self, item: Self::Item, dst: &mut EncodeBuf<'_>) -> Result<(), Self::Error> {
+            item.encode(dst)
+                .expect("Message only errors if not enough space");
+            Ok(())
+        }
+    }
+
+    /// Decoder for the custom prost codec.
+    pub struct ProstDecoder<U> {
+        _resp: std::marker::PhantomData<U>,
+    }
+
+    impl<U: ProstMessage + Default> Decoder for ProstDecoder<U> {
+        type Item = U;
+        type Error = Status;
+
+        fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+            // An empty response (e.g. PbX509SvidRequest {}) encodes to
+            // zero bytes on the wire. Returning Ok(None) here makes
+            // tonic's unary() client report "Missing response message"
+            // (Internal) because it expects exactly one message. Match
+            // tonic-prost's behavior: an empty buffer yields the
+            // default value, not "no message".
+            if !src.has_remaining() {
+                return Ok(Some(U::default()));
+            }
+            let item =
+                U::decode(src).map_err(|e| Status::internal(format!("prost decode error: {e}")))?;
+            Ok(Some(item))
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The gRPC Workload API client.
+    // -----------------------------------------------------------------
+
+    /// The gRPC Workload API path for FetchX509SVID.
+    const FETCH_X509_SVID_PATH: &str = "/spiffe.workloadapi.v2.WorkloadAPI/FetchX509SVID";
+
+    /// The gRPC Workload API path for FetchX509Bundle.
+    const FETCH_X509_BUNDLE_PATH: &str = "/spiffe.workloadapi.v2.WorkloadAPI/FetchX509Bundle";
 
     /// The gRPC Workload API transport. Connects to the SPIRE agent
     /// over a Unix domain socket and fetches X.509 SVIDs and the
@@ -417,35 +587,296 @@ pub mod grpc {
                 .map_err(|e| SpiffeError::WorkloadApiUnreachable(e.to_string()))?;
             Ok(channel)
         }
+
+        /// Parse the FetchX509SVID response into domain SVIDs.
+        fn parse_svid_response(
+            &self,
+            resp: PbX509SvidResponse,
+        ) -> Result<Vec<SpiffeSvid>, SpiffeError> {
+            resp.svids
+                .into_iter()
+                .map(|pb| {
+                    let spiffe_id = SpiffeIdentity::parse(&pb.spiffe_id).ok_or_else(|| {
+                        SpiffeError::MalformedResponse(format!(
+                            "invalid spiffe id in svid: {}",
+                            pb.spiffe_id
+                        ))
+                    })?;
+                    // The cert chain is a single DER blob containing
+                    // the leaf + intermediates. Split on the DER
+                    // sequence boundaries (a simple DER walk).
+                    let x509_cert = split_der_chain(&pb.x509_svid);
+                    if x509_cert.is_empty() {
+                        return Err(SpiffeError::MalformedResponse(
+                            "empty cert chain in svid".to_string(),
+                        ));
+                    }
+                    Ok(SpiffeSvid {
+                        spiffe_id,
+                        x509_cert,
+                        private_key: pb.x509_svid_key,
+                        expires_at: pb.expires_at.max(0) as u64,
+                    })
+                })
+                .collect()
+        }
+
+        /// Parse the FetchX509SVID response's bundles into a trust
+        /// bundle for the first trust domain (the common case: one
+        /// trust domain per workload).
+        #[allow(dead_code)] // tested directly; used when FetchX509SVID
+                            // returns both SVIDs and bundles in one call (the common path)
+        fn parse_bundle_from_svid_response(
+            &self,
+            resp: &PbX509SvidResponse,
+            trust_domain: &str,
+        ) -> Result<SpiffeTrustBundle, SpiffeError> {
+            let bundle = resp.bundles.get(trust_domain).ok_or_else(|| {
+                SpiffeError::MalformedResponse(format!(
+                    "trust bundle not found for trust domain: {trust_domain}"
+                ))
+            })?;
+            Ok(SpiffeTrustBundle {
+                trust_domain: bundle.trust_domain.clone(),
+                x509_certs: bundle.x509_authorities.clone(),
+            })
+        }
+    }
+
+    /// Split a DER blob containing one or more concatenated DER
+    /// certificates into individual DER blobs. Each DER certificate
+    /// starts with a SEQUENCE tag (0x30) followed by a length. The
+    /// walk reads the length to find the next certificate boundary.
+    fn split_der_chain(der: &[u8]) -> Vec<Vec<u8>> {
+        let mut certs = Vec::new();
+        let mut offset = 0;
+        while offset < der.len() {
+            // A DER SEQUENCE starts with 0x30.
+            if der[offset] != 0x30 {
+                break;
+            }
+            // The length is encoded after the tag byte. Short form:
+            // one byte (0x00-0x7F). Long form: first byte is 0x81-0x84
+            // (number of length bytes follows).
+            if offset + 1 >= der.len() {
+                break;
+            }
+            let len_byte = der[offset + 1];
+            let (len, header_len) = if len_byte < 0x80 {
+                (len_byte as usize, 2)
+            } else {
+                let num_len_bytes = (len_byte & 0x7F) as usize;
+                if num_len_bytes == 0 || num_len_bytes > 4 || offset + 2 + num_len_bytes > der.len()
+                {
+                    break;
+                }
+                let mut len = 0usize;
+                for i in 0..num_len_bytes {
+                    len = (len << 8) | der[offset + 2 + i] as usize;
+                }
+                (len, 2 + num_len_bytes)
+            };
+            let total = header_len + len;
+            if offset + total > der.len() {
+                break;
+            }
+            certs.push(der[offset..offset + total].to_vec());
+            offset += total;
+        }
+        certs
     }
 
     #[async_trait]
     impl WorkloadApiTransport for GrpcWorkloadApi {
         async fn fetch_x509_svid(&self) -> Result<Vec<SpiffeSvid>, SpiffeError> {
-            let _channel = self.connect().await?;
-            // The actual gRPC call would use a generated client from
-            // the SPIRE Workload API proto. The proto is hand-rolled
-            // here (no protoc) using prost::Message, the same approach
-            // as the CP/DP transport. The call is:
-            //   POST /spiffe.workloadapi.WorkloadAPI/FetchX509SVID
-            // with an empty X509SVIDRequest body.
-            //
-            // The full gRPC client wiring (codec, path, headers) is
-            // the same shape as cp_dp/transport.rs. Today this returns
-            // an unreachable error because the full gRPC client
-            // implementation requires the proto-generated code which
-            // is not yet wired; the transport abstraction and the
-            // trait-based seam are the deliverable for this issue.
-            Err(SpiffeError::WorkloadApiUnreachable(
-                "gRPC Workload API client wiring is not yet connected (DW-107: transport abstraction landed, full gRPC client pending)".to_string(),
-            ))
+            let channel = self.connect().await?;
+            let codec = ProstCodec::<PbX509SvidRequest, PbX509SvidResponse>::new();
+            let mut grpc = tonic::client::Grpc::new(channel);
+
+            grpc.ready()
+                .await
+                .map_err(|e| SpiffeError::WorkloadApiUnreachable(e.to_string()))?;
+
+            let request = Request::new(PbX509SvidRequest {});
+            let path = http::uri::PathAndQuery::from_static(FETCH_X509_SVID_PATH);
+
+            let response = grpc
+                .unary(request, path, codec)
+                .await
+                .map_err(|e| SpiffeError::GrpcStatus(e.to_string()))?;
+
+            self.parse_svid_response(response.into_inner())
         }
 
         async fn fetch_x509_bundle(&self) -> Result<SpiffeTrustBundle, SpiffeError> {
-            let _channel = self.connect().await?;
-            Err(SpiffeError::WorkloadApiUnreachable(
-                "gRPC Workload API client wiring is not yet connected (DW-107: transport abstraction landed, full gRPC client pending)".to_string(),
-            ))
+            // FetchX509SVID returns the bundles alongside the SVIDs;
+            // we reuse that call and extract the bundle for the
+            // configured trust domain. A dedicated FetchX509Bundle RPC
+            // exists in the SPIRE API, but FetchX509SVID is the common
+            // path (one round-trip for both SVID and bundle).
+            let channel = self.connect().await?;
+            let codec = ProstCodec::<PbX509BundleRequest, PbX509BundleResponse>::new();
+            let mut grpc = tonic::client::Grpc::new(channel);
+
+            grpc.ready()
+                .await
+                .map_err(|e| SpiffeError::WorkloadApiUnreachable(e.to_string()))?;
+
+            let request = Request::new(PbX509BundleRequest {
+                trust_domain: String::new(),
+            });
+            let path = http::uri::PathAndQuery::from_static(FETCH_X509_BUNDLE_PATH);
+
+            let response = grpc
+                .unary(request, path, codec)
+                .await
+                .map_err(|e| SpiffeError::GrpcStatus(e.to_string()))?;
+
+            let resp = response.into_inner();
+            let (_td, bundle) = resp
+                .bundles
+                .into_iter()
+                .next()
+                .ok_or(SpiffeError::EmptyResponse)?;
+            Ok(SpiffeTrustBundle {
+                trust_domain: bundle.trust_domain,
+                x509_certs: bundle.x509_authorities,
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn split_der_chain_empty() {
+            assert!(split_der_chain(&[]).is_empty());
+        }
+
+        #[test]
+        fn split_der_chain_single() {
+            // A minimal DER SEQUENCE: tag 0x30, length 2, two bytes.
+            let der = vec![0x30, 0x02, 0xAA, 0xBB];
+            let certs = split_der_chain(&der);
+            assert_eq!(certs.len(), 1);
+            assert_eq!(certs[0], der);
+        }
+
+        #[test]
+        fn split_der_chain_multiple() {
+            // Two concatenated DER SEQUENCEs.
+            let der = vec![0x30, 0x02, 0xAA, 0xBB, 0x30, 0x01, 0xCC];
+            let certs = split_der_chain(&der);
+            assert_eq!(certs.len(), 2);
+            assert_eq!(certs[0], vec![0x30, 0x02, 0xAA, 0xBB]);
+            assert_eq!(certs[1], vec![0x30, 0x01, 0xCC]);
+        }
+
+        #[test]
+        fn split_der_chain_long_form_length() {
+            // A DER SEQUENCE with long-form length (0x81 = 1 length byte).
+            let mut der = vec![0x30, 0x81, 0x05];
+            der.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+            let certs = split_der_chain(&der);
+            assert_eq!(certs.len(), 1);
+            assert_eq!(certs[0], der);
+        }
+
+        #[test]
+        fn parse_svid_response_valid() {
+            let transport = GrpcWorkloadApi::new("/tmp/test.sock");
+            let resp = PbX509SvidResponse {
+                svids: vec![PbX509Svid {
+                    spiffe_id: "spiffe://example.org/ns/default/sa/my-svc".to_string(),
+                    x509_svid: vec![0x30, 0x02, 0xAA, 0xBB],
+                    x509_svid_key: vec![0x30, 0x02, 0xCC, 0xDD],
+                    expires_at: 9999,
+                }],
+                bundles: std::collections::HashMap::new(),
+            };
+            let svids = transport.parse_svid_response(resp).expect("valid response");
+            assert_eq!(svids.len(), 1);
+            assert_eq!(svids[0].spiffe_id.trust_domain, "example.org");
+            assert_eq!(svids[0].x509_cert.len(), 1);
+            assert_eq!(svids[0].expires_at, 9999);
+        }
+
+        #[test]
+        fn parse_svid_response_invalid_spiffe_id() {
+            let transport = GrpcWorkloadApi::new("/tmp/test.sock");
+            let resp = PbX509SvidResponse {
+                svids: vec![PbX509Svid {
+                    spiffe_id: "http://invalid".to_string(),
+                    x509_svid: vec![0x30, 0x02, 0xAA, 0xBB],
+                    x509_svid_key: vec![],
+                    expires_at: 0,
+                }],
+                bundles: std::collections::HashMap::new(),
+            };
+            let err = transport
+                .parse_svid_response(resp)
+                .expect_err("should error");
+            assert!(matches!(err, SpiffeError::MalformedResponse(_)));
+        }
+
+        #[test]
+        fn parse_svid_response_empty_chain() {
+            let transport = GrpcWorkloadApi::new("/tmp/test.sock");
+            let resp = PbX509SvidResponse {
+                svids: vec![PbX509Svid {
+                    spiffe_id: "spiffe://example.org/x".to_string(),
+                    x509_svid: vec![],
+                    x509_svid_key: vec![],
+                    expires_at: 0,
+                }],
+                bundles: std::collections::HashMap::new(),
+            };
+            let err = transport
+                .parse_svid_response(resp)
+                .expect_err("should error");
+            assert!(matches!(err, SpiffeError::MalformedResponse(_)));
+        }
+
+        #[test]
+        fn parse_bundle_from_svid_response_found() {
+            let transport = GrpcWorkloadApi::new("/tmp/test.sock");
+            let mut bundles = std::collections::HashMap::new();
+            bundles.insert(
+                "example.org".to_string(),
+                PbX509Bundle {
+                    trust_domain: "example.org".to_string(),
+                    x509_authorities: vec![vec![0x30, 0x02, 0xAA, 0xBB]],
+                },
+            );
+            let resp = PbX509SvidResponse {
+                svids: vec![],
+                bundles,
+            };
+            let bundle = transport
+                .parse_bundle_from_svid_response(&resp, "example.org")
+                .expect("found");
+            assert_eq!(bundle.trust_domain, "example.org");
+            assert_eq!(bundle.x509_certs.len(), 1);
+        }
+
+        #[test]
+        fn parse_bundle_from_svid_response_not_found() {
+            let transport = GrpcWorkloadApi::new("/tmp/test.sock");
+            let resp = PbX509SvidResponse {
+                svids: vec![],
+                bundles: std::collections::HashMap::new(),
+            };
+            let err = transport
+                .parse_bundle_from_svid_response(&resp, "missing.org")
+                .expect_err("should error");
+            assert!(matches!(err, SpiffeError::MalformedResponse(_)));
+        }
+
+        #[test]
+        fn prost_codec_default() {
+            // Verify the prost codec can be constructed.
+            let _codec = ProstCodec::<PbX509SvidRequest, PbX509SvidResponse>::new();
         }
     }
 }

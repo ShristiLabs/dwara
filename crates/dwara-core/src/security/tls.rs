@@ -1380,43 +1380,94 @@ pub enum SpiffeMtlsRole {
     Client,
 }
 
+/// A SPIFFE-aware mTLS rustls config: either a client config (for
+/// outbound upstream connections) or a server config (for inbound
+/// listener connections). Built from an X.509 SVID and a trust
+/// bundle by [`build_spiffe_mtls_config`].
+pub enum SpiffeMtlsConfig {
+    /// A client config (outbound): presents the SVID as the client
+    /// cert, verifies peer (server) SVIDs against the trust bundle.
+    Client(rustls::ClientConfig),
+    /// A server config (inbound): presents the SVID as the server
+    /// cert, verifies peer (client) SVIDs against the trust bundle.
+    Server(rustls::ServerConfig),
+}
+
 /// Build a SPIFFE-aware mTLS rustls config from an X.509 SVID and a
 /// trust bundle. This is the integration point between the mesh domain
 /// (which fetches SVIDs from the SPIRE Workload API) and the TLS
 /// machinery here.
 ///
-/// # Stubbed
+/// The SVID's cert chain and private key are loaded as the presented
+/// certificate; the trust bundle is loaded as the peer-verification
+/// root store. The resulting config uses rustls's default certificate
+/// verifier (which validates the chain against the root store).
 ///
-/// This is a documented no-op today. The actual rustls
-/// `ServerConfig`/`ClientConfig` construction -- loading the SVID cert
-/// chain + private key as the presented certificate, the trust bundle
-/// as the peer-verification root store, and wiring a SPIFFE-ID-aware
-/// certificate verifier (one that extracts the URI SAN SPIFFE ID from
-/// the verified peer cert and hands it to the auth layer as the
-/// identity) -- would land here when the `spiffe` crate is added. Today
-/// the function logs that the integration is stubbed and returns an
-/// error so callers fail loudly and attributably.
+/// # Role
+///
+/// - [`SpiffeMtlsRole::Server`]: builds a `ServerConfig` that presents
+///   the SVID as the server cert and verifies peer (client) SVIDs
+///   against the trust bundle (with client auth required).
+/// - [`SpiffeMtlsRole::Client`]: builds a `ClientConfig` that presents
+///   the SVID as the client cert and verifies peer (server) SVIDs
+///   against the trust bundle.
 pub fn build_spiffe_mtls_config(
     role: SpiffeMtlsRole,
     svid: &crate::mesh::SpiffeSvid,
     trust_bundle: &crate::mesh::SpiffeTrustBundle,
-) -> Result<(), TlsError> {
+) -> Result<SpiffeMtlsConfig, TlsError> {
+    // Load the trust bundle into a root store.
+    let mut roots = rustls::RootCertStore::empty();
+    for cert_der in &trust_bundle.x509_certs {
+        roots
+            .add(CertificateDer::from(cert_der.clone()))
+            .map_err(|e| TlsError::RootUnusable(e.to_string()))?;
+    }
+
+    // Load the SVID cert chain and private key.
+    let cert_chain: Vec<CertificateDer<'static>> = svid
+        .x509_cert
+        .iter()
+        .map(|der| CertificateDer::from(der.clone()))
+        .collect();
+    if cert_chain.is_empty() {
+        return Err(TlsError::NoCertificates);
+    }
+    let private_key = PrivateKeyDer::try_from(svid.private_key.clone())
+        .map_err(|e| TlsError::RootUnusable(format!("invalid svid private key: {e}")))?;
+
     tracing::info!(
-        code = "spiffe_mtls_config_stubbed",
+        code = "spiffe_mtls_config_built",
         role = ?role,
-        cert_chain_len = svid.x509_cert.len(),
+        cert_chain_len = cert_chain.len(),
         trust_bundle_len = trust_bundle.x509_certs.len(),
-        "the SPIFFE-aware mTLS rustls config construction is stubbed (DW-107): the \
-         `spiffe` crate would be added when production-ready. The SVID cert/key and \
-         trust bundle would be loaded into a rustls ServerConfig/ClientConfig with a \
-         SPIFFE-ID-aware certificate verifier (the peer's URI SAN SPIFFE ID is the \
-         auth identity). No rustls config is built."
+        spiffe_id = %svid.spiffe_id,
+        "built SPIFFE-aware mTLS rustls config from SVID and trust bundle"
     );
-    // The shapes are used so the integration contract compiles and the
-    // scaffold is exercised; the real construction lands here when the
-    // spiffe crate is wired.
-    let _ = (role, svid, trust_bundle);
-    Err(TlsError::NoCertificates)
+
+    match role {
+        SpiffeMtlsRole::Server => {
+            // Server config: present the SVID as the server cert,
+            // verify peer (client) SVIDs against the trust bundle.
+            let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .map_err(|e| TlsError::RootUnusable(format!("client verifier: {e}")))?;
+            let cfg = rustls::ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert_chain, private_key)
+                .map_err(TlsError::Rustls)?;
+            Ok(SpiffeMtlsConfig::Server(cfg))
+        }
+        SpiffeMtlsRole::Client => {
+            // Client config: present the SVID as the client cert,
+            // verify peer (server) SVIDs against the trust bundle.
+            let cfg = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(cert_chain, private_key)
+                .map_err(TlsError::Rustls)?;
+            Ok(SpiffeMtlsConfig::Client(cfg))
+        }
+    }
 }
 
 /// Extract the SPIFFE ID (the URI SAN) from a verified peer
@@ -1426,25 +1477,159 @@ pub fn build_spiffe_mtls_config(
 /// peer cert's URI SAN and hands it to the auth layer as the
 /// principal/consumer.
 ///
-/// # Stubbed
+/// The extraction is a DER walk to the SubjectAltName extension,
+/// then the URI entry tagged with the `spiffe://` scheme. This is
+/// the same substrate as `spki_of_leaf` (no X.509 parser dependency).
 ///
-/// Documented no-op today. The DER walk to the URI SAN extension
-/// (the same substrate as `spki_of_leaf`, no X.509 parser dependency)
-/// would land here when the mesh mTLS wiring is production-ready. Today
-/// the function returns None.
+/// Returns `None` when the cert has no URI SAN or the URI is not a
+/// SPIFFE ID.
 pub fn extract_spiffe_id_from_peer_cert(
-    _cert: &rustls::pki_types::CertificateDer<'_>,
+    cert: &rustls::pki_types::CertificateDer<'_>,
 ) -> Option<crate::mesh::SpiffeIdentity> {
-    // The URI SAN extraction (a DER walk to the SubjectAltName
-    // extension, then the URI entry tagged with the SPIFFE scheme)
-    // would land here when production-ready, mirroring the
-    // `spki_algorithm_of_leaf` DER walk used by FIPS validation. Today
-    // the function is a documented no-op.
-    tracing::info!(
-        code = "spiffe_id_extraction_stubbed",
-        "the SPIFFE ID (URI SAN) extraction from a peer certificate is stubbed \
-         (DW-107): the DER walk would land here when the mesh mTLS wiring is \
-         production-ready."
-    );
+    // The DER walk: find the SubjectAltName extension (OID
+    // 2.5.29.17), then iterate the GeneralNames looking for a URI
+    // entry (tag 0x86 = context-specific [6]) that starts with
+    // "spiffe://".
+    let der = cert.as_ref();
+    let san_ext = find_extension(der, &[0x55, 0x1D, 0x11])?; // OID 2.5.29.17
+    let san_value = unwrap_octet_string(san_ext)?;
+    let uri = find_uri_san(san_value)?;
+    crate::mesh::SpiffeIdentity::parse(uri)
+}
+
+/// Find an X.509 extension by its OID bytes. Returns the extension's
+/// value (the OCTET STRING contents). This is a minimal DER walk; it
+/// does not validate the full cert structure (the cert is already
+/// verified by rustls before this function is called).
+fn find_extension<'a>(der: &'a [u8], oid: &[u8]) -> Option<&'a [u8]> {
+    // A minimal DER walker: find the tbsCertificate SEQUENCE, then
+    // iterate its fields looking for the extensions [3] EXPLICIT
+    // tagged element, then find the extension with the matching OID.
+    // This is intentionally minimal (the cert is already verified).
+    let mut offset = 0;
+    // Outer SEQUENCE (Certificate)
+    let (cert_seq, _after_outer) = read_sequence(der, offset)?;
+    offset = 0;
+    // tbsCertificate SEQUENCE (first field of Certificate)
+    let (tbs, _) = read_sequence(cert_seq, offset)?;
+    // Walk the tbsCertificate fields: version [0], serial, sigAlgo,
+    // issuer, validity, subject, extensions [3].
+    let mut p = 0;
+    // Skip version (optional [0] EXPLICIT)
+    if p < tbs.len() && tbs[p] == 0xA0 {
+        let (_, after) = read_tagged(tbs, p)?;
+        p = after;
+    }
+    // Skip serial (INTEGER)
+    let (_, after) = read_tagged(tbs, p)?;
+    p = after;
+    // Skip sigAlgo (SEQUENCE)
+    let (_, after) = read_tagged(tbs, p)?;
+    p = after;
+    // Skip issuer (SEQUENCE)
+    let (_, after) = read_tagged(tbs, p)?;
+    p = after;
+    // Skip validity (SEQUENCE)
+    let (_, after) = read_tagged(tbs, p)?;
+    p = after;
+    // Skip subject (SEQUENCE)
+    let (_, after) = read_tagged(tbs, p)?;
+    p = after;
+    // extensions [3] EXPLICIT
+    if p >= tbs.len() || tbs[p] != 0xA3 {
+        return None;
+    }
+    let (ext_seq, _) = read_tagged(tbs, p)?;
+    // ext_seq is a SEQUENCE of Extension SEQUENCEs
+    let mut ep = 0;
+    while ep < ext_seq.len() {
+        let (ext, after) = read_sequence(ext_seq, ep)?;
+        ep = after;
+        // ext is: OID, BOOLEAN (optional critical), OCTET STRING value
+        let (oid_val, after_oid) = read_tagged(ext, 0)?;
+        if oid_val.len() != oid.len() || oid_val != oid {
+            continue;
+        }
+        // Skip the OID tag byte (the read_tagged returns the value
+        // without the tag, but the OID value includes the tag byte
+        // in the raw DER; here oid_val is the OID content).
+        let mut vp = after_oid;
+        // Skip optional BOOLEAN (critical)
+        if vp < ext.len() && ext[vp] == 0x01 {
+            let (_, after) = read_tagged(ext, vp)?;
+            vp = after;
+        }
+        // OCTET STRING value
+        let (octet, _) = read_tagged(ext, vp)?;
+        return Some(octet);
+    }
+    None
+}
+
+/// Read a DER SEQUENCE at the given offset, returning the sequence
+/// contents and the offset after the sequence.
+fn read_sequence(der: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    if offset >= der.len() || der[offset] != 0x30 {
+        return None;
+    }
+    read_tlv(der, offset)
+}
+
+/// Read a DER TLV (tag-length-value) at the given offset, returning
+/// the value and the offset after the TLV.
+fn read_tagged(der: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    if offset >= der.len() {
+        return None;
+    }
+    read_tlv(der, offset)
+}
+
+/// Read a DER TLV at the given offset.
+fn read_tlv(der: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    if offset + 1 >= der.len() {
+        return None;
+    }
+    let len_byte = der[offset + 1];
+    let (len, header_len) = if len_byte < 0x80 {
+        (len_byte as usize, 2)
+    } else {
+        let num_len_bytes = (len_byte & 0x7F) as usize;
+        if num_len_bytes == 0 || num_len_bytes > 4 || offset + 2 + num_len_bytes > der.len() {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..num_len_bytes {
+            len = (len << 8) | der[offset + 2 + i] as usize;
+        }
+        (len, 2 + num_len_bytes)
+    };
+    let start = offset + header_len;
+    let end = start + len;
+    if end > der.len() {
+        return None;
+    }
+    Some((&der[start..end], end))
+}
+
+/// Unwrap an OCTET STRING, returning its contents.
+fn unwrap_octet_string(der: &[u8]) -> Option<&[u8]> {
+    if der.is_empty() || der[0] != 0x04 {
+        return None;
+    }
+    read_tlv(der, 0).map(|(v, _)| v)
+}
+
+/// Find a URI SAN (tag 0x86 = context-specific [6]) in a
+/// SubjectAltName extension value. Returns the URI as a string slice.
+fn find_uri_san(san: &[u8]) -> Option<&str> {
+    let mut offset = 0;
+    while offset < san.len() {
+        let (val, after) = read_tlv(san, offset)?;
+        // URI GeneralName is context-specific [6] = tag 0x86.
+        if san[offset] == 0x86 {
+            return std::str::from_utf8(val).ok();
+        }
+        offset = after;
+    }
     None
 }
