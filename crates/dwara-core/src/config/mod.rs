@@ -2122,6 +2122,16 @@ pub struct JwtProvider {
     /// the value at 7 days (604800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_key_grace_secs: Option<u64>,
+    /// How long to serve stale (cached) keys after a JWKS fetch failure
+    /// (SEC-12, #215), in seconds (default: same as `refresh_secs`,
+    /// capped at 300). When a JWKS fetch fails, the cached key set
+    /// keeps serving for this duration before a new fetch is attempted,
+    /// so a transient JWKS provider outage does not cascade into auth
+    /// failures. 0 disables stale-on-error (a fetch failure surfaces
+    /// immediately when the cache is empty; when the cache is non-empty
+    /// the existing degraded-mode behavior applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_on_error_secs: Option<u64>,
 }
 
 impl JwtProvider {
@@ -2129,6 +2139,15 @@ impl JwtProvider {
     /// (default 86 400; the DW-046 dual-validity window).
     pub fn retired_key_grace_secs(&self) -> u64 {
         self.retired_key_grace_secs.unwrap_or(86_400)
+    }
+    /// `stale_on_error_secs` resolved to its effective value (SEC-12,
+    /// #215): the default is `min(refresh_secs, 300)` — a failed fetch
+    /// backs off for at most one refresh interval (capped at 5 min) so
+    /// a down JWKS endpoint does not chain every Bearer request through
+    /// a doomed fetch attempt.
+    pub fn stale_on_error_secs(&self) -> u64 {
+        self.stale_on_error_secs
+            .unwrap_or_else(|| self.refresh_secs.min(300))
     }
 }
 
