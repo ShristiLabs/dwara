@@ -435,6 +435,16 @@ impl hyper::body::Body for CountingBody {
                     this.counter
                         .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 }
+                // PERF-12 (#209): hyper may not poll again after the
+                // last data frame when it knows the body length (via
+                // Content-Length or size_hint). Fire on_complete here
+                // when the inner body signals end-of-stream, so the
+                // analytics/access-log completion callback is not lost.
+                if this.on_complete.is_some() && Pin::new(&mut this.inner).is_end_stream() {
+                    if let Some(cb) = this.on_complete.take() {
+                        cb();
+                    }
+                }
             }
             Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
                 if let Some(cb) = this.on_complete.take() {
@@ -444,10 +454,6 @@ impl hyper::body::Body for CountingBody {
             Poll::Pending => {}
         }
         poll
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
@@ -3219,11 +3225,21 @@ where
         }
     };
     let body = std::mem::replace(resp.body_mut(), ProxyBody::Full(Full::new(Bytes::new())));
-    *resp.body_mut() = ProxyBody::Counted(Box::new(CountingBody::new(
-        body,
-        bytes_out,
-        Box::new(on_complete),
-    )));
+    // PERF-12 (#209): hyper may skip polling the body entirely when it
+    // knows the body is empty (size_hint=0, is_end_stream=true). In that
+    // case CountingBody::poll_frame never runs, so on_complete would
+    // never fire. Fire it synchronously here when the body is already
+    // complete; otherwise wrap it for byte-counted streaming completion.
+    if body.is_end_stream() {
+        on_complete();
+        *resp.body_mut() = body;
+    } else {
+        *resp.body_mut() = ProxyBody::Counted(Box::new(CountingBody::new(
+            body,
+            bytes_out,
+            Box::new(on_complete),
+        )));
+    }
     resp
 }
 

@@ -1042,8 +1042,11 @@ async fn malformed_jwks_body_keeps_cached_keys_working_and_500s_only_on_refresh(
         "cached keys must survive garbage jwks"
     );
 
-    // A refresh forced by an unknown kid hits the garbage: gateway-side
-    // failure -> 500 (the gateway cannot vouch for the caller either way).
+    // A refresh forced by an unknown kid hits the garbage: with cached
+    // keys serving (stale-on-error), the gateway degrades gracefully
+    // and returns 401 (invalid token) instead of 500 — the caller gets
+    // a clear "your token is not recognized" rather than a gateway
+    // outage. Only when the cache is empty does 500 surface.
     let stranger = rcgen::KeyPair::generate().unwrap();
     let unknown = lab_token(&stranger, "ghost");
     let (status, _, _) = send_with(
@@ -1052,7 +1055,7 @@ async fn malformed_jwks_body_keeps_cached_keys_working_and_500s_only_on_refresh(
         vec![("authorization", &format!("Bearer {unknown}"))],
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

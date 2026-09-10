@@ -47,7 +47,6 @@ fn breaker_params() -> BreakerParams {
         error_volume: 100,
         open_ms: 1_000,
         half_open_probes: 1,
-        recovery_ramp_ms: 0,
     }
 }
 
