@@ -64,11 +64,37 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// CFG-03 (#239): the current config schema version. Increment when
+/// the schema gains a breaking change (removed fields, renamed
+/// fields, changed semantics). The `dwara lint` command warns when a
+/// config's `version` is older than this; `dwara migrate` upgrades
+/// configs to this version.
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
+/// Default config version (assumed when `version` is absent from the
+/// YAML). The initial schema is version 1.
+fn default_config_version() -> u32 {
+    1
+}
+
+/// Whether the config version is the default (1). Used by
+/// `skip_serializing_if` to omit the field when it's the default.
+fn is_default_config_version(v: &u32) -> bool {
+    *v == 1
+}
+
 /// Root of a dwara configuration: one gateway process, N listeners, and one
 /// compiled config generation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Gateway {
+    /// CFG-03 (#239): config schema version. Defaults to 1 when
+    /// absent (the initial schema). The `dwara lint` command warns
+    /// when the version is older than the current schema version; the
+    /// `dwara migrate` command upgrades the config to the current
+    /// version.
+    #[serde(default = "default_config_version", skip_serializing_if = "is_default_config_version")]
+    pub version: u32,
     /// Entry points the gateway binds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<Listener>,

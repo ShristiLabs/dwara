@@ -581,6 +581,7 @@ pub fn translate(
 
     // Build the gateway.
     let dwara_gateway = DwaraGateway {
+        version: 1,
         listeners,
         routes: dwara_routes,
         services,

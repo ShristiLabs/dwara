@@ -83,6 +83,17 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// CFG-03 (#239): migrate a config to the current schema version.
+    /// Parses the config, sets the version to the current schema
+    /// version, and re-serializes. Prints the migrated config to stdout
+    /// (or writes it back to the file with --in-place).
+    Migrate {
+        /// Path to the gateway YAML config.
+        file: String,
+        /// Write the migrated config back to the file instead of stdout.
+        #[arg(long)]
+        in_place: bool,
+    },
     /// Print the JSON Schema of the gateway config.
     Schema,
     /// Import an external spec and generate a Dwara config.
@@ -480,6 +491,35 @@ fn main() {
                     },
                 }
             }
+        },
+        Command::Migrate { file, in_place } => match read(&file) {
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+            Ok(text) => match dwara_cli::migrate_config(&text) {
+                Ok((yaml, notes)) => {
+                    for note in &notes {
+                        eprintln!("{note}");
+                    }
+                    if in_place {
+                        match write_atomic(&file, &yaml) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                eprintln!("cannot write {file}: {e}");
+                                1
+                            }
+                        }
+                    } else {
+                        print!("{yaml}");
+                        0
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
         },
         Command::Import { kind } => match kind {
             ImportKind::Openapi { spec, output } => match read(&spec) {

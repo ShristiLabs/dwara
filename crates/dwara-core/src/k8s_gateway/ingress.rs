@@ -472,6 +472,7 @@ pub fn translate_ingress(
     }
 
     let dwara_gateway = DwaraGateway {
+        version: 1,
         listeners,
         routes: dwara_routes,
         services,

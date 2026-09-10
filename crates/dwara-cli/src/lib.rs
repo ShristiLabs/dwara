@@ -90,6 +90,37 @@ pub fn format_config_text(text: &str) -> Result<String, String> {
     gateway_to_yaml(&gateway).map_err(|e| format!("serialize failed: {e}"))
 }
 
+/// CFG-03 (#239): migrate a config to the current schema version.
+/// Parses the config, sets the version to `CURRENT_CONFIG_VERSION`,
+/// and re-serializes. Returns the migrated config YAML and a list of
+/// migration notes (what changed, if anything).
+pub fn migrate_config(text: &str) -> Result<(String, Vec<String>), String> {
+    let mut gateway = parse_gateway(text).map_err(|e| format!("parse failed: {e}"))?;
+    let mut notes = Vec::new();
+
+    if gateway.version < dwara_core::config::CURRENT_CONFIG_VERSION {
+        notes.push(format!(
+            "upgraded config version from {} to {}",
+            gateway.version,
+            dwara_core::config::CURRENT_CONFIG_VERSION
+        ));
+        gateway.version = dwara_core::config::CURRENT_CONFIG_VERSION;
+    } else if gateway.version == dwara_core::config::CURRENT_CONFIG_VERSION {
+        notes.push("config is already at the current version".to_string());
+    } else {
+        notes.push(format!(
+            "config version {} is newer than the current schema version {}; downgrading to {}",
+            gateway.version,
+            dwara_core::config::CURRENT_CONFIG_VERSION,
+            dwara_core::config::CURRENT_CONFIG_VERSION
+        ));
+        gateway.version = dwara_core::config::CURRENT_CONFIG_VERSION;
+    }
+
+    let yaml = gateway_to_yaml(&gateway).map_err(|e| format!("serialize failed: {e}"))?;
+    Ok((yaml, notes))
+}
+
 /// Compile both documents and report route/upstream/consumer deltas as
 /// plain text: `+ kind name` (added), `- kind name` (removed), and
 /// `~ kind name` (present in both sides under the same name but with
@@ -225,6 +256,33 @@ impl std::fmt::Display for LintWarning {
 /// lint rule — validation already rejects conflicting binds.
 pub fn lint_config(gateway: &Gateway) -> Vec<LintWarning> {
     let mut warnings = Vec::new();
+
+    // CFG-03 (#239): config version lint. Warn when the config's
+    // version is older than the current schema version (the config may
+    // use deprecated fields or miss new defaults). Also warn when the
+    // version is NEWER than the current schema (the config was written
+    // for a newer dwara version and may use unknown features).
+    if gateway.version < dwara_core::config::CURRENT_CONFIG_VERSION {
+        warnings.push(LintWarning {
+            kind: "config",
+            name: "version".to_string(),
+            message: format!(
+                "config version {} is older than the current schema version {}; run 'dwara migrate' to upgrade",
+                gateway.version,
+                dwara_core::config::CURRENT_CONFIG_VERSION
+            ),
+        });
+    } else if gateway.version > dwara_core::config::CURRENT_CONFIG_VERSION {
+        warnings.push(LintWarning {
+            kind: "config",
+            name: "version".to_string(),
+            message: format!(
+                "config version {} is newer than the current schema version {}; the config may use features not supported by this dwara version",
+                gateway.version,
+                dwara_core::config::CURRENT_CONFIG_VERSION
+            ),
+        });
+    }
 
     // prefix-duplicate: equal-length ties resolve to the FIRST declared
     // prefix route, so later duplicates are dead config.

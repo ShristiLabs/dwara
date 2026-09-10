@@ -431,6 +431,7 @@ fn build_gateway_from_envoy(envoy: &EnvoyConfig) -> (Gateway, Vec<String>) {
 
     let allow_empty_routes = routes.is_empty();
     let gateway = Gateway {
+        version: 1,
         listeners,
         routes,
         services: services.into_values().collect(),

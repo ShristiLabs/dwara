@@ -4,6 +4,12 @@
   "description": "Root of a dwara configuration: one gateway process, N listeners, and one\ncompiled config generation.",
   "type": "object",
   "properties": {
+    "version": {
+      "description": "CFG-03 (#239): config schema version. Defaults to 1 when\nabsent (the initial schema). The `dwara lint` command warns\nwhen the version is older than the current schema version; the\n`dwara migrate` command upgrades the config to the current\nversion.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
     "listeners": {
       "description": "Entry points the gateway binds.",
       "type": "array",

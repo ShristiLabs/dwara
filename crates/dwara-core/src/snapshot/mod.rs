@@ -8200,6 +8200,7 @@ impl Snapshot {
             generation: 0,
             content_hash: 0,
             gateway: Arc::new(Gateway {
+                version: 1,
                 trusted_proxies: vec![],
                 listeners: Vec::new(),
                 routes: Vec::new(),

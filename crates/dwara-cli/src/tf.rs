@@ -226,6 +226,7 @@ pub fn state_to_gateway(state: &TfState) -> Result<Gateway, String> {
 
     let allow_empty_routes = routes.is_empty();
     Ok(Gateway {
+        version: 1,
         listeners,
         routes,
         services,
@@ -1081,6 +1082,7 @@ mod tests {
 
     fn sample_gateway() -> Gateway {
         Gateway {
+            version: 1,
             listeners: vec![Listener {
                 name: "main".to_string(),
                 address: "127.0.0.1".to_string(),
@@ -1361,6 +1363,7 @@ mod tests {
     #[test]
     fn empty_state_round_trips() {
         let gw = Gateway {
+            version: 1,
             listeners: Vec::new(),
             routes: Vec::new(),
             services: Vec::new(),

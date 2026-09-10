@@ -195,6 +195,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
 
     let allow_empty_routes = routes.is_empty();
     Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services: vec![Service {

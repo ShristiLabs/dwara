@@ -577,6 +577,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
 
     let allow_empty_routes = routes.is_empty();
     let gateway = Gateway {
+        version: 1,
         listeners: Vec::new(),
         routes,
         services: services.into_values().collect(),
