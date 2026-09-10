@@ -2395,6 +2395,7 @@ fn redis_quotas_empty_url_rejected() {
         fail_open: true,
         key_prefix: "dwara:quota:".into(),
         connection_timeout_ms: 1000,
+        ha: Default::default(),
     });
     let issues = validate(&gw);
     assert!(
@@ -2413,6 +2414,7 @@ fn redis_quotas_connection_timeout_out_of_range_rejected() {
         fail_open: true,
         key_prefix: "dwara:quota:".into(),
         connection_timeout_ms: 10, // below MIN_REDIS_CONNECTION_TIMEOUT_MS (100)
+        ha: Default::default(),
     });
     let issues = validate(&gw);
     assert!(
@@ -2432,6 +2434,7 @@ fn redis_quotas_empty_key_prefix_rejected() {
         fail_open: true,
         key_prefix: "".into(),
         connection_timeout_ms: 1000,
+        ha: Default::default(),
     });
     let issues = validate(&gw);
     assert!(
@@ -2449,6 +2452,7 @@ fn redis_quotas_valid_config_accepted() {
         fail_open: true,
         key_prefix: "dwara:quota:".into(),
         connection_timeout_ms: 1000,
+        ha: Default::default(),
     });
     let issues = validate(&gw);
     assert!(

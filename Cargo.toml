@@ -234,6 +234,13 @@ licensing-core = { git = "https://github.com/ShristiLabs/licensing.git", rev = "
 # (the default) never pull it in; enabled via the `ent` feature on dwara-core.
 # The `tokio-comp` feature enables the async API (ConnectionManager) used by
 # the distributed GCRA limiter.
+# SCALE-11 (#248): Redis HA topologies (Sentinel and Cluster) for the
+# distributed rate limiter, quotas, and shared cache (ent feature only).
+# Sentinel mode resolves the master via SENTINEL GET-MASTER-ADDR-BY-NAME
+# commands (no extra redis crate feature needed). Cluster mode connects
+# to one node and uses hash tags for slot affinity (the redis 0.27
+# crate's async cluster connection is not Send, so full cluster support
+# with MOVED/ASK handling is a future enhancement).
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # DW-042: DNS-based dynamic upstream discovery (hickory-resolver for
 # TTL-aware A/SRV resolution). MIT OR Apache-2.0 (both allow-listed in

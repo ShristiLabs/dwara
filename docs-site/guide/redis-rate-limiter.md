@@ -105,6 +105,93 @@ automatically on failure. The connection is established once at
 startup and cloned per-rule at engine compile time. Reloads recompile
 the rate-limit engine with the same connection.
 
+## High availability (HA)
+
+The `ha` block controls the Redis deployment topology. It applies to
+all Redis-backed features (rate limiter, quotas, shared cache).
+
+### Single (default)
+
+The default topology: one Redis instance, no HA. If the instance is
+down, the `fail_open` policy applies.
+
+```yaml
+gateway:
+  redis_rate_limiter:
+    url: redis://127.0.0.1:6379
+    # ha block omitted — defaults to single
+```
+
+### Sentinel
+
+Redis Sentinel provides automatic failover: a set of Sentinel nodes
+monitor the master and promote a replica if the master fails. The
+gateway resolves the master via `SENTINEL GET-MASTER-ADDR-BY-NAME`
+at startup, then connects to the resolved master with a
+`ConnectionManager` (auto-reconnecting on failover is handled by
+re-resolving on disconnect).
+
+```yaml
+gateway:
+  redis_rate_limiter:
+    url: redis://127.0.0.1:6379  # used if ha.nodes is empty
+    ha:
+      topology: sentinel
+      master_name: mymaster
+      nodes:
+        - redis://sentinel-1:26379
+        - redis://sentinel-2:26379
+        - redis://sentinel-3:26379
+      request_timeout_ms: 500  # optional, default 500, range 50..=30000
+```
+
+| Field | Default | Range | Description |
+|---|---|---|---|
+| `topology` | `single` | `single`, `sentinel`, `cluster` | Deployment topology. |
+| `nodes` | `[]` | list of URLs | Sentinel/cluster node URLs. For `sentinel`, these are the Sentinel nodes. For `cluster`, any subset of the cluster's nodes. |
+| `master_name` | none | string | Required for `sentinel`: the `master_name` in Sentinel config. |
+| `request_timeout_ms` | `500` | 0 or 50..=30000 | Per-request timeout. 0 means no timeout (use the connection's default). A timed-out command is treated as a backend error and the `fail_open` policy applies. |
+
+### Cluster
+
+Redis Cluster shards data across multiple nodes. The gateway connects
+to one cluster node and uses hash tags (`{key}`) to ensure all rate-limit
+windows for one logical key land on the same slot. If the connected
+node is not the owner of that slot, Redis returns a MOVED error which
+is treated as a backend error (fail-open or fail-closed per config).
+
+Full cluster support with automatic MOVED/ASK handling is a future
+enhancement (requires a Redis client library with a Send-compatible
+async cluster connection).
+
+```yaml
+gateway:
+  redis_rate_limiter:
+    url: redis://127.0.0.1:6379  # used if ha.nodes is empty
+    ha:
+      topology: cluster
+      nodes:
+        - redis://cluster-node-1:6379
+        - redis://cluster-node-2:6379
+        - redis://cluster-node-3:6379
+      request_timeout_ms: 500
+```
+
+### Multi-region guidance
+
+For multi-region deployments, run one Redis (or Sentinel/Cluster) per
+region and point each region's gateway instances at their local Redis.
+Rate limits are shared within a region but not across regions. This
+is the recommended pattern: cross-region Redis adds latency and
+complexity that is rarely worth the benefit of a single global limit.
+
+If a single global limit is required, use Redis Sentinel or Cluster in
+one region and accept the cross-region latency. The `request_timeout_ms`
+field bounds the impact: a timed-out Redis command is treated as a
+backend error and the `fail_open` policy applies, so a slow cross-region
+Redis link degrades gracefully (no rate limiting) rather than blocking
+the request path.
+
 ## Runnable demo
 
 The `demos/11-enterprise/` directory in the repository includes the

@@ -134,6 +134,13 @@ pub struct RedisRateLimiter {
     key_ttl_s: u64,
     /// The compiled GCRA Lua script (EVALSHA-cached by the redis crate).
     script: Script,
+    /// Per-request timeout in milliseconds (SCALE-11, #248). 0 means
+    /// no per-request timeout (use the connection's default).
+    request_timeout_ms: u64,
+    /// True when the connection is to a Redis Cluster (SCALE-11,
+    /// #248): keys are wrapped in hash tags (`{key}`) so all windows
+    /// for one logical key land on the same slot.
+    is_cluster: bool,
 }
 
 impl std::fmt::Debug for RedisRateLimiter {
@@ -157,6 +164,8 @@ impl RedisRateLimiter {
         fail_open: bool,
         key_prefix: String,
         key_ttl_s: u64,
+        request_timeout_ms: u64,
+        is_cluster: bool,
     ) -> Option<Self> {
         if specs.is_empty() {
             return None;
@@ -169,6 +178,8 @@ impl RedisRateLimiter {
             key_prefix,
             key_ttl_s,
             script: Script::new(GCRA_LUA),
+            request_timeout_ms,
+            is_cluster,
         })
     }
 
@@ -186,6 +197,8 @@ impl RedisRateLimiter {
             config.fail_open,
             config.key_prefix.clone(),
             config.key_ttl_s,
+            config.ha.request_timeout_ms,
+            config.ha.topology == crate::config::RedisTopology::Cluster,
         )
     }
 
@@ -204,7 +217,16 @@ impl RedisRateLimiter {
 
         let mut binding: Option<GcraOutcome> = None;
         for (i, window) in self.windows.iter().enumerate() {
-            let redis_key = format!("{}{}:{}", self.key_prefix, key, i);
+            // SCALE-11 (#248): in cluster mode, wrap the logical key
+            // in a hash tag `{key}` so all windows for one key land on
+            // the same slot (the Lua script touches one key per
+            // call). In single mode, no hash tag (the key is used
+            // directly).
+            let redis_key = if self.is_cluster {
+                format!("{}{{{}}}:{}", self.key_prefix, key, i)
+            } else {
+                format!("{}{}:{}", self.key_prefix, key, i)
+            };
             match self.check_window(&redis_key, window, cost, now_ns).await {
                 Ok((true, remaining, _)) => {
                     let candidate = GcraOutcome {
@@ -278,22 +300,39 @@ impl RedisRateLimiter {
         now_ns: u64,
     ) -> Result<(bool, u64, u64), ExtensionsError> {
         let mut conn = self.conn.clone();
-        let result: Vec<i64> = self
-            .script
-            .key(redis_key)
-            .arg(window.emission_interval_ns)
-            .arg(window.burst_tolerance_ns)
-            .arg(u64::from(cost))
-            .arg(now_ns)
-            .arg(self.key_ttl_s)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| ExtensionsError::Backend(format!("redis gcra script error: {e}")))?;
-        // The Lua script returns {allowed (1/0), remaining, retry_after_ms}.
-        let allowed = result.first().copied().unwrap_or(0) == 1;
-        let remaining = u64::try_from(result.get(1).copied().unwrap_or(0)).unwrap_or(0);
-        let retry_after_ms = u64::try_from(result.get(2).copied().unwrap_or(0)).unwrap_or(0);
-        Ok((allowed, remaining, retry_after_ms))
+        let invoke = async {
+            let result: Vec<i64> = self
+                .script
+                .key(redis_key)
+                .arg(window.emission_interval_ns)
+                .arg(window.burst_tolerance_ns)
+                .arg(u64::from(cost))
+                .arg(now_ns)
+                .arg(self.key_ttl_s)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| ExtensionsError::Backend(format!("redis gcra script error: {e}")))?;
+            // The Lua script returns {allowed (1/0), remaining, retry_after_ms}.
+            let allowed = result.first().copied().unwrap_or(0) == 1;
+            let remaining = u64::try_from(result.get(1).copied().unwrap_or(0)).unwrap_or(0);
+            let retry_after_ms = u64::try_from(result.get(2).copied().unwrap_or(0)).unwrap_or(0);
+            Ok((allowed, remaining, retry_after_ms))
+        };
+        // SCALE-11 (#248): per-request timeout. 0 means no timeout
+        // (use the connection's default).
+        if self.request_timeout_ms == 0 {
+            invoke.await
+        } else {
+            tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), invoke)
+                .await
+                .map_err(|_| {
+                    ExtensionsError::Backend(format!(
+                        "redis gcra script timed out after {}ms (key={redis_key})",
+                        self.request_timeout_ms
+                    ))
+                })
+                .and_then(|inner| inner)
+        }
     }
 }
 

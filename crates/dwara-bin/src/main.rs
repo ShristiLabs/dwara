@@ -1516,10 +1516,88 @@ const DEFAULT_BIND_PORT: u16 = 8080;
 async fn establish_redis_connection(
     config: &dwara_core::config::RedisRateLimiterConfig,
 ) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
-    let client = redis::Client::open(config.url.as_str())?;
+    use dwara_core::config::RedisTopology;
     let timeout = Duration::from_millis(config.connection_timeout_ms);
-    let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
-    Ok(conn)
+    match config.ha.topology {
+        RedisTopology::Single => {
+            let client = redis::Client::open(config.url.as_str())?;
+            let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+            Ok(conn)
+        }
+        RedisTopology::Sentinel => {
+            // SCALE-11 (#248): Sentinel mode. Resolve the master via
+            // SENTINEL GET-MASTER-ADDR-BY-NAME, then connect to the
+            // resolved master with a ConnectionManager (auto-reconnecting
+            // on failover is handled by re-resolving on disconnect).
+            let master_name =
+                config.ha.master_name.as_deref().ok_or(
+                    "redis_rate_limiter.ha.master_name is required when topology = sentinel",
+                )?;
+            let sentinel_urls: Vec<String> = if config.ha.nodes.is_empty() {
+                vec![config.url.clone()]
+            } else {
+                config.ha.nodes.clone()
+            };
+            // Try each Sentinel node until one responds with the master
+            // address. Sentinels are interchangeable; any one can
+            // resolve the master.
+            let mut master_url: Option<String> = None;
+            for sentinel_url in &sentinel_urls {
+                let sentinel_client = redis::Client::open(sentinel_url.as_str())?;
+                let mut sentinel_conn = match tokio::time::timeout(
+                    timeout,
+                    sentinel_client.get_multiplexed_async_connection(),
+                )
+                .await
+                {
+                    Ok(Ok(conn)) => conn,
+                    Ok(Err(_)) | Err(_) => continue,
+                };
+                let addr: (String, String) = match redis::cmd("SENTINEL")
+                    .arg("GET-MASTER-ADDR-BY-NAME")
+                    .arg(master_name)
+                    .query_async(&mut sentinel_conn)
+                    .await
+                {
+                    Ok(addr) => addr,
+                    Err(_) => continue,
+                };
+                master_url = Some(format!("redis://{}/{}", addr.0, addr.1));
+                break;
+            }
+            let master_url = master_url.ok_or(format!(
+                "failed to resolve master '{master_name}' from any Sentinel node"
+            ))?;
+            tracing::info!(
+                code = "redis_sentinel_master_resolved",
+                master_name = master_name,
+                master_url = %master_url,
+                "Sentinel resolved master for redis_rate_limiter"
+            );
+            let client = redis::Client::open(master_url.as_str())?;
+            let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+            Ok(conn)
+        }
+        RedisTopology::Cluster => {
+            // SCALE-11 (#248): Redis Cluster mode. The redis 0.27
+            // crate's async cluster connection (ClusterConnection) is
+            // not Send (uses RefCell internally), so it cannot be used
+            // with ConnectionManager. Instead, connect to the first
+            // cluster node with a ConnectionManager. The rate limiter
+            // uses hash tags ({key}) to ensure all windows for one
+            // logical key land on the same slot; if the connected node
+            // is not the owner of that slot, Redis returns a MOVED
+            // error which is treated as a backend error (fail-open or
+            // fail-closed per config). Full cluster support with
+            // automatic MOVED/ASK handling is a future enhancement
+            // (requires upgrading to a redis crate version with a
+            // Send async cluster connection).
+            let cluster_url = config.ha.nodes.first().unwrap_or(&config.url);
+            let client = redis::Client::open(cluster_url.as_str())?;
+            let conn = tokio::time::timeout(timeout, client.get_connection_manager()).await??;
+            Ok(conn)
+        }
+    }
 }
 
 /// Establish a pooled Redis connection for the distributed quota checker

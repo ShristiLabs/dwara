@@ -677,19 +677,105 @@ fn is_default_license_grace_period_days(v: &u32) -> bool {
     *v == crate::config::limits::DEFAULT_LICENSE_GRACE_PERIOD_DAYS
 }
 
-/// Distributed Redis rate limiter config (DW-031, `gateway.redis_rate_limiter`).
+/// Redis deployment topology (SCALE-11, #248). Controls how the
+/// gateway connects to Redis for the distributed rate limiter,
+/// quotas, and shared cache. The default `single` mode uses one
+/// Redis URL (the existing behavior). `sentinel` mode resolves the
+/// master through a Sentinel deployment. `cluster` mode connects
+/// to a Redis Cluster.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum RedisTopology {
+    /// Single Redis instance (the default). Uses the `url` field
+    /// directly. No HA — if the instance is down, the fail-open
+    /// policy applies.
+    #[default]
+    Single,
+    /// Redis Sentinel: resolves the master via the Sentinel nodes
+    /// listed in `nodes`, using `master_name` to identify the
+    /// monitored instance. The gateway connects to the resolved
+    /// master via a `ConnectionManager` (automatic reconnection on
+    /// failover is handled by re-resolving on disconnect).
+    Sentinel,
+    /// Redis Cluster: connects to the cluster via the node URLs in
+    /// `nodes` (or `url` if `nodes` is empty). Uses the redis crate's
+    /// `ClusterClient` which handles slot mapping, MOVED/ASK
+    /// redirections, and cross-slot routing automatically. Lua
+    /// scripts use hash tags (`{key}`) to ensure all keys in a script
+    /// land on the same slot.
+    Cluster,
+}
+
+/// Redis HA and multi-region config (SCALE-11, #248). Embedded in
+/// each Redis-backed config block (rate limiter, quotas, cache) to
+/// control the connection topology and per-request timeout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedisHaConfig {
+    /// Deployment topology (default `single`).
+    #[serde(default, skip_serializing_if = "is_default_redis_topology")]
+    pub topology: RedisTopology,
+    /// Additional node URLs for `sentinel` or `cluster` mode. For
+    /// `sentinel`, these are the Sentinel node URLs (e.g.
+    /// `redis://sentinel-1:26379`). For `cluster`, these are the
+    /// cluster node URLs (any subset of the cluster's nodes; the
+    /// client discovers the rest). When empty, the `url` field on
+    /// the parent config is used as the sole node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    /// The master name for `sentinel` mode (the `master_name` in
+    /// Sentinel config). Required when `topology = sentinel`; ignored
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_name: Option<String>,
+    /// Per-request timeout in milliseconds (default 500; validated to
+    /// 50..=30 000). Applied to each Redis command (Lua script calls,
+    /// GET/SET for cache). A timed-out command is treated as a backend
+    /// error and the fail-open policy applies. 0 means no per-request
+    /// timeout (use the connection's default).
+    #[serde(
+        default = "default_redis_request_timeout_ms",
+        skip_serializing_if = "is_default_redis_request_timeout_ms"
+    )]
+    pub request_timeout_ms: u64,
+}
+
+impl Default for RedisHaConfig {
+    fn default() -> Self {
+        RedisHaConfig {
+            topology: RedisTopology::Single,
+            nodes: Vec::new(),
+            master_name: None,
+            request_timeout_ms: default_redis_request_timeout_ms(),
+        }
+    }
+}
+
+fn is_default_redis_topology(t: &RedisTopology) -> bool {
+    *t == RedisTopology::default()
+}
+
+fn default_redis_request_timeout_ms() -> u64 {
+    500
+}
+
+fn is_default_redis_request_timeout_ms(v: &u64) -> bool {
+    *v == default_redis_request_timeout_ms()
+}
+
+/// Distributed Redis-backed GCRA rate limiter config (DW-031,
+/// `gateway.redis_rate_limiter`).
 ///
 /// When present and the `ent` cargo feature is compiled in AND a valid
-/// license with the `redis_rate_limiter` feature claim is loaded, the
-/// gateway uses a Redis-backed GCRA limiter instead of the local
-/// in-memory one — so two or more gateway instances share one rate
-/// limit. The same GCRA algorithm runs, but the bucket state (the
-/// theoretical arrival time) lives in Redis and is updated atomically
-/// via a Lua script in a single round-trip. When the `ent` feature is
-/// NOT compiled in, or the license lacks the claim, the block is
-/// accepted but inert (the local GCRA limiter is used). When Redis is
-/// unreachable, `fail_open` (default true) lets requests through; set
-/// it to false to reject with 429 instead.
+/// license with the `redis_rate_limiter` feature claim is loaded, the gateway
+/// uses a Redis-backed GCRA rate limiter instead of the local in-memory
+/// one — so two or more gateway instances share one rate limit per key. The
+/// same stacked-window GCRA semantics run, but the per-key TAT lives in
+/// Redis and is updated atomically via a Lua script in a single round-trip.
+/// When the `ent` feature is NOT compiled in, or the license lacks the
+/// claim, the block is accepted but inert (the local GCRA limiter is used).
+/// When Redis is unreachable, `fail_open` (default true) lets requests
+/// through; set it to false to reject with 429 instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedisRateLimiterConfig {
@@ -730,6 +816,20 @@ pub struct RedisRateLimiterConfig {
         skip_serializing_if = "is_default_redis_key_ttl_s"
     )]
     pub key_ttl_s: u64,
+    /// HA and topology config (SCALE-11, #248). Controls whether the
+    /// gateway connects to a single Redis, a Sentinel deployment, or a
+    /// Redis Cluster. Defaults to single-instance mode (the existing
+    /// behavior).
+    #[serde(default, skip_serializing_if = "is_default_redis_ha")]
+    pub ha: RedisHaConfig,
+}
+
+/// Sentinel: returns true when the `RedisHaConfig` is at its default
+/// (single topology, no nodes, no master name, default request
+/// timeout). Used by `skip_serializing_if` to keep the config output
+/// clean for the common single-Redis case.
+fn is_default_redis_ha(ha: &RedisHaConfig) -> bool {
+    ha == &RedisHaConfig::default()
 }
 
 /// Distributed Redis-backed consumer request quotas config (DW-155,
@@ -778,6 +878,10 @@ pub struct RedisQuotaConfig {
         skip_serializing_if = "is_default_redis_connection_timeout_ms"
     )]
     pub connection_timeout_ms: u64,
+    /// HA and topology config (SCALE-11, #248). Same shape as
+    /// `redis_rate_limiter.ha`.
+    #[serde(default, skip_serializing_if = "is_default_redis_ha")]
+    pub ha: RedisHaConfig,
 }
 
 fn default_redis_quota_key_prefix() -> String {
@@ -853,6 +957,10 @@ pub struct RedisCacheConfig {
     /// local tier).
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub local_tier: bool,
+    /// HA and topology config (SCALE-11, #248). Same shape as
+    /// `redis_rate_limiter.ha`.
+    #[serde(default, skip_serializing_if = "is_default_redis_ha")]
+    pub ha: RedisHaConfig,
 }
 
 fn default_redis_cache_key_prefix() -> String {

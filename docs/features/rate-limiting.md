@@ -162,3 +162,50 @@ Activation requires all three: the `ent` cargo feature, a
 inert and the local limiter is used. See the docs-site
 [Redis rate limiter](../../docs-site/guide/redis-rate-limiter.md) guide
 for configuration and operations.
+
+## Redis HA topologies (SCALE-11, #248)
+
+The `ha` block on `RedisRateLimiterConfig`, `RedisQuotaConfig`, and
+`RedisCacheConfig` controls the Redis deployment topology. Three
+topologies are supported:
+
+- **`single`** (default): one Redis instance. No HA — if the instance
+  is down, the `fail_open` policy applies. This is the existing
+  behavior.
+- **`sentinel`**: Redis Sentinel. The gateway resolves the master via
+  `SENTINEL GET-MASTER-ADDR-BY-NAME` at startup, then connects to the
+  resolved master with a `ConnectionManager`. On failover, the
+  `ConnectionManager` reconnects; a future enhancement could
+  re-resolve the master on disconnect.
+- **`cluster`**: Redis Cluster. The gateway connects to one cluster
+  node and uses hash tags (`{key}`) in the rate-limit keys to ensure
+  all windows for one logical key land on the same slot. Full cluster
+  support with automatic MOVED/ASK handling is a future enhancement
+  (the redis 0.27 crate's async cluster connection is not `Send`).
+
+The `request_timeout_ms` field (default 500, range 50..=30000, 0 for
+no timeout) bounds each Redis command. A timed-out command is treated
+as a backend error and the `fail_open` policy applies.
+
+### Validation
+
+`validate_redis_ha` (in `snapshot/mod.rs`) checks:
+- `topology = sentinel` requires `master_name` and at least one node
+  URL.
+- `topology = cluster` requires at least one node URL.
+- `request_timeout_ms` must be 0 or in 50..=30000.
+
+### Multi-region
+
+For multi-region deployments, run one Redis per region and point each
+region's gateways at their local Redis. Rate limits are shared within
+a region but not across regions. Cross-region Redis is not recommended
+(latency, complexity); the `request_timeout_ms` field bounds the
+impact if it is used.
+
+Code: `crates/dwara-core/src/config/mod.rs` (`RedisTopology`,
+`RedisHaConfig`), `crates/dwara-core/src/extensions/redis_rate_limiter.rs`
+(`RedisRateLimiter` with `request_timeout_ms` and `is_cluster` fields,
+hash-tag key format), `crates/dwara-core/src/snapshot/mod.rs`
+(`validate_redis_ha`), `crates/dwara-bin/src/main.rs`
+(`establish_redis_connection` with topology dispatch).

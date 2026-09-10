@@ -2051,6 +2051,70 @@ fn validate_redis_rate_limiter(gateway: &Gateway, issues: &mut Vec<ValidationIss
             "redis_rate_limiter.key_prefix must be a non-empty string",
         ));
     }
+    validate_redis_ha("redis_rate_limiter", &rl.ha, issues);
+}
+
+/// Validate the `ha` block shared by all Redis-backed config sections
+/// (SCALE-11, #248). Checks:
+/// - `topology = sentinel` requires `master_name` and at least one
+///   node URL.
+/// - `topology = cluster` requires at least one node URL (or the
+///   parent `url` must be non-empty).
+/// - `request_timeout_ms` must be 0 or in 50..=30 000.
+fn validate_redis_ha(
+    prefix: &str,
+    ha: &crate::config::RedisHaConfig,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    use crate::config::RedisTopology;
+    match ha.topology {
+        RedisTopology::Single => {}
+        RedisTopology::Sentinel => {
+            if ha.master_name.is_none()
+                || ha
+                    .master_name
+                    .as_deref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{prefix}.ha.master_name"),
+                    format!("{prefix}.ha.master_name is required when topology = sentinel"),
+                ));
+            }
+            if ha.nodes.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{prefix}.ha.nodes"),
+                    format!("{prefix}.ha.nodes must list at least one Sentinel URL when topology = sentinel"),
+                ));
+            }
+        }
+        RedisTopology::Cluster => {
+            if ha.nodes.is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    "(root)",
+                    &format!("{prefix}.ha.nodes"),
+                    format!("{prefix}.ha.nodes must list at least one cluster node URL when topology = cluster"),
+                ));
+            }
+        }
+    }
+    let timeout = ha.request_timeout_ms;
+    if timeout != 0 && !(50..=30_000).contains(&timeout) {
+        issues.push(issue(
+            "gateway",
+            "(root)",
+            &format!("{prefix}.ha.request_timeout_ms"),
+            format!(
+                "{prefix}.ha.request_timeout_ms {timeout} is out of range: must be 0 or 50..=30000"
+            ),
+        ));
+    }
 }
 
 /// Validate the `gateway.redis_quotas` block (DW-155): the URL must be
@@ -2097,6 +2161,7 @@ fn validate_redis_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             "redis_quotas.key_prefix must be a non-empty string",
         ));
     }
+    validate_redis_ha("redis_quotas", &rq.ha, issues);
 }
 
 /// Validate the `gateway.redis_cache` block (SCALE-04, #183): the URL
@@ -2142,6 +2207,7 @@ fn validate_redis_cache(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
             "redis_cache.key_prefix must be a non-empty string",
         ));
     }
+    validate_redis_ha("redis_cache", &rc.ha, issues);
 }
 
 /// Validate the `gateway.config_convergence` block (DW-054): the
