@@ -456,6 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 proxy_protocol: false,
                 alt_svc: None,
                 l4: None,
+                http2: None,
             }]
         }
         None => state.snapshot().gateway().listeners.clone(),

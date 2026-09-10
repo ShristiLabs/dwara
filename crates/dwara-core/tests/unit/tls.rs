@@ -392,6 +392,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
             proxy_protocol: false,
             alt_svc: None,
             l4: None,
+            http2: None,
         }],
         routes: vec![],
         services: vec![],

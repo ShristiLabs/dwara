@@ -552,6 +552,7 @@ fn normalization_is_idempotent_for_constructed_gateway_with_all_variants() {
             authorization: None,
             alt_svc: None,
             l4: None,
+            http2: None,
         }],
         routes: vec![Route {
             name: "r".into(),

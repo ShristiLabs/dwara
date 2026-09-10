@@ -413,6 +413,7 @@ pub fn translate(
             authorization: None,
             alt_svc: None,
             l4: None,
+            http2: None,
         };
         listeners.push(dwara_listener);
     }

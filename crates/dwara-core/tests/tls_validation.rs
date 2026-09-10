@@ -31,6 +31,7 @@ fn https_listener(name: &str, port: u16, tls: ListenerTls) -> Listener {
         authorization: None,
         alt_svc: None,
         l4: None,
+        http2: None,
     }
 }
 

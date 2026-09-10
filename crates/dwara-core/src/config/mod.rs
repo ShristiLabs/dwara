@@ -2286,6 +2286,48 @@ pub struct Listener {
     /// block is accepted but inert (validation warns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l4: Option<L4Config>,
+    /// HTTP/2 flow-control tuning for this listener (PERF-11, #244).
+    /// When set, the h2 server builder uses these values instead of
+    /// the process-wide defaults from `DWARA_H2_*` env vars. Only
+    /// meaningful on `http` and `https` listeners (h2 is negotiated
+    /// via ALPN or prior knowledge); ignored on `h3` (HTTP/3 has its
+    /// own transport-level flow control) and `tcp`/`udp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2: Option<Http2ListenerConfig>,
+}
+
+/// HTTP/2 flow-control tuning for a listener (PERF-11, #244,
+/// `listeners[].http2`). Every field is optional; an omitted field
+/// keeps the process-wide default from `DWARA_H2_*` env vars. This
+/// allows per-listener tuning for streaming (SSE) workloads where
+/// larger windows reduce flow-control stalls on long-lived streams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Http2ListenerConfig {
+    /// Initial stream-level window size in bytes (hyper
+    /// `initial_stream_window_size`). Absent: process default
+    /// (1 MiB via `DWARA_H2_STREAM_WINDOW_KIB`). Larger values
+    /// reduce stalls on streaming responses but increase memory
+    /// per stream. Bounds: at most 16 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_stream_window_size: Option<u32>,
+    /// Initial connection-level window size in bytes (hyper
+    /// `initial_connection_window_size`). Absent: process default
+    /// (4 MiB via `DWARA_H2_CONNECTION_WINDOW_KIB`). Bounds: at
+    /// most 64 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_connection_window_size: Option<u32>,
+    /// Enable adaptive flow-control window (hyper
+    /// `adaptive_window`). Absent: false. When true, the
+    /// connection window grows and shrinks based on throughput,
+    /// which helps streaming workloads on high-BDP paths.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adaptive_window: bool,
+    /// Maximum number of concurrent streams per connection (hyper
+    /// `max_concurrent_streams`). Absent: process default (128 via
+    /// `DWARA_H2_MAX_CONCURRENT_STREAMS`). Bounds: at most 1_000_000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_streams: Option<u32>,
 }
 
 fn default_listener_protocol() -> ListenerProtocol {
@@ -4955,6 +4997,20 @@ pub struct UpstreamPoolConfig {
     /// Bounds: at least 1, at most 1_000_000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_streams: Option<u32>,
+    /// Initial stream-level window size in bytes for the upstream h2
+    /// client (hyper `http2_initial_stream_window_size`). Absent:
+    /// hyper's default. Larger values reduce flow-control stalls on
+    /// streaming (SSE) responses from the upstream but increase
+    /// memory per stream. Only meaningful for the `http2` protocol.
+    /// Bounds: at most 16 MiB. (PERF-11, #244)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_stream_window_size: Option<u32>,
+    /// Initial connection-level window size in bytes for the upstream
+    /// h2 client (hyper `http2_initial_connection_window_size`).
+    /// Absent: hyper's default. Bounds: at most 64 MiB.
+    /// (PERF-11, #244)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_connection_window_size: Option<u32>,
 }
 
 /// SEC-03: upstream mTLS client certificate configuration. Reuses the

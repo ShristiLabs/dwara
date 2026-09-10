@@ -91,6 +91,9 @@ pub(crate) struct BoundListener {
     /// header. Hot-reloaded (read from the current snapshot at bind
     /// time; a config reload rebinds with the new value).
     pub(crate) alt_svc: Option<Arc<str>>,
+    /// PERF-11 (#244): per-listener HTTP/2 flow-control overrides.
+    /// None = use process-wide defaults. Hot-reloaded.
+    pub(crate) http2_config: Option<Arc<dwara_core::config::Http2ListenerConfig>>,
 }
 
 /// In-flight passthrough and L4 splice tracker for graceful drain on
@@ -261,6 +264,7 @@ pub(crate) async fn bind_listener(
             mode,
             proxy_protocol: l.proxy_protocol,
             alt_svc: l.alt_svc.as_ref().map(|s| Arc::from(s.as_str())),
+            http2_config: l.http2.as_ref().map(|c| Arc::new(c.clone())),
         },
     ))
 }
@@ -297,6 +301,8 @@ pub(crate) async fn run_listener(
         // DW-088: clone alt_svc once per iteration so it can be moved
         // into spawned tasks without borrowing bound across the spawn.
         let alt_svc = bound.alt_svc.clone();
+        // PERF-11 (#244): same pattern for h2 config.
+        let h2_config = bound.http2_config.clone();
         match &bound.mode {
             ListenerMode::Cleartext => {
                 // DW-030: on a proxy_protocol listener the header phase
@@ -323,7 +329,15 @@ pub(crate) async fn run_listener(
                         let stream =
                             dwara_core::dataplane::hardening::PrefixedStream::new(stream, prefix);
                         serve_http_tls(
-                            watcher, dp, stream, peer, listener, hardening, None, alt_svc,
+                            watcher,
+                            dp,
+                            stream,
+                            peer,
+                            listener,
+                            hardening,
+                            None,
+                            alt_svc,
+                            h2_config.clone(),
                         );
                     });
                 } else {
@@ -336,6 +350,7 @@ pub(crate) async fn run_listener(
                         Arc::clone(&hardening),
                         None,
                         alt_svc.clone(),
+                        h2_config.clone(),
                     );
                 }
             }
@@ -507,6 +522,7 @@ pub(crate) async fn run_listener(
                                 hardening,
                                 client_cert,
                                 alt_svc.clone(),
+                                h2_config.clone(),
                             );
                         }
                         Err(err) => tracing::warn!("tls handshake error: {err}"),
@@ -542,6 +558,7 @@ pub(crate) async fn run_listener(
                     Poll::Ready(Ok((stream, peer))) => {
                         accepted += 1;
                         let alt_svc = bound.alt_svc.clone();
+                        let h2_config = bound.http2_config.clone();
                         match &bound.mode {
                             ListenerMode::Passthrough => {}
                             // DW-103: L4 backlog connections are closed
@@ -573,8 +590,15 @@ pub(crate) async fn run_listener(
                                                 stream, prefix,
                                             );
                                         serve_http_tls(
-                                            watcher, dp, stream, peer, listener, hardening, None,
+                                            watcher,
+                                            dp,
+                                            stream,
+                                            peer,
+                                            listener,
+                                            hardening,
+                                            None,
                                             alt_svc,
+                                            h2_config.clone(),
                                         );
                                     });
                                 } else {
@@ -587,6 +611,7 @@ pub(crate) async fn run_listener(
                                         Arc::clone(&hardening),
                                         None,
                                         alt_svc.clone(),
+                                        h2_config.clone(),
                                     );
                                 }
                             }
@@ -642,6 +667,7 @@ pub(crate) async fn run_listener(
                                                 hardening,
                                                 client_cert,
                                                 alt_svc.clone(),
+                                                h2_config.clone(),
                                             )
                                         }
                                         Err(err) => {
@@ -785,6 +811,7 @@ fn serve_http_tls<S>(
     hardening: Arc<HttpHardening>,
     client_cert: Option<Arc<dwara_core::authn::ClientCertificate>>,
     alt_svc: Option<std::sync::Arc<str>>,
+    h2_config: Option<Arc<dwara_core::config::Http2ListenerConfig>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -802,6 +829,10 @@ fn serve_http_tls<S>(
         // slowloris header timeout on every serving connection. See
         // dwara-core's hardening module for the knob table.
         hardening.apply(&mut auto);
+        // PERF-11 (#244): per-listener h2 flow-control overrides.
+        if let Some(h2_cfg) = &h2_config {
+            hardening.apply_listener_h2(&mut auto, h2_cfg);
+        }
         let conn = watcher.watch(auto.serve_connection_with_upgrades(
             TokioIo::new(stream),
             service_fn(move |mut req| {
