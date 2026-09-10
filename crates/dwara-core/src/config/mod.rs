@@ -3231,6 +3231,24 @@ pub struct MirrorConfig {
     /// 100 mirrors every request. The sampling is per-request (a
     /// random draw against this percentage).
     pub percentage: u8,
+    /// Hard timeout for the mirror request in milliseconds. If the
+    /// mirror upstream does not respond within this duration, the
+    /// mirror request is abandoned. Default 2000 (2 seconds). The
+    /// mirror is fire-and-forget, so this timeout never affects the
+    /// primary request.
+    #[serde(
+        default = "default_mirror_timeout_ms",
+        skip_serializing_if = "is_default_mirror_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+}
+
+fn default_mirror_timeout_ms() -> u64 {
+    2000
+}
+
+fn is_default_mirror_timeout_ms(v: &u64) -> bool {
+    *v == 2000
 }
 
 /// Fault injection configuration (DW-062, `routes[].fault_injection`).
