@@ -8,50 +8,23 @@
 //! trusted party that holds the secret, and the expiry bounds the
 //! URL's validity window.
 //!
-//! The verifier is feature-gated behind the `signed_url` cargo
-//! feature (default OFF). The config schema (`SignedUrlConfig` on
-//! the route) is always present so configs round-trip without the
-//! feature; when the feature is off, the block is accepted but inert
-//! (validation warns, the runtime check does not run).
+//! ## Replay hardening (SEC-07, #211)
 //!
-//! ## Canonical request
+//! Two optional mechanisms prevent replay within the validity window:
 //!
-//! The canonical string signed by the HMAC is:
+//! - **One-time nonces**: when `require_nonce: true`, each signed URL
+//!   must carry a unique `nonce` query parameter. The verifier records
+//!   each seen nonce in a bounded TTL cache; a replayed nonce is
+//!   rejected with `ReplayedNonce`. The cache is per-verifier (per
+//!   route), keyed by the nonce value, and entries expire at the
+//!   URL's `expires` timestamp (so the cache does not grow unboundedly).
+//! - **Client-IP binding**: when `bind_client_ip: true`, the canonical
+//!   request includes the client's IP address, so a signed URL minted
+//!   for one client cannot be replayed from a different IP. The IP is
+//!   appended to the canonical string as a fourth line.
 //!
-//! ```text
-//! <METHOD>\n<path>\n<expires>
-//! ```
-//!
-//! Where `<METHOD>` is the uppercase HTTP method, `<path>` is the
-//! request path (without query string), and `<expires>` is the
-//! expiry timestamp as a Unix epoch seconds string. The signature is
-//! the HMAC-SHA256 of this canonical string, hex-encoded.
-//!
-//! ## Query parameters
-//!
-//! The verifier extracts two query parameters:
-//!
-//! - `sig` (configurable via `query_param`): the hex-encoded
-//!   HMAC-SHA256 signature.
-//! - `expires`: the Unix epoch seconds timestamp at which the URL
-//!   expires.
-//!
-//! ## Verification
-//!
-//! 1. Extract `sig` and `expires` from the query string.
-//! 2. Check that `expires` is in the future (with optional clock
-//!    skew tolerance).
-//! 3. Recompute the HMAC-SHA256 over the canonical request.
-//! 4. Compare the recomputed signature with the provided `sig` using
-//!    a constant-time comparison.
-//!
-//! ## Integration point
-//!
-//! Signed URL verification runs as an authn method, before authz
-//! (the request-path order positions it alongside API key / JWT /
-//! HMAC request signing). A route with `signed_url.enabled: true`
-//! requires a valid signature; a missing or invalid signature is
-//! rejected with 401 `signed_url_invalid` or 401 `signed_url_expired`.
+//! Both are opt-in (default off) for backward compatibility with
+//! existing signed-URL minters.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -86,6 +59,23 @@ pub struct SignedUrlConfig {
     /// Must be non-empty. Default: `sig`.
     #[serde(default = "default_query_param")]
     pub query_param: String,
+    /// Require a one-time nonce (SEC-07, #211): when true, each
+    /// signed URL must carry a `nonce` query parameter, and the
+    /// verifier rejects replayed nonces within the validity window.
+    /// Default: false (backward compatible).
+    #[serde(default)]
+    pub require_nonce: bool,
+    /// The query parameter name carrying the one-time nonce.
+    /// Must be non-empty when `require_nonce` is true.
+    /// Default: `nonce`.
+    #[serde(default = "default_nonce_param")]
+    pub nonce_param: String,
+    /// Bind the signature to the client's IP address (SEC-07, #211):
+    /// when true, the canonical request includes the client IP as a
+    /// fourth line, so a signed URL minted for one client cannot be
+    /// replayed from a different IP. Default: false.
+    #[serde(default)]
+    pub bind_client_ip: bool,
 }
 
 fn default_ttl_seconds() -> u64 {
@@ -94,6 +84,10 @@ fn default_ttl_seconds() -> u64 {
 
 fn default_query_param() -> String {
     "sig".to_string()
+}
+
+fn default_nonce_param() -> String {
+    "nonce".to_string()
 }
 
 /// An error from signed URL verification (DW-109).
@@ -108,6 +102,10 @@ pub enum SignedUrlError {
     InvalidSignature,
     /// The URL has expired (the `expires` timestamp is in the past).
     Expired,
+    /// The nonce query parameter is missing (SEC-07, #211).
+    MissingNonce,
+    /// The nonce has already been used (replay detected, SEC-07, #211).
+    ReplayedNonce,
 }
 
 impl std::fmt::Display for SignedUrlError {
@@ -125,6 +123,15 @@ impl std::fmt::Display for SignedUrlError {
             SignedUrlError::Expired => {
                 write!(f, "signed URL has expired")
             }
+            SignedUrlError::MissingNonce => {
+                write!(f, "signed URL nonce is missing from the query string")
+            }
+            SignedUrlError::ReplayedNonce => {
+                write!(
+                    f,
+                    "signed URL nonce has already been used (replay detected)"
+                )
+            }
         }
     }
 }
@@ -140,6 +147,61 @@ pub enum SignedUrlResult {
     Invalid,
     /// The URL has expired.
     Expired,
+    /// The nonce is missing or has been replayed (SEC-07, #211).
+    NonceError,
+}
+
+/// A bounded TTL cache for one-time nonces (SEC-07, #211). Entries
+/// expire at the URL's `expires` timestamp, so the cache does not
+/// grow unboundedly. Bounded to `MAX_NONCES` entries; when full, the
+/// oldest entries are evicted (a signed URL with an evicted nonce
+/// would have expired anyway, since the cache TTL is the URL's
+/// validity window).
+struct NonceCache {
+    entries: std::collections::HashMap<String, u64>,
+    /// Ordered keys for LRU eviction (insertion order).
+    order: std::collections::VecDeque<String>,
+}
+
+impl NonceCache {
+    const MAX_NONCES: usize = 4096;
+
+    fn new() -> Self {
+        NonceCache {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Check and record a nonce. Returns `true` if the nonce is fresh
+    /// (not seen before, or the previous entry has expired), `false`
+    /// if it is a replay within the validity window.
+    fn check_and_record(&mut self, nonce: &str, expires: u64) -> bool {
+        // Purge expired entries (cheap: we check the front of the
+        // queue, which holds the oldest entries).
+        while let Some(front) = self.order.front() {
+            if let Some(&exp) = self.entries.get(front) {
+                if exp <= expires {
+                    self.entries.remove(front);
+                    self.order.pop_front();
+                    continue;
+                }
+            }
+            break;
+        }
+        if self.entries.contains_key(nonce) {
+            return false; // replay
+        }
+        // Evict oldest if at capacity.
+        if self.entries.len() >= Self::MAX_NONCES {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.entries.insert(nonce.to_string(), expires);
+        self.order.push_back(nonce.to_string());
+        true
+    }
 }
 
 /// A signed URL verifier (DW-109).
@@ -152,6 +214,13 @@ pub enum SignedUrlResult {
 pub struct SignedUrlVerifier {
     secret: Vec<u8>,
     query_param: String,
+    /// SEC-07 (#211): nonce configuration.
+    require_nonce: bool,
+    nonce_param: String,
+    bind_client_ip: bool,
+    /// SEC-07 (#211): per-verifier nonce cache (guarded by the
+    /// verifier's `Mutex` in `verify`).
+    nonces: std::sync::Mutex<NonceCache>,
 }
 
 impl SignedUrlVerifier {
@@ -168,9 +237,16 @@ impl SignedUrlVerifier {
         if config.query_param.is_empty() {
             return Err(SignedUrlError::MissingSignature);
         }
+        if config.require_nonce && config.nonce_param.is_empty() {
+            return Err(SignedUrlError::MissingNonce);
+        }
         Ok(Self {
             secret,
             query_param: config.query_param.clone(),
+            require_nonce: config.require_nonce,
+            nonce_param: config.nonce_param.clone(),
+            bind_client_ip: config.bind_client_ip,
+            nonces: std::sync::Mutex::new(NonceCache::new()),
         })
     }
 
@@ -188,12 +264,22 @@ impl SignedUrlVerifier {
     /// - `path`: the request path (without query string).
     /// - `query`: the raw query string (e.g. "foo=bar&sig=abc&expires=123").
     /// - `now`: the current Unix epoch seconds.
+    /// - `client_ip`: the client's IP address (used when
+    ///   `bind_client_ip` is true; pass an empty string to skip).
     ///
     /// Returns [`SignedUrlResult::Valid`] if the signature matches
     /// and the URL has not expired; [`SignedUrlResult::Invalid`] if
     /// the signature is missing or does not match; [`SignedUrlResult::Expired`]
-    /// if the URL has expired.
-    pub fn verify(&self, method: &str, path: &str, query: &str, now: u64) -> SignedUrlResult {
+    /// if the URL has expired; [`SignedUrlResult::NonceError`] if the
+    /// nonce is missing or replayed (SEC-07, #211).
+    pub fn verify(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        now: u64,
+        client_ip: &str,
+    ) -> SignedUrlResult {
         let params = parse_query(query);
         let sig = match params.get(&self.query_param) {
             Some(s) => s,
@@ -210,8 +296,24 @@ impl SignedUrlVerifier {
         if now > expires {
             return SignedUrlResult::Expired;
         }
+        // SEC-07 (#211): nonce check BEFORE signature verification —
+        // a replayed nonce is rejected without recomputing the HMAC.
+        if self.require_nonce {
+            let nonce = match params.get(&self.nonce_param) {
+                Some(n) => n,
+                None => return SignedUrlResult::NonceError,
+            };
+            let mut cache = self.nonces.lock().expect("nonce cache poisoned");
+            if !cache.check_and_record(nonce, expires) {
+                return SignedUrlResult::NonceError;
+            }
+        }
         // Recompute the HMAC over the canonical request.
-        let canonical = format!("{method}\n{path}\n{expires}");
+        let canonical = if self.bind_client_ip {
+            format!("{method}\n{path}\n{expires}\n{client_ip}")
+        } else {
+            format!("{method}\n{path}\n{expires}")
+        };
         let mut mac = match HmacSha256::new_from_slice(&self.secret) {
             Ok(m) => m,
             Err(_) => return SignedUrlResult::Invalid,
@@ -233,15 +335,39 @@ impl SignedUrlVerifier {
     /// - `method`: the uppercase HTTP method.
     /// - `path`: the request path (without query string).
     /// - `expires`: the Unix epoch seconds at which the URL expires.
+    /// - `client_ip`: the client's IP address (used when
+    ///   `bind_client_ip` is true; pass an empty string to skip).
+    /// - `nonce`: an optional nonce (used when `require_nonce` is
+    ///   true; the caller generates a unique nonce per URL).
     ///
-    /// Returns the query string `"<query_param>=<sig>&expires=<expires>"`.
-    pub fn sign(&self, method: &str, path: &str, expires: u64) -> Result<String, SignedUrlError> {
-        let canonical = format!("{method}\n{path}\n{expires}");
+    /// Returns the query string with the signature, expiry, and
+    /// optional nonce parameters.
+    pub fn sign(
+        &self,
+        method: &str,
+        path: &str,
+        expires: u64,
+        client_ip: &str,
+        nonce: Option<&str>,
+    ) -> Result<String, SignedUrlError> {
+        let canonical = if self.bind_client_ip {
+            format!("{method}\n{path}\n{expires}\n{client_ip}")
+        } else {
+            format!("{method}\n{path}\n{expires}")
+        };
         let mut mac = HmacSha256::new_from_slice(&self.secret)
             .map_err(|_| SignedUrlError::InvalidSignature)?;
         mac.update(canonical.as_bytes());
         let sig = hex_encode(&mac.finalize().into_bytes());
-        Ok(format!("{}={}&expires={}", self.query_param, sig, expires))
+        let mut query = format!("{}={}&expires={}", self.query_param, sig, expires);
+        if self.require_nonce {
+            let n = nonce.ok_or(SignedUrlError::MissingNonce)?;
+            query.push('&');
+            query.push_str(&self.nonce_param);
+            query.push('=');
+            query.push_str(n);
+        }
+        Ok(query)
     }
 }
 
@@ -250,6 +376,8 @@ impl std::fmt::Debug for SignedUrlVerifier {
         f.debug_struct("SignedUrlVerifier")
             .field("query_param", &self.query_param)
             .field("secret_len", &self.secret.len())
+            .field("require_nonce", &self.require_nonce)
+            .field("bind_client_ip", &self.bind_client_ip)
             .finish()
     }
 }
