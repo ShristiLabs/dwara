@@ -105,6 +105,25 @@ frame (opcode 8, status 1008, policy violation) for the CLIENT
 direction — written ahead of any pending upstream bytes — and returns
 EOF on the client reads, ending the tunnel.
 
+DP-05 (#253) extends post-upgrade policing with three additional knobs:
+
+- **`idle_timeout_s`** (1..=86400): wraps the tunnel in an idle-aware
+  bidirectional copy. If no data flows in either direction for this
+  duration, both sides are shut down. Absent: the tunnel stays open
+  until one side closes (the prior default). The idle timer resets on
+  every successful read or write in either direction.
+- **`max_frame_size_bytes`** (1..=16777216, 1 byte to 16 MiB): caps the
+  payload length of a single WebSocket DATA frame. A frame exceeding
+  this limit causes the connection to be closed with close code 1009
+  (message too big). The check runs at the frame-header scan — both
+  the 7-bit short length and the 16/64-bit extended length — so the
+  violation is detected before the payload is consumed.
+- **Reserved opcode and malformed control-frame enforcement**: the
+  frame scanner now rejects RFC 6455 reserved opcodes (0x3-0x7 data,
+  0xB-0xF control) and control frames with extended lengths (control
+  payloads are capped at 125 bytes). Both are protocol errors, closed
+  with close code 1002 (protocol error).
+
 Design points, each pinned by tests:
 
 - **The scanner reads headers only.** 2..=14 bytes per frame
@@ -125,6 +144,9 @@ Design points, each pinned by tests:
   whose backend upgrades `foo` gets the generic tunnel, unpoliced, so
   no WS frame is ever parsed into (or a close frame injected into) a
   non-WebSocket stream.
+- **The policer activates when any post-upgrade policy is set.** Rate,
+  frame size, and idle timeout are independent — any one arms the
+  wrapper. Without any, the tunnel is the byte-exact DW-009 splice.
 - **Transparency is the default.** Without a `websocket` block, the
   tunnel is the byte-exact DW-009 splice (pinned: a 50-frame burst
   echoes whole, unpoliced).
@@ -140,19 +162,24 @@ routes:
     websocket:
       origins: [https://app.example.com]   # exact match; missing Origin denied
       max_frames_per_sec: 100              # 1..=100000; absent = unpoliced
+      idle_timeout_s: 300                  # 1..=86400; absent = no idle timeout
+      max_frame_size_bytes: 1048576        # 1..=16777216; absent = no size limit
     action: { type: proxy }
 ```
 
-Validation rejects empty or over-256-byte/non-printable origins and
-rates outside `1..=limits::MAX_WEBSOCKET_FRAMES_PER_SEC`. The knobs
-are independent — either may be set alone.
+Validation rejects empty or over-256-byte/non-printable origins, rates
+outside `1..=limits::MAX_WEBSOCKET_FRAMES_PER_SEC`, idle timeouts
+outside `1..=86400`, and frame sizes outside `1..=16777216`. The knobs
+are independent — any subset may be set.
 
 Decisions land in `dwara_websocket_policy_total{route,outcome}` with
-the closed set `origin_denied` (gate, before upstream contact) and
-`rate_closed` (policer; counted when the tunnel task completes, so a
-process exit mid-tunnel can undercount). The route label is the
-config-declared route name — the same cardinality class as
-`requests_total`.
+the closed set `origin_denied` (gate, before upstream contact),
+`rate_closed` (frame-rate policer), `size_closed` (frame-size
+policer), and `protocol_closed` (reserved opcode / malformed control
+frame). All policer outcomes are counted when the tunnel task
+completes, so a process exit mid-tunnel can undercount. The route
+label is the config-declared route name — the same cardinality class
+as `requests_total`.
 
 The [dataplane and proxy](./dataplane-proxy.md) page covers the
 generic tunnel this feature manages; [protocol

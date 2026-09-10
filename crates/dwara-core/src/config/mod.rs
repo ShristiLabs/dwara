@@ -3553,6 +3553,20 @@ pub struct RouteWebsocket {
     /// 1..=[`limits::MAX_WEBSOCKET_FRAMES_PER_SEC`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_frames_per_sec: Option<u64>,
+    /// Post-upgrade idle timeout in seconds (DP-05, #253). If no data
+    /// flows in either direction for this duration, the tunnel is
+    /// closed. Absent: no idle timeout (the tunnel stays open until
+    /// one side closes, the prior default). Validation enforces
+    /// 1..=86400 (1 second to 24 hours).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_s: Option<u64>,
+    /// Maximum payload size of a single WebSocket DATA frame in bytes
+    /// (DP-05, #253). A frame exceeding this limit causes the
+    /// connection to be closed with close code 1009 (message too big).
+    /// Absent: no frame size limit (the prior default). Validation
+    /// enforces 1..=16777216 (1 byte to 16 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_size_bytes: Option<u64>,
 }
 
 /// Per-route SLO objectives (DW-052, `routes[].slo`).

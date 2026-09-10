@@ -47,6 +47,8 @@ fn ws_cfg(origins: &[&str]) -> RouteWebsocket {
     RouteWebsocket {
         origins: origins.iter().map(|s| s.to_string()).collect(),
         max_frames_per_sec: None,
+        idle_timeout_s: None,
+        max_frame_size_bytes: None,
     }
 }
 
@@ -311,4 +313,133 @@ fn websocket_validation_rejects_unusable_origins_and_out_of_bounds_rates() {
     ));
     let joined = issues.join("\n");
     assert!(joined.contains("max_frames_per_sec must be in"), "{joined}");
+}
+
+// --- DP-05 (#253): idle timeout and frame size validation -------------------
+
+#[test]
+fn websocket_validation_accepts_idle_timeout_and_frame_size_in_bounds() {
+    assert!(validate_ws_yaml(
+        "  websocket:\n    idle_timeout_s: 30\n    max_frame_size_bytes: 1048576\n"
+    )
+    .is_empty());
+}
+
+#[test]
+fn websocket_validation_rejects_out_of_bounds_idle_timeout() {
+    let issues = validate_ws_yaml("  websocket:\n    idle_timeout_s: 0\n");
+    let joined = issues.join("\n");
+    assert!(joined.contains("idle_timeout_s must be in"), "{joined}");
+
+    let issues = validate_ws_yaml("  websocket:\n    idle_timeout_s: 86401\n");
+    let joined = issues.join("\n");
+    assert!(joined.contains("idle_timeout_s must be in"), "{joined}");
+}
+
+#[test]
+fn websocket_validation_rejects_out_of_bounds_frame_size() {
+    let issues = validate_ws_yaml("  websocket:\n    max_frame_size_bytes: 0\n");
+    let joined = issues.join("\n");
+    assert!(joined.contains("max_frame_size_bytes must be in"), "{joined}");
+
+    let issues = validate_ws_yaml("  websocket:\n    max_frame_size_bytes: 16777217\n");
+    let joined = issues.join("\n");
+    assert!(joined.contains("max_frame_size_bytes must be in"), "{joined}");
+}
+
+// --- DP-05 (#253): frame scanner violation detection -----------------------
+
+#[test]
+fn frame_scanner_detects_reserved_data_opcode() {
+    use dwara_core::dataplane::websocket::{count_data_frames, FrameCounter, FrameViolation};
+    // Opcode 0x3 (reserved data frame), FIN=1, masked, len=0.
+    let frame = [0x83, 0x80, 0x00, 0x00, 0x00, 0x00];
+    let mut c = FrameCounter::new();
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::ProtocolError);
+    // count_data_frames returns 0 because the scanner short-circuited.
+    assert_eq!(count_data_frames(&frame), 0);
+}
+
+#[test]
+fn frame_scanner_detects_reserved_control_opcode() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // Opcode 0xF (reserved control frame), FIN=1, masked, len=0.
+    let frame = [0x8f, 0x80, 0x00, 0x00, 0x00, 0x00];
+    let mut c = FrameCounter::new();
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::ProtocolError);
+}
+
+#[test]
+fn frame_scanner_detects_control_frame_with_extended_length() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // Opcode 0x8 (close), FIN=1, masked, len7=126 (extended 16-bit).
+    // This is a protocol error: control frames must be <= 125 bytes.
+    let frame = [0x88, 0xFE, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00];
+    let mut c = FrameCounter::new();
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::ProtocolError);
+}
+
+#[test]
+fn frame_scanner_detects_frame_exceeding_max_size_short_length() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // Text frame, FIN=1, masked, payload=120 bytes (fits in 7-bit
+    // length), max=100. The scanner should reject at the Head scan.
+    let mut frame = vec![0x81, 0x80 | 120u8];
+    frame.extend_from_slice(&[0u8; 4]); // mask
+    frame.extend_from_slice(&[0u8; 120]); // payload
+    let mut c = FrameCounter::new().with_max_frame_size(100);
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::SizeExceeded);
+}
+
+#[test]
+fn frame_scanner_detects_frame_exceeding_max_size_extended_length() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // Binary frame, FIN=1, masked, 16-bit extended length=1000, max=500.
+    let mut frame = vec![0x82, 0xFE];
+    frame.extend_from_slice(&1000u16.to_be_bytes()); // extended length
+    frame.extend_from_slice(&[0u8; 4]); // mask
+    frame.extend_from_slice(&[0u8; 1000]); // payload
+    let mut c = FrameCounter::new().with_max_frame_size(500);
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::SizeExceeded);
+}
+
+#[test]
+fn frame_scanner_accepts_valid_frames_under_max_size() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // Text frame, FIN=1, masked, payload=50 bytes, max=100.
+    let mut frame = vec![0x81, 0x80 | 50u8];
+    frame.extend_from_slice(&[0u8; 4]); // mask
+    frame.extend_from_slice(&[0u8; 50]); // payload
+    let mut c = FrameCounter::new().with_max_frame_size(100);
+    c.feed(&frame);
+    assert_eq!(c.violation(), FrameViolation::None);
+    assert_eq!(c.data_frames(), 1);
+}
+
+#[test]
+fn frame_scanner_stops_after_first_violation() {
+    use dwara_core::dataplane::websocket::{FrameCounter, FrameViolation};
+    // First: a valid text frame (10 bytes). Second: a reserved opcode.
+    let mut frame = vec![0x81, 0x80 | 10u8];
+    frame.extend_from_slice(&[0u8; 4]); // mask
+    frame.extend_from_slice(&[0u8; 10]); // payload
+    frame.extend_from_slice(&[0x83, 0x80, 0x00, 0x00, 0x00, 0x00]); // reserved opcode 0x3
+    let mut c = FrameCounter::new();
+    c.feed(&frame);
+    assert_eq!(c.data_frames(), 1); // first frame counted
+    assert_eq!(c.violation(), FrameViolation::ProtocolError);
+}
+
+#[test]
+fn flag_to_metric_decodes_all_violation_kinds() {
+    use dwara_core::dataplane::websocket::flag_to_metric;
+    assert_eq!(flag_to_metric(0), "");
+    assert_eq!(flag_to_metric(1), "rate_closed");
+    assert_eq!(flag_to_metric(2), "size_closed");
+    assert_eq!(flag_to_metric(3), "protocol_closed");
 }
