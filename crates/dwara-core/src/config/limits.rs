@@ -18,6 +18,11 @@ pub const KETAMA_VNODES: u64 = 160;
 /// weight sets.
 pub const MAX_RING_VNODES: u64 = 65_536;
 
+/// Maglev lookup table size (DP-07, #236). Must be a prime number for
+/// the Maglev permutation algorithm to work correctly. 65537 is the
+/// default used by Google's Maglev paper and Envoy.
+pub const MAGLEV_TABLE_SIZE: usize = 65_537;
+
 /// Validation bound for `upstreams[].slow_start_ms` (10 minutes): the ramp
 /// window is per-endpoint-entry, and unbounded windows would keep recycled
 /// addresses permanently underweighted.

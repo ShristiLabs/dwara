@@ -981,6 +981,9 @@ pub struct UpstreamHandle {
     /// upstream is accepted at validation but inert). The other variants
     /// use the TCP/TLS `client` below.
     protocol: UpstreamProtocol,
+    /// DP-07 (#236): what to hash for consistent-hash load balancers
+    /// (`ip_hash` and `maglev`). `None` = client IP (the default).
+    hash_on: Option<crate::config::HashOn>,
     /// DW-108: the H3/QUIC upstream transport, present iff
     /// `protocol == H3` AND the `h3` cargo feature is enabled. When
     /// `protocol == H3` and this is `None`, the feature is off and every
@@ -1083,6 +1086,13 @@ impl UpstreamHandle {
     /// endpoint the same way) and for tests.
     pub fn lb(&self) -> &Arc<crate::dataplane::balance::UpstreamLb> {
         &self.lb
+    }
+
+    /// DP-07 (#236): the hash-key source for this upstream's
+    /// consistent-hash load balancer (`ip_hash` or `maglev`). `None`
+    /// means the client IP is used (the default).
+    pub fn hash_on(&self) -> Option<&crate::config::HashOn> {
+        self.hash_on.as_ref()
     }
 
     /// DW-094 (Ent): set the edge's locality context on this upstream's
@@ -1709,6 +1719,7 @@ fn build_handle(
         http2_only,
         tls_roots,
         protocol: u.protocol,
+        hash_on: u.hash_on.clone(),
         h3: h3_handle,
     })
 }
@@ -2009,6 +2020,7 @@ mod tests {
         let up = ConfigUpstream {
             name: "bare".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![],
             connection_cap: None,

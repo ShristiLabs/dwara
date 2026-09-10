@@ -426,6 +426,7 @@ fn hcl_escapes_special_characters() {
     gw.upstreams.push(Upstream {
         name: "up".to_string(),
         load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
         protocol: UpstreamProtocol::Http1,
         trusted_ca_file: None,
         endpoints: vec![Endpoint {

@@ -6281,6 +6281,56 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
                 ),
             ));
         }
+        // DP-07 (#236): hash_on is only meaningful for consistent-hash
+        // load balancers (ip_hash and maglev). A hash_on block on a
+        // non-hash algorithm is an authoring mistake.
+        if let Some(hash_on) = &u.hash_on {
+            if !matches!(
+                u.load_balancer,
+                crate::config::LoadBalancer::IpHash | crate::config::LoadBalancer::Maglev
+            ) {
+                issues.push(issue(
+                    "upstream",
+                    &u.name,
+                    "hash_on",
+                    format!(
+                        "hash_on only applies to ip_hash or maglev load balancers; \
+                         '{}' does not use a hash key",
+                        match u.load_balancer {
+                            crate::config::LoadBalancer::RoundRobin => "round_robin",
+                            crate::config::LoadBalancer::LeastRequests => "least_requests",
+                            crate::config::LoadBalancer::Random => "random",
+                            crate::config::LoadBalancer::PeakEwma => "peak_ewma",
+                            _ => "this",
+                        }
+                    ),
+                ));
+            }
+            // Validate cookie/header names are non-empty.
+            match hash_on {
+                crate::config::HashOn::Cookie { cookie } => {
+                    if cookie.trim().is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            "hash_on.cookie",
+                            "hash_on cookie name must be a non-empty string",
+                        ));
+                    }
+                }
+                crate::config::HashOn::Header { header } => {
+                    if header.trim().is_empty() {
+                        issues.push(issue(
+                            "upstream",
+                            &u.name,
+                            "hash_on.header",
+                            "hash_on header name must be a non-empty string",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         if u.connection_cap == Some(0) {
             issues.push(issue(
                 "upstream",

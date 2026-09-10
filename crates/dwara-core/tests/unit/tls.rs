@@ -398,6 +398,7 @@ fn passthrough_gateway() -> (Gateway, ListenerTls) {
         upstreams: vec![Upstream {
             name: "backend-a".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "10.0.0.5".into(),

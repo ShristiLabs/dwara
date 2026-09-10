@@ -80,7 +80,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
-use crate::config::limits::KETAMA_VNODES;
+use crate::config::limits::{KETAMA_VNODES, MAGLEV_TABLE_SIZE};
 use crate::config::{Endpoint, LoadBalancer, PassiveHealth, PeakEwmaConfig};
 use crate::resilience::health::{EndpointHealth, HealthDispatch, HealthParams};
 
@@ -225,6 +225,10 @@ struct LbState {
     slow_start: Duration,
     /// Ketama ring (hash -> endpoint index); empty unless ip_hash.
     ring: BTreeMap<u64, usize>,
+    /// Maglev lookup table (DP-07, #236): fixed-size array mapping
+    /// `hash % table_size` to an endpoint index. Empty unless the
+    /// algorithm is `maglev`.
+    maglev_table: Vec<usize>,
     /// Resolved passive-health parameters for this generation (DW-012);
     /// `None` = passive health disabled (no ejection, no filtering).
     health: Option<Arc<HealthParams>>,
@@ -385,11 +389,17 @@ fn build_state(
     } else {
         BTreeMap::new()
     };
+    let maglev_table = if algorithm == LoadBalancer::Maglev {
+        build_maglev_table(&eps)
+    } else {
+        Vec::new()
+    };
     LbState {
         endpoints: eps,
         algorithm,
         slow_start,
         ring,
+        maglev_table,
         health,
         peak_ewma_tau_ns,
         peak_ewma_cfg,
@@ -418,6 +428,82 @@ fn build_ring(eps: &[LbEndpoint]) -> BTreeMap<u64, usize> {
         }
     }
     ring
+}
+
+/// Maglev lookup table construction (DP-07, #236). The Maglev algorithm
+/// (Google's network load balancer) builds a fixed-size lookup table
+/// where each slot maps to an endpoint. Each endpoint generates a
+/// permutation of the table indices; the table is populated by walking
+/// through each endpoint's permutation in round-robin order, filling
+/// the first empty slot each endpoint's permutation points to. This
+/// produces a table with even distribution and minimal remapping on
+/// endpoint changes.
+///
+/// The table size must be prime (65537 by default). Weight is applied
+/// by repeating each endpoint's entry in the population walk (a
+/// weight-w endpoint gets w "slots" in the round-robin, giving it
+/// proportionally more table entries).
+fn build_maglev_table(eps: &[LbEndpoint]) -> Vec<usize> {
+    let n = eps.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let m = MAGLEV_TABLE_SIZE;
+    // Build each endpoint's permutation: offset[i] and skip[i] are
+    // computed from the endpoint's identity hash. The permutation is
+    // (offset + j * skip) % m for j = 0, 1, 2, ...
+    let permutations: Vec<(u64, u64)> = eps
+        .iter()
+        .map(|e| {
+            let mut h = Fnv1a::new();
+            h.update(e.address.as_bytes());
+            h.update(&e.port.to_be_bytes());
+            let raw = h.finish();
+            let offset = raw % m as u64;
+            let skip = (raw / m as u64 % (m as u64 - 1) + 1) % (m as u64 - 1);
+            (offset, skip)
+        })
+        .collect();
+    // Build the table: for each endpoint, maintain a cursor into its
+    // permutation. Walk through endpoints in round-robin order (repeating
+    // weight times), filling the first empty slot each permutation
+    // points to. Continue until the table is full.
+    let mut table = vec![usize::MAX; m];
+    // Weighted cursor: each endpoint appears `weight` times in the
+    // round-robin walk.
+    let weighted_indices: Vec<usize> = eps
+        .iter()
+        .enumerate()
+        .flat_map(|(i, e)| std::iter::repeat_n(i, e.weight.max(1) as usize))
+        .collect();
+    if weighted_indices.is_empty() {
+        return Vec::new();
+    }
+    let mut cursors = vec![0u64; n];
+    let mut filled = 0usize;
+    while filled < m {
+        for &ep_idx in &weighted_indices {
+            let (offset, skip) = permutations[ep_idx];
+            // Find the next empty slot for this endpoint.
+            loop {
+                let slot = ((offset + cursors[ep_idx] * skip) % m as u64) as usize;
+                cursors[ep_idx] += 1;
+                if table[slot] == usize::MAX {
+                    table[slot] = ep_idx;
+                    filled += 1;
+                    break;
+                }
+                // Safety: the permutation visits all slots, so this loop
+                // terminates (when the table is nearly full, some
+                // endpoints may need to skip many filled slots, but the
+                // total work is bounded by O(m * n)).
+            }
+            if filled >= m {
+                break;
+            }
+        }
+    }
+    table
 }
 
 /// Hash a client key onto ring space (same FNV-1a as the ring uses).
@@ -1149,6 +1235,44 @@ impl UpstreamLb {
                                 .map(|(_, &i)| i)
                         })
                         .unwrap_or_else(|| smooth_weighted_rr(state, cand.as_deref()))
+                }
+                None => smooth_weighted_rr(state, cand.as_deref()),
+            },
+            // Maglev (DP-07, #236): O(1) lookup table. Hash the key,
+            // index into the table, and verify the result is eligible.
+            // When filtering is active and the table entry is not
+            // eligible, fall back to linear probing of the table
+            // (wrapping) to find the next eligible entry. With no key,
+            // fall back to smooth WRR.
+            LoadBalancer::Maglev => match key {
+                Some(k) => {
+                    let h = key_hash(k);
+                    if state.maglev_table.is_empty() {
+                        return smooth_weighted_rr(state, cand.as_deref()).into();
+                    }
+                    let m = state.maglev_table.len() as u64;
+                    let start = (h % m) as usize;
+                    if !filtered {
+                        // Fast path: no filtering, direct lookup.
+                        return state.maglev_table[start].into();
+                    }
+                    // Filtered path: linear probe for the first eligible
+                    // entry (wrapping). At most one full table scan.
+                    let eligible_set: Vec<bool> = {
+                        let mut set = vec![false; state.endpoints.len()];
+                        for &i in cand.as_deref().unwrap_or(&[]) {
+                            set[i] = true;
+                        }
+                        set
+                    };
+                    for offset in 0..state.maglev_table.len() {
+                        let idx = state.maglev_table[(start + offset) % state.maglev_table.len()];
+                        if eligible_set[idx] {
+                            return idx.into();
+                        }
+                    }
+                    // No eligible entry found; fall back to WRR.
+                    smooth_weighted_rr(state, cand.as_deref())
                 }
                 None => smooth_weighted_rr(state, cand.as_deref()),
             },

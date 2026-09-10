@@ -5211,6 +5211,21 @@ where
         };
     rec.upstream = Some(handle.name().to_string());
 
+    // DP-07 (#236): extract the hash_on key from the request before
+    // `req` is consumed by `into_parts()` below. The hash_on config
+    // on the upstream determines what to hash (cookie, header, or
+    // client IP). Falls back to None (client IP) when the cookie/header
+    // is absent or hash_on is not configured.
+    let hash_on_key: Option<String> = handle.hash_on().and_then(|hash_on| match hash_on {
+        crate::config::HashOn::Cookie { cookie } => read_cookie(req.headers(), cookie),
+        crate::config::HashOn::Header { header } => req
+            .headers()
+            .get(header)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        crate::config::HashOn::ClientIp => None,
+    });
+
     let wants_upgrade = req.headers().contains_key(UPGRADE);
     if wants_upgrade && req.version() == Version::HTTP_2 {
         return simple(
@@ -5662,8 +5677,16 @@ where
         // ip_hash branch pins the session to one endpoint; split
         // services without sticky hash per request id. Everything
         // else keeps the client-IP key (the ip_hash contract).
+        //
+        // DP-07 (#236): when the upstream has a `hash_on` config
+        // (cookie or header), the extracted value (hash_on_key, above)
+        // is used as the hash key. This takes priority over the client
+        // IP but is overridden by the sticky/split mechanism. Falls
+        // back to the client IP when the cookie/header is absent.
         let dispatch_hash_key: &str = if sticky_key.is_some() || service.split.is_some() {
             dispatch_key.as_str()
+        } else if let Some(ref hk) = hash_on_key {
+            hk.as_str()
         } else {
             peer_key.as_str()
         };

@@ -21,6 +21,7 @@ fn identity(name: &str) -> Identity {
         groups: Vec::new(),
         claims: BTreeMap::new(),
         body_digest: None,
+        agent: None,
     }
 }
 

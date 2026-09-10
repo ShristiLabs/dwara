@@ -408,6 +408,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
             Upstream {
                 name: upstream_name.clone(),
                 load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+                        hash_on: None,
                 protocol: dwara_core::config::UpstreamProtocol::Http1,
                 trusted_ca_file: None,
                 endpoints,
@@ -482,6 +483,7 @@ fn build_gateway_from_nginx(conf: &NginxConfig) -> (Gateway, Vec<String>) {
                     Upstream {
                         name: upstream_name.clone(),
                         load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+                        hash_on: None,
                         protocol: dwara_core::config::UpstreamProtocol::Http1,
                         trusted_ca_file: None,
                         endpoints: vec![endpoint],

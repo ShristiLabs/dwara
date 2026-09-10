@@ -97,6 +97,7 @@ fn upstream(name: &str) -> Upstream {
     Upstream {
         name: name.into(),
         load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".into(),

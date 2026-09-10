@@ -210,6 +210,7 @@ fn build_gateway(doc: &OpenApiDoc) -> Gateway {
         upstreams: vec![Upstream {
             name: "openapi-backend".to_string(),
             load_balancer: dwara_core::config::LoadBalancer::RoundRobin,
+                        hash_on: None,
             protocol: dwara_core::config::UpstreamProtocol::Http1,
             trusted_ca_file: None,
             endpoints: vec![Endpoint {

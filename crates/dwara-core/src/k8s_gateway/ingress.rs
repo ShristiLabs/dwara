@@ -326,6 +326,7 @@ pub fn translate_ingress(
                     let upstream = DwaraUpstream {
                         name: upstream_name.clone(),
                         load_balancer: LoadBalancer::RoundRobin,
+                        hash_on: None,
                         protocol: UpstreamProtocol::Http1,
                         trusted_ca_file: None,
                         endpoints: eps,

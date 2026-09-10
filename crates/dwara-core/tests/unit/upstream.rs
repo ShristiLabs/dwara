@@ -80,6 +80,7 @@ fn test_upstream(
     ConfigUpstream {
         name: "backend".into(),
         load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
         protocol,
         endpoints: vec![Endpoint {
             address,
@@ -414,6 +415,7 @@ fn validate_rejects_zero_connection_cap_and_zero_timeouts() {
         upstreams: vec![ConfigUpstream {
             name: "u".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

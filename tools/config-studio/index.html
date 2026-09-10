@@ -1604,6 +1604,11 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "$ref": "#/$defs/AiEndpoint",
        "default": "chat"
       },
+      "dialect": {
+       "description": ": The client-facing request dialect. Defaults\nto `openai` (the historical behavior). When set to\n`anthropic` or `gemini`, the gateway parses the incoming\nrequest using that dialect's native format and translates\nto the canonical `ChatRequest`. When set to `passthrough`,\nthe request body is forwarded to the provider as-is (no\ntranslation, still metered/governed).",
+       "$ref": "#/$defs/AiIngressDialect",
+       "default": "openai"
+      },
       "type": {
        "type": "string",
        "const": "ai"
@@ -1739,6 +1744,36 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "description": "OpenAI moderation (`POST /v1/moderations`). Proxied as a\npassthrough.",
      "type": "string",
      "const": "moderation"
+    },
+    {
+     "description": ": OpenAI Batch API (`POST /v1/batches`). Proxied\nas a passthrough for batch creation/status/cancel. When batch\nresults are retrieved (`GET /v1/batches/{id}/output`), the\nJSONL result file is parsed and each line's `usage` is metered\nat the batch (50% discount) rate.",
+     "type": "string",
+     "const": "batch"
+    }
+   ]
+  },
+  "AiIngressDialect": {
+   "description": ": The client-facing request dialect for an AI route.\nDetermines how the gateway parses the incoming request body.",
+   "oneOf": [
+    {
+     "description": "OpenAI chat-completions shape (the historical default). The\nrequest is parsed by `openai_compat::parse_chat_request`.",
+     "type": "string",
+     "const": "openai"
+    },
+    {
+     "description": "Anthropic Messages API shape. The request is parsed by\n`ingress::parse_anthropic_request` and translated to the\ncanonical `ChatRequest`.",
+     "type": "string",
+     "const": "anthropic"
+    },
+    {
+     "description": "Gemini generateContent shape. The request is parsed by\n`ingress::parse_gemini_request` and translated to the\ncanonical `ChatRequest`.",
+     "type": "string",
+     "const": "gemini"
+    },
+    {
+     "description": "Passthrough mode: the request body is forwarded to the\nprovider as-is (no translation, still metered/governed).\nThe response is returned as-is.",
+     "type": "string",
+     "const": "passthrough"
     }
    ]
   },
@@ -3220,6 +3255,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      "$ref": "#/$defs/LoadBalancer",
      "default": "round_robin"
     },
+    "hash_on": {
+     "description": ": what to hash for consistent-hash load balancers\n(`ip_hash` and `maglev`). Defaults to `client_ip` (the pre-\nbehavior). When set to `cookie` or `header`, the gateway extracts\nthe value from the request and uses it as the hash key; if the\ncookie/header is absent, it falls back to the client IP.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/HashOn"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
     "protocol": {
      "description": "Protocol used toward upstream endpoints.",
      "$ref": "#/$defs/UpstreamProtocol",
@@ -3420,9 +3466,71 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
      ]
     },
     {
+     "description": "Maglev consistent hashing: Google's Maglev algorithm\nuses a fixed-size lookup table (default 65537 entries) populated\nby each endpoint's permutation. Provides better distribution than\nketama for large endpoint pools with tight balance bounds. The\nhash key is determined by `hash_on` (client IP, cookie, or header).",
+     "type": "string",
+     "const": "maglev"
+    },
+    {
      "description": "Peak-EWMA latency-aware load balancing (Finagle-style):\nfavors low-latency endpoints and degrades outliers. Each endpoint\ncarries an atomic EWMA cost tracker (nanosecond resolution) updated\nwith the Finagle peak-EWMA formula: a new RTT that EXCEEDS the\ncurrent cost replaces it outright (the \"peak\"), otherwise the cost\ndecays toward the new RTT at rate `exp(-td / tau)`. Selection picks\nthe endpoint with the lowest `cost_ns * (inflight + 1)` score, so a\nslow endpoint with few in-flight requests can still win a pick\nwhile a fast one is saturated. Tunable via `upstreams[].peak_ewma`\n(decay tau and the initial cost); defaults are 10 s decay and a\n250 ms initial cost. Carried across rebuilds by `address:port`,\nexactly like in-flight counters and health trackers.",
      "type": "string",
      "const": "peak_ewma"
+    }
+   ]
+  },
+  "HashOn": {
+   "description": "What to hash for consistent-hash load balancers (`ip_hash` and\n`maglev`).: extends the hash key source beyond the\nclient IP to support cookie-based sticky sessions and header-based\naffinity.",
+   "oneOf": [
+    {
+     "description": "Hash the client IP (the default behavior, backward-compatible\nwith pre- configs).",
+     "type": "object",
+     "properties": {
+      "type": {
+       "type": "string",
+       "const": "client_ip"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "additionalProperties": false
+    },
+    {
+     "description": "Hash a cookie value. If the cookie is not present in the request,\nthe gateway falls back to the client IP. Used for sticky sessions\nwithout the `services[].sticky` split mechanism.",
+     "type": "object",
+     "properties": {
+      "cookie": {
+       "description": "The cookie name to read.",
+       "type": "string"
+      },
+      "type": {
+       "type": "string",
+       "const": "cookie"
+      }
+     },
+     "additionalProperties": false,
+     "required": [
+      "type",
+      "cookie"
+     ]
+    },
+    {
+     "description": "Hash a request header value. If the header is not present, falls\nback to the client IP. Common for routing by `X-User-Id` or\n`X-Session-Id` for session affinity.",
+     "type": "object",
+     "properties": {
+      "header": {
+       "description": "The header name to read (case-insensitive).",
+       "type": "string"
+      },
+      "type": {
+       "type": "string",
+       "const": "header"
+      }
+     },
+     "additionalProperties": false,
+     "required": [
+      "type",
+      "header"
+     ]
     }
    ]
   },
@@ -3435,6 +3543,11 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "http2",
       "https"
      ]
+    },
+    {
+     "description": "Cleartext HTTP/2 with prior knowledge (h2c,). No TLS;\nthe client speaks HTTP/2 directly over TCP. Common for internal\neast-west gRPC traffic without TLS.",
+     "type": "string",
+     "const": "h2c"
     },
     {
      "description": "HTTP/3 over QUIC. QUIC mandates TLS 1.3, so an `h3`\nupstream always negotiates TLS with ALPN `h3`; the\n`trusted_ca_file` field selects the trust roots (the default\nwebpki public set, or a private-CA bundle). Requires the `h3`\ncargo feature on dwara-bin to actually proxy: when the feature is\noff the protocol is accepted at validation but the upstream is\ninert (every dispatch fails closed with a clear error rather than\nsilently falling back to a wrong transport).",
@@ -4170,6 +4283,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "boolean",
       "null"
      ]
+    },
+    "agent": {
+     "description": ": agent principal metadata. Only meaningful when\n`consumer_type` is `agent`; ignored otherwise. Carries the\nagent's display name, description, owner, and permission level\nfor first-class agent principal attribution.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/AgentPrincipal"
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "additionalProperties": false,
@@ -4361,6 +4485,65 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     }
    },
    "additionalProperties": false
+  },
+  "AgentPrincipal": {
+   "description": ": First-class agent principal metadata. Attached to a\n`Consumer` with `consumer_type: agent` to carry agent-specific\nattribution and permission data.",
+   "type": "object",
+   "properties": {
+    "display_name": {
+     "description": "The agent's display name (human-readable). Defaults to the\nconsumer name when not set.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "description": {
+     "description": "A human-readable description of the agent's purpose.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "owner": {
+     "description": "The owner of this agent (a user or team name). Used for\nattribution and audit.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "permissions": {
+     "description": "The agent's permission level. One of: `read_only`,\n`read_write`, `admin`. Default `read_only`.",
+     "anyOf": [
+      {
+       "$ref": "#/$defs/AgentPermissionLevel"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "additionalProperties": false
+  },
+  "AgentPermissionLevel": {
+   "description": ": Agent permission levels for first-class agent\nprincipals. Mirrors the `Permission` enum in the MCP module but\nlives in config for declarative assignment.",
+   "oneOf": [
+    {
+     "description": "Read-only access (list, get, stats, health, config).",
+     "type": "string",
+     "const": "read_only"
+    },
+    {
+     "description": "Read-write access (read + create, update, delete).",
+     "type": "string",
+     "const": "read_write"
+    },
+    {
+     "description": "Full admin access (all tools including purge).",
+     "type": "string",
+     "const": "admin"
+    }
+   ]
   },
   "Policy": {
    "description": "Named reusable rule bundle (rate limit, timeouts, ...); attachable at\nseveral scopes. Plugin-backed phases arrive with the M3 plugin system.",
@@ -6600,6 +6783,20 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
        "description": "The selection preference: `cost` (cheapest), `latency`\n(fastest), or `balanced` (best cost/latency sum).",
        "$ref": "#/$defs/AiLatencyPreference"
       },
+      "live": {
+       "description": ": when true, the policy uses live latency\nobservations to dynamically adjust candidate ordering. The\nstatic `latency` scores are used as priors; observed latencies\nfrom recent requests refine the selection. Default false\n(static selection, the behavior).",
+       "type": "boolean"
+      },
+      "live_window": {
+       "description": ": the window size for live latency tracking\n(number of recent observations to average). Default 10. Only\nused when `live` is true.",
+       "type": [
+        "integer",
+        "null"
+       ],
+       "format": "uint",
+       "minimum": 0,
+       "default": 10
+      },
       "kind": {
        "type": "string",
        "const": "latency_cost"
@@ -6860,6 +7057,20 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
       "$ref": "#/$defs/AiMcpTool"
      }
     },
+    "resources": {
+     "description": ": Static resources exposed via `resources/list`\nand `resources/read`. Each resource has a URI, a name, a\ndescription, and an optional MIME type. The resource content\nis served inline (no upstream proxy).",
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/AiMcpResource"
+     }
+    },
+    "prompts": {
+     "description": ": Static prompt templates exposed via\n`prompts/list` and `prompts/get`. Each prompt has a name, a\ndescription, and a template body with optional arguments.",
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/AiMcpPrompt"
+     }
+    },
     "sessions": {
      "description": "Session policy. Absent (the default): the built-in defaults\n(TTL 3600s, max 1000 concurrent sessions).",
      "anyOf": [
@@ -6936,6 +7147,91 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
     "description",
     "upstream",
     "input_schema"
+   ]
+  },
+  "AiMcpResource": {
+   "description": ": One MCP static resource (`ai.mcp.resources.<name>`).\nResources are served inline (no upstream proxy). The content is\nreturned verbatim in `resources/read` responses.",
+   "type": "object",
+   "properties": {
+    "uri": {
+     "description": "The resource URI (e.g., `config://routes`, `data://users`). Must\nbe non-empty (validation rejects empty strings).",
+     "type": "string"
+    },
+    "name": {
+     "description": "Human-readable name (returned in `resources/list`).",
+     "type": "string"
+    },
+    "description": {
+     "description": "Human-readable description (returned in `resources/list`).",
+     "type": "string"
+    },
+    "mime_type": {
+     "description": "The MIME type of the content (e.g., `text/plain`,\n`application/json`). Default `text/plain`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "content": {
+     "description": "The resource content (returned verbatim in `resources/read`).",
+     "type": "string"
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "uri",
+    "name",
+    "description",
+    "content"
+   ]
+  },
+  "AiMcpPrompt": {
+   "description": ": One MCP static prompt template\n(`ai.mcp.prompts.<name>`). Prompts are served inline. The\ntemplate body is returned in `prompts/get` responses, with\noptional argument substitution.",
+   "type": "object",
+   "properties": {
+    "description": {
+     "description": "Human-readable description (returned in `prompts/list`).",
+     "type": "string"
+    },
+    "template": {
+     "description": "The prompt template body. May contain `{{argument_name}}`\nplaceholders that are substituted from the `arguments` field\nof a `prompts/get` request.",
+     "type": "string"
+    },
+    "arguments": {
+     "description": "The argument definitions for this prompt. Each argument has a\nname, a description, and a required flag.",
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/AiMcpPromptArgument"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "description",
+    "template"
+   ]
+  },
+  "AiMcpPromptArgument": {
+   "description": ": One prompt argument definition.",
+   "type": "object",
+   "properties": {
+    "name": {
+     "description": "The argument name (used as the `{{name}}` placeholder in the\ntemplate).",
+     "type": "string"
+    },
+    "description": {
+     "description": "Human-readable description of the argument.",
+     "type": "string"
+    },
+    "required": {
+     "description": "Whether the argument is required (default false).",
+     "type": "boolean"
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "description"
    ]
   },
   "AiMcpSessions": {

@@ -4751,6 +4751,13 @@ pub struct Upstream {
     pub name: String,
     #[serde(default = "default_load_balancer")]
     pub load_balancer: LoadBalancer,
+    /// DP-07 (#236): what to hash for consistent-hash load balancers
+    /// (`ip_hash` and `maglev`). Defaults to `client_ip` (the pre-#236
+    /// behavior). When set to `cookie` or `header`, the gateway extracts
+    /// the value from the request and uses it as the hash key; if the
+    /// cookie/header is absent, it falls back to the client IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_on: Option<HashOn>,
     /// Protocol used toward upstream endpoints.
     #[serde(default = "default_upstream_protocol")]
     pub protocol: UpstreamProtocol,
@@ -5634,6 +5641,12 @@ pub enum LoadBalancer {
     LeastRequests,
     Random,
     IpHash,
+    /// Maglev consistent hashing (DP-07, #236): Google's Maglev algorithm
+    /// uses a fixed-size lookup table (default 65537 entries) populated
+    /// by each endpoint's permutation. Provides better distribution than
+    /// ketama for large endpoint pools with tight balance bounds. The
+    /// hash key is determined by `hash_on` (client IP, cookie, or header).
+    Maglev,
     /// Peak-EWMA latency-aware load balancing (DW-090, Finagle-style):
     /// favors low-latency endpoints and degrades outliers. Each endpoint
     /// carries an atomic EWMA cost tracker (nanosecond resolution) updated
@@ -5647,6 +5660,33 @@ pub enum LoadBalancer {
     /// 250 ms initial cost. Carried across rebuilds by `address:port`,
     /// exactly like in-flight counters and health trackers.
     PeakEwma,
+}
+
+/// What to hash for consistent-hash load balancers (`ip_hash` and
+/// `maglev`). DP-07 (#236): extends the hash key source beyond the
+/// client IP to support cookie-based sticky sessions and header-based
+/// affinity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HashOn {
+    /// Hash the client IP (the default behavior, backward-compatible
+    /// with pre-#236 configs).
+    #[default]
+    ClientIp,
+    /// Hash a cookie value. If the cookie is not present in the request,
+    /// the gateway falls back to the client IP. Used for sticky sessions
+    /// without the `services[].sticky` split mechanism.
+    Cookie {
+        /// The cookie name to read.
+        cookie: String,
+    },
+    /// Hash a request header value. If the header is not present, falls
+    /// back to the client IP. Common for routing by `X-User-Id` or
+    /// `X-Session-Id` for session affinity.
+    Header {
+        /// The header name to read (case-insensitive).
+        header: String,
+    },
 }
 
 fn default_upstream_protocol() -> UpstreamProtocol {

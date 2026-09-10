@@ -577,6 +577,7 @@ async fn pool_with_health(health: PassiveHealth) -> TestPool {
         upstreams: vec![ConfigUpstream {
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![
                 Endpoint {
@@ -799,6 +800,7 @@ async fn serve_status(listener: TcpListener, hits: Arc<AtomicU64>, status: Statu
 fn upstream_cfg(
     endpoints: Vec<Endpoint>,
     load_balancer: LoadBalancer,
+            hash_on: None,
     health: PassiveHealth,
 ) -> ConfigUpstream {
     ConfigUpstream {
@@ -1092,6 +1094,7 @@ fn gateway_with_health(h: PassiveHealth) -> Gateway {
         upstreams: vec![ConfigUpstream {
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

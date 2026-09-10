@@ -101,6 +101,7 @@ fn bench_gateway() -> Gateway {
         .map(|u| Upstream {
             name: format!("upstream-{u}"),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: (0..5)
                 .map(|e| Endpoint {

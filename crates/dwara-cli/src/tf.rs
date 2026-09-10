@@ -488,6 +488,7 @@ fn upstream_attrs(u: &Upstream) -> Value {
             LoadBalancer::LeastRequests => "least_requests",
             LoadBalancer::Random => "random",
             LoadBalancer::IpHash => "ip_hash",
+            LoadBalancer::Maglev => "maglev",
             LoadBalancer::PeakEwma => "peak_ewma",
         }),
     );
@@ -520,6 +521,8 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
         Some("least_requests") => LoadBalancer::LeastRequests,
         Some("random") => LoadBalancer::Random,
         Some("ip_hash") => LoadBalancer::IpHash,
+        Some("maglev") => LoadBalancer::Maglev,
+        Some("peak_ewma") => LoadBalancer::PeakEwma,
         _ => LoadBalancer::RoundRobin,
     };
     let protocol = match v.get("protocol").and_then(Value::as_str) {
@@ -552,6 +555,7 @@ fn parse_upstream_attrs(v: &Value) -> Result<Upstream, String> {
     Ok(Upstream {
         name,
         load_balancer,
+        hash_on: None,
         protocol,
         trusted_ca_file: None,
         endpoints,
@@ -680,6 +684,7 @@ pub fn gateway_to_hcl(gateway: &Gateway) -> String {
                 LoadBalancer::LeastRequests => "least_requests",
                 LoadBalancer::Random => "random",
                 LoadBalancer::IpHash => "ip_hash",
+                LoadBalancer::Maglev => "maglev",
                 LoadBalancer::PeakEwma => "peak_ewma",
             }
         ));

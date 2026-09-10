@@ -137,6 +137,7 @@ fn base_gateway(listener: Listener) -> Gateway {
         upstreams: vec![Upstream {
             name: "pool".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http1,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),

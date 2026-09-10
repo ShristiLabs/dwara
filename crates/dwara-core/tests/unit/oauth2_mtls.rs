@@ -297,6 +297,7 @@ fn upstream_with_oauth2(cfg: OAuth2ClientCredentials) -> Upstream {
     Upstream {
         name: "pool".into(),
         load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
         protocol: UpstreamProtocol::Http1,
         endpoints: vec![Endpoint {
             address: "127.0.0.1".into(),

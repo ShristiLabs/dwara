@@ -89,6 +89,7 @@ fn upstream(
     ConfigUpstream {
         name: name.into(),
         load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
         protocol,
         endpoints: vec![Endpoint {
             address: address.into(),
@@ -709,6 +710,7 @@ fn validate_rejects_zero_in_each_timeout_field_independently() {
             upstreams: vec![ConfigUpstream {
                 name: "u".into(),
                 load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
                 protocol: UpstreamProtocol::Http1,
                 endpoints: vec![Endpoint {
                     address: "127.0.0.1".into(),
@@ -781,6 +783,7 @@ fn validate_accepts_positive_connection_cap_and_timeouts() {
         upstreams: vec![ConfigUpstream {
             name: "u".into(),
             load_balancer: LoadBalancer::RoundRobin,
+            hash_on: None,
             protocol: UpstreamProtocol::Http2,
             endpoints: vec![Endpoint {
                 address: "127.0.0.1".into(),
