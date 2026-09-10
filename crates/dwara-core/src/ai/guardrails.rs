@@ -72,9 +72,9 @@
 //! `ai` depends on `config` only (see `scripts/check_deps.py`); this
 //! module reads `config::ai::AiConfig` and nothing else. The `regex`
 //! crate is a workspace dependency. The `jsonschema` crate is a
-//! workspace dependency feature-gated behind `openapi_validation`
-//! (reusing the existing feature — no new feature added); without it,
-//! schema rules compile to an inert placeholder that always allows.
+//! workspace dependency used unconditionally for schema guardrails
+//! (AI-08/#197 decoupled schema checks from the openapi_validation
+//! feature flag — schema conformance is always available).
 
 use crate::ai::redaction::Redactor;
 use crate::ai::types::{ChatRequest, ChatResponse};
@@ -560,6 +560,103 @@ impl GuardrailEngine {
             }
         }
         None
+    }
+
+    /// AI-08 (#197): Redact PII from a streaming chunk's text. Runs
+    /// all response-phase PII rules' redactors against the chunk text
+    /// and returns the redacted string. If no PII rules are configured
+    /// or no matches are found, the original text is returned
+    /// unchanged. This enables mid-stream PII scrubbing for SSE
+    /// responses without buffering the entire response.
+    pub fn redact_stream_chunk(&self, chunk_text: &str) -> String {
+        if self.rules.is_empty() {
+            return chunk_text.to_string();
+        }
+        let mut text = chunk_text.to_string();
+        for rule in &self.rules {
+            if !matches!(
+                rule.phase,
+                AiGuardrailPhase::Response | AiGuardrailPhase::Both
+            ) {
+                continue;
+            }
+            if rule.kind != AiGuardrailKind::Pii {
+                continue;
+            }
+            if let Some(redactor) = &rule.redactor {
+                text = redactor.redact(&text);
+            }
+        }
+        text
+    }
+
+    /// AI-08 (#197): Check an arbitrary text string (e.g., an MCP
+    /// tool-call output) against response-phase guardrail rules.
+    /// Returns `Block` if a banned pattern matches with a block
+    /// action, `Redact` if a PII rule matches with a redact action
+    /// (carrying the redacted text), or `Allow` otherwise. Used to
+    /// inspect MCP tool outputs before they are returned to the
+    /// client.
+    pub fn check_text(&self, text: &str) -> GuardrailResult {
+        if self.rules.is_empty() {
+            return GuardrailResult::Allow;
+        }
+        let mut redacted = text.to_string();
+        let mut had_redaction = false;
+        for rule in &self.rules {
+            if !matches!(
+                rule.phase,
+                AiGuardrailPhase::Response | AiGuardrailPhase::Both
+            ) {
+                continue;
+            }
+            match rule.kind {
+                AiGuardrailKind::Banned => {
+                    if !rule.patterns.is_empty() && rule.patterns.is_match(text) {
+                        match rule.action {
+                            AiGuardrailAction::Block => {
+                                return GuardrailResult::Block {
+                                    rule_name: rule.name.clone(),
+                                    reason: "banned content in tool output".to_string(),
+                                };
+                            }
+                            AiGuardrailAction::Log => {
+                                tracing::info!(
+                                    code = "ai_guardrail_tool_output_banned_logged",
+                                    rule = %rule.name,
+                                    "guardrail rule matched tool output (log/dry-run)"
+                                );
+                            }
+                            AiGuardrailAction::Redact => { /* no-op for banned */ }
+                        }
+                    }
+                }
+                AiGuardrailKind::Pii => {
+                    if let Some(redactor) = &rule.redactor {
+                        let new_text = redactor.redact(&redacted);
+                        if new_text != redacted {
+                            had_redaction = true;
+                            redacted = new_text;
+                            if rule.action == AiGuardrailAction::Block {
+                                return GuardrailResult::Block {
+                                    rule_name: rule.name.clone(),
+                                    reason: "PII detected in tool output".to_string(),
+                                };
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if had_redaction {
+            GuardrailResult::Redact {
+                rule_name: "tool_output_pii".to_string(),
+                redacted_prompt: redacted,
+            }
+        } else {
+            GuardrailResult::Allow
+        }
     }
 
     /// Apply prompt-phase redaction to a ChatRequest's messages,

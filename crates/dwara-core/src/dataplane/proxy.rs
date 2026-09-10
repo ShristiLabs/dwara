@@ -2564,7 +2564,66 @@ where
 
     // --- Build the response ---
     let session_id_for_hdr = result.session_id.clone();
-    match result.response {
+    // AI-08 (#197): inspect MCP tool-call outputs through guardrails.
+    // When the method is tools/call, the result.content[].text fields
+    // are checked against response-phase guardrail rules (banned,
+    // PII). Banned content with a block action returns a JSON-RPC
+    // error; PII content is redacted in place.
+    let resp_json = if let Some(mut resp) = result.response {
+        if rpc_req.method == "tools/call" {
+            // AI-08 (#197): collect guardrail actions for tool outputs.
+            let guardrails = dp.ai_guardrails();
+            let mut block_error: Option<String> = None;
+            if let Some(result_obj) = resp.get_mut("result").and_then(|r| r.as_object_mut()) {
+                if let Some(content) = result_obj.get_mut("content").and_then(|c| c.as_array_mut())
+                {
+                    for item in content.iter_mut() {
+                        if item.get("type").and_then(|t| t.as_str()) != Some("text") {
+                            continue;
+                        }
+                        let Some(text_val) = item.get_mut("text") else {
+                            continue;
+                        };
+                        let Some(text_str) = text_val.as_str() else {
+                            continue;
+                        };
+                        let original = text_str.to_string();
+                        match guardrails.check_text(&original) {
+                            crate::ai::guardrails::GuardrailResult::Block { reason, .. } => {
+                                *text_val = serde_json::Value::String(format!(
+                                    "[blocked by guardrail: {reason}]"
+                                ));
+                                block_error = Some(reason);
+                            }
+                            crate::ai::guardrails::GuardrailResult::Redact {
+                                redacted_prompt,
+                                ..
+                            } => {
+                                *text_val = serde_json::Value::String(redacted_prompt);
+                            }
+                            crate::ai::guardrails::GuardrailResult::Allow => {}
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = block_error {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert(
+                        "error".into(),
+                        serde_json::json!({
+                            "code": -32001,
+                            "message": "tool output blocked by guardrail",
+                            "data": {"reason": reason}
+                        }),
+                    );
+                }
+            }
+        }
+        Some(resp)
+    } else {
+        None
+    };
+    match resp_json {
         Some(resp_json) => {
             mcp_json_response(StatusCode::OK, &resp_json, session_id_for_hdr.as_deref())
         }

@@ -529,7 +529,10 @@ mod tests {
         assert_eq!(req.other.get("seed"), Some(&json!(7)));
         // AI-06 (#196): response_format is now parsed into the typed
         // field, not preserved in `other`.
-        assert!(matches!(req.response_format, Some(ResponseFormat::JsonObject)));
+        assert!(matches!(
+            req.response_format,
+            Some(ResponseFormat::JsonObject)
+        ));
         assert!(!req.other.contains_key("response_format"));
     }
 

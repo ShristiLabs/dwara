@@ -2636,7 +2636,12 @@ impl AiStreamBody {
         if self.guardrails.is_empty() || self.guardrail_cut_off {
             return;
         }
-        if let Some(rule_name) = self.guardrails.check_stream_chunk(batch_text) {
+        // AI-08 (#197): PII redaction on streaming chunks. The
+        // redacted text replaces the batch text in the translated
+        // frames. This runs BEFORE the banned-content check so the
+        // banned patterns see the redacted text.
+        let batch_text = self.guardrails.redact_stream_chunk(batch_text);
+        if let Some(rule_name) = self.guardrails.check_stream_chunk(&batch_text) {
             self.guardrail_cut_off = true;
             // Drop the provider body NOW (eager upstream cancel).
             self.inner = None;
