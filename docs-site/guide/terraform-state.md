@@ -45,6 +45,32 @@ Pushes the desired config to the gateway via `PATCH /config`. If
 `--config` is given, that YAML is used as the desired config;
 otherwise the desired YAML is derived from the tfstate.
 
+## `dwara-cli tf apply-crud`
+
+```sh
+dwara-cli tf apply-crud --admin http://127.0.0.1:2019 --state dwara.tfstate
+```
+
+Applies the desired state to the gateway using per-entity CRUD
+operations instead of full-document `PATCH /config`. Each resource is
+managed independently:
+
+- **Added resources** are created via `POST /routes`, `POST /services`,
+  etc.
+- **Changed resources** are replaced via `PUT /routes/<name>`,
+  `PUT /services/<name>`, etc.
+- **Removed resources** are deleted via `DELETE /routes/<name>`,
+  `DELETE /services/<name>`, etc.
+
+This is the "true provider" behavior: each resource is managed
+independently, enabling incremental updates and per-resource drift
+detection. The managed entity kinds are routes, services, upstreams,
+consumers, and policies. Listeners are not managed by CRUD (they
+require full-document replacement).
+
+The existing `dwara-cli tf apply` (full-document `PATCH /config`) is
+retained for backward compatibility and bulk-replace workflows.
+
 ## State model
 
 The tfstate JSON follows Terraform's state file structure. Dwara config

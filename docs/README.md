@@ -224,6 +224,19 @@ Feature areas written up so far (M1-M6 complete):
   pricing fidelity and fail-open cost guard, OTel GenAI semantic
   conventions and AI metric families, local token estimation for
   budget pre-checks, and streaming semantic cache (#164-#169).
+- [Configurable filter-chain ordering](./features/filter-chain-ordering.md)
+  — formalizes the request pipeline phases (acl, rate_limit, authn,
+  authz, validate, transform, cache, route) with a `FilterPhase` enum,
+  per-phase dry-run mode, and per-route ordering overrides (#191,
+  CFG-05).
+- [Remote/signed plugin registry](./features/plugin-registry.md) —
+  remote plugin artifacts with SHA-256 digest and optional Ed25519
+  signature verification, fleet-consistent pinning via
+  `plugin_registry` config, and `dwara plugin search`/`install` CLI
+  commands (#192, CFG-06).
+- [Terraform-compatible state tool](./features/terraform-provider.md)
+  — now covers the `apply-crud` subcommand for true provider
+  behavior via per-entity CRUD operations (#193, CFG-08).
 
 When a feature changes materially, update its page in the same
 change — follow the established pattern: what the feature does, why

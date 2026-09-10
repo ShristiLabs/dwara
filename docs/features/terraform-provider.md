@@ -23,6 +23,19 @@ Terraform provider (or `terraform import`) could consume it. The bridge
 path to Pulumi (via the Terraform bridge) is also open: the HCL and
 tfstate are the standard interchange formats those tools expect.
 
+## SCALE-12 (#193): True provider behavior via per-entity CRUD
+
+The original `apply` command pushes the full desired config as a
+single `PATCH /config` (full-document replacement). The
+`apply-crud` command (added in #193) uses the admin API's
+per-entity CRUD endpoints (`POST /routes`, `PUT /routes/<name>`,
+`DELETE /routes/<name>`, etc.) to manage each resource
+independently -- the same behavior a real Terraform provider would
+exhibit. This makes the tool a "true provider" in behavior, even
+without the gRPC plugin protocol. The existing `apply` (full-document
+PATCH) is retained for backward compatibility and bulk-replace
+workflows.
+
 ## State model
 
 The tfstate JSON follows Terraform's state file structure:
@@ -100,6 +113,31 @@ YAML, full-document replacement). If `--config` is given, that YAML is
 the desired config; otherwise the desired YAML is derived from the
 tfstate. The admin API's response carries the new generation and
 content hash.
+
+### `dwara tf apply-crud` (#193)
+
+```
+dwara tf apply-crud --admin <url> --state <path> [--ca <path>]
+```
+
+Applies the desired state to the gateway using per-entity CRUD
+operations instead of full-document PATCH. Each resource is managed
+independently:
+
+- **Added entities:** `POST /<entity_kind>` with the entity JSON.
+- **Changed entities:** `PUT /<entity_kind>/<name>` with the entity
+  JSON.
+- **Removed entities:** `DELETE /<entity_kind>/<name>`.
+
+The entity kinds managed by CRUD are: `routes`, `services`,
+`upstreams`, `consumers`, `policies`. Listeners are not managed by
+CRUD (they require full-document replacement); this is a documented
+limitation.
+
+The `AdminClient` gains `list_entities`, `get_entity`,
+`create_entity`, `replace_entity`, and `delete_entity` methods that
+call the admin API's entity CRUD endpoints (see
+`crates/dwara-admin/src/entity_crud.rs`).
 
 ## Plan/apply flow
 
