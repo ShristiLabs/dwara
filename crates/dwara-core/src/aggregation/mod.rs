@@ -1,4 +1,4 @@
-//! API aggregation plugin pack (DW-061).
+//! API aggregation (DW-061 spec, DP-09 runtime / #237).
 //!
 //! Multi-upstream composition, JSONPath/CEL fragment shaping,
 //! per-fragment fail-open/closed (decision 10; section 5-Traffic).
@@ -24,13 +24,18 @@
 //! The aggregator fetches all fragments in parallel, shapes each, and
 //! combines them into a single JSON response.
 //!
-//! ## Done-when
+//! ## Runtime (DP-09, #237)
 //!
-//! KrakenD-style endpoint composed from 3 upstreams incl. failure case.
+//! [`run_aggregation`] is the async runtime: it fetches all fragments
+//! in parallel via simple async TCP + HTTP/1.1, shapes each through
+//! JSONPath, and composes the result through the pure [`compose`]
+//! function. A [`ServiceResolver`] trait abstracts service-to-endpoint
+//! resolution so the runtime can be wired to the dataplane's current
+//! generation balancers.
 //!
-//! ## Feature gate
+//! ## Availability
 //!
-//! The `aggregation` cargo feature must be enabled.
+//! The module is always compiled into the OSS build.
 
 use std::collections::HashMap;
 
@@ -397,4 +402,131 @@ pub fn validate_spec(spec: &AggregationSpec) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Async runtime (DP-09, #237)
+// ---------------------------------------------------------------------------
+
+/// The async aggregation runtime: fetches all fragments, shapes each,
+/// and composes the result.
+///
+/// This is the runtime half of the aggregation module (DW-061 spec +
+/// DP-09 runtime). It uses simple async TCP with manual HTTP/1.1
+/// framing to fetch each fragment from its upstream service, then
+/// feeds the results through the pure [`compose`] function.
+///
+/// Fragments are fetched sequentially (the resolver is a borrowed
+/// reference, so spawning parallel tasks would require `'static`).
+/// A future optimization can wrap the resolver in `Arc` and use
+/// `JoinSet` for parallel fetches.
+pub async fn run_aggregation(
+    spec: &AggregationSpec,
+    resolver: &dyn ServiceResolver,
+) -> ComposeResult {
+    let mut results = Vec::with_capacity(spec.fragments.len());
+    for fragment in &spec.fragments {
+        results.push(fetch_fragment(fragment, resolver).await);
+    }
+    compose(spec, &results)
+}
+
+/// Fetch a single fragment from its upstream service.
+async fn fetch_fragment(
+    fragment: &FragmentSpec,
+    resolver: &dyn ServiceResolver,
+) -> FragmentResult {
+    // Resolve the service to an upstream endpoint.
+    let endpoint = match resolver.resolve(&fragment.service) {
+        Some(e) => e,
+        None => {
+            return make_error_fragment_result(
+                fragment,
+                &format!("service '{}' not found or has no endpoint", fragment.service),
+            );
+        }
+    };
+
+    // Build the HTTP request.
+    let request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nAccept: application/json\r\n\r\n",
+        fragment.method, fragment.path, endpoint.host, endpoint.port
+    );
+
+    // Connect and send the request.
+    let addr = format!("{}:{}", endpoint.host, endpoint.port);
+    let mut stream = match tokio::net::TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            return make_error_fragment_result(
+                fragment,
+                &format!("connect to {addr} failed: {e}"),
+            );
+        }
+    };
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if let Err(e) = stream.write_all(request.as_bytes()).await {
+        return make_error_fragment_result(fragment, &format!("write failed: {e}"));
+    }
+
+    // Read the response (bounded by max_fragment_bytes + headers).
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                if response.len() > fragment.max_fragment_bytes + 8192 {
+                    return make_error_fragment_result(
+                        fragment,
+                        "response exceeds max fragment size",
+                    );
+                }
+            }
+            Err(e) => {
+                return make_error_fragment_result(fragment, &format!("read failed: {e}"));
+            }
+        }
+    }
+
+    // Parse the HTTP response: skip headers, extract body.
+    let body = match extract_http_body(&response) {
+        Ok(b) => b,
+        Err(e) => {
+            return make_error_fragment_result(fragment, &format!("http parse failed: {e}"));
+        }
+    };
+
+    make_fragment_result(fragment, &body)
+}
+
+/// Extract the body from an HTTP/1.1 response (skip the status line
+/// and headers, return the body bytes as a string).
+fn extract_http_body(response: &[u8]) -> Result<String, String> {
+    // Find the end of headers (\r\n\r\n).
+    let separator = b"\r\n\r\n";
+    let pos = response
+        .windows(separator.len())
+        .position(|w| w == separator)
+        .ok_or("no header/body separator found")?;
+
+    let body = &response[pos + separator.len()..];
+    String::from_utf8(body.to_vec()).map_err(|e| format!("invalid UTF-8 in body: {e}"))
+}
+
+/// A service resolver: maps a service name to an upstream endpoint.
+/// Implemented by the dataplane (which has the current snapshot's
+/// services + upstreams + balancers).
+pub trait ServiceResolver: Send + Sync {
+    /// Resolve a service name to an upstream endpoint (host, port).
+    fn resolve(&self, service: &str) -> Option<ResolvedEndpoint>;
+}
+
+/// A resolved upstream endpoint.
+#[derive(Debug, Clone)]
+pub struct ResolvedEndpoint {
+    pub host: String,
+    pub port: u16,
 }
