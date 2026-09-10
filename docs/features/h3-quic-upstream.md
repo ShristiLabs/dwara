@@ -107,16 +107,25 @@ TCP/TLS path's per-attempt deadline. A QUIC `ConnectionError::TimedOut`
 maps to `ConnectTimeout`; all other H3 errors map to
 `UpstreamError::Io` (retryable transport errors).
 
-## Response buffering (documented v1 limitation)
+## Response streaming (PERF-10, #243)
 
-Unlike the TCP/TLS path (which streams the upstream body through
-`UpstreamBody`), the H3 path buffers the full response body before
-returning. h3's `recv_data` is an async method on the stream handle,
-not a hyper `Body`, and bridging it into the streaming `UpstreamBody`
-wrapper without a per-stream driver task is a follow-up. The request
-body is likewise buffered (sent as one `DATA` frame). Streaming H3
-bodies are a future improvement, not a regression: an H3 upstream is a
-new transport.
+The H3 transport supports two response modes:
+
+- `h3_request` (buffered): collects the full response body into one
+  `Bytes` before returning. The original v1 behavior; kept for
+  compatibility and simple use cases.
+- `h3_request_streaming` (streaming): returns response headers
+  immediately and streams the body through a tokio mpsc channel as h3
+  `recv_data` chunks arrive. A driver task reads `recv_data` and sends
+  each chunk through a bounded channel (capacity 1) so backpressure
+  flows from the consumer to the upstream. The receiver is wrapped in
+  `UpstreamBody::from_h3_streaming`, which applies the idle/deadline/
+  health knobs uniformly across transports.
+
+The streaming path matches the h1/h2 zero-buffer guarantee. The
+request body is still sent as one `DATA` frame (the proxy already
+buffers request bodies for retries); streaming request bodies are a
+separate enhancement.
 
 ## Configuration
 

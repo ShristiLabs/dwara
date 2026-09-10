@@ -156,6 +156,10 @@ export default withMermaid(
                   text: "Post-quantum TLS",
                   link: "/guide/post-quantum-tls",
                 },
+                {
+                  text: "SPIFFE/SPIRE workload identity",
+                  link: "/guide/spiffe-spire",
+                },
               ],
             },
             {

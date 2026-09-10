@@ -202,9 +202,13 @@ Feature areas written up so far (M1-M6 complete):
 - [Service mesh mode](./features/service-mesh.md) — sidecar mesh
   mode with SPIFFE/SPIRE mTLS identity, inbound/outbound listeners,
   and iptables/TPROXY redirect (DW-107).
+- [SPIFFE/SPIRE workload identity](./features/spiffe-spire.md) —
+  SPIRE Workload API gRPC client, X.509 SVID fetching, mTLS config
+  construction, and URI SAN SPIFFE ID extraction (SEC-16, #247).
 - [H3/QUIC upstream transport](./features/h3-quic-upstream.md) —
   HTTP/3 over QUIC as an upstream transport via quinn/h3/h3-quinn,
-  distinct from HTTP/3 ingress (DW-108).
+  distinct from HTTP/3 ingress (DW-108). Now covers streaming response
+  bodies (PERF-10, #243).
 - [Extism PDK, bot hooks, signed-URL, cert pinning](./features/extism-pdk-bot-hooks.md)
   — Extism PDK scaffold for plugin development, bot detection hooks,
   signed-URL verification, and upstream TLS certificate pinning by
