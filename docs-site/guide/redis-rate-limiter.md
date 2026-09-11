@@ -57,7 +57,20 @@ gateway:
 ## How it works
 
 The limiter uses the same GCRA (Generic Cell Rate Algorithm) as the
-local limiter. For each rate-limit check:
+local limiter. Each check is one atomic Redis round-trip, which is
+what keeps the decision consistent across every gateway instance:
+
+```mermaid
+flowchart TD
+    R[Request arrives at any instance] --> K["Build the key from selectors\nip, ip+route, consumer+route, ..."]
+    K --> L["Lua script runs atomically in Redis:\nread TAT, compute new TAT, write back"]
+    L --> RT[One round-trip returns:\nallowed, remaining, retry-after]
+    RT -->|allowed| A[Request proceeds]
+    RT -->|denied| D[429 with Retry-After]
+    I[Another gateway instance,\nsame key] -.->|serialized by Redis| L
+```
+
+For each rate-limit check:
 
 1. The key is built from the policy's selectors (e.g. `ip`,
    `ip+route`, `consumer+route`) exactly as the local limiter does.
@@ -194,7 +207,7 @@ the request path.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository includes the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository includes the
 `redis_rate_limiter` block (inert in the OSS build, which uses the
 local GCRA limiter) and verifies the proxy path (test script:
 `test-04-redis-limiters.sh`). The category README covers

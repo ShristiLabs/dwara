@@ -236,7 +236,7 @@ not triggered.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/07-ai-gateway/` (test
+Run this feature against a live gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) (test
 script: `test-06-prompt-experimentation.sh`) in the repository.
 The category README covers prerequisites and teardown.
 

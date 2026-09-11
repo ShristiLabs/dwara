@@ -50,6 +50,14 @@ secret_sources:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    C["Config references a secret as\nvault:path/to/secret"] --> R["Read at startup and on every reload\nfrom secret/data/dwara/path/to/secret"]
+    R --> L[Secret returned with a lease]
+    L --> N["Lease renewed automatically\nbefore expiry"]
+    N -->|"renewal fails (Vault down)"| CC["Keep serving the cached value\nuntil the lease expires,\nthen fail closed"]
+```
+
 In config fields that accept secret references, use the `vault:`
 scheme:
 
@@ -91,7 +99,7 @@ secrets in the same config.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository documents the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository documents the
 Vault/KMS secret sources and verifies the OSS `${...}` secret path
 (test script: `test-05-vault-secrets.sh`). The category README covers
 prerequisites and teardown.

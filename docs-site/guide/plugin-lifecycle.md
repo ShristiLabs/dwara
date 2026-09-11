@@ -16,6 +16,14 @@ iteratively (see the [changelog](https://github.com/shristilabs/dwara/blob/main/
 This page documents the lifecycle behavior the runtime implements.
 :::
 
+## When to use this
+
+- You deploy plugins (proxy-wasm or native) and need to know what
+  happens on config reload -- which instances are hot-swapped versus
+  restarted, and what happens to in-flight requests.
+- A plugin is crashing or misbehaving and you need to understand the
+  health tracking and failure isolation before you disable it.
+
 ## Loading
 
 On load, the plugin lifecycle manager, for each configured plugin:
@@ -99,7 +107,7 @@ execution order.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/08-extensibility/` (test
+Run this feature against a live gateway: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) (test
 script: `test-06-plugin-lifecycle.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

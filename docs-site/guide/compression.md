@@ -55,6 +55,20 @@ routes:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    R[Response on a route\nwith compression] --> NE{"Already has\nContent-Encoding?"}
+    NE -->|yes| P[Pass through untouched]
+    NE -->|"no (also 1xx/204/304, empty body,\n101 upgrades)"| P
+    NE -->|no| ALG{"First algorithm in the preference\norder the client accepts?"}
+    ALG -->|client accepts none or\nsends no Accept-Encoding| P
+    ALG -->|algorithm chosen| SZ{"Known size < min_size?"}
+    SZ -->|yes| P
+    SZ -->|no or streamed| CT{"Content-Type matches\ncontent_types and not\nexcluded_content_types?"}
+    CT -->|no| P
+    CT -->|yes| C["Encode at the clamped level\ngzip 0-9, brotli 0-11, zstd 0-22"]
+```
+
 1. The gateway negotiates against the request's `Accept-Encoding`:
    `algorithms` is a preference order, and the first entry the client
    accepts wins. Clients that accept nothing the route offers (or
@@ -98,7 +112,7 @@ rest of the config -- an atomic snapshot swap, no restart.
 
 ## Runnable demo
 
-Run compression against a live gateway: `demos/05-request-response/`
+Run compression against a live gateway: [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response)
 (test script: `test-06-compression.sh`) in the repository. The script
 requests a JSON file with `Accept-Encoding: gzip` and asserts a
 `Content-Encoding: gzip` response. The category README covers

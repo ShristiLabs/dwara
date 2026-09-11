@@ -169,7 +169,7 @@ events: `canary_promoted`, `canary_rolled_back`.
 ## Runnable demo
 
 Run the balancers and splits against a live gateway:
-`demos/02-load-balancing/` in the repository. Test scripts cover
+[`demos/02-load-balancing/`](https://github.com/shristilabs/dwara/tree/main/demos/02-load-balancing) in the repository. Test scripts cover
 each per-upstream strategy (`test-01-round-robin.sh` through
 `test-04-peak-ewma.sh`), cookie-affinity sticky sessions
 (`test-05-sticky-sessions.sh`), and a 90/10 weighted split between

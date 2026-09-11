@@ -9,6 +9,14 @@ and per-agent token budgets, with typed analytics attribution so agent
 traffic is identifiable, governable, and billable separately from user
 traffic.
 
+## When to use this
+
+- Different teams should reach different models -- a per-team
+  allowlist decides who may call which alias, and a shadow audit
+  records every usage for review before enforcement.
+- Bots and agents call your AI routes and need their own identity,
+  tool allowlists, token budgets, and separate billing attribution.
+
 ## Agent principals & governance
 
 Agent principals extend the consumer model with typed identities,
@@ -187,7 +195,7 @@ Once you are satisfied with the false-positive rate, switch to
 ## Runnable demo
 
 Run a team model allowlist against a live gateway:
-`demos/07-ai-gateway/` in the repository (test script:
+[`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) in the repository (test script:
 `test-13-model-governance.sh` -- a model outside the allowlist gets
 403 before routing). The category README covers prerequisites and
 teardown.

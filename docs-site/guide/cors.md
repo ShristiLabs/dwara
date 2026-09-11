@@ -67,6 +67,17 @@ browser gets a 404.
 
 With a `cors` block on the matched route:
 
+```mermaid
+flowchart TD
+    R[Request on a route\nwith a cors block] --> PF{"OPTIONS with Origin and\nAccess-Control-Request-Method?"}
+    PF -->|yes: a preflight| PO{"Policy allows origin,\nmethod, requested headers?"}
+    PO -->|allowed| PA["204 answered by the gateway itself --\nnever proxied, no authn or rate limit,\nCORS headers included"]
+    PO -->|rejected| PR["204 with no CORS headers --\nthe browser reports a failed preflight"]
+    PF -->|"no: a plain request"| OR{"Origin header\nallowed by the policy?"}
+    OR -->|yes| AC["Upstream response carries\nAllow-Origin, credentials, expose-headers,\nVary: Origin"]
+    OR -->|no| NC[Response passes through\nwith no CORS headers]
+```
+
 1. **Preflights** (`OPTIONS` carrying `Origin` and
    `Access-Control-Request-Method`) are answered by the gateway
    itself with `204` -- never forwarded to the upstream, and not
@@ -127,7 +138,7 @@ the config -- an atomic snapshot swap, no restart.
 
 ## Runnable demo
 
-Run CORS against a live gateway: `demos/05-request-response/` (test
+Run CORS against a live gateway: [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test
 script: `test-05-cors.sh`) in the repository. The script sends an
 `OPTIONS` preflight with an `Origin` and an
 `Access-Control-Request-Method`, then asserts the

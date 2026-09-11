@@ -27,7 +27,7 @@ flowchart TD
     A[ai action selected] --> B[Budget pre-check\nper-minute / per-day\ntoken caps]
     B -->|over budget| BX[429\nai_budget_exceeded]
     B -->|ok| C[Read + parse body\nOpenAI chat-completions format]
-    C -->|parse error| CX[400\nbad_request]
+    C -->|parse error| CX[400\ninvalid_json]
     C -->|ok| D[Model governance\nper-team allowlist check]
     D -->|denied| DX[403\nmodel_denied_by_policy]
     D -->|ok| E[Prompt guardrails\ninjection / PII /\nbanned content / schema]

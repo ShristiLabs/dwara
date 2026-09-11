@@ -55,7 +55,7 @@ gateway lifetime.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/11-enterprise/` (test
+Run this feature against a live gateway: [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) (test
 script: `test-12-audit-log.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

@@ -222,7 +222,7 @@ prompt names return an MCP JSON-RPC error.
 
 ## Runnable demo
 
-Run the MCP gateway against a live gateway: `demos/07-ai-gateway/`
+Run the MCP gateway against a live gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway)
 in the repository (test script: `test-11-mcp-gateway.sh` --
 `tools/list` over `/mcp`). The category README covers prerequisites
 and teardown.

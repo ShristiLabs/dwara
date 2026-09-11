@@ -2,8 +2,7 @@
 
 ## One-command TLS demo
 
-`quickstart/oss/` in the repository is an end-to-end demo: a docker-compose
-stack with Dwara doing [TLS termination](https://en.wikipedia.org/wiki/Transport_Layer_Security) (the gateway decrypts TLS itself) in front of an nginx demo upstream.
+An end-to-end demo stack with Dwara doing [TLS termination](https://en.wikipedia.org/wiki/Transport_Layer_Security) (the gateway decrypts TLS itself) in front of an nginx demo upstream, in [`quickstart/oss/`](https://github.com/shristilabs/dwara/tree/main/quickstart/oss) at the repository root:
 
 ```sh
 cd quickstart/oss
@@ -12,18 +11,16 @@ docker compose up        # builds the gateway image
 curl --cacert ../certs/server.crt https://localhost:8443/
 ```
 
-The `curl` prints the demo page: the client negotiated TLS with Dwara,
-which routed `/` to the nginx upstream and proxied the response back.
-See the [OSS quickstart demo](../demos/oss-quickstart) for the full
-feature walkthrough, or `quickstart/oss/README.md` in the repository
-for teardown and details.
 Linux hosts need `sudo chown -R 65532:65532 quickstart/certs` before
 `docker compose up`
 (the distroless image runs as UID 65532).
 
-The sibling `quickstart/enterprise/` directory runs the Enterprise
-edition's CP/DP split topology instead (controller + edge fleet); see
-the [Enterprise quickstart demo](../demos/enterprise-quickstart).
+The [OSS quickstart demo](../demos/oss-quickstart) page is the
+canonical walkthrough -- everything the demo covers, the admin API,
+and teardown. The sibling [`quickstart/enterprise/`](https://github.com/shristilabs/dwara/tree/main/quickstart/enterprise)
+directory runs the Enterprise edition's CP/DP split topology instead
+(controller + edge fleet); see the
+[Enterprise quickstart demo](../demos/enterprise-quickstart).
 
 ## Docker
 
@@ -86,7 +83,7 @@ generates, so it never goes stale.
 
 ## Runnable demo
 
-Run TLS transport against a live gateway: `demos/10-tls-transport/`
+Run TLS transport against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport)
 in the repository. `test-01-tls-terminate.sh` and
 `test-02-multi-sni.sh` exercise TLS termination and multi-SNI
 certificate selection; SNI passthrough is configuration-only -- the

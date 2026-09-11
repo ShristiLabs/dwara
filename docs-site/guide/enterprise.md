@@ -72,7 +72,7 @@ infrastructure for fleet-wide state):
   split topology on one Docker network: a controller broadcasting config
   to two edge/gateway data planes. One `docker compose up`, one config
   file, watch the fleet converge.
-- `demos/11-enterprise/` - a live stack for every feature in this
+- [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) - a live stack for every feature in this
   section, run with the OSS image: the test scripts document each
   enterprise config block (accepted but inert) and verify the
   OSS-equivalent behavior. The category README covers prerequisites,

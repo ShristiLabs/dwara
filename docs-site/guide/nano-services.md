@@ -103,7 +103,7 @@ receives `502` -- the gateway treats a broken module like a broken upstream.
 
 ## Runnable demo
 
-Run the demo stack: `demos/08-extensibility/` in the repository (test
+Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test
 script: `test-04-nano-services.sh`). The default demo image builds
 without the `nano_services` cargo feature, so the script documents
 the route action and verifies the composed echo + static services;

@@ -71,6 +71,17 @@ authz:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    R[Request on a route with\nOPA authorization] --> B["Built-in authz rules first\n(see Interaction with built-in authz)"]
+    B -->|any denies| D403[403]
+    B -->|no denial| P["POST to the OPA endpoint:\nmethod, path, headers,\nconsumer identity as JSON"]
+    P --> E[OPA evaluates the Rego policy]
+    E -->|decision true| A[Request proceeds to the upstream]
+    E -->|decision false| D403
+    P -.->|"OPA unreachable: fail_closed\n(default true) decides"| D403
+```
+
 1. The gateway sends a POST to the OPA endpoint with the request
    context (method, path, headers, consumer identity) as JSON.
 2. OPA evaluates the Rego policy and returns a boolean decision.
@@ -131,7 +142,7 @@ If either denies, the request is rejected with 403.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/04-security-auth/` (test
+Run this feature against a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test
 script: `test-20-opa-authz.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

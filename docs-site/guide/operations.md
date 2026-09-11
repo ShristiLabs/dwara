@@ -117,7 +117,7 @@ See the full [environment variables reference](../reference/environment-variable
 
 ## Runnable demo
 
-Run hot config reload against a live gateway: `demos/09-operations/`
+Run hot config reload against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations)
 in the repository (test script: `test-01-hot-reload.sh` -- touch the
 mounted config and the gateway keeps answering while it re-reads and
 re-publishes). The category README covers prerequisites and teardown.

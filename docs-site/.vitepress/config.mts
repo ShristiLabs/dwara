@@ -90,6 +90,11 @@ export default withMermaid(
       },
 
       themeConfig: {
+        // No versions are frozen yet (versions/ is empty; run
+        // `npm run docs:freeze -- <version>` at the first release tag).
+        // Hide the version switcher until there is a second version to
+        // switch to: delete this `false` when the first freeze happens.
+        versionSwitcher: false,
         // The nav logo is the Dwara mark on its indigo squircle (an app
         // icon), served from docs-site/public/. VitePress rewrites this
         // with withBase, so it resolves to /dwara/mark-icon.svg in prod.
@@ -100,9 +105,7 @@ export default withMermaid(
           { text: "Architecture", link: "/architecture/overview" },
           { text: "Reference", link: "/reference/environment-variables" },
           // The plugin injects the version switcher into the nav array at
-          // build time; no explicit entry is needed here (versionSwitcher
-          // defaults to enabled). See .vitepress/theme/index.ts for the
-          // richer VersionSwitcher component wiring.
+          // build time when enabled (see versionSwitcher above).
         ],
 
         sidebar: {
@@ -362,11 +365,6 @@ export default withMermaid(
                 {
                   text: "Native plugin filters",
                   link: "/guide/native-plugins",
-                },
-                {
-                  text: "Extism plugin development kit" +
-                    '<span class="vp-sb-badge experimental">experimental</span>',
-                  link: "/guide/extism-pdk",
                 },
                 {
                   text: "Nano-services (WASM handlers)",

@@ -68,6 +68,6 @@ on an h1 listener matches the same request on an h3 listener.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/10-tls-transport/` (test
+Run this feature against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport) (test
 script: `test-07-http3.sh`) in the repository.
 The category README covers prerequisites and teardown.

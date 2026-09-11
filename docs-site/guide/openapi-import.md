@@ -111,7 +111,7 @@ action. The supported [JSON Schema](https://json-schema.org/) (a standard for de
 
 ## Runnable demo
 
-Run the import flow end to end: `demos/12-protocol-translation/`
+Run the import flow end to end: [`demos/12-protocol-translation/`](https://github.com/shristilabs/dwara/tree/main/demos/12-protocol-translation)
 (test scripts: `test-06-openapi-import.sh` for the import flow,
 `test-06-mock-response.sh` in `demos/01-routing/` for mock routes) in
 the repository. The category READMEs cover prerequisites and teardown.

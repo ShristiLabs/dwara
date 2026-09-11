@@ -88,7 +88,7 @@ but not yet enforced at runtime.
 
 ## Runnable demo
 
-Watch a read timeout fire: `demos/03-resilience/` (test script:
+Watch a read timeout fire: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test script:
 `test-06-timeouts.sh`) in the repository calls a 2000 ms-slow
 upstream behind a 500 ms `read_ms` and asserts the 504. The
 category README covers prerequisites and teardown.

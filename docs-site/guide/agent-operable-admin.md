@@ -21,6 +21,14 @@ transport is mounted by an embedding, this page documents the tool
 surface such an integration exposes.
 :::
 
+## When to use this
+
+- You operate the gateway with AI agents (or want to) and need a
+  typed, permissioned tool surface instead of agents issuing raw
+  admin-API calls.
+- An embedding or automation layer mounts the MCP server and you need
+  the tool inventory, argument schemas, and RBAC model it exposes.
+
 ## The tool surface
 
 `McpServer::new()` registers ten standard tools:
@@ -95,7 +103,7 @@ See [Admin API](./admin-api) for the underlying operator surface and
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/09-operations/` (test
+Run this feature against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) (test
 script: `test-13-agent-operable-admin.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

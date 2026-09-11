@@ -104,7 +104,7 @@ link it.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository includes the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository includes the
 `license` block and verifies the OSS stub path, where the gate is
 always `LicenseGate::none()` (test script: `test-10-licensing.sh`).
 The category README covers prerequisites and teardown.

@@ -72,6 +72,8 @@ with `Ctrl-C` — it drains in-flight requests before exiting (see
 
 ## Next steps
 
+- [Concepts](./concepts) — the vocabulary the rest of the docs use:
+  consumers, policy scopes, workspaces, config generations and snapshots.
 - [Configuration](./configuration) — the shape of the YAML config and the
   concepts (Listener/Route/Service/Upstream/...) it's built from.
 - [Deployment](./deployment) — TLS termination, Docker images, systemd.

@@ -52,6 +52,16 @@ the whole upstream is in trouble and the fastest correct answer is
 
 The breaker is a three-state machine per upstream:
 
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: failure streak or 60 s window ratio trips
+    Open --> HalfOpen: open_ms elapsed
+    HalfOpen --> Closed: probe succeeds, counters reset
+    HalfOpen --> Open: probe fails, open_ms restarts
+    Open --> Open: requests rejected 503 + Retry-After
+```
+
 - **Closed** -- requests flow. Failures are counted toward both the
   streak and the 60 s window.
 - **Open** -- requests are rejected with `503` "upstream circuit
@@ -83,7 +93,7 @@ a `breaker_opened` / `breaker_closed` event on the gateway event bus
 
 ## Runnable demo
 
-Trip a breaker on a live gateway: `demos/03-resilience/` (test
+Trip a breaker on a live gateway: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test
 script: `test-03-circuit-breaker.sh`) in the repository floods a
 flaky upstream until the breaker opens and responses come back
 502/503. The category README covers prerequisites and teardown.

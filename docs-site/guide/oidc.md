@@ -227,6 +227,6 @@ IdP allows this redirect URI in its configuration.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/04-security-auth/` (test
+Run this feature against a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test
 script: `test-18-oidc.sh`) in the repository.
 The category README covers prerequisites and teardown.

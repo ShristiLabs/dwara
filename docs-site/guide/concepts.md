@@ -223,7 +223,6 @@ Three plugin families, unified under one dispatch chain:
 |---|---|---|
 | **Proxy-Wasm** | The proxy-wasm host: community Kong/Envoy filters run unmodified (capability `wasm`) | [Proxy-Wasm plugins](./proxy-wasm-plugins) |
 | **Native plugins** | A Rust filter trait compiled into the binary (capability `plugins`) | [Native plugins](./native-plugins) |
-| **Extism PDK** | Extism plugin development kit runtime (capability `extism`) | [Extism PDK](./extism-pdk) |
 | **Nano-services** | WASM route handlers — a route action that runs a WASM module to generate the response | [Nano-services](./nano-services) |
 
 Plugins are declared at the top level and referenced by name from

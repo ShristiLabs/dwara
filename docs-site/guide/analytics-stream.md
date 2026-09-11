@@ -91,7 +91,7 @@ Three families in [`/metrics`](./observability):
 
 ## Runnable demo
 
-Run the stream against a live gateway: `demos/06-observability/`
+Run the stream against a live gateway: [`demos/06-observability/`](https://github.com/shristilabs/dwara/tree/main/demos/06-observability)
 (test script: `test-09-analytics-stream.sh`) in the repository. The
 demo fires NDJSON batches at a collector container and the test
 asserts the records arrive. The category README covers prerequisites

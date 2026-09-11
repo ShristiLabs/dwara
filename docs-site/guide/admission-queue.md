@@ -107,7 +107,7 @@ turning it on. See [Maintenance and dry-run](./maintenance#dry-run).
 
 ## Runnable demo
 
-Fire a 50-request burst at a live gateway: `demos/03-resilience/`
+Fire a 50-request burst at a live gateway: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience)
 (test script: `test-07-load-shedding.sh`) in the repository asserts
 the basic requests survive; the demo ships a high
 `max_concurrent_requests` cap, and the README explains how to lower

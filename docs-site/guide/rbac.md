@@ -82,6 +82,16 @@ role_assignments:
 
 Permissions are evaluated as follows:
 
+```mermaid
+flowchart TD
+    R[Authenticated principal requests\nan action in a workspace] --> L[Look up the principal's\nrole assignments]
+    L --> W["For each role: check the role's\npermissions against the action\nand the workspace"]
+    W -->|any role grants it| A[Allow]
+    W -->|no role grants it| D["Deny (fail-closed)"]
+    A --> AUD[Allowed and denied actions\nboth land in the audit log]
+    D --> AUD
+```
+
 1. A principal's roles are looked up.
 2. For each role, the permissions are checked against the requested
    action and workspace.
@@ -98,7 +108,7 @@ the fact through the [audit log](./audit-log); see
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository documents
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository documents
 workspace RBAC and verifies the admin API's mTLS surface, the OSS
 admin boundary (test script: `test-06-workspace-rb.sh`). The
 category README covers prerequisites and teardown.

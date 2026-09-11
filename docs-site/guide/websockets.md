@@ -65,6 +65,20 @@ never reach the backend.
 
 ## How it works
 
+```mermaid
+flowchart TD
+    U[Client requests a\nWebSocket upgrade] --> O{"origins set and\nOrigin header matches?"}
+    O -->|"no (or no Origin)"| H403["403 -- the handshake never\nreaches the backend"]
+    O -->|yes| H[Handshake relayed to the upstream,\n101 Switching Protocols]
+    H --> T[Tunnel spliced:\nframes flow end to end]
+    T --> G{"Guard rails on client frames\n(when configured)"}
+    G -->|"sustained frames > max_frames_per_sec"| C1008["Closed with 1008\npolicy violation"]
+    G -->|"frame payload > max_frame_size_bytes"| C1009["Closed with 1009\nmessage too big"]
+    G -->|"reserved opcodes or extended\ncontrol-frame lengths"| C1002["Closed with 1002\nprotocol error"]
+    G -->|"no data either direction\nfor idle_timeout_s"| CI[Idle tunnel closed]
+    G -->|well-behaved traffic| T
+```
+
 1. A client requests a WebSocket
    [upgrade](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/101)
    (Switching Protocols -- the handshake response that upgrades to
@@ -104,7 +118,7 @@ For request-level limits on HTTP traffic, see
 
 ## Runnable demo
 
-A WebSocket echo upstream is proxied in `demos/05-request-response/`
+A WebSocket echo upstream is proxied in [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response)
 (test script: `test-09-websocket.sh`) in the repository, behind a
 route with an origin check and a frame-rate cap. The script verifies
 the `/ws` route is reachable (a plain GET draws a 400/426, not a

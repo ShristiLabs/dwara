@@ -120,6 +120,6 @@ resolved address.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/02-load-balancing/` (test
+Run this feature against a live gateway: [`demos/02-load-balancing/`](https://github.com/shristilabs/dwara/tree/main/demos/02-load-balancing) (test
 script: `test-07-dynamic-discovery.sh`) in the repository.
 The category README covers prerequisites and teardown.

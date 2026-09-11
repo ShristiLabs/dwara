@@ -53,6 +53,22 @@ request is replayable. Two properties make a retry safe:
 
 ## How it works
 
+Every failed attempt passes through three gates before a retry is
+issued -- and a retry only ever happens before response headers
+arrive:
+
+```mermaid
+flowchart TD
+    F[Attempt fails] --> C{"Classifier:\nretryable outcome?"}
+    C -->|"no: other 4xx, mid-stream body error"| R1[Report failure to client\nand to passive health]
+    C -->|"yes: 502/503/504, 429,\ntransport error"| B{"Retry budget\nleft in the window?"}
+    B -->|exhausted| R2[Fail through to client]
+    B -->|available| D{"total_deadline_ms set and\nnext sleep crosses it?"}
+    D -->|yes| R3[Return last response or error]
+    D -->|no| S["Full-jitter sleep\nuniform in 0 .. min(base * 2^(n-1), cap)"]
+    S --> A[Next attempt\nchecked against the breaker first]
+```
+
 1. An attempt fails. The classifier decides whether the outcome is
    retryable at all:
 
@@ -101,7 +117,7 @@ with `timeouts.read_ms: 3000` means at most three 3-second attempts
 
 ## Runnable demo
 
-Watch a retry recover a request: `demos/03-resilience/` (test
+Watch a retry recover a request: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test
 script: `test-04-retries.sh`) in the repository retries against a
 50%-flaky pool until the healthy echo endpoint answers 200. The
 category README covers prerequisites and teardown.

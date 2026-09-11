@@ -147,7 +147,7 @@ kept in memory for the process lifetime and zeroized on shutdown.
 ## Runnable demo
 
 Run env and file secret references against a live gateway:
-`demos/09-operations/` in the repository (test script:
+[`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) in the repository (test script:
 `test-08-secrets.sh`). The demo shows a `${DEMO_SECRET}` credential
 resolving, unset references failing closed, and the redacted admin
 `/config` echo; the category README covers prerequisites and

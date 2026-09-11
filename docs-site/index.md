@@ -147,14 +147,13 @@ domains:
   - title: Extensibility and plugins
     link: /guide/extensibility-overview
     visual: extensibility
-    blurb: "Three plugin families -- proxy-wasm, native Rust filters, and Extism -- unified under one dispatch chain."
+    blurb: "Proxy-Wasm plugins, native Rust filters, and WASM nano-services -- unified under one dispatch chain."
     icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M9 3v5m6-5v5M6.5 8h11v4a5.5 5.5 0 0 1-11 0V8ZM12 17.5V21'/></svg>"
     items:
       - { name: Proxy-Wasm plugins, desc: "Kong/Envoy filters run unmodified", link: /guide/proxy-wasm-plugins }
       - { name: Native plugin filters, desc: "Rust filters, same dispatch chain", link: /guide/native-plugins }
       - { name: Extension traits, desc: "Swap whole subsystems via traits", link: /guide/extension-traits }
       - { name: Nano-services, desc: "WASM route handlers, no upstream", link: /guide/nano-services }
-      - { name: Extism PDK, desc: "Multi-language plugin runtime", link: /guide/extism-pdk, badge: experimental }
       - { name: Plugin lifecycle, desc: "Hot-swap, health, failure isolation", link: /guide/plugin-lifecycle }
       - { name: Plugin SDK, desc: "dwara-cli scaffolding", link: /guide/plugin-sdk }
   - title: Observability and analytics
@@ -295,12 +294,22 @@ back the same way. A path with no matching route returns `404`; a dead
 backend returns `502`. Stop with `Ctrl-C` -- in-flight requests drain
 before the process exits.
 
-A released binary works the same way: point `DWARA_CONFIG` at your
-YAML. [Getting started](/guide/getting-started) walks through a first
-config, [Installation](/guide/installation) covers binaries,
-Docker images, and systemd, and the [OSS quickstart demo](/demos/oss-quickstart)
-is a comprehensive, feature-complete walkthrough of every OSS capability
-in one `docker compose up`.
+This exact command assumes a source checkout with Rust 1.94+, cmake,
+and a C compiler. A released binary or Docker image works the same
+way: point `DWARA_CONFIG` at your YAML -- [Installation](/guide/installation)
+covers binaries, Docker images, OS packages, and systemd, no toolchain
+needed.
+
+New to Dwara? Follow this order:
+
+1. [Getting started](/guide/getting-started) -- a first config, line
+   by line.
+2. [Concepts](/guide/concepts) -- the vocabulary the rest of the docs
+   use: consumers, policy scopes, config generations and snapshots.
+3. [First scenarios](/guide/first-scenarios) -- task-oriented guides
+   for day-one goals.
+4. [OSS quickstart demo](/demos/oss-quickstart) -- every OSS
+   capability in one `docker compose up`.
 
 ## By scenario
 

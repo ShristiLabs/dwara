@@ -9,6 +9,16 @@ file reconfigures the whole fleet.
 The demo lives at [`quickstart/enterprise/`](https://github.com/shristilabs/dwara/tree/main/quickstart/enterprise)
 in the repository.
 
+::: tip Which quickstart should I run?
+Run this one to evaluate the enterprise fleet topology -- one
+controller broadcasting config to a fleet of edges. Building it needs
+the private ShristiLabs licensing repository (the compose setup runs
+`vendor-licensing.sh`); the CP/DP split itself runs without a license
+claim. If you want the complete OSS feature tour instead, see the
+[OSS quickstart demo](./oss-quickstart) -- plain Docker, no private
+repositories.
+:::
+
 ## What it demonstrates
 
 - **CP/DP split** -- a leader-elected controller compiles config and

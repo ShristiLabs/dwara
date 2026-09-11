@@ -41,7 +41,7 @@ your config files entirely.
 
 ## Runnable demo
 
-The `demos/04-security-auth/` directory in the repository runs a
+The [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) directory in the repository runs a
 live stack for several features in this section -- API key, Basic,
 mTLS, and HMAC credentials, authorization rules, and IP ACLs; its
 README covers prerequisites, test scripts, and teardown.

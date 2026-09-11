@@ -113,7 +113,7 @@ headers and bodies are never recorded, only the route sequence and timing.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+Run this feature against a live gateway: [`demos/12-protocol-translation/`](https://github.com/shristilabs/dwara/tree/main/demos/12-protocol-translation) (test
 script: `test-08-api-lifecycle.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

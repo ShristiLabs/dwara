@@ -100,6 +100,6 @@ fields by narrowing the schema to the fields you care about.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+Run this feature against a live gateway: [`demos/12-protocol-translation/`](https://github.com/shristilabs/dwara/tree/main/demos/12-protocol-translation) (test
 script: `test-07-openapi-response-validation.sh`) in the repository.
 The category README covers prerequisites and teardown.

@@ -70,6 +70,15 @@ Abort and delay are independent -- both can be configured on the
 same route. A request that is both aborted and delayed is aborted
 (the delay is moot).
 
+```mermaid
+flowchart TD
+    R[Request on a route with\nfault injection] --> AB{"Abort matches?\npercentage, status"}
+    AB -->|"yes (checked first)"| A["Direct response with the\nconfigured status -- no upstream call"]
+    AB -->|no| DL{"Delay matches?\npercentage, duration"}
+    DL -->|yes| W[Hold for the configured duration] --> U
+    DL -->|no| U[Proxy to the upstream normally]
+```
+
 ## Combining with mirroring
 
 Fault injection can be combined with [mirroring](./mirroring) on
@@ -79,7 +88,7 @@ primary is faulted.
 
 ## Runnable demo
 
-Feel an injected fault: `demos/03-resilience/` (test script:
+Feel an injected fault: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test script:
 `test-10-fault-injection.sh`) in the repository calls a route with
 a 100 ms delay fault and asserts the 200 arrives late. The category
 README covers prerequisites and teardown.

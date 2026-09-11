@@ -15,6 +15,14 @@ A `dry_run` field on the guardrails block evaluates all rules and logs
 would-be blocks without rejecting requests -- see
 [Dry-run mode](#dry-run-mode) below.
 
+## When to use this
+
+- Prompts or model responses must not carry certain content --
+  injected instructions, PII, banned terms -- and you want the
+  gateway to block them before they reach a provider or a client.
+- Consumers should only get responses that conform to an output JSON
+  Schema you publish.
+
 ## Configuration
 
 ```yaml
@@ -154,7 +162,7 @@ while others enforce.
 
 ## Runnable demo
 
-Run guardrails against a live gateway: `demos/07-ai-gateway/` in the
+Run guardrails against a live gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) in the
 repository (test script: `test-07-guardrails.sh` -- an injection
 prompt is blocked with 400, a benign one passes). The category README
 covers prerequisites and teardown.

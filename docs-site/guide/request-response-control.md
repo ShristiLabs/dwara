@@ -28,9 +28,13 @@ attachments.
   Accept-header versioning with HTTP-date Deprecation and Sunset
   signaling.
 
+These features run inside the shared request pipeline -- see
+[Filter-chain ordering](./filter-chain-ordering) for the phase order
+all of them participate in and how to override it.
+
 ## Runnable demo
 
-The `demos/05-request-response/` directory in the repository runs a
+The [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) directory in the repository runs a
 live stack for the features in this section; its README covers
 prerequisites, test scripts, and teardown.
 

@@ -71,7 +71,10 @@ SVIDs are fetched from a SPIFFE Bundle Endpoint (typically a
 never holds a long-lived key -- it rotates the SVID before it expires, so a
 compromised sidecar's identity is short-lived and revocable. The trust bundle
 (`trusted_ca_file`) is the SPIFFE bundle the gateway uses to verify peer
-SVIDs; it is refreshed from the same endpoint.
+SVIDs; it is refreshed from the same endpoint. For running Dwara against a
+real SPIRE deployment, see [SPIFFE/SPIRE workload identity](./spiffe-spire);
+for kernel-level traffic steering without sidecars at all, see the
+[eBPF hooks research spike](./ebpf-hooks).
 
 ## mTLS
 
@@ -119,7 +122,7 @@ just IP addresses -- the foundation of zero-trust service-to-service calls.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository documents
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository documents
 service mesh mode and verifies the reverse-proxy baseline (test
 script: `test-09-service-mesh.sh`). The category README covers
 prerequisites and teardown.

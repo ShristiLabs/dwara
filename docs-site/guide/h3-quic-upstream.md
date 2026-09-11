@@ -91,7 +91,7 @@ separately per listener and per upstream.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/10-tls-transport/` (test
+Run this feature against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport) (test
 script: `test-07-http3.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

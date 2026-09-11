@@ -40,7 +40,7 @@ covers the optional route blocks that go on top.
 
 ## Runnable demo
 
-Run these features against a live gateway: `demos/01-routing/` in the
+Run these features against a live gateway: [`demos/01-routing/`](https://github.com/shristilabs/dwara/tree/main/demos/01-routing) in the
 repository. The test scripts cover the exact, prefix, and regex match
 types (`test-01` through `test-03`), redirects, direct responses,
 mock responses, path rewrites, method allowlists, and host-header

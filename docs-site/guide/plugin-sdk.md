@@ -132,6 +132,6 @@ plugins are loaded and validated.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/08-extensibility/` (test
+Run this feature against a live gateway: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) (test
 script: `test-07-plugin-sdk.sh`) in the repository.
 The category README covers prerequisites and teardown.

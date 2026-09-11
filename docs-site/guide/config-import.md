@@ -4,6 +4,14 @@ Dwara can import external gateway configs from NGINX, Kong, Envoy, and
 OpenAPI specs to scaffold your gateway config. This is a switching-cost
 lever for teams migrating to Dwara.
 
+## When to use this
+
+- You are evaluating or migrating to Dwara from NGINX, Kong, or
+  Envoy and want a first-draft config from your existing one instead
+  of starting from a blank file.
+- You have OpenAPI specs and want routes (and mocks) scaffolded from
+  the paths and operations they already describe.
+
 ## NGINX import
 
 ```sh
@@ -112,6 +120,6 @@ what to review and handle manually.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/09-operations/` (test
+Run this feature against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) (test
 script: `test-11-config-import.sh`) in the repository.
 The category README covers prerequisites and teardown.

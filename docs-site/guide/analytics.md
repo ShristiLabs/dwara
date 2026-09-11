@@ -300,7 +300,7 @@ a valid license. In an OSS build the `FederatedAnalyticsSink` is inert.
 
 ## Runnable demo
 
-Query a live analytics store: `demos/06-observability/` in the
+Query a live analytics store: [`demos/06-observability/`](https://github.com/shristilabs/dwara/tree/main/demos/06-observability) in the
 repository. Test scripts exercise the mTLS admin dashboard query
 (`test-04-analytics-query.sh`) and a custom-dimension rollup keyed on
 the `X-API-Version` request header (`test-05-analytics-dimensions.sh`).

@@ -105,7 +105,7 @@ and `Retry-After`-driven backoff). See
 
 ## Runnable demo
 
-Hit the limit on a live gateway: `demos/04-security-auth/` (test
+Hit the limit on a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test
 script: `test-11-rate-limiting.sh`) in the repository fires rapid
 requests at a rate-limited route and asserts the sixth answers 429.
 The category README covers prerequisites and teardown.

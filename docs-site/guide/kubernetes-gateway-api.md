@@ -6,6 +6,14 @@ Ingress resources into its config model. The controller watches the
 Kubernetes API server, translates the watched resources into a Dwara
 config YAML, and publishes it to a file the gateway hot-reloads.
 
+## When to use this
+
+- Your workloads already declare routing with Gateway, HTTPRoute, or
+  Ingress resources and you want Dwara to honor them instead of
+  maintaining a parallel YAML.
+- You want standard, portable ingress semantics in Kubernetes while
+  keeping Dwara's policy features on top.
+
 ## Enabling
 
 The Kubernetes Gateway API controller is compiled into the OSS build (no `k8s` cargo feature needed)
@@ -129,7 +137,7 @@ be listed on k8s.io.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/09-operations/` (test
+Run this feature against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) (test
 script: `test-12-kubernetes-gateway-api.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

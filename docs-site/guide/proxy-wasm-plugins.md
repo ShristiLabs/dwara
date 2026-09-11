@@ -125,7 +125,7 @@ with the `dwara-cli plugin new` command.
 
 ## Runnable demo
 
-Run the demo stack: `demos/08-extensibility/` in the repository (test
+Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test
 script: `test-02-proxy-wasm.sh`). The default demo image builds
 without the `wasm` cargo feature, so the script documents the plugin
 config shape and verifies the proxy path; the README covers

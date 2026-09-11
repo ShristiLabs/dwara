@@ -110,7 +110,7 @@ fail silently with a log warning).
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository documents the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository documents the
 distributed cache and verifies the proxy path over the local
 in-memory store (test script: `test-03-distributed-cache.sh`). The
 category README covers prerequisites and teardown.

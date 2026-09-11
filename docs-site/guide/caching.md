@@ -173,7 +173,7 @@ is saving and why followers fell back.
 ## Runnable demo
 
 Run response caching against a live gateway:
-`demos/05-request-response/` (test script:
+[`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test script:
 `test-07-response-caching.sh`) in the repository. The script requests
 the same cached file twice and asserts the second response is a hit
 (an `Age` header, or a faster answer than the first). The category

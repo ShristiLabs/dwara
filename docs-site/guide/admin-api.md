@@ -259,7 +259,7 @@ reader within a couple of seconds, no restart. Geo rules require the
 
 ## Runnable demo
 
-Run the mTLS admin API against a live gateway: `demos/09-operations/`
+Run the mTLS admin API against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations)
 in the repository (test script: `test-02-admin-api.sh` -- `/health`,
 `/config`, and `/stats` over mTLS, plus a handshake failure without a
 client cert). The category README covers prerequisites and teardown.

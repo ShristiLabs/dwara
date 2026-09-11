@@ -80,6 +80,14 @@ authz:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    R[Request on a route with\nCedar authorization] --> E["Extract the Cedar triple from the request:\nprincipal = consumer identity,\naction = method mapped to read or write,\nresource = route name"]
+    E --> P["In-process Cedar engine evaluates\nthe compiled policy set\n(no network call)"]
+    P -->|Allow| A[Request proceeds to the upstream]
+    P -->|Deny| D403[403]
+```
+
 1. The gateway extracts the principal (consumer identity), action
    (HTTP method mapped to read/write), and resource (route name)
    from the request.
@@ -135,7 +143,7 @@ If either denies, the request is rejected with 403.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/04-security-auth/` (test
+Run this feature against a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test
 script: `test-21-cedar-authz.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

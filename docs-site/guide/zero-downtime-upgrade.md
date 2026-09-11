@@ -21,6 +21,27 @@ absorb the hand-off.
 
 ## How it works
 
+The upgrade is a hand-off between two processes sharing the same
+listening ports; the old process only exits after the new one is
+already serving:
+
+```mermaid
+sequenceDiagram
+    participant O as Old process
+    participant K as Kernel sockets (SO_REUSEPORT)
+    participant N as New process
+    O->>N: SIGUSR2 - spawn same binary, inherit env
+    N->>K: bind the same ports alongside the old process
+    N->>N: spawn accept tasks
+    N-->>O: READY over the Unix domain socket
+    alt READY arrives within the timeout
+        O->>O: stop accepting, drain connections, exit 0
+        Note over K: both sockets bound throughout - no refused connection
+    else start fails or READY times out
+        O->>O: log the error, keep running
+    end
+```
+
 1. Every listening socket is bound with `SO_REUSEPORT` (in addition to
    `SO_REUSEADDR` (allows rebinding a port in TIME_WAIT)). This allows a second process to bind the same port
    while the first is still listening. On Linux the kernel
@@ -116,6 +137,6 @@ to the upgrade signal.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/09-operations/` (test
+Run this feature against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) (test
 script: `test-09-zero-downtime-upgrade.sh`) in the repository.
 The category README covers prerequisites and teardown.

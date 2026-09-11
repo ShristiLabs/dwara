@@ -125,7 +125,7 @@ note at the top of this page).
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/10-tls-transport/` (test
+Run this feature against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport) (test
 script: `test-10-acme.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

@@ -79,6 +79,6 @@ so you can trace a config change's blast radius before shipping it.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/09-operations/` (test
+Run this feature against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) (test
 script: `test-07-replay-debugging.sh`) in the repository.
 The category README covers prerequisites and teardown.

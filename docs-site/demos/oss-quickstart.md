@@ -10,6 +10,15 @@ The demo lives at [`quickstart/oss/`](https://github.com/shristilabs/dwara/tree/
 in the repository. It runs on Docker and needs no cargo build -- the
 compose file builds the gateway image from `Dockerfile.scratch`.
 
+::: tip Which quickstart should I run?
+Run this one to tour the complete OSS feature set in a single
+`docker compose up` -- no license and no private repositories needed.
+If you are evaluating the enterprise fleet topology (controller +
+edge data planes) instead, see the
+[Enterprise quickstart demo](./enterprise-quickstart); it runs without
+a license too, except the Redis-backed features.
+:::
+
 ## What it demonstrates
 
 The `dwara.yaml` config is a single file that demonstrates every OSS

@@ -14,9 +14,6 @@ filter, and an Extism filter in sequence.
 - [Native plugin filters](./native-plugins) - a Rust filter trait
   compiled into the binary, running alongside proxy-wasm in the same
   dispatch chain.
-- [Extism plugin development kit](./extism-pdk) - the Extism PDK
-  runtime for plugins written in any language that compiles to WASM.
-  Experimental; see the page for current status.
 - [Nano-services (WASM handlers)](./nano-services) - a route action
   that runs a WASM module to generate the response directly, no
   upstream needed.
@@ -24,14 +21,23 @@ filter, and an Extism filter in sequence.
   configured, hot-reloaded, and torn down across config generations.
 - [Plugin SDK](./plugin-sdk) - the types and helpers for writing
   native and proxy-wasm plugins against Dwara.
+- [Plugin registry](./plugin-registry) - load plugins from a remote
+  registry with digest and signature verification, for
+  fleet-consistent pinning.
 - [Extension traits](./extension-traits) - the five swappable seams
   (RateLimiter, ConfigSource, CacheStore, AnalyticsSink, SecretSource)
   that let you replace entire subsystems with a custom or enterprise
   backend.
 
+An Extism PDK runtime was previously scaffolded as a third plugin
+path but was removed before it was ever wired into the dispatch
+chain, config schema, or runtime (issue #259) -- Proxy-Wasm and
+native filters are the supported plugin paths, and Extism may be
+re-introduced in a future milestone if there is demand.
+
 ## Runnable demo
 
-The `demos/08-extensibility/` directory in the repository runs a live
+The [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) directory in the repository runs a live
 stack for the features in this section; its README covers
 prerequisites, test scripts, and teardown.
 

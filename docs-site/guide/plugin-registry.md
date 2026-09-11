@@ -5,6 +5,14 @@ verification and optional Ed25519 signature verification. This
 enables fleet-consistent plugin pinning: all gateways in a fleet
 reference the same registry and get the same signed artifacts.
 
+## When to use this
+
+- A fleet of gateways must run byte-identical plugin builds, pinned
+  by digest rather than by mutable local copies.
+- Plugins come from outside your build (a vendor or another team) and
+  must be verified -- SHA-256 digests, optionally Ed25519 signatures
+  -- before the gateway loads them.
+
 ## Configuring a remote plugin source
 
 Set the `source` block on a plugin entry instead of a local `wasm`

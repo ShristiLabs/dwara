@@ -8,6 +8,14 @@ response headers. This page shows the four versioning patterns and how
 to deprecate a version clients can read. For the exhaustive field
 list see the [configuration schema](../reference/configuration-schema).
 
+## When to use this
+
+- You serve more than one version of an API and want clients to
+  select the version by path, header, query, or `Accept` media type.
+- A version is being retired and clients should be told -- the
+  `deprecation` block emits standard `Deprecation` and `Sunset`
+  headers they can read programmatically.
+
 ## Choosing a versioning pattern
 
 All four shapes are plain route configuration. Whichever you pick,
@@ -240,7 +248,7 @@ rules themselves.
 
 ## Runnable demo
 
-See the deprecation headers on a live route: `demos/01-routing/`
+See the deprecation headers on a live route: [`demos/01-routing/`](https://github.com/shristilabs/dwara/tree/main/demos/01-routing)
 (test script: `test-09-api-versioning.sh`) in the repository. The
 demo's `versioned-api` route emits `Deprecation` and `Sunset` on
 every response; the four versioning patterns themselves are not

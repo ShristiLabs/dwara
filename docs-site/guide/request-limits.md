@@ -175,6 +175,6 @@ config -- an atomic snapshot swap, no restart.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/05-request-response/` (test
+Run this feature against a live gateway: [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test
 script: `test-10-request-limits.sh`) in the repository.
 The category README covers prerequisites and teardown.

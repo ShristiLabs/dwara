@@ -5,6 +5,13 @@ sampling, and retention. Capture is OFF by default (privacy-first);
 when on, a redaction pass scrubs PII and secrets before storage,
 sampling controls volume, and retention ages records out.
 
+## When to use this
+
+- You need an audit trail of what was sent to and returned by AI
+  providers -- for incident review, compliance, or quality analysis.
+- PII or secrets may appear in prompts and responses; capture scrubs
+  them before anything is stored.
+
 ## Configuration
 
 ```yaml
@@ -84,7 +91,7 @@ the entire stream, contradicting the zero-buffer design).
 
 ## Runnable demo
 
-Run prompt logging against a live gateway: `demos/07-ai-gateway/` in
+Run prompt logging against a live gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) in
 the repository (test script: `test-08-prompt-logging.sh`, which
 queries captured rows via the mTLS admin API). The category README
 covers prerequisites and teardown.

@@ -41,7 +41,7 @@ passed through to a backend that terminates its own TLS.
 
 ## Runnable demo
 
-The `demos/01-routing/` and `demos/10-tls-transport/` directories in
+The [`demos/01-routing/`](https://github.com/shristilabs/dwara/tree/main/demos/01-routing) and `demos/10-tls-transport/` directories in
 the repository run live stacks for the features in this section --
 routing match types and actions in the former; TLS termination,
 multi-SNI certificate selection, and HTTP/2 via ALPN

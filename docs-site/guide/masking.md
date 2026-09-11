@@ -114,7 +114,7 @@ running one. The exhaustive field list is the generated
 
 ## Runnable demo
 
-A masking route is wired up in `demos/05-request-response/` (test
+A masking route is wired up in [`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test
 script: `test-08-field-masking.sh`) in the repository, with `password`
 and `secret` pointers configured. The demo's echo upstream returns no
 sensitive fields, so the test only checks that the route answers --

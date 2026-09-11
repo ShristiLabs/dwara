@@ -189,7 +189,7 @@ table (`event_wal`) is created automatically by the schema migration.
 
 ## Runnable demo
 
-Run webhooks against a live gateway: `demos/06-observability/` (test
+Run webhooks against a live gateway: [`demos/06-observability/`](https://github.com/shristilabs/dwara/tree/main/demos/06-observability) (test
 script: `test-10-webhooks.sh`) in the repository. The demo delivers
 breaker, ejection, recovery, and config publish/reject events to a
 receiver container, and the test checks the receiver's event ledger.

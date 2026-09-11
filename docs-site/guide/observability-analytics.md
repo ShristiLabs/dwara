@@ -23,6 +23,6 @@ state changes (breaker trips, endpoint ejections, config publishes).
 
 ## Runnable demo
 
-The `demos/06-observability/` directory in the repository runs a live
+The [`demos/06-observability/`](https://github.com/shristilabs/dwara/tree/main/demos/06-observability) directory in the repository runs a live
 stack for the features in this section; its README covers
 prerequisites, test scripts, and teardown.

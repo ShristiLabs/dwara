@@ -127,7 +127,7 @@ endpoint:
 
 ## Runnable demo
 
-Take a route down gracefully: `demos/03-resilience/` (test script:
+Take a route down gracefully: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test script:
 `test-12-maintenance-mode.sh`) in the repository requests a
 maintenance route and asserts the 503 with `Retry-After: 60`. The
 category README covers prerequisites and teardown.

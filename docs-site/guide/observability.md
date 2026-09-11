@@ -212,7 +212,7 @@ but the variable is unset, the console server does not bind.
 
 ## Runnable demo
 
-Run the signals against a live gateway: `demos/06-observability/` in
+Run the signals against a live gateway: [`demos/06-observability/`](https://github.com/shristilabs/dwara/tree/main/demos/06-observability) in
 the repository. Test scripts assert the `/metrics` request counter
 (`test-01-metrics.sh`), `X-Request-Id` echoed on every response
 (`test-02-request-id.sh`), access logs landing in the gateway's

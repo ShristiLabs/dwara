@@ -9,6 +9,14 @@ It is short because the decision itself is the point; the operator-facing
 configuration is covered in [CP/DP split](./cp-dp-split) and
 [Cluster sync](./cluster-sync).
 
+## When to use this
+
+- You operate the Ent controller and need to know what state survives
+  a controller restart (and what does not) before planning restarts
+  or migrations.
+- You are evaluating the persistence choice -- what is stored, and
+  why PostgreSQL over SQLite or etcd.
+
 ## What the controller stores
 
 The controller's durable store holds four categories of state:
@@ -50,7 +58,7 @@ interactions into database rows.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/11-enterprise/` (test
+Run this feature against a live gateway: [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) (test
 script: `test-14-ent-controller-persistence.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

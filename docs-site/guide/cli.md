@@ -264,7 +264,7 @@ for the regression gate (`scripts/bench-regression.py`).
 
 ## Runnable demo
 
-Run config validation against a live gateway: `demos/09-operations/`
+Run config validation against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations)
 in the repository (test script: `test-03-cli-validate.sh`). The demo
 image ships only the gateway binary, so the script documents
 `dwara-cli validate` and proves the config through the gateway's

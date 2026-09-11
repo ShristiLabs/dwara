@@ -134,7 +134,7 @@ falling back to the static score when no observations exist.
 ## Runnable demo
 
 Failover chains and weighted model canaries run against a live
-gateway: `demos/07-ai-gateway/` in the repository (test scripts:
+gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) in the repository (test scripts:
 `test-03-failover-chain.sh`, `test-04-model-canary.sh`). The category
 README covers prerequisites and teardown.
 

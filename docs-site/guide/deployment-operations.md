@@ -24,6 +24,6 @@ is already built or downloaded.
 
 ## Runnable demo
 
-The `demos/09-operations/` directory in the repository runs a live
+The [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations) directory in the repository runs a live
 stack for the features in this section; its README covers
 prerequisites, test scripts, and teardown.

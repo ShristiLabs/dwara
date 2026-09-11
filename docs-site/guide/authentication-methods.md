@@ -9,6 +9,15 @@ its own page.
 For the broader security model -- secrets, authorization, upstream
 authn -- see [Security and identity](./security).
 
+## When to use this
+
+- You are deciding how callers should authenticate to the gateway --
+  this page compares the five families and links to each method's
+  detail page.
+- Different caller populations need different credentials (API keys
+  for services, JWTs for end users, mTLS for partner traffic); the
+  families compose per consumer.
+
 ## Method reference
 
 | Method | What it checks | Best for | Guide |
@@ -48,7 +57,7 @@ see [OAuth2](./oauth2) and [mTLS](./mtls).
 
 ## Runnable demo
 
-Check credentials against a live gateway: `demos/04-security-auth/`
+Check credentials against a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth)
 (test scripts: `test-01-api-key-auth.sh`, `test-02-basic-auth.sh`,
 `test-04-mtls-auth.sh`, `test-05-hmac-signing.sh`,
 `test-17-jwt-jwks.sh`, `test-18-oidc.sh`) in the repository. The

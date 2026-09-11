@@ -189,7 +189,7 @@ dataplane-visible difference in attachment semantics.
 
 ## Runnable demo
 
-Run the demo stack: `demos/08-extensibility/` in the repository (test
+Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test
 script: `test-01-native-plugins.sh`). The default demo image builds
 without the `plugins` cargo feature, so the script documents the
 native-filter config shape and verifies the proxy path; the README

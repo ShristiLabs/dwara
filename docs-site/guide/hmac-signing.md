@@ -195,7 +195,7 @@ and credential configuration is covered in
 
 ## Runnable demo
 
-Probe the auth gate: `demos/04-security-auth/` (test script:
+Probe the auth gate: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test script:
 `test-05-hmac-signing.sh`) in the repository asserts that requests
 with a missing or bogus signature answer 401 -- computing a valid
 signature is left to the client, and the script header documents

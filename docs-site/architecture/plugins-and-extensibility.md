@@ -2,11 +2,10 @@
 
 How Dwara's three plugin runtimes compose into a single dispatch
 chain. For configuration and the per-runtime guides, see
-[Proxy-Wasm plugins](../guide/proxy-wasm-plugins),
-[Native plugins](../guide/native-plugins), and
-[Extism PDK](../guide/extism-pdk). This page covers the runtime
-architecture: the shared phase model, the dispatch chain, and the
-lifecycle of a plugin instance.
+[Proxy-Wasm plugins](../guide/proxy-wasm-plugins) and
+[Native plugins](../guide/native-plugins). This page covers the
+runtime architecture: the shared phase model, the dispatch chain, and
+the lifecycle of a plugin instance.
 
 Dwara unifies three plugin runtimes behind one dispatch model:
 
@@ -144,8 +143,9 @@ The `ExtismDispatch` trait mirrors `WasmDispatch`. The
 `extism` crate is not a dependency; `ExtismInstance` phase methods are
 no-ops returning `FilterOutcome::Continue`. The trait, adapter, and
 config schema are in place for a future dependency addition subject
-to license review. See [Extism PDK](../guide/extism-pdk) for the
-intended model.
+to license review. The Extism PDK scaffold was removed from the
+codebase before it was ever wired in (issue #259); Extism may be
+re-introduced in a future milestone.
 
 ## Plugin lifecycle
 
@@ -206,7 +206,5 @@ the contract future wiring will satisfy.
 - [Plugin lifecycle](../guide/plugin-lifecycle) — load, compile,
   hot-swap, health.
 - [Plugin SDK](../guide/plugin-sdk) — the host API surface.
-- [Extism PDK](../guide/extism-pdk) — the Extism runtime model and
-  current stub status.
 - [Config, state, and extensions](./config-and-state) — how plugin
   config is compiled and hot-swapped.

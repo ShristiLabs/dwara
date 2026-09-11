@@ -73,6 +73,19 @@ routes:
 
 ## How it works
 
+The block has two sides, each running the same fixed-order pipeline:
+
+```mermaid
+flowchart TD
+    REQ["Request side -- runs after Dwara adds\nX-Forwarded-* and identity headers"] --> H["Headers and query maps,\none fixed order: set, then add,\nthen rename, then remove"]
+    H --> JB["JSON body operations,\napplied in list order"]
+    JB --> UP[Upstream receives the shaped request]
+    RESP["Response side -- runs before\nthe compression pipeline"] --> RH["Headers and query maps,\nthe same fixed order"]
+    RH --> RB["JSON body operations,\napplied in list order"]
+    RB --> CL[Client receives the shaped response]
+    UP --> RESP
+```
+
 The block has two sides. `request` shapes what the upstream
 receives; `response` shapes what the client receives. Header and
 query operations are maps applied in one fixed order; JSON body
@@ -194,7 +207,7 @@ reported at once. The exhaustive field list is the generated
 ## Runnable demo
 
 Run header and query transforms against a live gateway:
-`demos/05-request-response/` (test scripts:
+[`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test scripts:
 `test-01-header-transforms.sh`, `test-02-query-transforms.sh`) in the
 repository. The tests verify request header set/add/remove, a query
 parameter added before forwarding, and a response header stamp,

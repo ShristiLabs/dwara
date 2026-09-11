@@ -12,6 +12,16 @@ to Cedar or OPA instead, see
 Authorization runs on every request that resolved a route; unrouted
 404s never reach the rules.
 
+## When to use this
+
+- Route access should depend on who the caller is -- consumer
+  allow/deny lists, JWT scopes or claims, source IP, or geography.
+- You need coarse gates (internal-only routes, partner-only APIs) and
+  the built-in rules are expressive enough -- no external policy
+  engine needed.
+- You want to stage enforcement with a monitor mode that logs what
+  would be denied before turning it on.
+
 ## Attaching rules
 
 An `authorization` block can appear at five levels, from most to
@@ -149,7 +159,7 @@ check, not an authorization rule, and is never muted by `dry_run`.
 
 ## Runnable demo
 
-Watch rules decide on a live gateway: `demos/04-security-auth/`
+Watch rules decide on a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth)
 (test scripts: `test-08-authorization-chain.sh`,
 `test-09-ip-acl.sh`) in the repository checks route-level consumer
 allow/deny (the wrong credential gets 403, the right one 200) and

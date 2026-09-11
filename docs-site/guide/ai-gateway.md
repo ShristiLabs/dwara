@@ -682,7 +682,7 @@ the secret never appears in the config file at all; see
 ## Runnable demo
 
 Run provider adapters, model aliasing, and streaming against a live
-gateway: `demos/07-ai-gateway/` in the repository (test scripts:
+gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) in the repository (test scripts:
 `test-01-provider-adapters.sh`, `test-02-model-alias.sh`,
 `test-14-streaming-sse.sh`). The category README covers prerequisites
 and teardown.

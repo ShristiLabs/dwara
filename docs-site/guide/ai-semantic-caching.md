@@ -42,6 +42,23 @@ ai:
 
 ## How it works
 
+A lookup walks a two-tier path before any provider call happens:
+
+```mermaid
+flowchart TD
+    Q[AI request, after guardrails] --> E{"Exact-match tier:\nprompt hash cached\nand within TTL?"}
+    E -->|hit| RET[Return cached response\nno provider call, no token spend]
+    E -->|miss| EM[Prompt sent to the\nembedding service]
+    EM -.->|unavailable or timeout| PR[Fail open: provider call]
+    EM --> HNSW["Nearest-neighbor search\nof the HNSW index, k=1"]
+    HNSW --> S{"Cosine similarity >= threshold,\nwithin TTL, same model alias?"}
+    S -->|yes| RET
+    S -->|no| PR
+    PR --> ST[Store prompt embedding + response\nfire-and-forget, never blocks]
+    ST --> DONE[Return response]
+    RET --> DONE
+```
+
 ### Exact-match fast tier
 
 Before calling the embedding service, the cache checks an exact-match
@@ -132,7 +149,7 @@ dollar savings.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/07-ai-gateway/` (test
+Run this feature against a live gateway: [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) (test
 script: `test-05-semantic-caching.sh`) in the repository.
 The category README covers prerequisites and teardown.
 

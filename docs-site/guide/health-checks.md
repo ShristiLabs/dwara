@@ -89,6 +89,15 @@ Probe semantics worth knowing:
 
 Each endpoint moves through three states:
 
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Ejected: streak or windowed ratio, eject_ms
+    Ejected --> HalfOpen: ejection window elapsed
+    HalfOpen --> Healthy: probe succeeds, history cleared
+    HalfOpen --> Ejected: probe fails, re-ejected
+```
+
 1. **Healthy** -- eligible for selection; failures are counted
    toward both the streak and the window.
 2. **Ejected** -- removed from the load balancer's candidate set for
@@ -120,7 +129,7 @@ reload.
 ## Runnable demo
 
 Run both checks against a live gateway with flaky and healthy
-upstreams: `demos/03-resilience/` (test scripts:
+upstreams: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test scripts:
 `test-01-passive-health.sh`, `test-02-active-health.sh`) in the
 repository. The category README covers prerequisites and teardown.
 

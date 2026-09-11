@@ -44,7 +44,7 @@ mechanics.
 
 ## Runnable demo
 
-The `demos/08-extensibility/` README documents the
+The [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) README documents the
 extension-trait surface with a pointer to this page; the demo
 category's test scripts cover the config-driven plugin families.
 

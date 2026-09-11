@@ -55,6 +55,15 @@ routes:
 
 ## How it works
 
+```mermaid
+flowchart LR
+    C[gRPC client] -->|"HTTP/2: h2 ALPN over TLS,\nor h2c prior knowledge on cleartext"| L[Existing listener --\nno gRPC-specific config]
+    L --> RT["Route match on the RPC path\n/package.Service/Method\nlike any other path"]
+    RT --> UP["Upstream dialed with\nprotocol: http2"]
+    UP --> S["Streams relayed end to end,\ntrailers included"]
+    S --> U[gRPC upstream]
+```
+
 1. The gRPC client connects to an existing listener. On TLS the
    client negotiates HTTP/2 via h2 ALPN; on cleartext it uses h2c
    prior knowledge. Nothing is configured per protocol.
@@ -88,6 +97,6 @@ For the gateway's own request-timeout configuration, see
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/10-tls-transport/` (test
+Run this feature against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport) (test
 script: `test-06-grpc-proxying.sh`) in the repository.
 The category README covers prerequisites and teardown.

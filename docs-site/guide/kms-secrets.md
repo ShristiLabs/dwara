@@ -45,6 +45,14 @@ secret_sources:
 
 ## How it works
 
+```mermaid
+flowchart LR
+    C["Config references a secret as\nkms:key_id:ciphertext"] --> R[Resolve at config compile time]
+    R --> K["Cloud KMS Decrypt call\nwith the named key"]
+    K -->|"plaintext (mock provider:\nciphertext returned as-is)"| U[Used as the secret value,\nnever logged or echoed]
+    K -->|"KMS unreachable or key gone\n(see Fail-closed behavior)"| F["Startup or reload refuses --\nthe running generation keeps serving"]
+```
+
 KMS secrets are referenced as `key_id:ciphertext`:
 
 ```yaml
@@ -91,7 +99,7 @@ secrets in the same config.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/11-enterprise/` (test
+Run this feature against a live gateway: [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) (test
 script: `test-11-kms-secrets.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

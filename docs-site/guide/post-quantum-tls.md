@@ -89,6 +89,15 @@ makes the flag safe to enable ahead of peer support.
 
 ## How it works
 
+```mermaid
+flowchart TD
+    H[ClientHello with the peer's\nsupported kx groups] --> G{"Peer supports\nX25519MLKEM768?"}
+    G -->|yes| HYB["Hybrid key exchange:\nclassical X25519 + ML-KEM-768\n(shared secret needs BOTH)"]
+    G -->|no| CL["Fallback: classical X25519\n(the group list is a preference order,\nthe first shared group wins)"]
+    HYB --> TLS[TLS handshake completes]
+    CL --> TLS
+```
+
 The `pq_provider()` function in `security/pq.rs` builds a
 `rustls::crypto::CryptoProvider` from the aws-lc-rs default provider
 with the `X25519MLKEM768` hybrid kx group prepended to the kx group
@@ -114,7 +123,7 @@ post-quantum TLS product.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/10-tls-transport/` (test
+Run this feature against a live gateway: [`demos/10-tls-transport/`](https://github.com/shristilabs/dwara/tree/main/demos/10-tls-transport) (test
 script: `test-09-pq-tls.sh`) in the repository.
 The demo documents the current limitations alongside what
 runs today; see its README.

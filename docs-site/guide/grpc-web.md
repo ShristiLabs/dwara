@@ -90,6 +90,6 @@ preserved in the gRPC-Web trailer frame, so a failed RPC surfaces as
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+Run this feature against a live gateway: [`demos/12-protocol-translation/`](https://github.com/shristilabs/dwara/tree/main/demos/12-protocol-translation) (test
 scripts: `test-01-grpc-web-framing.sh`, `test-02-json-transcoding.sh`) in the repository.
 The category README covers prerequisites and teardown.

@@ -60,6 +60,19 @@ certificates -- are shown in their sections below.
 
 Two mapping strategies, checked in order:
 
+```mermaid
+flowchart TD
+    H[TLS handshake completes] --> V{"Client certificate verified\nagainst the listener CA?"}
+    V -->|no cert or invalid| F["Fall through to the other auth\nfamilies, or 401 if the route\nrequires auth"]
+    V -->|verified| M{"Mapping enabled\nwith entries?"}
+    M -->|no| R[Match via the per-consumer\nmtls credential registry]
+    M -->|yes| CN{"Subject CN\nmatches an entry?"}
+    CN -->|yes| C1[Map to that consumer]
+    CN -->|no| FP{"SHA-256 DER fingerprint\nmatches?"}
+    FP -->|yes| C2[Map to that consumer]
+    FP -->|no| NM["401 mtls_consumer_not_mapped\n(no fall-through: the mapping\nis authoritative)"]
+```
+
 1. **Subject CN** (`subject_cn_mapping`): maps the certificate's
    subject [CommonName](https://en.wikipedia.org/wiki/X.509) (the
    subject name field of a certificate) to a consumer. Binding by
@@ -189,7 +202,7 @@ the custom pinning verifier with client auth.
 ## Runnable demo
 
 Present a client certificate to a live gateway:
-`demos/04-security-auth/` (test scripts: `test-04-mtls-auth.sh`,
+[`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test scripts: `test-04-mtls-auth.sh`,
 `test-16-mtls-forward-headers.sh`) in the repository verifies a
 cert mapped to a consumer by subject CN and checks that
 `X-Client-Cert-*` headers reach the upstream. The category README

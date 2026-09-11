@@ -7,6 +7,14 @@ gateway can track spend per consumer, team, and model and export it for
 billing reconciliation. The two work together -- a cost-per-day budget is
 only enforced once a pricing table is configured.
 
+## When to use this
+
+- One consumer or team must not burn unbounded tokens or spend --
+  per-minute token caps and per-day cost caps answer before the
+  provider call.
+- You need per-consumer, per-team, and per-model cost accounting, and
+  billing exports to reconcile it against provider invoices.
+
 ## Token budgets
 
 A token budget caps the total AI consumption of one consumer (or one
@@ -82,7 +90,7 @@ empty or zero budget).
   provider tokens are consumed:
 
   ```
-  data: {"error":{"code":"ai_budget_exceeded","message":"the token budget for this window is exhausted; the stream was cut off","request_id":"req-...","type":"rate_limit_error"}}
+  data: {"error":{"code":"ai_budget_exceeded_midstream","message":"the token budget for this window is exhausted; the stream was cut off","request_id":"req-...","type":"rate_limit_error"}}
 
   data: [DONE]
   ```
@@ -181,7 +189,7 @@ billing pipelines that need columnar output).
 
 ## Runnable demo
 
-The `demos/07-ai-gateway/` stack in the repository configures
+The [`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) stack in the repository configures
 per-consumer and per-policy token budgets and per-model pricing in
 its `dwara.yaml` (consumer `demo-user`, policy `ai-budget`); there
 is no dedicated test script. The category README covers the config,

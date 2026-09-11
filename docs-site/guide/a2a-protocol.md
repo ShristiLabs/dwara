@@ -83,7 +83,7 @@ agent-to-agent calls present the same credentials any client would.
 
 ## Runnable demo
 
-`demos/07-ai-gateway/` (test script: `test-15-a2a.sh`) in the
+[`demos/07-ai-gateway/`](https://github.com/shristilabs/dwara/tree/main/demos/07-ai-gateway) (test script: `test-15-a2a.sh`) in the
 repository routes a chat request through an `ai.a2a` agent to a mock
 A2A upstream and asserts the full chat-to-task-submit translation,
 including the task-completion state and usage accounting. The

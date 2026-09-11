@@ -51,6 +51,24 @@ Hedging requires:
 
 ## How it works
 
+The primary races at most `hedge_max` delayed copies, each on a
+different endpoint; the first response wins:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as Gateway
+    participant E1 as Endpoint 1 (primary)
+    participant E2 as Endpoint 2 (hedge)
+    C->>G: request
+    G->>E1: primary request
+    Note over G,E1: hedge_after_ms passes, no response yet
+    G->>E2: hedge copy, different endpoint
+    E2-->>G: response arrives first
+    G->>E1: cancel the primary
+    G-->>C: winning response
+```
+
 1. The primary request is sent to the first endpoint.
 2. If no response arrives within `hedge_after_ms`, a hedge copy is
    sent to a different endpoint.
@@ -84,7 +102,7 @@ response is an error.
 
 ## Runnable demo
 
-Race a hedge against a slow upstream: `demos/03-resilience/` (test
+Race a hedge against a slow upstream: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test
 script: `test-05-hedging.sh`) in the repository hedges a request to
 a 300 ms-slow pool and asserts the echo hedge answers 200 in under
 300 ms. The category README covers prerequisites and teardown.

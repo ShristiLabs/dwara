@@ -90,6 +90,6 @@ attribute a single client request to its translated upstream RPC.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/12-protocol-translation/` (test
+Run this feature against a live gateway: [`demos/12-protocol-translation/`](https://github.com/shristilabs/dwara/tree/main/demos/12-protocol-translation) (test
 scripts: `test-02-json-transcoding.sh`, `test-03-protocol-translation.sh`) in the repository.
 The category README covers prerequisites and teardown.

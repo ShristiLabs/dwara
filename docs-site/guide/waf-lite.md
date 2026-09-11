@@ -7,6 +7,25 @@ a full [WAF](https://en.wikipedia.org/wiki/Web_application_firewall) (Web Applic
 upstream, with a bounded inspection cost and a dry-run mode for safe
 rollout.
 
+## How it works
+
+The WAF runs after the route method allowlist and before the route
+limits, inspecting the ORIGINAL request (before path rewrite or
+transforms):
+
+```mermaid
+flowchart TD
+    R[Request matches a route\nwith a waf block] --> H["Inspect path, headers, and query\nagainst the enabled filter categories\nsqli, xss, path_traversal + custom patterns"]
+    H --> CT{"Body content type is JSON,\nform-urlencoded, or text/plain?"}
+    CT -->|yes| BI["Buffer up to max_body_inspect_bytes\nand inspect the prefix\n(beyond the cap is NOT inspected)"]
+    CT -->|no| M{"Pattern match?"}
+    BI --> M
+    M -->|no match| PASS[Continue to authentication\nand rate limiting]
+    M -->|match| DR{dry_run?}
+    DR -->|true| LOG["Log only (outcome=logged)\nand continue to the upstream"]
+    DR -->|false| BLK["403 waf_blocked"]
+```
+
 ## When to use this
 
 WAF-lite is a first-line defense that catches obvious attack payloads
@@ -142,7 +161,7 @@ ORIGINAL request (before path rewrite or transforms).
 
 ## Runnable demo
 
-Throw attack payloads at a live gateway: `demos/04-security-auth/`
+Throw attack payloads at a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth)
 (test script: `test-13-waf-lite.sh`) in the repository sends SQLi,
 XSS, and path-traversal inputs (asserting 403) alongside a clean
 request (200). The category README covers prerequisites and

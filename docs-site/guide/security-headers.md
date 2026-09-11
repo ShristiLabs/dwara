@@ -91,7 +91,7 @@ reported at once. The exhaustive field list is the generated
 ## Runnable demo
 
 Run security-header injection against a live gateway:
-`demos/05-request-response/` (test script:
+[`demos/05-request-response/`](https://github.com/shristilabs/dwara/tree/main/demos/05-request-response) (test script:
 `test-04-security-headers.sh`) in the repository. The test asserts
 HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, and CSP
 on a hardened route; the demo listener is plaintext HTTP, so the HSTS

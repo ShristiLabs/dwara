@@ -1,5 +1,14 @@
 # CP/DP split (Enterprise)
 
+## When to use this
+
+- You operate more than a handful of gateway instances and want one
+  place to compile and distribute config -- the controller
+  broadcasts generations; every edge hot-reloads.
+- Fleet-wide consistency matters more than per-instance autonomy:
+  edges keep serving through controller outages on their last
+  received generation.
+
 ## Overview
 
 Dwara Enterprise supports a control plane / data plane split
@@ -179,7 +188,7 @@ watch every data plane reload) and controller-outage survival.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository documents the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository documents the
 CP/DP split and verifies the single-node OSS baseline (test script:
 `test-01-cp-dp-split.sh`); the controller and edge binaries need the
 `ent` build shown in the quickstarts above. The category README

@@ -65,6 +65,16 @@ gateway:
 The convergence coordinator runs alongside the local file watcher. The
 flow for a config change is:
 
+```mermaid
+flowchart TD
+    CH[Config change or SIGHUP,\non any instance] --> L["1. Local reload:\nvalidate, compile, atomically\npublish a new generation"]
+    L --> P["2. Publish to the backend:\nupsert this instance's record\nand store the config body"]
+    P --> PO["3. Poll every poll_interval_ms:\nrefresh own TTL, read every\nother instance's record"]
+    PO -->|"a higher generation with a\ndifferent hash exists"| CV["4. Converge: load that config body,\nre-publish locally via the same\npipeline (failures keep the running\ngeneration), then re-publish it"]
+    PO -->|nothing newer| WAIT[Wait for the next poll]
+    DR["5. Every drift_check_interval_ms:\ncompare hashes across instances"] -->|"an instance differs from\nthe majority"| AL["Structured warning +\ndwara_config_convergence_drift = 1"]
+```
+
 1. **Local reload.** A file change (or SIGHUP) triggers the normal
    reload pipeline: validate, compile, and atomically publish a new
    generation via `compile_and_publish`.
@@ -136,7 +146,7 @@ same `backend` config field when available.
 
 ## Runnable demo
 
-The `demos/11-enterprise/` directory in the repository includes the
+The [`demos/11-enterprise/`](https://github.com/shristilabs/dwara/tree/main/demos/11-enterprise) directory in the repository includes the
 `config_convergence` block (inert in the OSS build) and verifies hot
 reload via the local file watcher (test script:
 `test-02-convergence.sh`). The category README covers prerequisites

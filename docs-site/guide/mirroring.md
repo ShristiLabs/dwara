@@ -63,7 +63,7 @@ mirror request is sent in parallel with the (delayed) primary.
 
 ## Runnable demo
 
-Shadow traffic on a live gateway: `demos/03-resilience/` (test
+Shadow traffic on a live gateway: [`demos/03-resilience/`](https://github.com/shristilabs/dwara/tree/main/demos/03-resilience) (test
 script: `test-11-mirroring.sh`) in the repository mirrors 100% of a
 test route to a shadow upstream and asserts the primary still
 answers 200. The category README covers prerequisites and teardown.

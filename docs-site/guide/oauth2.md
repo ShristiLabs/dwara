@@ -57,6 +57,16 @@ section 2.3.1).
 
 ## How it works
 
+```mermaid
+flowchart TD
+    R[Request on an OAuth2 route] --> T{"Token cached\nand TTL valid?"}
+    T -->|yes| U[Forward to upstream]
+    T -->|no| G["Client-credentials grant\nagainst the token endpoint\n(HTTP Basic auth)"]
+    G --> C[Cache the new token per upstream]
+    C --> U
+    U --> P["Upstream receives\nAuthorization: Bearer token\nreplacing any client header"]
+```
+
 1. The gateway obtains an access token from the token endpoint using
    the client-credentials grant ([RFC 6749](https://www.rfc-editor.org/rfc/rfc6749)
    [section 4.4](https://www.rfc-editor.org/rfc/rfc6749#section-4.4) (a
@@ -130,7 +140,7 @@ leak the token endpoint's body or headers.
 
 ## Runnable demo
 
-Run this feature against a live gateway: `demos/04-security-auth/` (test
+Run this feature against a live gateway: [`demos/04-security-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/04-security-auth) (test
 script: `test-19-oauth2-client-credentials.sh`) in the repository.
 The category README covers prerequisites and teardown.
 
