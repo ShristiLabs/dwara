@@ -20,7 +20,14 @@ themselves:
    Enterprise features are the ones that span *multiple* gateway
    instances or need external infrastructure. See
    [Editions](./editions).
-2. **Config** — *what this particular gateway does*. A single strict
+2. **Capability** — *which optional surfaces this build carries*.
+   Advanced surfaces ship as compile-time capabilities (`wasm` for the
+   proxy-wasm host, `plugins` for native filters, `cel`, `aggregation`,
+   `mcp`, ...). They are default-OFF and not included in the published
+   binaries; a config block for a capability the build lacks is
+   rejected at validation. See
+   [compile-time feature packs](./editions#compile-time-feature-packs).
+3. **Config** — *what this particular gateway does*. A single strict
    YAML file declares the routing chain, identity, policy, and
    observability. This page is mostly about this axis.
 
@@ -34,8 +41,12 @@ two are different failure modes — know which axis you are on.
 Traffic flows through a fixed chain of named entities, each referencing
 the next by name:
 
-```
-Listener -> Route -> Service -> Upstream -> Endpoint
+```mermaid
+flowchart LR
+    L[Listener\nbind + port + TLS] --> R[Route\nmatch + action]
+    R --> S[Service\nthe unit a route points at]
+    S --> U[Upstream\npool + resilience]
+    U --> E[Endpoint\none address:port backend]
 ```
 
 | Entity | What it is | Owns |
@@ -62,9 +73,14 @@ A route's `action` decides where the response comes from:
   upstream.
 - **`respond`** — answer directly with a status/body/headers, no
   upstream (synthetic health checks, deprecation notices).
+- **`mock`** — serve a canned response without contacting any
+  upstream, with an optional artificial delay (contract tests,
+  demos).
 - **`ai`** — translate and forward to an AI provider through the AI
   adapter pack (requires the `ai` config block; see
   [AI gateway](./ai-gateway)).
+- **`nano_service`** — run a WASM module to generate the response
+  directly, no upstream (see [Nano-services](./nano-services)).
 
 ### Route-level blocks
 
@@ -72,8 +88,10 @@ These are not policy attachments — each is a single optional block on
 the route itself: `cors`, `compression`, `limits`, `transforms`,
 `masking`, `security_headers`, `cache`, `maintenance`, `deprecation`,
 `waf`, `graphql`, `websocket`, `plugins`, `request_validation`,
-`fault_injection`, `mirror`, `slo`, `oidc_login`. Each has its own
-guide; see the sidebar under *Routing and request handling*.
+`fault_injection`, `mirror`, `slo`, `oidc_login`, `grpc_web`,
+`translation` (protocol translation), `openapi` (response validation),
+`filter_chain` (phase overrides). Each has its own guide; see the
+sidebar under *Routing and request handling*.
 
 ## Identity and access
 
@@ -214,6 +232,7 @@ action and a separate taxonomy applies. See
 | **Analytics stream** | NDJSON firehose of every completed request to an external sink | [Analytics stream](./analytics-stream) |
 | **Webhooks** | Alert/event envelopes for state changes (breaker, ejection, config) | [Alert webhooks](./webhooks) |
 | **Synthetic monitoring** | Active probes that feed health and SLO metrics | [Synthetic monitoring](./synthetic-monitoring) |
+| **Replay debugging** | Record routing decisions per request, replay them offline against a new config | [Replay debugging](./replay-debugging) |
 
 ## Extensibility
 
@@ -238,6 +257,15 @@ routes' `plugins` field. See [Plugin lifecycle](./plugin-lifecycle).
 | **Hot reload** | Debounced file-watch or SIGHUP triggers the pipeline; in-flight requests keep their original generation. |
 | **State store** | Optional embedded SQLite holding durable identity state: consumers, credentials, quota counters. |
 | **Admin listener** | Optional mTLS-only management surface: `GET`/`PATCH /config`, `/health`, `/stats`. |
+
+```mermaid
+flowchart TD
+    SRC["Any config source:\nfile watch, SIGHUP, admin API,\ncontroller stream"] --> P[parse] --> V[validate] --> C[compile] --> PUB["publish:\nnew generation, atomic snapshot swap"]
+    P -.->|failure at any stage| KEEP["the running snapshot keeps serving --\nnothing is ever half-replaced"]
+    V -.-> KEEP
+    C -.-> KEEP
+    PUB --> G["generation N+1 --\nin-flight requests finish on N"]
+```
 
 See [Operations](./operations) and [Hot reload](../architecture/overview#hot-reload).
 

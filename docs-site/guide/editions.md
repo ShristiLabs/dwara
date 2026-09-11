@@ -195,6 +195,19 @@ the gateway to the OSS feature set (traffic keeps flowing; fleet
 coordination pauses), and the `dwara_license_status` metric tells you
 which state you are in. See [Enterprise licensing](./licensing).
 
+### Compile-time feature packs
+
+Separate from the edition question, some advanced surfaces ship as
+optional compile-time capabilities — `wasm` (the proxy-wasm host),
+`plugins` (native filters), `cel`, `aggregation`, `mcp`. They are
+default-OFF and not included in the published binaries: their library
+components are complete in the source tree, and a build that carries
+one enables its config block. A config block for a capability the
+build lacks is rejected at validation — unlike an enterprise feature
+in an OSS build, which parses and validates but stays inert. Status
+notes on the individual guide pages say where each capability stands
+today.
+
 ## Choosing an edition
 
 - **One gateway, or a few independent gateways** behind a load
