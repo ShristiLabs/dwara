@@ -55,10 +55,16 @@ ALLOWED = {
     "extensions": {"config"},
     "observability": set(),
     "events": {"config", "observability"},
+    # DW-093: developer portal, environment profiles, API journey.
+    # Depends on config for portal/profile config types.
+    "lifecycle": {"config"},
     # DW-105/DW-093: snapshot validation checks FIPS/PQ mode flags
     # (security::fips::FipsMode, security::pq::PqMode) to validate
     # listener/upstream TLS config, so snapshot may depend on security.
-    "snapshot": {"config", "events", "security"},
+    # DW-093: snapshot carries the compiled developer portal
+    # (lifecycle::DevPortal) so the dataplane can serve it without a
+    # separate lookup, so snapshot may depend on lifecycle.
+    "snapshot": {"config", "events", "security", "lifecycle"},
     "state": {"config"},
     # SCALE-05 (#184): workspace persistence — the workspace manager
     # delegates CRUD to the state store (SQLite for OSS, the same
@@ -70,7 +76,9 @@ ALLOWED = {
     # controller and SPIFFE client; security::tls imports mesh types
     # for SVID-based TLS, so security may depend on mesh.
     "mesh": {"config"},
-    "security": {"config", "state", "observability", "mesh"},
+    # DW-107: security::signed_url uses the NonceStore extension trait
+    # for distributed nonce storage, so security may depend on extensions.
+    "security": {"config", "state", "observability", "mesh", "extensions"},
     # DW-119: native filter trait + unified dispatch chain. Depends on
     # config only; the wasm domain bridges its instances in via a
     # generic adapter so plugins never imports wasm (downward only).
