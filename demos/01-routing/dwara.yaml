@@ -1,10 +1,10 @@
 # Category 01: Core Gateway & Routing
 #
 # Demonstrates every routing match type and action the gateway supports:
-#   - exact match        (healthz, mock-api, static-demo)
+#   - exact match        (ping, mock-api, static-demo)
 #   - prefix match       (api-v1, versioned-api, method-test, legacy-redirect)
 #   - regex match        (users-by-id)
-#   - respond action     (healthz)
+#   - respond action     (ping)
 #   - proxy action       (api-v1, users-by-id, static-demo, method-test, versioned-api)
 #   - redirect action    (legacy-redirect)
 #   - mock action        (mock-api)
@@ -36,12 +36,15 @@ listeners:
 
 routes:
   # --- Exact: health check (respond directly, no upstream contact) ---
-  - name: healthz
+  # Uses /ping, not /healthz, because /healthz is a reserved gateway path
+  # (DW-013): the built-in liveness probe is served before route
+  # resolution and permanently shadows any configured route matching it.
+  - name: ping
     service: echo-service
     match:
       path:
         type: exact
-        value: /healthz
+        value: /ping
     action:
       type: respond
       status: 200

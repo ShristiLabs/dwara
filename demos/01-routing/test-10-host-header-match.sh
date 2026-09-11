@@ -15,10 +15,10 @@ echo "=== Test 10: Host Header Match (gateway responsiveness) ==="
 
 wait_for "$BASE_URL/healthz" 30
 
-status=$(http_status "$BASE_URL/healthz" -H "Host: api.example.com")
-body=$(http_body "$BASE_URL/healthz" -H "Host: api.example.com")
+status=$(http_status "$BASE_URL/ping" -H "Host: api.example.com")
+body=$(http_body "$BASE_URL/ping" -H "Host: api.example.com")
 
-assert_status "200" "$status" "GET /healthz with custom Host returns 200"
-assert_contains "$body" "ok" "GET /healthz with custom Host body is 'ok'"
+assert_status "200" "$status" "GET /ping with custom Host returns 200"
+assert_contains "$body" "ok" "GET /ping with custom Host body is 'ok'"
 
 print_summary

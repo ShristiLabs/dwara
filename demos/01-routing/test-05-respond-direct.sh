@@ -1,26 +1,27 @@
 #!/bin/bash
 set -e
 
-# Test 05: Respond direct — /healthz returns 200 with body "ok"
-# Verifies the `respond` action returns the configured body.
-# Note: the gateway wraps respond bodies in a JSON envelope and sets
-# Content-Type to application/json regardless of the configured header.
+# Test 05: Respond direct — /ping returns 200 with body "ok"
+# Verifies the `respond` action returns the configured body and
+# Content-Type. Uses /ping (not /healthz) because /healthz is a
+# reserved gateway path whose built-in handler emits a JSON envelope
+# with Content-Type application/json, shadowing any configured route.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../_shared/helpers.sh"
 
 BASE_URL="http://localhost:8080"
 
-echo "=== Test 05: Respond Direct (/healthz Content-Type) ==="
+echo "=== Test 05: Respond Direct (/ping Content-Type) ==="
 
 wait_for "$BASE_URL/healthz" 30
 
-status=$(http_status "$BASE_URL/healthz")
-headers=$(http_headers "$BASE_URL/healthz")
-body=$(http_body "$BASE_URL/healthz")
+status=$(http_status "$BASE_URL/ping")
+headers=$(http_headers "$BASE_URL/ping")
+body=$(http_body "$BASE_URL/ping")
 
-assert_status "200" "$status" "GET /healthz returns 200"
-assert_contains "$body" "ok" "GET /healthz body is 'ok'"
-assert_header "$headers" "Content-Type" "application/json" "GET /healthz Content-Type is application/json"
+assert_status "200" "$status" "GET /ping returns 200"
+assert_contains "$body" "ok" "GET /ping body is 'ok'"
+assert_header "$headers" "Content-Type" "text/plain" "GET /ping Content-Type is text/plain"
 
 print_summary

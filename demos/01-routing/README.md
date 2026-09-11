@@ -9,7 +9,7 @@ supports, plus path rewrites, method allowlists, and API deprecation headers.
 
 | Type | Route | Pattern | Example path |
 |------|-------|---------|--------------|
-| `exact` | healthz | `/healthz` | `/healthz` |
+| `exact` | ping | `/ping` | `/ping` |
 | `exact` | mock-api | `/v1/mock` | `/v1/mock` |
 | `exact` | static-demo | `/` | `/` |
 | `prefix` | versioned-api | `/v1/` | `/v1/test` |
@@ -18,11 +18,16 @@ supports, plus path rewrites, method allowlists, and API deprecation headers.
 | `prefix` | legacy-redirect | `/old` | `/old` |
 | `regex` | users-by-id | `/v1/users/[^/]+` | `/v1/users/42` |
 
+> **Reserved paths:** `/healthz`, `/readyz`, and `/metrics` are built-in
+> gateway endpoints served *before* route resolution. A configured route
+> matching any of them is permanently shadowed. The `ping` route uses
+> `/ping` (not `/healthz`) so the `respond` action actually executes.
+
 ### Actions
 
 | Action | Route | Behavior |
 |--------|-------|----------|
-| `respond` | healthz | Returns 200 `ok` with `Content-Type: text/plain` |
+| `respond` | ping | Returns 200 `ok` with `Content-Type: text/plain` |
 | `proxy` | versioned-api, api-v1, users-by-id, static-demo, method-test | Forwards to an upstream |
 | `redirect` | legacy-redirect | 301 redirect to `/v1/` |
 | `mock` | mock-api | Returns 200 `{"mock": true}` with a 50ms delay |
@@ -42,7 +47,7 @@ The gateway resolves a request path to at most one route using this
 precedence: **exact** beats **regex** beats **longest prefix**. Equal-length
 prefix ties go to the first-declared route.
 
-- `/healthz` -> `healthz` (exact)
+- `/ping` -> `ping` (exact)
 - `/v1/mock` -> `mock-api` (exact beats prefix)
 - `/v1/users/42` -> `users-by-id` (regex beats prefix)
 - `/v1/methods` -> `method-test` (longer prefix beats `/v1/`)
@@ -89,6 +94,9 @@ curl -sf http://localhost:8080/healthz
 # -> ok
 ```
 
+This hits the built-in liveness probe (reserved path), not the `ping`
+route — see the reserved-paths note above.
+
 ### 3. Run the test scripts
 
 Each test script sources `../_shared/helpers.sh`, waits for the gateway,
@@ -123,17 +131,17 @@ docker compose down -v
 
 | Test | Request | Expected |
 |------|---------|----------|
-| test-01-exact-match | `GET /healthz` | 200, body `ok` |
+| test-01-exact-match | `GET /ping` | 200, body `ok` |
 | test-02-prefix-match | `GET /v1/test` | 200, body contains echo JSON |
 | test-03-regex-match | `GET /v1/users/42` | 200, body contains echo JSON |
 | test-04-redirect | `GET /old` | 301, `Location: /v1/` |
-| test-05-respond-direct | `GET /healthz` | 200, `Content-Type: text/plain` |
+| test-05-respond-direct | `GET /ping` | 200, `Content-Type: text/plain` |
 | test-06-mock-response | `GET /v1/mock` | 200, body contains `mock` |
 | test-07-path-rewrite | `GET /v1/test` | echo `parsed_path` is `/test` |
 | test-08-method-allowlist | `PATCH /v1/methods` | 405 |
 | test-08-method-allowlist | `GET /v1/methods` | 200 |
 | test-09-api-versioning | `HEAD /v1/test` | `Deprecation` + `Sunset` headers present |
-| test-10-host-header-match | `GET /healthz` with custom Host | 200, body `ok` |
+| test-10-host-header-match | `GET /ping` with custom Host | 200, body `ok` |
 
 All tests should pass with zero failures.
 

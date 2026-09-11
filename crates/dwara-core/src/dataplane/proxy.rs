@@ -7843,9 +7843,14 @@ fn respond(
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Response<ProxyBody> {
     let body = body.unwrap_or("");
+    let has_content_type = headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("content-type"));
     let mut builder = Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
-        .header(hyper::header::CONTENT_TYPE, "text/plain");
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    if !has_content_type {
+        builder = builder.header(hyper::header::CONTENT_TYPE, "text/plain");
+    }
     for (name, value) in headers {
         // Validation rejects unbuildable name/value pairs; skip rather
         // than panic if a generation tear slipped one through.
