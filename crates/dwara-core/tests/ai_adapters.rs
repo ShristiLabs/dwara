@@ -583,6 +583,7 @@ fn ai_runtime_compiles_and_resolves() {
             name: "p1".into(),
             kind: AiProviderKind::Anthropic,
             upstream: "up1".into(),
+            path: None,
             auth: Some(AiProviderAuth {
                 header: "x-api-key".into(),
                 value: "inline-secret".into(),

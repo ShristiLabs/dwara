@@ -3097,6 +3097,27 @@ fn validate_ai(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                 ),
             ));
         }
+        if let Some(path) = &p.path {
+            if path.trim().is_empty() {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].path",
+                    "provider path override must be non-empty (remove the \
+                     field to use the adapter's default path)",
+                ));
+            } else if !path.starts_with('/') {
+                issues.push(issue(
+                    "gateway",
+                    &p.name,
+                    "ai.providers[].path",
+                    format!(
+                        "provider path override '{path}' must start with '/' \
+                         (it is a request path, not a full URL)"
+                    ),
+                ));
+            }
+        }
         if let Some(auth) = &p.auth {
             if hyper::header::HeaderName::from_bytes(auth.header.as_bytes()).is_err() {
                 issues.push(issue(

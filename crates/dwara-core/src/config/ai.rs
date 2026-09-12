@@ -218,6 +218,16 @@ pub struct AiProvider {
     /// example) may need none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AiProviderAuth>,
+    /// Full request path override for this provider. When set, the
+    /// transport uses this path verbatim instead of the adapter's
+    /// built-in path. This bridges providers whose API path differs
+    /// from the adapter's default (e.g. z.ai's coding-plan endpoint
+    /// `/api/coding/paas/v4/chat/completions` vs the OpenAI adapter's
+    /// `/v1/chat/completions`) without an external reverse proxy.
+    /// When unset, the adapter's per-kind default path is used.
+    /// Applies to both adapter-translated and passthrough requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// DW-080 (Ent): a credential pool for this provider. When set,
     /// the gateway rotates across multiple API keys to aggregate
     /// rate-limit headroom (the LiteLLM pattern). Each entry is an

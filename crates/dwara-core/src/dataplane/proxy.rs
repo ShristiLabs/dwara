@@ -7846,8 +7846,8 @@ fn respond(
     let has_content_type = headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("content-type"));
-    let mut builder = Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
     if !has_content_type {
         builder = builder.header(hyper::header::CONTENT_TYPE, "text/plain");
     }

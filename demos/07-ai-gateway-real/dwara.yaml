@@ -1,0 +1,317 @@
+# Category 07 (real LLMs): AI Gateway demo config.
+#
+# Exercises the dwara AI gateway against three REAL OpenAI-compatible
+# LLM backends instead of mocks:
+#
+#   - z.ai (GLM-5.3)        -- cloud API, GLM Coding Plan, OpenAI-compatible
+#                              at https://api.z.ai/api/coding/paas/v4/chat/completions
+#   - Ollama (llama3.2)     -- local, OpenAI-compatible at :11434/v1
+#   - LM Studio             -- local, OpenAI-compatible at :1234/v1
+#
+# All three use kind: openai (the OpenAI chat-completions dialect). z.ai
+# uses a non-standard path (/api/coding/paas/v4 for the GLM Coding
+# Plan); the `path` override on the zai provider replaces the adapter's
+# default /v1/chat/completions, so no external reverse proxy is needed.
+#
+# Prerequisites:
+#   - ZAI_API_KEY env var set to your z.ai API key
+#   - Ollama running on the host with `ollama pull llama3.2`
+#   - LM Studio running on the host with a model loaded and the
+#     OpenAI-compatible server started (Developer tab, default :1234)
+#
+# Run `docker compose up -d` then the test-*.sh scripts.
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+routes:
+  # AI chat-completions route. The `ai` action hands the request to the
+  # AI provider-adapter pipeline: alias resolution, governance, guard
+  # rails, budget, then provider transport (the provider's upstream,
+  # not the service's upstream, carries the call).
+  - name: ai-chat
+    service: ai-service
+    match:
+      path:
+        type: exact
+        value: /v1/chat/completions
+      methods:
+        - POST
+    action:
+      type: ai
+    auth_required: true
+    policies:
+      - ai-budget
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  # The service upstream is NOT dialed for AI routes (the provider's
+  # upstream is used instead), but the service is required by the
+  # schema. It points at the zai proxy for completeness.
+  - name: ai-service
+    upstream: zai-upstream
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+
+upstreams:
+  # z.ai transport (direct HTTPS to api.z.ai). The gateway connects
+  # directly over TLS; the `path` override on the provider rewrites
+  # /v1/chat/completions to /api/coding/paas/v4/chat/completions (the
+  # GLM Coding Plan endpoint), so no external reverse proxy is needed.
+  - name: zai-upstream
+    load_balancer: round_robin
+    protocol: https
+    use_system_roots: true
+    endpoints:
+      - address: api.z.ai
+        port: 443
+
+  # Ollama transport (OpenAI-compatible endpoint on the host). Reached
+  # from the container via host.docker.internal.
+  - name: ollama-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: host.docker.internal
+        port: 11434
+
+  # LM Studio transport (OpenAI-compatible endpoint on the host). LM
+  # Studio's built-in server listens on :1234 by default (enable it in
+  # the Developer tab). Reached from the container via
+  # host.docker.internal.
+  - name: lmstudio-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: host.docker.internal
+        port: 1234
+
+  # Dead upstream for the failover demo: nothing listens on :9999, so
+  # the primary always fails with a connection error and the gateway
+  # falls over to the secondary (ollama). Short connect timeout so the
+  # failover is fast.
+  - name: dead-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: host.docker.internal
+        port: 9999
+    timeouts:
+      connect_ms: 2000
+
+# ---------------------------------------------------------------------------
+# Consumers (authentication identities)
+# ---------------------------------------------------------------------------
+
+consumers:
+  - name: demo-user
+    type: user
+    credentials:
+      - type: api_key
+        key: demo-ai-key
+    # Per-consumer AI token budget (DW-078).
+    token_budget:
+      tokens_per_min: 500000
+      cost_per_day_micros: 5000000
+      scope: consumer
+    # Opt this consumer into prompt/response logging capture.
+    ai_logging: true
+
+# ---------------------------------------------------------------------------
+# Policies (reusable rule bundles)
+# ---------------------------------------------------------------------------
+
+policies:
+  - name: ai-budget
+    token_budget:
+      tokens_per_min: 500000
+      cost_per_day_micros: 10000000
+      scope: policy
+
+# ---------------------------------------------------------------------------
+# Admin API (mTLS-only)
+# ---------------------------------------------------------------------------
+
+admin:
+  bind: 0.0.0.0:2019
+  tls:
+    cert_file: /etc/dwara/certs/server.crt
+    key_file: /etc/dwara/certs/server.key
+    client_ca_file: /etc/dwara/certs/client-ca.crt
+
+# ---------------------------------------------------------------------------
+# Global authorization (least specific link of the chain)
+# ---------------------------------------------------------------------------
+
+authorization:
+  ip_acl:
+    default: allow
+
+# ---------------------------------------------------------------------------
+# Analytics store (required for prompt logging, DW-081)
+# ---------------------------------------------------------------------------
+
+analytics:
+  path: /var/lib/dwara/analytics.db
+  flush_ms: 1000
+
+# ---------------------------------------------------------------------------
+# AI gateway
+# ---------------------------------------------------------------------------
+
+ai:
+  # Provider pool: each entry names an upstream that carries the
+  # transport and the wire-protocol adapter kind. All three are
+  # OpenAI-compatible, so they all use kind: openai.
+  providers:
+    # z.ai (GLM-5.3): cloud API, GLM Coding Plan. The `path` override
+    # replaces the OpenAI adapter's default /v1/chat/completions with
+    # the coding-plan endpoint /api/coding/paas/v4/chat/completions, so
+    # no external reverse proxy (nginx) is needed. The API key is read
+    # from the ZAI_API_KEY env var at config-compile time; it never
+    # appears in the config file or any log output. The env var must
+    # contain the full header value including "Bearer " (e.g.
+    # ZAI_API_KEY="Bearer sk-...") because the credential resolver
+    # requires ${...} to be the ENTIRE value -- "Bearer ${ZAI_API_KEY}"
+    # would be treated as a literal string, not a reference.
+    - name: zai
+      kind: openai
+      upstream: zai-upstream
+      path: /api/coding/paas/v4/chat/completions
+      auth:
+        header: Authorization
+        value: "${ZAI_API_KEY}"
+
+    # Ollama (llama3.2): local, no auth required.
+    - name: ollama
+      kind: openai
+      upstream: ollama-upstream
+
+    # LM Studio: local, no auth required. The provider_model should
+    # match the identifier of the model loaded in LM Studio's Developer
+    # tab. When a single model is loaded, LM Studio accepts any model
+    # name in the request and uses the loaded model; the response
+    # echoes the loaded model's identifier (the gateway rewrites the
+    # response model field to the alias, so it never leaks to the
+    # client). Adjust provider_model below to match your loaded model.
+    - name: lmstudio
+      kind: openai
+      upstream: lmstudio-upstream
+
+    # Dead provider for the failover demo: always fails (connection
+    # error to a dead port), forcing the gateway to fall over to the
+    # next provider in the chain.
+    - name: dead
+      kind: openai
+      upstream: dead-upstream
+
+  # Model alias table: the `model` value in a client request maps to
+  # a provider + provider's own model identifier.
+  models:
+    # Simple aliases: one provider, one model.
+    glm-5.3:
+      provider: zai
+      provider_model: glm-5.3
+    llama3.2:
+      provider: ollama
+      provider_model: llama3.2
+    lmstudio-model:
+      provider: lmstudio
+      provider_model: loaded-model
+
+    # Failover chain: the primary (dead) always fails with a
+    # connection error, so the gateway falls over to ollama/llama3.2.
+    failover-chat:
+      provider: dead
+      provider_model: dead-model
+      failover:
+        - provider: ollama
+          provider_model: llama3.2
+
+    # Weighted canary: 50/50 split across zai (GLM-5.3) and ollama
+    # (llama3.2). Distinct prompts per request avoid semantic-cache
+    # hits (if enabled) freezing the split.
+    canary-chat:
+      provider: zai
+      provider_model: glm-5.3
+      canary:
+        - version: glm
+          weight: 50
+          provider: zai
+          provider_model: glm-5.3
+        - version: ollama
+          weight: 50
+          provider: ollama
+          provider_model: llama3.2
+
+  # Per-model pricing table: micro-USD per 1K tokens (DW-079).
+  # Approximate values for budget tracking; adjust to match your
+  # provider's actual pricing.
+  pricing:
+    glm-5.3:
+      input_per_1k_micros: 100
+      output_per_1k_micros: 400
+    llama3.2:
+      input_per_1k_micros: 0
+      output_per_1k_micros: 0
+    loaded-model:
+      input_per_1k_micros: 0
+      output_per_1k_micros: 0
+
+  # Model governance: per-team model allowlists + shadow audit (DW-084).
+  # The ai-budget policy restricts the demo-user consumer to the
+  # allowlist below. Any other alias is blocked at the edge with 403
+  # before routing.
+  governance:
+    audit: true
+    team_allowlists:
+      ai-budget:
+        - glm-5.3
+        - llama3.2
+        - lmstudio-model
+        - failover-chat
+        - canary-chat
+
+  # Guardrails: prompt-injection / PII checks (DW-082). A `block` action
+  # rejects the request with 400 guardrail_blocked; a `redact` action
+  # scrubs the matched content before the provider call.
+  guardrails:
+    rules:
+      - name: block-injection
+        kind: injection
+        action: block
+        phase: prompt
+        patterns:
+          - "(?i)ignore.*instructions"
+      - name: redact-pii
+        kind: pii
+        action: redact
+        phase: both
+
+  # Prompt/response logging: opt-in capture with redaction (DW-081).
+  # Sample every request (1.0) for the demo; retain 7 days. The
+  # 16-digit pattern scrubs card numbers to [REDACTED].
+  logging:
+    enabled: true
+    sample_rate: 1.0
+    retention_secs: 604800
+    redaction:
+      patterns:
+        - "[0-9]{16}"
+      replacement: "[REDACTED]"

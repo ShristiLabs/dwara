@@ -84,6 +84,10 @@ pub struct CompiledProvider {
     pub kind: AiProviderKind,
     /// Name of the upstream that carries the transport.
     pub upstream: String,
+    /// Full request path override. When set, the transport uses this
+    /// path verbatim instead of the adapter's built-in path. None means
+    /// use the adapter's per-kind default path.
+    pub path: Option<String>,
     /// Resolved auth header pairs (name, value). SECRET: never logged,
     /// never echoed; the redaction walk in `config` covers config
     /// echoes and this value lives only here and on the wire.
@@ -222,6 +226,7 @@ impl AiRuntime {
                     name: p.name.clone(),
                     kind: p.kind,
                     upstream: p.upstream.clone(),
+                    path: p.path.clone(),
                     auth_headers,
                     credential_pool,
                 },
@@ -300,6 +305,7 @@ impl AiRuntime {
                         name: agent.name.clone(),
                         kind: AiProviderKind::A2a,
                         upstream: agent.upstream.clone(),
+                        path: None,
                         auth_headers: Vec::new(),
                         credential_pool: None,
                     },

@@ -220,6 +220,7 @@ services:
 | `name` | (required) | Provider name, referenced by model aliases. Unique within the `ai:` block. |
 | `kind` | (required) | Wire dialect: `openai`, `anthropic`, `gemini`, `azure_openai`, or `bedrock`. |
 | `upstream` | (required) | Name of the upstream that carries this provider's transport (endpoints, TLS, timeouts, connection pooling, circuit breaking). |
+| `path` | (optional) | Full request path override. When set, the transport uses this path verbatim instead of the adapter's built-in default (e.g. `/v1/chat/completions` for the OpenAI adapter). Use this to bridge providers whose API path differs from the adapter's default -- such as z.ai's GLM Coding Plan endpoint `/api/coding/paas/v4/chat/completions` -- without an external reverse proxy. When unset, the adapter's per-kind default path is used. Applies to both adapter-translated and passthrough requests. |
 | `auth.header` | (required with `auth`) | Header name the provider expects (`Authorization`, `x-api-key`, `x-goog-api-key`). |
 | `auth.value` | (required with `auth`) | Header value, verbatim. Use a `${...}` [secret reference](./secrets) (env var or file); inline values are redacted in every config echo. Omit `auth` entirely for providers that need none (for example a local OpenAI-compatible endpoint on an internal network). |
 | `credential_pool` | (optional, Ent) | A multi-key credential pool for this provider. See [Credential pools](#credential-pools) below. Mutually exclusive with `auth`. |

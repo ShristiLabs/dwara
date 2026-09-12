@@ -53,6 +53,7 @@ use crate::ai::adapter::{adapter_for, ProviderAdapter};
 use crate::ai::openai_compat;
 use crate::ai::stream::StreamTranslator;
 use crate::ai::types::{ChatRequest, Usage};
+use crate::ai::CompiledProvider;
 use crate::config::ai::UnknownModelPolicy;
 use crate::dataplane::proxy::{consumer_type_str, DataPlane, Generation, ProxyBody};
 use bytes::Bytes;
@@ -80,8 +81,8 @@ pub const MAX_AI_ERROR_BYTES: usize = 1024 * 1024;
 /// AI-02: the provider path for each non-chat endpoint. The passthrough
 /// forwards the request body as-is to the provider's upstream at this
 /// path (no adapter translation). The path is OpenAI-compatible (the
-/// most common target); providers with different paths can be reached
-/// via an upstream rewrite.
+/// most common target); providers with different paths can override
+/// the path per-provider via `ai.providers[].path`.
 fn passthrough_path(endpoint: crate::config::AiEndpoint) -> &'static str {
     match endpoint {
         crate::config::AiEndpoint::Embeddings => "/v1/embeddings",
@@ -94,6 +95,14 @@ fn passthrough_path(endpoint: crate::config::AiEndpoint) -> &'static str {
         // separately in serve_ai_batch_results.
         crate::config::AiEndpoint::Batch => "/v1/batches",
     }
+}
+
+/// Resolve the outbound request path for a provider. When the provider
+/// has a `path` override configured, it is used verbatim for ALL
+/// endpoints (chat, embeddings, etc.). When unset, the adapter's
+/// per-kind default path is used.
+fn resolve_path<'a>(provider: &'a CompiledProvider, default: &'a str) -> &'a str {
+    provider.path.as_deref().unwrap_or(default)
 }
 
 /// AI-02: serve a non-chat AI endpoint (embeddings, images, audio,
@@ -213,7 +222,7 @@ async fn serve_ai_passthrough(
 
     // Build the outbound request: the passthrough path + the original
     // body + the provider's auth headers.
-    let path = passthrough_path(endpoint);
+    let path = resolve_path(provider, passthrough_path(endpoint));
     let mut outbound = http::Request::builder()
         .method(http::Method::POST)
         .uri(path);
@@ -422,7 +431,7 @@ async fn serve_ai_chat_passthrough(
 
     // Build the outbound request: the chat path + the original body +
     // the provider's auth headers.
-    let path = passthrough_path(crate::config::AiEndpoint::Chat);
+    let path = resolve_path(provider, passthrough_path(crate::config::AiEndpoint::Chat));
     let mut outbound = http::Request::builder()
         .method(http::Method::POST)
         .uri(path);
@@ -1289,9 +1298,10 @@ where
             );
             continue;
         };
+        let outbound_path = resolve_path(provider, &provider_req.path);
         let mut outbound = Request::builder()
             .method(Method::POST)
-            .uri(&provider_req.path)
+            .uri(outbound_path)
             .header(hyper::header::CONTENT_TYPE, "application/json")
             .header(hyper::header::ACCEPT, "application/json");
         for (name, value) in &provider_req.headers {

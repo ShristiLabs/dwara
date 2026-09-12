@@ -669,6 +669,99 @@ fn ai_config_schema_is_strict_and_validation_catches_errors() {
 }
 
 #[test]
+fn ai_provider_path_override_validates_and_parses() {
+    use dwara_core::config::parse_gateway;
+    use dwara_core::snapshot::validate;
+
+    // A provider with a valid path override parses and validates clean.
+    let good = parse_gateway(
+        "routes:\n\
+         - name: r\n\
+         \x20 service: s\n\
+         \x20 match:\n\
+         \x20   path:\n\
+         \x20     type: prefix\n\
+         \x20     value: /v1\n\
+         \x20 action:\n\
+         \x20   type: ai\n\
+         services:\n\
+         - name: s\n\
+         \x20 upstream: u\n\
+         upstreams:\n\
+         - name: u\n\
+         \x20 endpoints:\n\
+         \x20   - address: 127.0.0.1\n\
+         \x20     port: 9000\n\
+         ai:\n\
+         \x20 providers:\n\
+         \x20 - name: zai\n\
+         \x20   kind: openai\n\
+         \x20   upstream: u\n\
+         \x20   path: /api/coding/paas/v4/chat/completions\n\
+         \x20 models:\n\
+         \x20   alias:\n\
+         \x20     provider: zai\n\
+         \x20     provider_model: m\n",
+    )
+    .expect("ai config with path override parses");
+    assert!(
+        validate(&good).is_empty(),
+        "valid path override: {:?}",
+        validate(&good)
+    );
+
+    // Path not starting with '/' is flagged.
+    let bad_path = parse_gateway(
+        "ai:\n\
+         \x20 providers:\n\
+         \x20 - name: zai\n\
+         \x20   kind: openai\n\
+         \x20   upstream: u\n\
+         \x20   path: api/coding/paas/v4\n\
+         \x20 models:\n\
+         \x20   alias:\n\
+         \x20     provider: zai\n\
+         \x20     provider_model: m\n\
+         upstreams:\n\
+         - name: u\n\
+         \x20 endpoints:\n\
+         \x20   - address: 127.0.0.1\n\
+         \x20     port: 9000\n",
+    )
+    .unwrap();
+    let issues = validate(&bad_path);
+    assert!(
+        issues.iter().any(|i| i.field == "ai.providers[].path"),
+        "path without leading '/' flagged: {issues:?}"
+    );
+
+    // Empty path is flagged.
+    let empty_path = parse_gateway(
+        "ai:\n\
+         \x20 providers:\n\
+         \x20 - name: zai\n\
+         \x20   kind: openai\n\
+         \x20   upstream: u\n\
+         \x20   path: ''\n\
+         \x20 models:\n\
+         \x20   alias:\n\
+         \x20     provider: zai\n\
+         \x20     provider_model: m\n\
+         upstreams:\n\
+         - name: u\n\
+         \x20 endpoints:\n\
+         \x20   - address: 127.0.0.1\n\
+         \x20     port: 9000\n",
+    )
+    .unwrap();
+    let issues = validate(&empty_path);
+    assert!(
+        issues.iter().any(|i| i.field == "ai.providers[].path"),
+        "empty path flagged: {issues:?}"
+    );
+}
+
+#[test]
 fn inline_provider_auth_is_redacted_in_config_echoes() {
     use dwara_core::config::parse_gateway;
     let gw = parse_gateway(

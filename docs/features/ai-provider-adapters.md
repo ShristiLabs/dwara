@@ -312,6 +312,13 @@ ai:
       auth:
         header: Authorization
         value: Bearer ${OPENAI_API_KEY}   # inline values redacted in echoes
+    - name: zai
+      kind: openai
+      upstream: zai-pool
+      path: /api/coding/paas/v4/chat/completions  # override the adapter's default path
+      auth:
+        header: Authorization
+        value: ${ZAI_API_KEY}
     - name: claude
       kind: anthropic
       upstream: anthropic-pool
@@ -355,11 +362,21 @@ routes:
     action: { type: ai, endpoint: embeddings }
 ```
 
+Provider `path` override: when a provider's API endpoint differs from
+the adapter's built-in default path (e.g. z.ai's GLM Coding Plan uses
+`/api/coding/paas/v4/chat/completions` instead of the OpenAI adapter's
+`/v1/chat/completions`), the optional `path` field on `ai.providers[]`
+replaces the adapter's path verbatim. When unset, the adapter's
+per-kind default path is used. This applies to both adapter-translated
+chat requests and passthrough requests (embeddings, images, etc.),
+bridging non-standard endpoints without an external reverse proxy.
+
 Validation: provider `upstream` refs must resolve; auth values must be
-valid header values AND resolvable at compile time; model `provider`
-refs must exist; an `ai` route action without an `ai:` block is
-rejected; an `ai:` block with zero providers or zero models is
-rejected (it could never serve anything).
+valid header values AND resolvable at compile time; `path` (when set)
+must be non-empty and start with `/`; model `provider` refs must exist;
+an `ai` route action without an `ai:` block is rejected; an `ai:` block
+with zero providers or zero models is rejected (it could never serve
+anything).
 
 ## Metrics
 

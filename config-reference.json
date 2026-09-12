@@ -6622,6 +6622,13 @@
             }
           ]
         },
+        "path": {
+          "description": "Full request path override for this provider. When set, the\ntransport uses this path verbatim instead of the adapter's\nbuilt-in path. This bridges providers whose API path differs\nfrom the adapter's default (e.g. z.ai's coding-plan endpoint\n`/api/coding/paas/v4/chat/completions` vs the OpenAI adapter's\n`/v1/chat/completions`) without an external reverse proxy.\nWhen unset, the adapter's per-kind default path is used.\nApplies to both adapter-translated and passthrough requests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "credential_pool": {
           "description": "DW-080 (Ent): a credential pool for this provider. When set,\nthe gateway rotates across multiple API keys to aggregate\nrate-limit headroom (the LiteLLM pattern). Each entry is an\n`AiProviderAuth` (same shape as `auth`); the pool is used\nINSTEAD of `auth` — validation rejects a provider that sets\nboth. At request time the pool picks one credential per\nrequest (round-robin by default); when a key returns 429, it\nis temporarily quarantined and subsequent requests rotate to\nthe next. Pool exhaustion (all keys quarantined) degrades\ngracefully with a 429 + Retry-After, not a panic. Ent-only:\nrejected at validation when the `ent` cargo feature is off.",
           "anyOf": [
