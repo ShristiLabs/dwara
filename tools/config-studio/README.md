@@ -18,7 +18,15 @@ network access required.
 - **Visualize**: an Overview shows entity counts, the request wiring
   table (route -> service -> upstream -> endpoints) with
   dangling-reference chips, and copyable next-step commands
-  (`dwara validate`, `DWARA_CONFIG=... dwara run`).
+  (`dwara validate`, `DWARA_CONFIG=... dwara run`). A Diagrams view
+  generates live mermaid flowcharts from the current config: request
+  flow (listener -> route -> service -> upstream -> endpoints),
+  policy attachments (where each policy attaches across the
+  consumer/route/service/listener/global precedence chain), consumer
+  and auth provider relationships (JWT, OIDC, HMAC, mTLS), and the AI
+  gateway topology (model aliases -> providers -> upstreams, with
+  failover and canary edges). Click any diagram node to jump to its
+  editor; dangling references are shown in red.
 - **Validate**: structural validation against the same JSON Schema
   Dwara generates from its Rust config types (`dwara schema`), plus
   cross-reference checks the schema cannot express (route -> service
@@ -90,7 +98,9 @@ analytics, admin API, service mesh, API lifecycle, enterprise).
 | `index.html` | The built, distributable tool (commit this) |
 | `src/app.template.html` | Application source with build markers |
 | `vendor/js-yaml.min.js` | js-yaml 4.1.0 (MIT) for YAML round-tripping |
-| `build.py` | Inlines schema + js-yaml into the template |
+| `vendor/mermaid.min.js` | mermaid 11.15.0 (MIT) for diagram rendering |
+| `vendor/mermaid-LICENSE` | mermaid MIT license text |
+| `build.py` | Inlines schema + js-yaml + mermaid into the template |
 
 ## Rebuilding
 
@@ -103,9 +113,14 @@ python3 tools/config-studio/build.py
 
 Requires Python 3 (stdlib only).
 
-## Vendored dependency
+## Vendored dependencies
 
 `vendor/js-yaml.min.js` is js-yaml 4.1.0, MIT licensed
 (https://github.com/nodeca/js-yaml). The license header is preserved
 at the top of the file. It is embedded at build time so the tool
 works fully offline; no other third-party code is included.
+
+`vendor/mermaid.min.js` is mermaid 11.15.0, MIT licensed
+(https://github.com/mermaid-js/mermaid). The license is preserved as
+`vendor/mermaid-LICENSE`. It is embedded at build time to render the
+diagram flowcharts offline.

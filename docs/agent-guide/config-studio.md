@@ -14,6 +14,8 @@ and editing gateway YAML.
   `config-reference.json` itself (must match `dwara schema` output for CI).
 - `vendor/js-yaml.min.js` is vendored (js-yaml 4.1.0, MIT). Upgrades are a
   deliberate license-and-size review.
+- `vendor/mermaid.min.js` is vendored (mermaid 11.15.0, MIT) for the
+  Diagrams view. Upgrades are a deliberate license-and-size review.
 - Must stay offline: no CDN scripts, no runtime fetches, no node build step.
 - Verify by rebuilding, opening in browser, and confirming templates pass
   `dwara-cli validate`.

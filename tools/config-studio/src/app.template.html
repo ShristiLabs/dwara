@@ -200,6 +200,17 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
   #formcol { min-width: 0; }
   #yamlcol { width: 100%; border-left: 0; border-top: 1px solid var(--line); max-height: 50vh; }
 }
+.diag-tabs { display: flex; gap: 6px; margin: 10px 0 16px; flex-wrap: wrap; }
+.diag-tab { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--dim); border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+.diag-tab:hover { filter: brightness(.97); }
+.diag-tab.active { background: #e0eaff; color: #0b3dd6; border-color: #9db9f5; font-weight: 600; }
+.diag-container { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow: auto; width: 600px; height: 600px; display: flex; align-items: center; justify-content: center; }
+.diag-container .mermaid { font-family: inherit; transform-origin: center center; transition: transform 0.15s ease; }
+.diag-container svg { max-width: 100%; max-height: 100%; width: auto; height: auto; }
+.diag-zoom { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+.diag-zoom button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.diag-zoom button:hover { filter: brightness(.97); }
+.diag-zoom .level { font-size: 12px; color: var(--dim); min-width: 44px; text-align: center; }
 </style>
 </head>
 <body>
@@ -266,6 +277,7 @@ h3.subhead { margin: 22px 0 4px; font-size: 14.5px; }
 </div>
 
 <script>/*__JSYAML__*/</script>
+<script>/*__MERMAID__*/</script>
 <script id="dwara-schema" type="application/json">__SCHEMA_JSON__</script>
 <script>
 "use strict";
@@ -403,7 +415,8 @@ function labelize(key) {
 
 var LS_KEY = "dwara-config-studio.doc.v1";
 var doc = {};
-var sel = { section: "overview", idx: -1 };
+var sel = { section: "overview", idx: -1, diagram: "request-flow" };
+var diagZoom = 1;
 try {
   var saved = localStorage.getItem(LS_KEY);
   if (saved) doc = JSON.parse(saved);
@@ -455,7 +468,7 @@ function delPath(path) {
 /* ---------- section registry ---------- */
 
 var GROUPS = [
-  { label: "Overview", sections: [{ key: "overview", label: "Overview" }] },
+  { label: "Overview", sections: [{ key: "overview", label: "Overview" }, { key: "diagrams", label: "Diagrams" }] },
   { label: "Traffic", sections: [
     { key: "listeners", label: "Listeners", ent: true },
     { key: "routes", label: "Routes", ent: true },
@@ -1322,6 +1335,7 @@ function renderMain() {
   var key = sel.section;
 
   if (key === "overview") { renderOverview(fc); return; }
+  if (key === "diagrams") { renderDiagrams(fc); return; }
 
   var sec = SECTION_BY_KEY[key];
   var propSch = SCHEMA.properties && SCHEMA.properties[key];
@@ -1456,6 +1470,637 @@ function renderOverview(fc) {
     document.createTextNode(" - "),
     h("a", { href: DOCS + "/guide/cli", target: "_blank", rel: "noopener", style: "color:var(--accent)", text: "CLI reference" })
   ]));
+}
+
+/* ---------- mermaid diagrams ---------- */
+
+var MERMAID_READY = typeof mermaid !== "undefined";
+if (MERMAID_READY) {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "default",
+    securityLevel: "loose",
+    flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" }
+  });
+}
+
+var DIAGRAM_TYPES = [
+  { key: "request-flow", label: "Request Flow" },
+  { key: "policy-attachments", label: "Policy Attachments" },
+  { key: "consumer-auth", label: "Consumer & Auth" },
+  { key: "ai-gateway", label: "AI Gateway" }
+];
+
+/* Node ID allocation: sequential N0, N1, ... with a map back to
+   entity paths for click-to-jump.  Reset on every diagram render. */
+var _diagNid = 0;
+var _diagNodeMap = {};
+function makeNode(path) {
+  var id = "N" + (_diagNid++);
+  _diagNodeMap[id] = path;
+  return id;
+}
+
+/* Global click callback invoked by mermaid (securityLevel: loose). */
+window.handleDiagramClick = function (id) {
+  var path = _diagNodeMap[id];
+  if (path) navigateTo(path);
+};
+
+/* Escape label text for mermaid htmlLabels. */
+var _AMP = String.fromCharCode(38);
+function mEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, _AMP + "amp;")
+    .replace(/</g, _AMP + "lt;")
+    .replace(/>/g, _AMP + "gt;")
+    .replace(/"/g, _AMP + "quot;");
+}
+function mLabel(lines) { return lines.map(mEsc).join("<br/>"); }
+
+function matchStr(match) {
+  if (!match || !match.path) return "?";
+  var mp = match.path;
+  if (typeof mp === "string") return mp;
+  return (mp.type ? mp.type + ":" : "") + (mp.value || "?");
+}
+
+function credType(cred) {
+  if (!cred || !cred.type) return "credential";
+  var t = cred.type;
+  if (t === "api_key") return "api-key";
+  if (t === "hmac") return "hmac";
+  if (t === "jwt") return "jwt";
+  if (t === "mtls") return "mtls";
+  return t;
+}
+
+/* ---------- diagram: shared color system ---------- */
+
+/* Entity-type color classes.  Each classDef is appended once per
+   diagram; nodes reference them via "class N0 <type>".  Colors are
+   chosen for distinguishability on a white background. */
+var DIAG_COLORS = {
+  listener:   { fill: "#dbeafe", stroke: "#3b82f6", color: "#1e3a5f" },
+  route:      { fill: "#e0e7ff", stroke: "#6366f1", color: "#312e81" },
+  service:    { fill: "#d1fae5", stroke: "#10b981", color: "#064e3b" },
+  upstream:   { fill: "#fef3c7", stroke: "#f59e0b", color: "#78350f" },
+  endpoint:   { fill: "#f3f4f6", stroke: "#9ca3af", color: "#374151" },
+  consumer:   { fill: "#fce7f3", stroke: "#ec4899", color: "#831843" },
+  credential: { fill: "#fbcfe8", stroke: "#f472b6", color: "#831843" },
+  policy:     { fill: "#ffedd5", stroke: "#f97316", color: "#7c2d12" },
+  global:     { fill: "#ede9fe", stroke: "#8b5cf6", color: "#4c1d95" },
+  jwt:        { fill: "#cffafe", stroke: "#06b6d4", color: "#155e75" },
+  oidc:       { fill: "#a7f3d0", stroke: "#14b8a6", color: "#134e4a" },
+  hmac:       { fill: "#fecaca", stroke: "#ef4444", color: "#7f1d1d" },
+  mtls:       { fill: "#e0f2fe", stroke: "#0ea5e9", color: "#0c4a6e" },
+  provider:   { fill: "#fae8ff", stroke: "#a855f7", color: "#581c87" },
+  model:      { fill: "#f5f3ff", stroke: "#7c3aed", color: "#4c1d95" },
+  missing:    { fill: "#fdeaea", stroke: "#c62828", color: "#c62828" }
+};
+
+var DIAG_LEGEND = [
+  ["listener", "Listener"], ["route", "Route"], ["service", "Service"],
+  ["upstream", "Upstream"], ["endpoint", "Endpoint"], ["consumer", "Consumer"],
+  ["credential", "Credential"], ["policy", "Policy"], ["global", "Global"],
+  ["jwt", "JWT Provider"], ["oidc", "OIDC Provider"], ["hmac", "HMAC Auth"],
+  ["mtls", "mTLS Mapping"], ["provider", "AI Provider"], ["model", "AI Model"],
+  ["missing", "Missing Ref"]
+];
+
+/* Emit classDef lines for every color, plus the missing style. */
+function colorDefs() {
+  var out = [];
+  Object.keys(DIAG_COLORS).forEach(function (k) {
+    var c = DIAG_COLORS[k];
+    out.push("  classDef " + k + " fill:" + c.fill + ",stroke:" + c.stroke + ",stroke-width:2px,color:" + c.color);
+  });
+  /* missing gets dashed stroke */
+  out.push("  classDef missing fill:" + DIAG_COLORS.missing.fill + ",stroke:" + DIAG_COLORS.missing.stroke + ",stroke-width:2px,stroke-dasharray:4 2,color:" + DIAG_COLORS.missing.color);
+  return out;
+}
+
+/* Build a legend bar (HTML chips) showing the colors used in the
+   current diagram.  `used` is an array of type keys. */
+function diagLegend(used) {
+  var bar = h("div", { style: "display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px" });
+  used.forEach(function (k) {
+    var entry = DIAG_LEGEND.find(function (e) { return e[0] === k; });
+    if (!entry) return;
+    var c = DIAG_COLORS[k];
+    bar.appendChild(h("span", {
+      style: "display:inline-flex;align-items:center;gap:5px;font-size:12px;color:" + c.color,
+      text: entry[1]
+    }, [h("span", { style: "display:inline-block;width:14px;height:14px;border-radius:3px;background:" + c.fill + ";border:2px solid " + c.stroke })]));
+  });
+  return bar;
+}
+
+/* ---------- diagram: request flow ---------- */
+
+function genRequestFlow() {
+  var listeners = doc.listeners || [], routes = doc.routes || [],
+      services = doc.services || [], upstreams = doc.upstreams || [];
+  if (!listeners.length && !routes.length && !services.length && !upstreams.length)
+    return { text: "", empty: "No listeners, routes, services, or upstreams configured.", used: [] };
+
+  var svcIdx = {}; services.forEach(function (s, i) { if (s && s.name) svcIdx[s.name] = i; });
+  var upIdx = {}; upstreams.forEach(function (u, i) { if (u && u.name) upIdx[u.name] = i; });
+
+  var lines = ["flowchart LR"];
+  var used = {};
+
+  if (listeners.length) {
+    used.listener = true;
+    lines.push('  subgraph SGL ["Listeners: ' + listeners.length + '"]');
+    listeners.forEach(function (l, i) {
+      var id = makeNode(["listeners", i]);
+      lines.push('    ' + id + '["' + mLabel([l.name || ("listener " + (i + 1)), (l.address || "?") + ":" + (l.port || "?")]) + '"]');
+      lines.push("    class " + id + " listener");
+      lines.push("    click " + id + " call handleDiagramClick()");
+    });
+    lines.push("  end");
+  }
+
+  var routeIds = [];
+  if (routes.length) {
+    used.route = true;
+    lines.push('  subgraph SGR ["Routes: ' + routes.length + '"]');
+    routes.forEach(function (r, i) {
+      var id = makeNode(["routes", i]);
+      routeIds.push(id);
+      lines.push('    ' + id + '["' + mLabel([r.name || ("route " + (i + 1)), matchStr(r && r.match)]) + '"]');
+      lines.push("    class " + id + " route");
+      lines.push("    click " + id + " call handleDiagramClick()");
+    });
+    lines.push("  end");
+  }
+
+  if (listeners.length && routes.length) lines.push("  SGL --> SGR");
+
+  var svcNodes = {};
+  services.forEach(function (s, i) {
+    var id = makeNode(["services", i]);
+    svcNodes[s.name] = id;
+    used.service = true;
+    lines.push('  ' + id + '["' + mLabel([s.name || ("service " + (i + 1))]) + '"]');
+    lines.push("  class " + id + " service");
+    lines.push("  click " + id + " call handleDiagramClick()");
+  });
+
+  var upNodes = {};
+  upstreams.forEach(function (u, i) {
+    var id = makeNode(["upstreams", i]);
+    upNodes[u.name] = id;
+    used.upstream = true;
+    lines.push('  ' + id + '["' + mLabel([u.name || ("upstream " + (i + 1)), u.protocol || ""]) + '"]');
+    lines.push("  class " + id + " upstream");
+    lines.push("  click " + id + " call handleDiagramClick()");
+    (u.endpoints || []).forEach(function (ep, j) {
+      var eid = makeNode(["upstreams", i]);
+      used.endpoint = true;
+      lines.push('  ' + eid + '["' + mLabel(["ep", (ep.address || "?") + " " + (ep.port || "?")]) + '"]');
+      lines.push("  class " + eid + " endpoint");
+      lines.push("  " + id + " --> " + eid);
+    });
+  });
+
+  routes.forEach(function (r, i) {
+    var rid = routeIds[i];
+    if (!rid) return;
+    if (r && r.service) {
+      if (svcIdx[r.service] !== undefined) {
+        lines.push("  " + rid + " --> " + svcNodes[r.service]);
+      } else {
+        var did = makeNode(null);
+        used.missing = true;
+        lines.push('  ' + did + '["' + mEsc(r.service) + ' (missing)"]');
+        lines.push("  class " + did + " missing");
+        lines.push("  " + rid + " --> " + did);
+      }
+    }
+  });
+
+  services.forEach(function (s) {
+    var sid = svcNodes[s.name];
+    if (!sid) return;
+    if (s.upstream) {
+      if (upIdx[s.upstream] !== undefined) {
+        lines.push("  " + sid + " --> " + upNodes[s.upstream]);
+      } else {
+        var did = makeNode(null);
+        used.missing = true;
+        lines.push('  ' + did + '["' + mEsc(s.upstream) + ' (missing)"]');
+        lines.push("  class " + did + " missing");
+        lines.push("  " + sid + " --> " + did);
+      }
+    }
+    if (s.split && s.split.targets) {
+      s.split.targets.forEach(function (t) {
+        if (t.upstream && upIdx[t.upstream] !== undefined) {
+          lines.push("  " + sid + ' -.->|split ' + (t.weight || 0) + "| " + upNodes[t.upstream]);
+        } else if (t.upstream) {
+          var did = makeNode(null);
+          used.missing = true;
+          lines.push('  ' + did + '["' + mEsc(t.upstream) + ' (missing)"]');
+          lines.push("  class " + did + " missing");
+          lines.push("  " + sid + " -.->|split| " + did);
+        }
+      });
+    }
+  });
+
+  lines = lines.concat(colorDefs());
+  return { text: lines.join("\n"), used: Object.keys(used) };
+}
+
+/* ---------- diagram: policy attachments ---------- */
+
+function genPolicyAttachments() {
+  var policies = doc.policies || [];
+  if (!policies.length && !doc.global_policies)
+    return { text: "", empty: "No policies configured.", used: [] };
+
+  var polIdx = {};
+  policies.forEach(function (p, i) { if (p && p.name) polIdx[p.name] = i; });
+
+  var lines = ["flowchart TD"];
+  var used = {};
+
+  var polNodes = {};
+  policies.forEach(function (p, i) {
+    var id = makeNode(["policies", i]);
+    polNodes[p.name] = id;
+    used.policy = true;
+    var parts = [p.name || ("policy " + (i + 1))];
+    if (p.rate_limit || p.rate_limits) parts.push("rate-limit");
+    if (p.timeouts) parts.push("timeouts");
+    if (p.token_budget) parts.push("token-budget");
+    lines.push('  ' + id + '["' + mLabel(parts) + '"]');
+    lines.push("  class " + id + " policy");
+    lines.push("  click " + id + " call handleDiagramClick()");
+  });
+
+  /* global policies */
+  if (doc.global_policies) {
+    used.global = true;
+    var gNode = makeNode(null);
+    lines.push('  ' + gNode + '{"global_policies"}');
+    lines.push("  class " + gNode + " global");
+    (doc.global_policies.policies || doc.global_policies).forEach(function (pn) {
+      if (polIdx[pn] !== undefined) {
+        lines.push("  " + gNode + " --> " + polNodes[pn]);
+      } else {
+        var did = makeNode(null);
+        used.missing = true;
+        lines.push('  ' + did + '["' + mEsc(pn) + ' (missing)"]');
+        lines.push("  class " + did + " missing");
+        lines.push("  " + gNode + " --> " + did);
+      }
+    });
+  }
+
+  /* entity nodes (de-duplicated: one node per entity even with multiple policies) */
+  var entNodes = {};
+  function entNode(key, idx, label, type) {
+    var k = key + "_" + idx;
+    if (entNodes[k]) return entNodes[k];
+    var id = makeNode([key, idx]);
+    entNodes[k] = id;
+    used[type] = true;
+    lines.push('  ' + id + '["' + mLabel(label) + '"]');
+    lines.push("  class " + id + " " + type);
+    lines.push("  click " + id + " call handleDiagramClick()");
+    return id;
+  }
+
+  /* listener policies */
+  (doc.listeners || []).forEach(function (l, i) {
+    (l && l.policies || []).forEach(function (pn) {
+      if (polIdx[pn] !== undefined) {
+        var lid = entNode("listeners", i, ["listener", l.name || ("listener " + (i + 1))], "listener");
+        lines.push("  " + lid + " --> " + polNodes[pn]);
+      }
+    });
+  });
+
+  /* route policies */
+  (doc.routes || []).forEach(function (r, i) {
+    (r && r.policies || []).forEach(function (pn) {
+      if (polIdx[pn] !== undefined) {
+        var rid = entNode("routes", i, ["route", r.name || ("route " + (i + 1))], "route");
+        lines.push("  " + rid + " --> " + polNodes[pn]);
+      }
+    });
+  });
+
+  /* service policies */
+  (doc.services || []).forEach(function (s, i) {
+    (s && s.policies || []).forEach(function (pn) {
+      if (polIdx[pn] !== undefined) {
+        var sid = entNode("services", i, ["service", s.name || ("service " + (i + 1))], "service");
+        lines.push("  " + sid + " --> " + polNodes[pn]);
+      }
+    });
+  });
+
+  /* consumer policies */
+  (doc.consumers || []).forEach(function (c, i) {
+    (c && c.policies || []).forEach(function (pn) {
+      if (polIdx[pn] !== undefined) {
+        var cid = entNode("consumers", i, ["consumer", c.name || ("consumer " + (i + 1))], "consumer");
+        lines.push("  " + cid + " --> " + polNodes[pn]);
+      }
+    });
+  });
+
+  if (lines.length <= 1) return { text: "", empty: "No policy attachments found.", used: [] };
+  lines = lines.concat(colorDefs());
+  return { text: lines.join("\n"), used: Object.keys(used) };
+}
+
+/* ---------- diagram: consumer & auth ---------- */
+
+function genConsumerAuth() {
+  var consumers = doc.consumers || [];
+  var jwtProv = doc.jwt_providers || [];
+  var oidcProv = doc.oidc_providers || [];
+  var hmac = doc.hmac_auth;
+  var mtlsMap = doc.mtls_consumer_mapping;
+
+  if (!consumers.length && !jwtProv.length && !oidcProv.length && !hmac && !mtlsMap)
+    return { text: "", empty: "No consumers or auth providers configured.", used: [] };
+
+  var lines = ["flowchart LR"];
+  var used = {};
+  var consIdx = {};
+  consumers.forEach(function (c, i) { if (c && c.name) consIdx[c.name] = i; });
+
+  /* consumer nodes + credentials */
+  var consNodes = {};
+  consumers.forEach(function (c, i) {
+    var id = makeNode(["consumers", i]);
+    consNodes[c.name] = id;
+    used.consumer = true;
+    lines.push('  ' + id + '["' + mLabel(["consumer", c.name || ("consumer " + (i + 1))]) + '"]');
+    lines.push("  class " + id + " consumer");
+    lines.push("  click " + id + " call handleDiagramClick()");
+    (c.credentials || []).forEach(function (cred, j) {
+      var cid = makeNode(["consumers", i]);
+      used.credential = true;
+      lines.push('  ' + cid + '["' + mLabel([credType(cred)]) + '"]');
+      lines.push("  class " + cid + " credential");
+      lines.push("  " + id + " --- " + cid);
+    });
+  });
+
+  /* jwt providers -> consumer */
+  jwtProv.forEach(function (p, i) {
+    var pid = makeNode(["jwt_providers"]);
+    used.jwt = true;
+    lines.push('  ' + pid + '["' + mLabel(["jwt", p.name || ("provider " + (i + 1))]) + '"]');
+    lines.push("  class " + pid + " jwt");
+    lines.push("  click " + pid + " call handleDiagramClick()");
+    if (p.consumer && consIdx[p.consumer] !== undefined) {
+      lines.push("  " + pid + " --> " + consNodes[p.consumer]);
+    } else if (p.consumer) {
+      var did = makeNode(null);
+      used.missing = true;
+      lines.push('  ' + did + '["' + mEsc(p.consumer) + ' (missing)"]');
+      lines.push("  class " + did + " missing");
+      lines.push("  " + pid + " --> " + did);
+    }
+  });
+
+  /* oidc providers -> consumer */
+  oidcProv.forEach(function (p, i) {
+    var pid = makeNode(["oidc_providers"]);
+    used.oidc = true;
+    lines.push('  ' + pid + '["' + mLabel(["oidc", p.name || ("provider " + (i + 1))]) + '"]');
+    lines.push("  class " + pid + " oidc");
+    lines.push("  click " + pid + " call handleDiagramClick()");
+    if (p.consumer && consIdx[p.consumer] !== undefined) {
+      lines.push("  " + pid + " --> " + consNodes[p.consumer]);
+    } else if (p.consumer) {
+      var did = makeNode(null);
+      used.missing = true;
+      lines.push('  ' + did + '["' + mEsc(p.consumer) + ' (missing)"]');
+      lines.push("  class " + did + " missing");
+      lines.push("  " + pid + " --> " + did);
+    }
+  });
+
+  /* hmac auth */
+  if (hmac) {
+    var hid = makeNode(["hmac_auth"]);
+    used.hmac = true;
+    lines.push('  ' + hid + '["' + mLabel(["hmac auth"]) + '"]');
+    lines.push("  class " + hid + " hmac");
+    lines.push("  click " + hid + " call handleDiagramClick()");
+  }
+
+  /* mTLS mapping */
+  if (mtlsMap && mtlsMap.enabled) {
+    var mid = makeNode(["mtls_consumer_mapping"]);
+    used.mtls = true;
+    lines.push('  ' + mid + '["' + mLabel(["mTLS mapping"]) + '"]');
+    lines.push("  class " + mid + " mtls");
+    lines.push("  click " + mid + " call handleDiagramClick()");
+    if (mtlsMap.consumers) {
+      mtlsMap.consumers.forEach(function (cn) {
+        if (consIdx[cn] !== undefined) {
+          lines.push("  " + mid + " --> " + consNodes[cn]);
+        }
+      });
+    }
+  }
+
+  if (lines.length <= 1) return { text: "", empty: "No consumer or auth relationships to show.", used: [] };
+  lines = lines.concat(colorDefs());
+  return { text: lines.join("\n"), used: Object.keys(used) };
+}
+
+/* ---------- diagram: AI gateway ---------- */
+
+function genAiGateway() {
+  var ai = doc.ai;
+  if (!ai || (!ai.models && !ai.providers))
+    return { text: "", empty: "No AI gateway configured. Add an ai block to define providers and models.", used: [] };
+
+  var providers = ai.providers || [];
+  var models = ai.models || {};
+  var upstreams = doc.upstreams || [];
+  var upIdx = {}; upstreams.forEach(function (u, i) { if (u && u.name) upIdx[u.name] = i; });
+  var provIdx = {}; providers.forEach(function (p, i) { if (p && p.name) provIdx[p.name] = i; });
+
+  if (!providers.length && !Object.keys(models).length)
+    return { text: "", empty: "No AI providers or models configured.", used: [] };
+
+  var lines = ["flowchart LR"];
+  var used = {};
+
+  var provNodes = {};
+  providers.forEach(function (p, i) {
+    var id = makeNode(["ai"]);
+    provNodes[p.name] = id;
+    used.provider = true;
+    lines.push('  ' + id + '["' + mLabel(["provider", p.name || ("provider " + (i + 1)), p.kind || ""]) + '"]');
+    lines.push("  class " + id + " provider");
+    lines.push("  click " + id + " call handleDiagramClick()");
+    if (p.upstream) {
+      if (upIdx[p.upstream] !== undefined) {
+        var uid = makeNode(["upstreams", upIdx[p.upstream]]);
+        used.upstream = true;
+        lines.push('  ' + uid + '["' + mLabel(["upstream", p.upstream]) + '"]');
+        lines.push("  class " + uid + " upstream");
+        lines.push("  click " + uid + " call handleDiagramClick()");
+        lines.push("  " + id + " --> " + uid);
+      } else {
+        var did = makeNode(null);
+        used.missing = true;
+        lines.push('  ' + did + '["' + mEsc(p.upstream) + ' (missing)"]');
+        lines.push("  class " + did + " missing");
+        lines.push("  " + id + " --> " + did);
+      }
+    }
+  });
+
+  Object.keys(models).forEach(function (alias) {
+    var m = models[alias];
+    if (!m) return;
+    var mid = makeNode(["ai"]);
+    used.model = true;
+    lines.push('  ' + mid + '["' + mLabel(["model", alias, m.provider_model || ""]) + '"]');
+    lines.push("  class " + mid + " model");
+    lines.push("  click " + mid + " call handleDiagramClick()");
+    if (m.provider && provIdx[m.provider] !== undefined) {
+      lines.push("  " + mid + " --> " + provNodes[m.provider]);
+    } else if (m.provider) {
+      var did = makeNode(null);
+      used.missing = true;
+      lines.push('  ' + did + '["' + mEsc(m.provider) + ' (missing)"]');
+      lines.push("  class " + did + " missing");
+      lines.push("  " + mid + " --> " + did);
+    }
+    if (m.failover && m.failover.provider) {
+      if (provIdx[m.failover.provider] !== undefined) {
+        lines.push("  " + mid + ' -.->|failover| ' + provNodes[m.failover.provider]);
+      } else {
+        var fid = makeNode(null);
+        used.missing = true;
+        lines.push('  ' + fid + '["' + mEsc(m.failover.provider) + ' (missing)"]');
+        lines.push("  class " + fid + " missing");
+        lines.push("  " + mid + " -.->|failover| " + fid);
+      }
+    }
+    if (m.canary && m.canary.provider) {
+      if (provIdx[m.canary.provider] !== undefined) {
+        lines.push("  " + mid + ' -.->|canary ' + (m.canary.weight || 0) + "| " + provNodes[m.canary.provider]);
+      }
+    }
+  });
+
+  if (lines.length <= 1) return { text: "", empty: "No AI provider or model relationships to show.", used: [] };
+  lines = lines.concat(colorDefs());
+  return { text: lines.join("\n"), used: Object.keys(used) };
+}
+
+var DIAGRAM_GENERATORS = {
+  "request-flow": genRequestFlow,
+  "policy-attachments": genPolicyAttachments,
+  "consumer-auth": genConsumerAuth,
+  "ai-gateway": genAiGateway
+};
+
+function renderDiagrams(fc) {
+  fc.appendChild(h("h2", { class: "section-title", text: "Diagrams" }));
+  fc.appendChild(h("p", { class: "section-desc", text: "Live mermaid diagrams generated from the current config. Click any node to jump to its editor. Dangling references are shown in red." }));
+
+  if (!MERMAID_READY) {
+    fc.appendChild(h("div", { class: "notice", text: "Mermaid renderer failed to load. Rebuild with: python3 tools/config-studio/build.py" }));
+    return;
+  }
+
+  if (!sel.diagram) sel.diagram = "request-flow";
+
+  var tabs = h("div", { class: "diag-tabs" });
+  DIAGRAM_TYPES.forEach(function (dt) {
+    tabs.appendChild(h("button", {
+      class: "diag-tab" + (sel.diagram === dt.key ? " active" : ""),
+      text: dt.label,
+      onclick: function () { sel.diagram = dt.key; renderMain(); }
+    }));
+  });
+  fc.appendChild(tabs);
+
+  _diagNid = 0;
+  _diagNodeMap = {};
+
+  var gen = DIAGRAM_GENERATORS[sel.diagram] || genRequestFlow;
+  var result = gen();
+
+  if (!result.text) {
+    fc.appendChild(h("div", { class: "notice", text: result.empty || "No data for this diagram." }));
+    return;
+  }
+
+  /* color legend */
+  if (result.used && result.used.length) fc.appendChild(diagLegend(result.used));
+
+  /* zoom controls */
+  var zoomBar = h("div", { class: "diag-zoom" });
+  function zoomLabel() { return Math.round(diagZoom * 100) + "%"; }
+  var levelEl = h("span", { class: "level", text: zoomLabel() });
+  function applyZoom(svg) {
+    if (svg) svg.style.transform = "scale(" + diagZoom + ")";
+  }
+  zoomBar.appendChild(h("button", { text: "-", title: "Zoom out", onclick: function () {
+    diagZoom = Math.max(0.25, diagZoom - 0.1);
+    var svg = container.querySelector("svg");
+    applyZoom(svg); levelEl.textContent = zoomLabel();
+  }}));
+  zoomBar.appendChild(levelEl);
+  zoomBar.appendChild(h("button", { text: "+", title: "Zoom in", onclick: function () {
+    diagZoom = Math.min(4, diagZoom + 0.1);
+    var svg = container.querySelector("svg");
+    applyZoom(svg); levelEl.textContent = zoomLabel();
+  }}));
+  zoomBar.appendChild(h("button", { text: "Reset", title: "Reset zoom", onclick: function () {
+    diagZoom = 1;
+    var svg = container.querySelector("svg");
+    applyZoom(svg); levelEl.textContent = zoomLabel();
+  }}));
+  fc.appendChild(zoomBar);
+
+  var container = h("div", { class: "diag-container" });
+  var el = h("pre", { class: "mermaid", text: result.text });
+  container.appendChild(el);
+  fc.appendChild(container);
+
+  try {
+    mermaid.run({ nodes: [el] }).then(function () {
+      applyZoom(container.querySelector("svg"));
+    }).catch(function (e) {
+      container.textContent = "";
+      container.appendChild(h("div", { class: "notice", text: "Diagram render error: " + (e.message || String(e)) }));
+    });
+  } catch (e) {
+    container.textContent = "";
+    container.appendChild(h("div", { class: "notice", text: "Diagram render error: " + (e.message || String(e)) }));
+  }
+
+  /* collapsible mermaid source with copy button */
+  var src = h("details", { class: "adv" });
+  src.appendChild(h("summary", { text: "Mermaid source" }));
+  var srcBody = h("div", { class: "body" });
+  srcBody.appendChild(h("pre", { style: "font:12px var(--mono);white-space:pre-wrap;word-break:break-all", text: result.text }));
+  srcBody.appendChild(h("button", { class: "small", text: "copy", style: "margin-top:6px", onclick: function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(result.text);
+    else fallbackCopy(result.text);
+    flashStatus("copied mermaid source");
+  }}));
+  src.appendChild(srcBody);
+  fc.appendChild(src);
 }
 
 /* ---------- YAML pane ---------- */
@@ -1677,7 +2322,7 @@ document.getElementById("btn-copy").addEventListener("click", function () {
 });
 document.getElementById("btn-clear").addEventListener("click", function () {
   if (!confirm("Clear the current draft? This cannot be undone (a new blank config is started).")) return;
-  doc = {}; persist(); sel = { section: "overview", idx: -1 }; render(); openTemplates();
+  doc = {}; persist(); sel = { section: "overview", idx: -1, diagram: "request-flow" }; render(); openTemplates();
 });
 function fallbackCopy(text) {
   var ta = document.createElement("textarea");
@@ -1716,7 +2361,7 @@ document.addEventListener("keydown", function (e) {
     grid.appendChild(h("div", { class: "tpl", onclick: function () {
       doc = JSON.parse(JSON.stringify(t.doc));
       persist();
-      sel = { section: "overview", idx: -1 };
+      sel = { section: "overview", idx: -1, diagram: "request-flow" };
       render();
       closeTemplates();
     }}, [
