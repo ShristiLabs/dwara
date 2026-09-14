@@ -34,6 +34,11 @@
 //! - `DWARA_ACCEPTORS_PER_LISTENER` (#271): number of concurrent acceptor
 //!   tasks per listener, default 1. Set to the number of CPU cores to
 //!   parallelize connection acceptance and keep all tokio workers fed.
+//! - `DWARA_POOL_SHARDS`: number of hyper-util client pool shards per
+//!   upstream, default 1. Set to the number of tokio workers to reduce
+//!   pool-lock contention under high concurrency (each shard has its own
+//!   `Mutex<PoolInner>`). The connection cap is shared across shards via
+//!   `Arc`, so the total cap is not multiplied.
 //! - `DWARA_LOG` (DW-021): RUST_LOG-syntax filter for the tracing
 //!   subscriber, default `dwara=info`. Output is JSON on STDOUT (spans,
 //!   structured logs, and the per-request `dwara::access` access-log

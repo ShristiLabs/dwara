@@ -5727,14 +5727,18 @@ where
     // Forwarded headers: rebuild XFF/X-Real-IP from the direct peer under
     // the trusted-proxies rule; Host becomes the upstream authority.
     let trusted = peer_is_trusted(&gateway.trusted_proxies, peer);
+    // PERF: format the peer to a String ONCE and reuse for both XFF and
+    // X-Real-IP (previously peer.to_string() was called twice per
+    // request — two heap allocations for the same IpAddr).
+    let peer_str = peer.to_string();
     let inbound_xff = req
         .headers()
         .get(&X_FORWARDED_FOR)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let xff = match (trusted, inbound_xff) {
-        (true, Some(existing)) => format!("{existing}, {peer}"),
-        (_, _) => peer.to_string(),
+        (true, Some(existing)) => format!("{existing}, {peer_str}"),
+        (_, _) => peer_str.clone(),
     };
 
     // Tunneling rebuilds a `Connection: Upgrade` header on the forwarded
@@ -5757,7 +5761,7 @@ where
     if let Ok(v) = HeaderValue::from_str(&xff) {
         parts.headers.insert(&X_FORWARDED_FOR, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&peer.to_string()) {
+    if let Ok(v) = HeaderValue::from_str(&peer_str) {
         parts.headers.insert(&X_REAL_IP, v);
     }
     // Trusted consumer identity upstream (DW-019): injected by the gateway
@@ -5941,7 +5945,16 @@ where
     // regardless of retry eligibility or upgrade status: the budget window
     // counts ALL proxied traffic to the upstream, so a POST-heavy upstream
     // still accumulates denominator headroom for its idempotent share.
-    budget.record_request();
+    //
+    // PERF: skip the lock + SystemTime syscall when neither retries nor
+    // hedging are configured — the budget is only consulted by
+    // try_reserve_retry, which is unreachable when attempts == 0 and no
+    // hedge block is set. This eliminates a contended std::sync::Mutex
+    // acquisition on every proxied request for upstreams without retries
+    // (the common case in benchmarks and many production deployments).
+    if retries_enabled || hedge_eligible {
+        budget.record_request();
+    }
     let mut replay: Option<Bytes> = None;
     let first_body: AttemptBody<B> = if let Some(bytes) = transformed_body {
         // DW-028: the transform already buffered (and replaced) the

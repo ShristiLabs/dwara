@@ -52,7 +52,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "loom")]
 use loom::sync::Mutex;
 #[cfg(not(feature = "loom"))]
-use std::sync::Mutex;
+use parking_lot::Mutex;
 // OnceLock seeds the jitter RNG in production code; it stays std.
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -241,7 +241,7 @@ impl RetryBudget {
     /// Called once per request, never per attempt.
     pub fn record_request(&self) {
         let now = (self.now_ms)();
-        let mut events = self.events.lock().expect("retry budget poisoned");
+        let mut events = self.events.lock();
         self.prune_locked(&mut events, now);
         events.push_back((now, false));
     }
@@ -258,7 +258,7 @@ impl RetryBudget {
     /// retries rather than a burst.
     pub fn try_reserve_retry(&self, percent: u32) -> bool {
         let now = (self.now_ms)();
-        let mut events = self.events.lock().expect("retry budget poisoned");
+        let mut events = self.events.lock();
         self.prune_locked(&mut events, now);
         let requests = events.iter().filter(|(_, r)| !*r).count() as u64;
         let retries = events.len() as u64 - requests;
@@ -273,7 +273,7 @@ impl RetryBudget {
     /// In-window totals (observability/tests).
     pub fn totals(&self) -> usize {
         let now = (self.now_ms)();
-        let mut events = self.events.lock().expect("retry budget poisoned");
+        let mut events = self.events.lock();
         self.prune_locked(&mut events, now);
         events.len()
     }
@@ -281,7 +281,7 @@ impl RetryBudget {
     /// In-window retries (observability/tests).
     pub fn retries(&self) -> usize {
         let now = (self.now_ms)();
-        let mut events = self.events.lock().expect("retry budget poisoned");
+        let mut events = self.events.lock();
         self.prune_locked(&mut events, now);
         events.iter().filter(|(_, r)| *r).count()
     }

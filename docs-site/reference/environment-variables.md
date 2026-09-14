@@ -27,6 +27,10 @@ policy is YAML config (see [Configuration](../guide/configuration)).
 | `DWARA_H2_CONNECTION_WINDOW_KIB` | `4096` | HTTP/2 connection-wide receive window (KiB). |
 | `DWARA_H2_MAX_SEND_BUF_KIB` | `1024` | HTTP/2 outbound send buffer per connection (KiB). |
 | `DWARA_REQUEST_BODY_TIMEOUT_MS` | `30000` (`0` disables) | Inactivity gap allowed between inbound request body frames. |
+| `DWARA_WORKER_THREADS` | `available_parallelism()` | Number of tokio async worker threads. Lowering can reduce memory on small instances; raising beyond core count rarely helps (workers are I/O-bound). |
+| `DWARA_MAX_BLOCKING_THREADS` | `512` | Upper bound on tokio's blocking thread pool (used for DNS resolution, TLS handshakes, file I/O). Raise if DNS-heavy workloads stall. |
+| `DWARA_ACCEPTORS_PER_LISTENER` | `1` | Concurrent acceptor tasks per TCP listener. Increase on high-connection-churn workloads (many short-lived connections) to spread accept() calls across workers. Does not affect persistent-connection throughput. |
+| `DWARA_POOL_SHARDS` | `1` | Number of independent hyper-util client pools per upstream. Each shard has its own mutex, reducing lock contention at high concurrency. The per-upstream `connection_cap` is shared across all shards (not multiplied). Increase to 4-16 on high-concurrency workloads; keep at 1 to maximize connection reuse for sequential workloads. |
 
 See [Operations](../guide/operations) and [Observability](../guide/observability)
 for the behavior each of these controls.

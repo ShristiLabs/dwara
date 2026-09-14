@@ -35,3 +35,4 @@ SIGTERM/SIGINT with backlog flush + drain. Admin API POST is live-published.
 | `DWARA_WORKER_THREADS` | `available_parallelism()` | tokio async worker thread count |
 | `DWARA_MAX_BLOCKING_THREADS` | `512` | tokio blocking thread pool size |
 | `DWARA_ACCEPTORS_PER_LISTENER` | `1` | concurrent acceptor tasks per listener |
+| `DWARA_POOL_SHARDS` | `1` | hyper-util client pool shards per upstream |

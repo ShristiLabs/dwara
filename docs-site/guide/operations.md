@@ -115,6 +115,49 @@ desync through the gateway on later keep-alive requests.
 
 See the full [environment variables reference](../reference/environment-variables).
 
+## Runtime tuning
+
+The following environment variables control the tokio runtime and
+upstream connection pool. They are read once at startup and apply
+process-wide. Defaults are conservative; tune only when a specific
+bottleneck has been identified.
+
+### Tokio runtime
+
+| Variable | Default | When to change |
+| --- | --- | --- |
+| `DWARA_WORKER_THREADS` | `available_parallelism()` | Lower on small instances (1-2 vCPU) to reduce thread overhead. Raising beyond core count rarely helps — workers are I/O-bound, not CPU-bound. |
+| `DWARA_MAX_BLOCKING_THREADS` | `512` | Raise if DNS-heavy or TLS-handshake-heavy workloads stall (blocking pool exhaustion shows as latency spikes). Lower to cap memory on constrained hosts. |
+
+### Accept loop
+
+| Variable | Default | When to change |
+| --- | --- | --- |
+| `DWARA_ACCEPTORS_PER_LISTENER` | `1` | Increase to 2-4 on workloads with many short-lived connections (high connection churn). Multiple acceptors spread `accept()` calls across worker threads. Does not improve throughput for persistent (keep-alive) connections. |
+
+### Upstream connection pool
+
+| Variable | Default | When to change |
+| --- | --- | --- |
+| `DWARA_POOL_SHARDS` | `1` | Increase to 4-16 on high-concurrency workloads (hundreds of concurrent requests per upstream) to reduce hyper-util pool mutex contention. Each shard gets its own mutex; the per-upstream `connection_cap` is shared across all shards (not multiplied). Keep at `1` for sequential workloads to maximize connection reuse. |
+
+The per-upstream YAML fields `connection_cap` and `max_pending` control
+connection and queue bounds. Their defaults changed to 256 each to
+prevent unbounded memory growth under high concurrency. See
+[Configuration](./configuration) and the
+[configuration schema](../reference/configuration-schema) for the
+field-level reference.
+
+### Benchmarking guidance
+
+When tuning for throughput, measure before and after using the
+benchmarking scripts in the repository `scripts/` directory. The macro
+sweep (`bench-macro-sweep.sh`) captures RPS, latency percentiles, and
+system metrics (RSS, fd count, CPU%) at each concurrency level. Pool
+sharding and acceptor count changes are most visible at 128+ concurrent
+connections; single-connection throughput is dominated by per-request
+CPU cost and is unaffected by these knobs.
+
 ## Runnable demo
 
 Run hot config reload against a live gateway: [`demos/09-operations/`](https://github.com/shristilabs/dwara/tree/main/demos/09-operations)

@@ -189,7 +189,7 @@ to a pool of endpoints), not on policies:
 | `breaker` | per-upstream circuit breaker (opens the whole pool) | [Traffic policy](./traffic-policy) |
 | `health` | passive health / outlier detection (eject bad endpoints) | [Operations](./operations) |
 | `active_health` | synthetic HTTP/TCP probes per endpoint | [Operations](./operations) |
-| `connection_cap` / `max_pending` | outbound connection and queue limits | [Operations](./operations) |
+| `connection_cap` / `max_pending` | outbound connection and queue limits (default 256 each) | [Operations](./operations) |
 | `slow_start_ms` | ramp-up window for newly-added endpoints | [Operations](./operations) |
 | `load_balancer` | strategy: round-robin, least-connections, peak-EWMA, ... | [Routing](./routing) |
 
