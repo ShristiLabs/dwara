@@ -17,6 +17,9 @@
 #                       regression gate; scripts/bench-regression.sh is the
 #                       full multi-workload harness)
 #   BENCH_H3_FEATURE    set to 1 to build loadgen with --features h3
+#   BENCH_CONNECTION_CAP  upstream connection_cap (default 1024; the
+#                        config default of 64 causes unbounded memory
+#                        growth when client connections exceed the cap)
 #
 # Connection-count caveat (100k-connection test):
 #   This script deliberately stays at <= 10,000 connections by default —
@@ -90,6 +93,7 @@ upstreams:
   - name: bench-upstream
     load_balancer: round_robin
     protocol: http1
+    connection_cap: ${BENCH_CONNECTION_CAP:-1024}
     endpoints:
       - address: 127.0.0.1
         port: ${ECHO_PORT}

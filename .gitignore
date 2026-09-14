@@ -26,6 +26,10 @@ __pycache__/
 .sdlc
 docs-internal
 
+# Local benchmark output artifacts (not for version control)
+bench-results/
+results.jsonl
+
 # cargo-cyclonedx output (per-crate SBOMs)
 *.cdx.json
 

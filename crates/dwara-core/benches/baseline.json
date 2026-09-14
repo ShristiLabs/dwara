@@ -1,19 +1,19 @@
 {
   "benches": {
-    "authn/apikey_verify_sha256_ct": 394.0,
-    "balancer/pick_ketama_5": 35.0,
-    "balancer/pick_wrr_5": 21.0,
-    "config/compile_100_routes": 1218883.0,
-    "config/validate_100_routes": 40696.0,
-    "headers/strip_hop_by_hop_30": 955.0,
-    "ratelimit/gcra_hit": 92.0,
-    "route/find_full_exact_param": 229.0,
-    "route/find_full_miss": 215.0,
-    "route/find_full_prefix_hit": 225.0,
-    "route/find_full_regex_hit": 128.0
+    "authn/apikey_verify_sha256_ct": 436.0,
+    "balancer/pick_ketama_5": 18.0,
+    "balancer/pick_wrr_5": 13.0,
+    "config/compile_100_routes": 704942.0,
+    "config/validate_100_routes": 30088.0,
+    "headers/strip_hop_by_hop_30": 527.0,
+    "ratelimit/gcra_hit": 52.0,
+    "route/find_full_exact_param": 144.0,
+    "route/find_full_miss": 47.0,
+    "route/find_full_prefix_hit": 158.0,
+    "route/find_full_regex_hit": 72.0
   },
   "meta": {
-    "machine": "ubuntu-latest",
+    "machine": "myhost",
     "note": "ns/iter, bencher format",
     "tolerance": 0.25
   }

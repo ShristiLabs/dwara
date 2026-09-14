@@ -144,6 +144,10 @@ Feature areas written up so far (M1-M6 complete):
   RBAC, API tokens, and audit logging (SEC-01, #154).
 - [CLI](./features/cli.md) — the library-shaped subcommands, exit-code
   contract, the load generator rig.
+- [Production-grade benchmarking](./features/benchmarking.md) — the
+  environment setup, micro-benchmark regression runner, enhanced macro
+  concurrency sweep with system metrics, and rate-limited saturation
+  sweep for capacity planning.
 - [Protocol hardening](./features/protocol-hardening.md) — parser
   bounds, the body-inactivity gap, how they compose.
 - [Extension points](./features/extension-points.md) — the five

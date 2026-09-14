@@ -129,8 +129,10 @@ def main() -> int:
             pass
         meta.update({"machine": args.machine,
                      "tolerance": args.tolerance,
-                     "note": "macro loadgen JSON: rps + latency percentiles; "
-                             "machine-dependent, loopback"})
+                     "note": "macro loadgen JSON: rps + latency percentiles + "
+                             "gateway sysmetrics (rss_kb, fd_count, cpu_pct); "
+                             "machine-dependent, loopback; sysmetrics are "
+                             "display-only (never gated)"})
         with open(args.write, "w", encoding="utf-8") as f:
             json.dump({"meta": meta, "workloads": current}, f, indent=2,
                       sort_keys=True)

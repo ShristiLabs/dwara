@@ -24,6 +24,9 @@
 #   BENCH_H3_FEATURE      build loadgen with --features h3 (default 0)
 #   DWARA_BENCH_H3_URL    h3 target URL; enables h3 runs (default unset)
 #   BENCH_SKIP_H2         set to 1 to skip h2 workloads (default unset)
+#   BENCH_CONNECTION_CAP  upstream connection_cap (default 1024; the
+#                        config default of 64 causes unbounded memory
+#                        growth when client connections exceed the cap)
 
 set -euo pipefail
 
@@ -34,11 +37,23 @@ ECHO_PORT="${BENCH_ECHO_PORT:-18091}"
 H3_FEATURE="${BENCH_H3_FEATURE:-0}"
 H3_URL="${DWARA_BENCH_H3_URL:-}"
 SKIP_H2="${BENCH_SKIP_H2:-0}"
+# Capture gateway process resource usage (RSS, fd count, CPU%) per
+# workload and merge it into each JSON: line as a `sysmetrics` block so
+# the checked-in baseline (scripts/bench-macro-baseline.json) displays
+# CPU/memory alongside rps/latency. Display-only: the regression gate
+# compares rps/p99_ns only, never sysmetrics (CPU% is too noisy on a
+# shared CI runner to gate on). Set BENCH_SYSMETRICS=0 to disable.
+DO_SYSMETRICS="${BENCH_SYSMETRICS:-1}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 
 command -v curl >/dev/null || { echo "curl required for the readiness probe" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "python3 required (JSON merge + regression gate)" >&2; exit 2; }
+if [ "$DO_SYSMETRICS" = "1" ]; then
+    # shellcheck source=bench-sysmetrics.sh
+    source "$ROOT/scripts/bench-sysmetrics.sh"
+fi
 
 # Build the loadgen (+ h3 feature only when requested) and the gateway.
 LOADGEN_ARGS=(-p dwara-cli --bin dwara-loadgen)
@@ -80,6 +95,7 @@ upstreams:
   - name: bench-upstream
     load_balancer: round_robin
     protocol: http1
+    connection_cap: ${BENCH_CONNECTION_CAP:-1024}
     endpoints:
       - address: 127.0.0.1
         port: ${ECHO_PORT}
@@ -127,8 +143,36 @@ run_workload() {
         echo "loadgen run failed for $proto/$workload" >&2
         return 1
     }
-    # Forward the JSON: line to stdout (the regression gate consumes it).
-    printf '%s\n' "$out" | grep '^JSON: '
+    # Forward the JSON: line to stdout (the regression gate consumes
+    # it). When sysmetrics capture is on, sample the gateway process
+    # (RSS, fd count, CPU%) and merge a `sysmetrics` block into the
+    # JSON line so the baseline displays CPU/memory per workload. The
+    # sampler reads the gateway PID post-run; `ps %cpu` is the
+    # cumulative average since process start, and RSS is the current
+    # resident set, so for a fresh gateway per harness run these reflect
+    # the workload just driven. Display-only (never gated).
+    local rss fds cpu
+    rss="0"; fds="0"; cpu="0.0"
+    if [ "$DO_SYSMETRICS" = "1" ] && [ -n "${GW_PID:-}" ] && kill -0 "$GW_PID" 2>/dev/null; then
+        rss="$(sample_rss_kb "$GW_PID")"; rss="${rss:-0}"
+        fds="$(sample_fd_count "$GW_PID")"; fds="${fds:-0}"
+        cpu="$(sample_cpu_pct "$GW_PID")"; cpu="${cpu:-0.0}"
+    fi
+    if [ "$DO_SYSMETRICS" = "1" ]; then
+        printf '%s\n' "$out" | grep '^JSON: ' | python3 -c "
+import json, sys
+rss, fds, cpu = int(${rss} or 0), int(${fds} or 0), float(${cpu} or 0.0)
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith('JSON: '):
+        continue
+    d = json.loads(line[6:])
+    d['sysmetrics'] = {'rss_kb': rss, 'fd_count': fds, 'cpu_pct': cpu}
+    print('JSON: ' + json.dumps(d))
+"
+    else
+        printf '%s\n' "$out" | grep '^JSON: '
+    fi
     # Human row to stderr. Anchor field greps with a leading space so
     # `p99_ns=` does not also match `err_p99_ns=` in the RESULT line.
     local row requests rps errors p99
@@ -137,14 +181,15 @@ run_workload() {
     rps="$(printf '%s' "$row" | grep -o ' rps=[0-9.]*' | cut -d= -f2)"
     errors="$(printf '%s' "$row" | grep -o ' errors=[0-9]*' | cut -d= -f2)"
     p99="$(printf '%s' "$row" | grep -o ' p99_ns=[0-9]*' | cut -d= -f2)"
-    printf '%-10s %-12s %10s %10.0f %8s %10s\n' \
-        "$proto" "$workload" "$requests" "$rps" "$errors" "$((p99 / 1000))" >&2
+    printf '%-10s %-12s %10s %10.0f %8s %10s %10s %10s %8s\n' \
+        "$proto" "$workload" "$requests" "$rps" "$errors" "$((p99 / 1000))" \
+        "$rss" "$fds" "$cpu" >&2
     [ "${errors:-1}" = "0" ] || return 1
 }
 
-printf '\n%-10s %-12s %10s %10s %8s %10s\n' \
-    PROTOCOL WORKLOAD REQUESTS RPS ERRORS 'P99(us)' >&2
-printf '%.0s-' {1..66} >&2; echo >&2
+printf '\n%-10s %-12s %10s %10s %8s %10s %10s %10s %8s\n' \
+    PROTOCOL WORKLOAD REQUESTS RPS ERRORS 'P99(us)' 'RSS(KB)' 'FD_COUNT' 'CPU_%' >&2
+printf '%.0s-' {1..92} >&2; echo >&2
 
 FAIL=0
 H1_URL="http://127.0.0.1:${GW_PORT}/bench"
