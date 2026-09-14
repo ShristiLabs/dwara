@@ -258,10 +258,18 @@ fn patch_publishes_and_watcher_republishes_file_edit_reaches_admin() {
 #[test]
 fn patch_during_inflight_request_old_generation_completes() {
     // A slow upstream: accepts, waits out the request, answers late.
+    // A readiness channel signals when the upstream has ACCEPTED the
+    // gateway's connection, so the PATCH is sent only after the old
+    // generation's upstream connection is established (otherwise a
+    // loaded CI runner can process the PATCH before the dial completes,
+    // dropping the old generation's upstream handle and failing the
+    // in-flight request with 502 — a test race, not a code bug).
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
     let slow = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream_port = slow.local_addr().unwrap().port();
     let upstream = std::thread::spawn(move || {
         if let Ok((mut s, _)) = slow.accept() {
+            let _ = accepted_tx.send(());
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
             std::thread::sleep(Duration::from_millis(700));
@@ -283,12 +291,19 @@ fn patch_during_inflight_request_old_generation_completes() {
     let _guard = spawn_server(&config_path, admin_port);
     let _ = generation(admin_port); // ready
 
-    // Fire the proxy request, then PATCH to a different config while it
-    // is in flight (the upstream is sleeping).
+    // Fire the proxy request, then wait for the upstream to accept the
+    // connection before PATCHing. This ensures the old generation's
+    // upstream connection is established before the config reload drops
+    // the old upstream handle.
     let mut dp = TcpStream::connect(("127.0.0.1", data_port)).unwrap();
     dp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     dp.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .unwrap();
+    // Wait for the upstream to accept the connection (readiness signal,
+    // not a sleep — the upstream sends exactly one signal on accept()).
+    accepted_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("upstream accepted the gateway's connection");
     let (status, _, resp) = admin_patch(
         &respond_config("patched", data_port, admin_port),
         admin_port,
