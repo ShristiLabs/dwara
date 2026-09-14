@@ -423,6 +423,10 @@ export default withMermaid(
                 { text: "Deployment", link: "/guide/deployment" },
                 { text: "Operations", link: "/guide/operations" },
                 {
+                  text: "Performance metrics",
+                  link: "/guide/performance-metrics",
+                },
+                {
                   text: "Zero-downtime upgrade",
                   link: "/guide/zero-downtime-upgrade",
                 },
