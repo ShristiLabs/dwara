@@ -4124,20 +4124,31 @@ where
     // policy attached at several levels is recorded once (its first
     // chain position), matching the rate-limit evaluation's dedup.
     let applicable_policies: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for name in consumer_policies
-            .iter()
-            .chain(&route.policies)
-            .chain(service_policies)
-            .chain(listener_policies)
-            .chain(&gateway.global_policies)
+        // PERF: short-circuit the common case (no policies at any level)
+        // to avoid allocating a HashSet + Vec on every request.
+        if consumer_policies.is_empty()
+            && route.policies.is_empty()
+            && service_policies.is_empty()
+            && listener_policies.is_empty()
+            && gateway.global_policies.is_empty()
         {
-            if seen.insert(name.clone()) {
-                out.push(name.clone());
+            Vec::new()
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for name in consumer_policies
+                .iter()
+                .chain(&route.policies)
+                .chain(service_policies)
+                .chain(listener_policies)
+                .chain(&gateway.global_policies)
+            {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
             }
+            out
         }
-        out
     };
 
     // Consumer request budgets (DW-033): after rate limiting — an
@@ -4982,6 +4993,14 @@ fn unauthorized(challenge: &str, rid: &str) -> Response<ProxyBody> {
 /// authenticator and injected as a trusted header on the proxied request;
 /// a client claiming `X-Consumer-*` must never reach the upstream with it.
 fn strip_consumer_headers(headers: &mut HeaderMap) {
+    // PERF: fast-path the common case (clients almost never send
+    // X-Consumer-* headers) to avoid allocating a Vec on every request.
+    if !headers
+        .keys()
+        .any(|n| n.as_str().starts_with("x-consumer-"))
+    {
+        return;
+    }
     let names: Vec<HeaderName> = headers
         .keys()
         .filter(|n| n.as_str().starts_with("x-consumer-"))
@@ -5262,28 +5281,27 @@ pub fn apply_path_rewrite(
     idx: usize,
     path: &str,
     params: &[(String, String)],
-) -> String {
+) -> Option<String> {
     let rewrite = match &route.action {
         RouteAction::Proxy { rewrite: Some(rw) } => rw,
-        _ => return path.to_string(),
+        _ => return None,
     };
     match rewrite {
         PathRewrite::StripPrefix {} => {
             let prefix = route.r#match.path.value.trim_end_matches('/');
             match path.strip_prefix(prefix) {
-                Some("") => "/".to_string(),
-                Some(rest) if rest.starts_with('/') => rest.to_string(),
-                Some(rest) => format!("/{rest}"),
-                None => path.to_string(),
+                Some("") => Some("/".to_string()),
+                Some(rest) if rest.starts_with('/') => Some(rest.to_string()),
+                Some(rest) => Some(format!("/{rest}")),
+                None => None,
             }
         }
         PathRewrite::ReplacePrefix {
             prefix,
             replacement,
-        } => match path.strip_prefix(prefix) {
-            Some(rest) => format!("{replacement}{rest}"),
-            None => path.to_string(),
-        },
+        } => path
+            .strip_prefix(prefix)
+            .map(|rest| format!("{replacement}{rest}")),
         PathRewrite::Regex { substitution, .. } => match table.rewrite_regex(idx) {
             Some(re) => {
                 // PERF-04 (#206): use captures() + the precompiled
@@ -5308,7 +5326,7 @@ pub fn apply_path_rewrite(
                                 out.push_str(pre);
                                 out.push_str(&subst.expand(&caps, params));
                                 out.push_str(post);
-                                out
+                                Some(out)
                             }
                             // Generation-tear backstop: the regex and
                             // substitution are built together, so this
@@ -5316,14 +5334,14 @@ pub fn apply_path_rewrite(
                             // path.
                             None => {
                                 let expanded = expand_substitution(substitution, &caps, params);
-                                format!("{pre}{expanded}{post}")
+                                Some(format!("{pre}{expanded}{post}"))
                             }
                         }
                     }
-                    None => path.to_string(),
+                    None => None,
                 }
             }
-            None => path.to_string(),
+            None => None,
         },
     }
 }
@@ -5686,20 +5704,24 @@ where
     // compiled before this rule): keep the original path, never a 500,
     // never a panic.
     let inbound = req.uri().clone();
-    let new_path = apply_path_rewrite(
+    // PERF: apply_path_rewrite returns None when no rewrite is configured
+    // (the common case), avoiding a path.to_string() allocation + string
+    // comparison on every request.
+    if let Some(new_path) = apply_path_rewrite(
         route,
         gen.snapshot.route_table(),
         route_idx,
         inbound.path(),
         params,
-    );
-    if new_path != inbound.path() {
-        let pq = match inbound.query() {
-            Some(q) => format!("{new_path}?{q}"),
-            None => new_path,
-        };
-        if let Ok(uri) = pq.parse() {
-            *req.uri_mut() = uri;
+    ) {
+        if new_path != inbound.path() {
+            let pq = match inbound.query() {
+                Some(q) => format!("{new_path}?{q}"),
+                None => new_path,
+            };
+            if let Ok(uri) = pq.parse() {
+                *req.uri_mut() = uri;
+            }
         }
     }
 
@@ -5731,14 +5753,21 @@ where
     // X-Real-IP (previously peer.to_string() was called twice per
     // request — two heap allocations for the same IpAddr).
     let peer_str = peer.to_string();
-    let inbound_xff = req
-        .headers()
-        .get(&X_FORWARDED_FOR)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let xff = match (trusted, inbound_xff) {
-        (true, Some(existing)) => format!("{existing}, {peer_str}"),
-        (_, _) => peer_str.clone(),
+    // PERF: only read and allocate the inbound XFF when the peer is
+    // trusted (the common case: default trusted_proxies is empty, so
+    // the inbound XFF is always discarded — the old code allocated it
+    // unconditionally via to_string() then threw it away).
+    let xff = if trusted {
+        match req
+            .headers()
+            .get(&X_FORWARDED_FOR)
+            .and_then(|v| v.to_str().ok())
+        {
+            Some(existing) => format!("{existing}, {peer_str}"),
+            None => peer_str.clone(),
+        }
+    } else {
+        peer_str.clone()
     };
 
     // Tunneling rebuilds a `Connection: Upgrade` header on the forwarded
@@ -6023,6 +6052,10 @@ where
     // once before the loop so every retry decision measures from the same
     // origin; `None` (the default) leaves the budget unbounded.
     let retry_loop_started = std::time::Instant::now();
+    // PERF: peer_str is already computed above for XFF/X-Real-IP; reuse
+    // it as the dispatch hash key fallback instead of calling
+    // peer.to_string() on every retry attempt.
+    let peer_key = peer_str.clone();
     loop {
         // Breaker admission (DW-015) precedes every attempt: endpoint
         // pick, dial, and any remaining retries. Checked per iteration so
@@ -6062,7 +6095,6 @@ where
             upstream = handle.name()
         );
         let mut picked: Option<String> = None;
-        let peer_key = peer.to_string();
         // DW-040: sticky sessions hash the ENDPOINT pick by the same
         // key that picked the branch (the affinity cookie), so an
         // ip_hash branch pins the session to one endpoint; split
@@ -8097,12 +8129,13 @@ pub fn strip_hop_by_hop(
     preserve_te: bool,
 ) -> Vec<String> {
     let tokens = connection_tokens(headers);
-    let listed: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
+    // PERF: avoid allocating a lowercased Vec<String> — compare
+    // case-insensitively in the filter closure instead.
     let drop: Vec<HeaderName> = headers
         .keys()
         .filter(|name| {
             let n = name.as_str();
-            if listed.iter().any(|l| l == n) {
+            if tokens.iter().any(|t| t.eq_ignore_ascii_case(n)) {
                 return !(keep_upgrade && n == "upgrade");
             }
             matches!(

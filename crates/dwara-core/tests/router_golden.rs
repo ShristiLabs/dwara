@@ -245,6 +245,7 @@ fn router_golden_suite() {
                 .unwrap_or_else(|| panic!("{context}: upstream_path expects a matched route"));
             let route = &gateway.routes[idx];
             let got = apply_path_rewrite(route, table, idx, &path_only, &params);
+            let got = got.unwrap_or_else(|| path_only.to_string());
             assert_eq!(
                 &got, expected_path,
                 "{context}: rewritten upstream path mismatch"

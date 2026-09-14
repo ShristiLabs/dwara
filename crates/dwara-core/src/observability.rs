@@ -403,14 +403,32 @@ pub fn emit_access(rec: &AccessRecord) {
 /// `message` a human string with no upstream internals, `request_id`
 /// ties the response to the trace/access log.
 pub fn envelope_body(code: &str, message: &str, request_id: &str) -> bytes::Bytes {
-    let obj = serde_json::json!({
-        "error": {
-            "code": code,
-            "message": message,
-            "request_id": request_id,
+    // Manual JSON formatting avoids the serde_json::Value intermediate
+    // allocation (the json! macro builds a Value tree, then to_string()
+    // serializes it back — two heap allocations). The envelope shape is
+    // fixed; we pre-allocate one String and JSON-escape each field.
+    fn escape_into(out: &mut String, s: &str) {
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
         }
-    });
-    bytes::Bytes::from(obj.to_string())
+    }
+    let mut buf = String::with_capacity(64 + code.len() + message.len() + request_id.len());
+    buf.push_str(r#"{"error":{"code":""#);
+    escape_into(&mut buf, code);
+    buf.push_str(r#"","message":""#);
+    escape_into(&mut buf, message);
+    buf.push_str(r#"","request_id":""#);
+    escape_into(&mut buf, request_id);
+    buf.push_str(r#""}}"#);
+    bytes::Bytes::from(buf)
 }
 
 /// Validate an inbound `X-Request-Id` value: printable ASCII (0x20-0x7E),

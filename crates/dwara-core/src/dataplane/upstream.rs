@@ -1243,12 +1243,12 @@ pub struct UpstreamHandle {
 /// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
 /// parseable URI authority; `[::1]:8080` is.
 fn endpoint_authority(address: &str, port: u16) -> String {
-    let host = if address.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{address}]")
+    // PERF: single format! instead of two (host + authority).
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{address}]:{port}")
     } else {
-        address.to_string()
-    };
-    format!("{host}:{port}")
+        format!("{address}:{port}")
+    }
 }
 
 impl UpstreamHandle {
