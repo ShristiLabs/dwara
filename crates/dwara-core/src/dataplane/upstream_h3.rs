@@ -58,13 +58,18 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
+// #272: parking_lot::Mutex for the connection-pool critical sections.
+// Brief (HashMap ops, never across an await) but touched on every H3
+// request; parking_lot's adaptive spinning avoids OS-level thread
+// blocking under moderate contention.
 use h3::client::{self, SendRequest};
 use h3_quinn::OpenStreams;
 use http::{HeaderMap, Response, StatusCode};
+use parking_lot::Mutex;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
 use tokio::task::JoinHandle;
@@ -316,7 +321,7 @@ impl QuicStreamPool {
         // the fresh sender without pooling it (the connection stays open
         // via the sender clone; it will be reaped when the caller drops
         // it) rather than evicting a live connection.
-        let mut conns = self.conns.lock().expect("pool lock poisoned");
+        let mut conns = self.conns.lock();
         let bucket = conns.entry(addr).or_default();
         bucket.retain(|e| e.is_live());
         if bucket.len() < self.max_conns_per_endpoint {
@@ -330,7 +335,7 @@ impl QuicStreamPool {
     /// connection. Stale (driver-finished) entries are reaped as a side
     /// effect.
     fn try_take_live(&self, addr: SocketAddr) -> Option<SendRequest<OpenStreams, Bytes>> {
-        let mut conns = self.conns.lock().expect("pool lock poisoned");
+        let mut conns = self.conns.lock();
         let bucket = conns.get_mut(&addr)?;
         // Reap dead entries first so the cap counts only live conns.
         bucket.retain(|e| e.is_live());
@@ -350,7 +355,7 @@ impl QuicStreamPool {
     /// resolves, so reaping is graceful.
     pub fn sweep(&self) {
         let now = Instant::now();
-        let mut conns = self.conns.lock().expect("pool lock poisoned");
+        let mut conns = self.conns.lock();
         for bucket in conns.values_mut() {
             bucket.retain(|e| e.is_live() && now.duration_since(e.last_used) < self.idle_timeout);
         }
@@ -359,7 +364,7 @@ impl QuicStreamPool {
 
     /// Number of live pooled connections for `addr` (observability/tests).
     pub fn live_count(&self, addr: SocketAddr) -> usize {
-        let mut conns = self.conns.lock().expect("pool lock poisoned");
+        let mut conns = self.conns.lock();
         conns
             .get_mut(&addr)
             .map(|b| {
@@ -601,7 +606,7 @@ impl H3UpstreamHandle {
     /// dropped with the handle; in-flight senders keep their QUIC
     /// connections alive until they complete.
     pub fn shutdown(&self) {
-        if let Some(handle) = self.sweep.lock().expect("sweep lock poisoned").take() {
+        if let Some(handle) = self.sweep.lock().take() {
             handle.abort();
         }
     }

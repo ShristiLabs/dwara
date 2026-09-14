@@ -1540,6 +1540,7 @@ dependencies = [
  "maxminddb",
  "mmdb-writer",
  "moka",
+ "parking_lot",
  "ppp",
  "prometheus",
  "proptest",

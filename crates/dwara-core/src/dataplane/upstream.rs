@@ -51,7 +51,7 @@
 //!   the handle's response type is `Response<UpstreamBody>`, not
 //!   `Response<Incoming>` (documented; the wrapper is a thin frame
 //!   passthrough when both knobs are unset).
-//! - **Connection cap**: `connection_cap` (default 64) bounds concurrent
+//! - **Connection cap**: `connection_cap` (default 256) bounds concurrent
 //!   outbound connections to the upstream — active AND pooled-idle — via a
 //!   semaphore permit acquired before dialing and stored inside the
 //!   connection's IO wrapper, so it is released exactly when the
@@ -67,13 +67,14 @@
 //!   the cap counts connections, not in-flight requests — HTTP/1.1
 //!   multiplexes several requests over one connection only sequentially,
 //!   and h2 pools share one connection per origin anyway.
-//! - **Pending cap** (DW-015): `max_pending` (default: absent = unbounded)
-//!   bounds how many requests may WAIT for a connection-cap slot. Over
-//!   that, the connector fails fast with [`UpstreamError::Saturated`]
-//!   (classified 503 "upstream saturated" by the proxy) instead of
-//!   queueing; a pending slot is held from the dial attempt until the
-//!   connection-cap permit is acquired, then released (the request is
-//!   connecting, no longer pending).
+//! - **Pending cap** (DW-015): `max_pending` (default 256) bounds how many
+//!   requests may WAIT for a connection-cap slot. Over that, the connector
+//!   fails fast with [`UpstreamError::Saturated`] (classified 503 "upstream
+//!   saturated" by the proxy) instead of queueing; a pending slot is held
+//!   from the dial attempt until the connection-cap permit is acquired,
+//!   then released (the request is connecting, no longer pending). The
+//!   default bounds memory under high concurrency (#270); operators who
+//!   need deeper queueing can set `max_pending` explicitly.
 //! - **TLS**: `https` upstreams negotiate TLS with ALPN `http/1.1`;
 //!   `http2` upstreams negotiate TLS with ALPN `h2` and lock the client to
 //!   HTTP/2; `http1` upstreams dial plaintext. Server certificates are
@@ -132,7 +133,24 @@ use crate::resilience::retries::{HedgeParams, RetryBudget, RetryParams};
 use crate::snapshot::Snapshot;
 
 /// Default connection cap when `connection_cap` is absent.
-pub const DEFAULT_CONNECTION_CAP: u32 = 64;
+///
+/// Raised from 64 to 256 (#270): the previous default of 64 caused
+/// unbounded memory growth under high concurrency — excess requests
+/// queued on the semaphore with their full request context held in
+/// memory, and the allocator retained those pages. 256 is a reasonable
+/// middle ground for modern workloads; operators with higher
+/// concurrency needs should set `connection_cap` explicitly.
+pub const DEFAULT_CONNECTION_CAP: u32 = 256;
+/// Default pending-request cap when `max_pending` is absent (#270).
+///
+/// Previously absent = unbounded queueing, which allowed memory to
+/// grow without limit when the connection cap was saturated. A
+/// default of 256 bounds the queue so excess requests get 503
+/// "upstream saturated" (backpressure) instead of queueing
+/// indefinitely. This aligns with the AGENTS.md rule that buffering
+/// must be size-capped. Operators who need deeper queueing can set
+/// `max_pending` explicitly.
+pub const DEFAULT_MAX_PENDING: u32 = 256;
 /// Default connect timeout when `timeouts.connect_ms` is absent.
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
 
@@ -979,9 +997,9 @@ struct UpstreamConnector {
     /// TLS client config (ALPN already set) for https/http2 upstreams.
     tls: Option<Arc<rustls::ClientConfig>>,
     cap: Arc<Semaphore>,
-    /// Pending-request cap (`max_pending`, DW-015). None = unbounded
-    /// queueing (the DW-008 behavior). Some = at most this many requests
-    /// may WAIT for a connection-cap slot; further dials fail fast with
+    /// Pending-request cap (`max_pending`, DW-015). Absent = bounded queue
+    /// of 256 (the #270 default). Some = at most this many requests may
+    /// WAIT for a connection-cap slot; further dials fail fast with
     /// [`UpstreamError::Saturated`].
     pending_cap: Option<Arc<Semaphore>>,
     connect_timeout: Duration,
@@ -1113,7 +1131,8 @@ pub struct UpstreamHandle {
     /// Rolling-window retry budget, carried across reloads like the
     /// balancer.
     retry_budget: Arc<RetryBudget>,
-    /// Effective pending cap (`max_pending`, DW-015); 0 = unbounded.
+    /// Effective pending cap (`max_pending`, DW-015); defaults to 256
+    /// when absent (#270). 0 = explicitly unbounded (legacy behavior).
     max_pending: u32,
     /// Per-upstream circuit breaker state (DW-015), carried across reloads
     /// like the retry budget. Always present (state-only object); whether
@@ -1788,6 +1807,7 @@ fn build_handle(
         pending_cap: u
             .max_pending
             .filter(|p| *p > 0)
+            .or(Some(DEFAULT_MAX_PENDING))
             .map(|p| Arc::new(Semaphore::new(p as usize))),
         connect_timeout,
         stats: Arc::clone(&stats),
@@ -1916,7 +1936,10 @@ fn build_handle(
         retries: RetryParams::from_config(u.retries.as_ref()),
         hedge: HedgeParams::from_config(u.retries.as_ref().and_then(|r| r.hedge.as_ref())),
         retry_budget,
-        max_pending: u.max_pending.unwrap_or(0),
+        max_pending: u
+            .max_pending
+            .filter(|p| *p > 0)
+            .unwrap_or(DEFAULT_MAX_PENDING),
         breaker,
         breaker_params: u.breaker.as_ref().map(BreakerParams::from_config),
         happy_eyeballs: effective_happy_eyeballs(u),

@@ -32,3 +32,6 @@ SIGTERM/SIGINT with backlog flush + drain. Admin API POST is live-published.
 | `DWARA_H2_MAX_SEND_BUF_KIB` | see README | HTTP/2 hardening |
 | `DWARA_REQUEST_BODY_TIMEOUT_MS` | see README | request body timeout |
 | `DWARA_SHUTDOWN_TIMEOUT_SECS` | `10` | graceful drain bound |
+| `DWARA_WORKER_THREADS` | `available_parallelism()` | tokio async worker thread count |
+| `DWARA_MAX_BLOCKING_THREADS` | `512` | tokio blocking thread pool size |
+| `DWARA_ACCEPTORS_PER_LISTENER` | `1` | concurrent acceptor tasks per listener |

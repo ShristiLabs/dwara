@@ -44,6 +44,30 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
+use tokio::task::JoinSet;
+
+/// Number of concurrent acceptor tasks per listener (#271).
+///
+/// A single accept loop per listener serializes connection acceptance,
+/// limiting throughput on multi-core machines. Multiple acceptor tasks
+/// sharing the same `Arc<TcpListener>` (which already has `SO_REUSEPORT`
+/// set) lets the kernel distribute incoming connections across acceptors,
+/// parallelizing the accept path and keeping all tokio workers fed.
+///
+/// Default is 1 (preserving the pre-#271 behavior). Set to a higher
+/// value (e.g., the number of CPU cores) to scale acceptance throughput.
+/// The socket's `SO_REUSEPORT` (DW-049) allows multiple processes to
+/// bind the same port for zero-downtime upgrades; intra-process, the
+/// same `Arc<TcpListener>` is shared — `accept()` takes `&self`, so
+/// concurrent calls are safe and the kernel hands each connection to
+/// exactly one acceptor.
+fn acceptors_per_listener() -> usize {
+    std::env::var("DWARA_ACCEPTORS_PER_LISTENER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
 
 /// Runtime face of one bound listener: what to do with each accepted
 /// connection.
@@ -758,6 +782,13 @@ where
 /// silently. The supervisor is [`dwara_core::supervision::supervise_panics`]
 /// (shared with the admin accept loop since #130); its semantics tests
 /// live beside it in dwara-core.
+///
+/// #271: when `DWARA_ACCEPTORS_PER_LISTENER` > 1, spawns that many
+/// supervised acceptor tasks, all sharing the same `Arc<TcpListener>`.
+/// The kernel distributes incoming connections across acceptors,
+/// parallelizing the accept path. Each acceptor is independently
+/// supervised (a panicked acceptor is respawned without affecting the
+/// others). All acceptors share the same shutdown signal.
 #[allow(clippy::too_many_arguments)] // mirrors run_listener's fixed plumbing
 pub(crate) async fn run_listener_supervised(
     bound: BoundListener,
@@ -774,25 +805,76 @@ pub(crate) async fn run_listener_supervised(
     hardening: Arc<HttpHardening>,
     splice_drain: Arc<SpliceDrain>,
 ) {
-    dwara_core::supervision::supervise_panics(
-        "listener",
-        &bound.name,
-        MAX_LISTENER_RESPAWNS,
-        || {
-            tokio::spawn(run_listener(
-                bound.clone(),
-                Arc::clone(&listener),
-                Arc::clone(&state),
-                Arc::clone(&dp),
-                Arc::clone(&graceful),
-                shutdown.clone(),
-                timeout,
-                Arc::clone(&hardening),
-                Arc::clone(&splice_drain),
-            ))
-        },
-    )
-    .await;
+    let n = acceptors_per_listener();
+    if n <= 1 {
+        // Single acceptor: the pre-#271 path (no JoinSet overhead).
+        dwara_core::supervision::supervise_panics(
+            "listener",
+            &bound.name,
+            MAX_LISTENER_RESPAWNS,
+            || {
+                tokio::spawn(run_listener(
+                    bound.clone(),
+                    Arc::clone(&listener),
+                    Arc::clone(&state),
+                    Arc::clone(&dp),
+                    Arc::clone(&graceful),
+                    shutdown.clone(),
+                    timeout,
+                    Arc::clone(&hardening),
+                    Arc::clone(&splice_drain),
+                ))
+            },
+        )
+        .await;
+        return;
+    }
+    // Multi-acceptor (#271): N supervised accept loops on the same
+    // Arc<TcpListener>. Each is independently supervised; the function
+    // returns when ALL acceptors have completed (clean shutdown or
+    // respawn cap exhausted). A JoinSet collects the supervisor tasks.
+    tracing::info!(
+        listener = %bound.name,
+        acceptors = n,
+        "spawning multi-acceptor listener (#271)"
+    );
+    let mut supervisors = JoinSet::new();
+    for i in 0..n {
+        let bound = bound.clone();
+        let listener = Arc::clone(&listener);
+        let state = Arc::clone(&state);
+        let dp = Arc::clone(&dp);
+        let graceful = Arc::clone(&graceful);
+        let shutdown = shutdown.clone();
+        let hardening = Arc::clone(&hardening);
+        let splice_drain = Arc::clone(&splice_drain);
+        let label = format!("{}#{}", bound.name, i);
+        supervisors.spawn(async move {
+            dwara_core::supervision::supervise_panics(
+                "listener",
+                &label,
+                MAX_LISTENER_RESPAWNS,
+                || {
+                    tokio::spawn(run_listener(
+                        bound.clone(),
+                        Arc::clone(&listener),
+                        Arc::clone(&state),
+                        Arc::clone(&dp),
+                        Arc::clone(&graceful),
+                        shutdown.clone(),
+                        timeout,
+                        Arc::clone(&hardening),
+                        Arc::clone(&splice_drain),
+                    ))
+                },
+            )
+            .await;
+        });
+    }
+    // Wait for all supervisors to complete. Each supervisor independently
+    // respawns its acceptor on panic up to MAX_LISTENER_RESPAWNS; a clean
+    // shutdown (watch signal) ends all acceptors.
+    while supervisors.join_next().await.is_some() {}
 }
 
 /// Serve one (possibly TLS-terminated) connection with the proxy dataplane.

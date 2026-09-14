@@ -63,6 +63,10 @@ arc-swap = "1"
 matchit = "0.9"
 regex = "1"
 notify = "8"
+# #272: faster Mutex for brief hot-path critical sections (adaptive
+# spinning instead of immediate OS-level blocking). Already pulled in
+# transitively by governor/moka/kube; declared here to use directly.
+parking_lot = "0.12"
 # TLS stack (DW-007): rustls with the aws-lc-rs provider (builds C via
 # cmake/cc); tokio-rustls for async accept/connect. PEM loading uses
 # rustls-pki-types PemObject directly (rustls-pemfile is unmaintained,

@@ -6966,7 +6966,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
      "default": []
     },
     "connection_cap": {
-     "description": "Maximum number of concurrent outbound connections to this upstream\n(active plus pooled idle). Defaults to 64 when absent. Enforced by\nthe upstream client; excess connection attempts wait for a\nslot rather than fail.",
+     "description": "Maximum number of concurrent outbound connections to this upstream\n(active plus pooled idle). Defaults to 256 when absent. Enforced by\nthe upstream client; excess connection attempts wait for a\nslot rather than fail. Raised from 64 to 256 to avoid\nunbounded memory growth under high concurrency.",
      "type": [
       "integer",
       "null"
@@ -7028,7 +7028,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
      ]
     },
     "max_pending": {
-     "description": "Maximum number of requests WAITING for an outbound connection slot\nto this upstream. 0/absent (the default) means unbounded\nqueueing \u2014 the `connection_cap` behavior. A positive value\nrejects excess requests IMMEDIATELY with 503 \"upstream saturated\"\ninstead of letting them wait.",
+     "description": "Maximum number of requests WAITING for an outbound connection slot\nto this upstream. 0/absent (the default) means a bounded\nqueue of 256 \u2014 the default bounds memory under high concurrency. A positive value rejects excess requests IMMEDIATELY with\n503 \"upstream saturated\" instead of letting them wait. To restore\nthe pre- unbounded queueing behavior, set a very large value.",
      "type": [
       "integer",
       "null"

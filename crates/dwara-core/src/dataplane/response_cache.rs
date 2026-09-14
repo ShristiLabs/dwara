@@ -168,16 +168,22 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+// #272: parking_lot::Mutex for the coalescing/inflight critical sections.
+// These are brief (HashMap ops, never across an await) but touched on
+// every cache miss; parking_lot's adaptive spinning avoids OS-level
+// thread blocking under moderate contention, keeping tokio workers
+// productive.
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::Body as _;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::header::{ETAG, IF_NONE_MATCH};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -778,7 +784,7 @@ impl ResponseCache {
         stored: &EntryEnvelope,
     ) {
         {
-            let mut inflight = self.inflight.lock().expect("revalidation lock poisoned");
+            let mut inflight = self.inflight.lock();
             if inflight.len() >= MAX_INFLIGHT_REVALIDATIONS || !inflight.insert(key.to_string()) {
                 return;
             }
@@ -1225,7 +1231,7 @@ impl ResponseCache {
             Solo,
         }
         let park = {
-            let mut map = self.coalescing.lock().expect("coalescing lock poisoned");
+            let mut map = self.coalescing.lock();
             if let Some(slot) = map.get(&flow.key) {
                 Park::Follow(Arc::clone(slot))
             } else if map.len() >= MAX_COALESCING_KEYS {
@@ -1356,10 +1362,7 @@ pub struct CoalesceLead {
 
 impl Drop for CoalesceLead {
     fn drop(&mut self) {
-        self.map
-            .lock()
-            .expect("coalescing lock poisoned")
-            .remove(&self.key);
+        self.map.lock().remove(&self.key);
         // Publish after the unlock: the woken follower's first acts
         // (store re-read, epoch check) take no coalescing lock, and
         // the map lock is never held across an await anywhere.
@@ -1462,10 +1465,7 @@ struct InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.set
-            .lock()
-            .expect("revalidation lock poisoned")
-            .remove(&self.key);
+        self.set.lock().remove(&self.key);
     }
 }
 

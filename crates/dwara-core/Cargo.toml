@@ -14,6 +14,10 @@ serde_yaml_ng = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 governor = { workspace = true }
+# #272: faster Mutex for brief hot-path critical sections (response-cache
+# coalescing/inflight, H3 connection pool). Adaptive spinning avoids
+# OS-level thread blocking under moderate contention.
+parking_lot = { workspace = true }
 matchit = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }

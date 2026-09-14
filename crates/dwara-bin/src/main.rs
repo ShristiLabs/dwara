@@ -26,6 +26,14 @@
 //! - `DWARA_SHUTDOWN_TIMEOUT_SECS`: graceful-drain budget on SIGTERM/SIGINT,
 //!   default 10. In-flight requests that exceed the budget are dropped when
 //!   the process exits.
+//! - `DWARA_WORKER_THREADS` (#273): number of tokio async worker threads,
+//!   default `available_parallelism()`. Set to a lower value in containers
+//!   with cgroup CPU limits to avoid oversubscription.
+//! - `DWARA_MAX_BLOCKING_THREADS` (#273): size of the blocking thread pool,
+//!   default 512. Raise if `spawn_blocking` is used heavily.
+//! - `DWARA_ACCEPTORS_PER_LISTENER` (#271): number of concurrent acceptor
+//!   tasks per listener, default 1. Set to the number of CPU cores to
+//!   parallelize connection acceptance and keep all tokio workers fed.
 //! - `DWARA_LOG` (DW-021): RUST_LOG-syntax filter for the tracing
 //!   subscriber, default `dwara=info`. Output is JSON on STDOUT (spans,
 //!   structured logs, and the per-request `dwara::access` access-log
@@ -153,8 +161,44 @@ fn shutdown_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Build the tokio runtime from env vars (#273).
+///
+/// - `DWARA_WORKER_THREADS`: number of async worker threads (default:
+///   `available_parallelism()`). Set to a lower value in containers with
+///   cgroup CPU limits to avoid oversubscription.
+/// - `DWARA_MAX_BLOCKING_THREADS`: size of the blocking thread pool
+///   (default: 512, the tokio default). Raise if `spawn_blocking` is used
+///   heavily (e.g., nano-services).
+fn build_runtime() -> tokio::runtime::Runtime {
+    let workers = std::env::var("DWARA_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+    let max_blocking = std::env::var("DWARA_MAX_BLOCKING_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(max_blocking)
+        .thread_name("dwara-worker")
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = build_runtime();
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Observability init (DW-021): JSON on STDOUT, filtered by DWARA_LOG
     // (RUST_LOG syntax; default dwara=info). Installed FIRST so startup
     // logs flow through the same pipeline as request logs.

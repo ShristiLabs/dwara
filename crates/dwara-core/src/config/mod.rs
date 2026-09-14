@@ -5407,9 +5407,10 @@ pub struct Upstream {
     #[serde(default)]
     pub endpoints: Vec<Endpoint>,
     /// Maximum number of concurrent outbound connections to this upstream
-    /// (active plus pooled idle). Defaults to 64 when absent. Enforced by
+    /// (active plus pooled idle). Defaults to 256 when absent. Enforced by
     /// the upstream client (DW-008); excess connection attempts wait for a
-    /// slot rather than fail.
+    /// slot rather than fail. Raised from 64 to 256 (#270) to avoid
+    /// unbounded memory growth under high concurrency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_cap: Option<u32>,
     /// Slow-start window in milliseconds (DW-011): an endpoint entering the
@@ -5450,10 +5451,11 @@ pub struct Upstream {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breaker: Option<BreakerConfig>,
     /// Maximum number of requests WAITING for an outbound connection slot
-    /// to this upstream (DW-015). 0/absent (the default) means unbounded
-    /// queueing — the DW-008 `connection_cap` behavior. A positive value
-    /// rejects excess requests IMMEDIATELY with 503 "upstream saturated"
-    /// instead of letting them wait.
+    /// to this upstream (DW-015). 0/absent (the default) means a bounded
+    /// queue of 256 — the default bounds memory under high concurrency
+    /// (#270). A positive value rejects excess requests IMMEDIATELY with
+    /// 503 "upstream saturated" instead of letting them wait. To restore
+    /// the pre-#270 unbounded queueing behavior, set a very large value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
