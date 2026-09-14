@@ -79,6 +79,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
       - name: Run macro harness + regression gate (best of 3, 30% tolerance)
         # Loopback rps on a shared CI runner is noisy. Run the harness up
         # to 3 times, keep the run with the highest total rps (the least
@@ -142,6 +147,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
       - name: Run macro harness and write CI-captured baseline
         run: |
           set -euo pipefail
@@ -179,6 +189,11 @@ jobs:
           toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
 
       - name: Compile check (h3 loadgen + h3 ingress)
         # The nightly macro-gate does not drive h3 throughput (no

@@ -84,6 +84,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
       - name: Run micro benchmarks (criterion, bencher format)
         # pipefail (#127): GitHub's default run shell is bash WITHOUT
         # pipefail, so a failing `cargo bench` previously hid behind
@@ -130,6 +135,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
 
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
+
       - name: Run micro benchmarks and write CI-captured baseline
         # pipefail (#127): a failing `cargo bench` must fail the pipeline,
         # not hide behind the writer script's exit 0 (which would commit a
@@ -169,6 +179,11 @@ jobs:
           toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
 
       - name: Run load profiles (low/med/high concurrency, errors must be 0)
         run: scripts/bench-macro.sh 20 10 100 1000
@@ -213,6 +228,11 @@ jobs:
           toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
 
       - name: Soak (24h at moderate concurrency; errors must be 0)
         run: |
