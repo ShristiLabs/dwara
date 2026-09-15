@@ -3190,19 +3190,14 @@ impl SloState {
         // Maintained under the write guard so a `record` in flight sees
         // either the fully swapped map with the flag set, or the gate
         // closed and no lock at all (see the field docs).
-        self.configured.store(
-            !routes.is_empty(),
-            std::sync::atomic::Ordering::Release,
-        );
+        self.configured
+            .store(!routes.is_empty(), std::sync::atomic::Ordering::Release);
     }
 
     /// Record one completed request's outcome for a configured route
     /// (no-op for routes without an SLO — the common case).
     fn record(&self, route: &str, status: u16, duration_ms: f64, now_ms: i64) {
-        if !self
-            .configured
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if !self.configured.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         if let Some(state) = self.routes.write().expect("slo state lock").get_mut(route) {

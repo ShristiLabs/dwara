@@ -1501,9 +1501,11 @@ impl UpstreamHandle {
                                 return Err(err);
                             }
                         };
-                        let mut h3_req = hyper::Request::builder()
-                            .method(method)
-                            .uri(format!("https://{}{}", dispatch.authority, path.as_str()));
+                        let mut h3_req = hyper::Request::builder().method(method).uri(format!(
+                            "https://{}{}",
+                            dispatch.authority,
+                            path.as_str()
+                        ));
                         if let Some(h) = h3_req.headers_mut() {
                             *h = headers;
                         }
