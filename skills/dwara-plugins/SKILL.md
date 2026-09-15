@@ -7,19 +7,19 @@ metadata:
   author: shristilabs
   repo: https://github.com/shristilabs/dwara
   docs: https://shristilabs.github.io/dwara/
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Extending Dwara
 
 Four extension surfaces, pick by need:
 
-| Surface | Use when | Cost |
-| --- | --- | --- |
-| **proxy-wasm plugin** | Portable filters in Rust, hot-loadable, sandboxed (fuel/memory/timeout limits), community Kong/Envoy filters | WASM overhead |
-| **Native Rust filter** | Maximum performance, full dwara-core access, compiled in | Rebuild the gateway |
-| **Extension trait impl** | You're embedding dwara-core as a library and want to swap a subsystem (rate limiter, cache store, analytics sink, config source, secret source) | It's a Rust integration, not config |
-| **nano-service** | Route handler AS a WASM module (route action, not a filter) | Sandboxed compute per route |
+| Surface | Use when | Status | Cost |
+| --- | --- | --- | --- |
+| **proxy-wasm plugin** | Portable filters in Rust, hot-loadable, sandboxed (fuel/memory/timeout limits), community Kong/Envoy filters | Scaffolded: config + tooling + runtime exist; request-path dispatch not yet wired (the dataplane runs a no-wasm placeholder) | WASM overhead |
+| **Native Rust filter** | Maximum performance, full dwara-core access, compiled in | Scaffolded: trait + registry exist; config-driven registration not wired | Rebuild the gateway |
+| **Extension trait impl** | You're embedding dwara-core as a library and want to swap a subsystem (rate limiter, cache store, analytics sink, config source, secret source) | Live (library integration) | It's a Rust integration, not config |
+| **nano-service** | Route handler AS a WASM module (route action, not a filter) | Live: compiled into every build, dispatched from the route action | Sandboxed compute per route |
 
 First: check what the build actually accepts. The `plugins:` block and
 `plugin_registry:` exist in the config schema of current builds - but
@@ -38,7 +38,8 @@ cargo build --release --target wasm32-wasip1
 # -> target/wasm32-wasip1/release/my_plugin.wasm
 ```
 
-Load it:
+Declare it (config parses and validates today; request-path dispatch is
+the remaining wiring - verify against your build before relying on it):
 
 ```yaml
 plugins:
@@ -53,11 +54,11 @@ plugins:
 # routes opt in with:  plugins: [my-plugin]
 ```
 
-Lifecycle: `Healthy` / `Crashed {error, crash_count}` (routes referencing a
-crashed plugin fail **closed** with 500) / `Disabled {reason}`. Loads are
-checksum-verified (SHA-256), exports-validated, hot-swappable by checksum.
-There is no `/plugins` admin endpoint yet - lifecycle state is observable
-in logs/metrics.
+The lifecycle model (once dispatched): `Healthy` / `Crashed {error,
+crash_count}` (routes referencing a crashed plugin fail **closed** with
+500) / `Disabled {reason}`. Loads are checksum-verified (SHA-256),
+exports-validated, hot-swappable by checksum. There is no `/plugins`
+admin endpoint yet - lifecycle state is observable in logs/metrics.
 
 Full walkthrough + registry distribution:
 [references/proxy-wasm.md](references/proxy-wasm.md).
@@ -68,6 +69,8 @@ Full walkthrough + registry distribution:
   `Continue` / `LocalResponse` / `Error`), register at startup in the
   `NativeRegistry`, load via a plugin entry with `native: <registered-name>`
   (mutually exclusive with `wasm:`). Same `phases`/`config` fields.
+  Like the wasm path, config-driven registration is scaffolded - the
+  registry has no production registration from config yet.
 - **Extension traits** (the seams enterprise backends also plug into):
 
 | Trait | Hook point |
@@ -82,15 +85,17 @@ Details: [references/native-filters-and-traits.md](references/native-filters-and
 
 ## Filter chain ordering (what runs before your plugin)
 
-Built-in order (configurable as a permutation via `filter_chain.order`,
-gateway-level with per-route overrides, plus a `dry_run` list):
+Built-in order (the `filter_chain.order` config validates as a permutation
+of all eight stages and per-route overrides parse, but applying a custom
+order on the live path is not wired - the dataplane runs this fixed order;
+per-attachment `dry_run` flags are the live dry-run mechanism):
 
 ```
 1 acl -> 2 rate_limit -> 3 authn -> 4 authz -> 5 validate -> 6 transform
       -> 7 cache -> 8 route
 ```
 
-`filter_chain.order` must be a permutation of all eight stages. If you need
+If you need
 auth context in your plugin, note authn/authz run **before** route match -
 your plugin executes within a request pipeline that already has a consumer
 resolved (on `auth_required` routes).
@@ -101,13 +106,14 @@ resolved (on `auth_required` routes).
   Check built-ins first: `transforms`, `authorization`, `waf`, policies -
   most "plugin ideas" are config.
 - Need custom logic at the edge without rebuilding the gateway?
-  proxy-wasm plugin.
+  proxy-wasm plugin (scaffold + build today; watch dispatch landing).
 - Tight-loop performance or dwara-core types? Native filter (rebuild).
 - Building a product on dwara-core? Extension traits.
 - Whole route as sandboxed code? `action.type: nano_service`
   (`module: path.wasm`, `config:` JSON init payload; WASI languages;
   capabilities must be granted explicitly; metric
-  `dwara_nano_service_total{route,outcome}`).
+  `dwara_nano_service_total{route,outcome}`) - live in every build, no
+  cargo feature.
 
 ## Gotchas
 

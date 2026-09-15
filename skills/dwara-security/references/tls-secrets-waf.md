@@ -22,6 +22,11 @@ validation when combined with FIPS mode** (FIPS is enterprise).
 
 ## ACME (automated certificates)
 
+> Status: config-accepted, runtime stubbed - the `acme` block parses and
+> validates, but no issuance/renewal client is wired into the listener
+> startup path yet. Use an external ACME client (certbot, lego,
+> cert-manager) and point the gateway at the resulting certificate files.
+
 ```yaml
 # listener-level acme block
 acme:

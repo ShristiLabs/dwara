@@ -7,7 +7,7 @@ metadata:
   author: shristilabs
   repo: https://github.com/shristilabs/dwara
   docs: https://shristilabs.github.io/dwara/
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Dwara AI gateway

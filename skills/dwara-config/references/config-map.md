@@ -9,10 +9,10 @@ plus where to read more. The runnable tour of nearly all of these is
 | Key | Purpose |
 | --- | --- |
 | `version` | Config schema version; `dwara-cli migrate` bumps it. |
-| `listeners[]` | Entry points: `name`, `address`, `port`, `protocol` (`http`, `https`, plus `h3`/`tcp`/`udp` surfaces), `tls` (terminate: `cert_file`/`key_file`/`client_ca_file`, multi-SNI `certificates[]`; passthrough mode), `proxy_protocol`, `alt_svc`, per-listener `authorization` + `policies`. |
+| `listeners[]` | Entry points: `name`, `address`, `port`, `protocol` (`http`, `https`, plus `h3`/`tcp`/`udp` surfaces — all compiled into every build), `tls` (terminate: `cert_file`/`key_file`/`client_ca_file`, multi-SNI `certificates[]`; passthrough mode), `proxy_protocol`, `alt_svc` (string, e.g. `h3=":8444"; ma=86400`), per-listener `authorization` + `policies`. |
 | `routes[]` | `name`, `service`, `match` (`path` exact/prefix/regex, `methods`, `host`, `headers`, `query`, `cookies`, `accept`), `action` (`proxy` + `rewrite`, `redirect`, `respond`, `mock`, `ai`), plus route-level: `auth_required`, `authorization`, `transforms`, `security_headers`, `cors`, `compression`, `cache`, `limits`, `waf`, `request_validation`, `masking`, `deprecation`, `slo`, `mirror`, `fault_injection`, `websocket`, `priority`, `maintenance`, `policies`, `plugins`. |
 | `services[]` | `name` + one of: `upstream` (+ `base_path`, `version`, `policies`), or `split` (`targets[]` weighted + optional `canary_analysis`), plus optional `sticky` (`cookie`, `ttl_s`). |
-| `upstreams[]` | Endpoint pools: `load_balancer` (`round_robin`, `least_requests`, `random`, `ip_hash`, `maglev`, `peak_ewma`), `protocol` (`http1`, `https`, `h2c`, `h3`), `endpoints[]` (`address`, `port`, `weight`), `health` (passive/outlier), `active_health`, `retries` (+ `hedge`), `timeouts`, `breaker`, `connection_cap`, `max_pending`, `slow_start_ms`, `dns_discovery`, `peak_ewma`, `hash_on`, `oauth2_client_credentials`, upstream `mtls`, `cert_pinning`. |
+| `upstreams[]` | Endpoint pools: `load_balancer` (`round_robin`, `least_requests`, `random`, `ip_hash`, `maglev`, `peak_ewma`), `protocol` (`http1`, `http2` = h2 over TLS, `https`, `h2c`, `h3`), `endpoints[]` (`address`, `port`, `weight`), `health` (passive/outlier), `active_health`, `retries` (+ `hedge`), `timeouts`, `breaker`, `connection_cap`, `max_pending`, `slow_start_ms`, `dns_discovery`, `peak_ewma`, `hash_on`, `oauth2_client_credentials`, upstream `mtls`, `cert_pinning`, `trusted_ca_file`/`use_system_roots` (upstream TLS trust), `pq`. |
 | `consumers[]` | `name`, `type` (`user`, `agent`), `groups[]`, `credentials[]` (`api_key`, `jwt`, `hmac`, `mtls`), `quotas` (`daily_requests`, `monthly_requests`, `dry_run`), `priority`, `token_budget`, `ai_logging`, `tool_allowlist`, `policies`. |
 | `policies[]` | Named reusable bundles: `rate_limit` (single window) or `rate_limits[]` (stacked, selector-based), `timeouts`, `token_budget`, `anomaly`, `adaptive`, `dry_run`. |
 | `global_policies` | Policy names applied to every request incl. unrouted 404s (except reserved `/healthz`, `/readyz`, `/metrics`). |
@@ -38,8 +38,8 @@ plus where to read more. The runnable tour of nearly all of these is
 | `ai` | The AI gateway block - see the dwara-ai-gateway skill (`providers`, `models`, `pricing`, `routing_policies`, `governance`, `guardrails`, `logging`, `semantic_cache`, `experiments`, `mcp`, `a2a`). |
 | `plugins` / `plugin_registry` | proxy-wasm + native plugin loading and registry - see the dwara-plugins skill. |
 | `filter_chain` | Order/dry-run of the built-in filter chain - see the dwara-plugins skill. |
-| `mesh` | Service-mesh/SPIFFE configuration (enterprise feature). |
-| `lifecycle` | Developer-portal / API lifecycle surfaces. |
+| `mesh` | Service-mesh/SPIFFE configuration (enterprise feature; runtime scaffolded). |
+| `lifecycle` | Developer-portal / API lifecycle surfaces (scaffolded: accepted but inert today). |
 | `trusted_proxies` | IPs/CIDRs whose `X-Forwarded-For` is honored. |
 | `max_concurrent_requests` | Gateway-wide concurrency cap. |
 | `load_shed_dry_run` | Log-and-admit instead of shedding over cap. |

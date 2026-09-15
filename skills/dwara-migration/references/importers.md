@@ -1,5 +1,9 @@
 # Importer details and post-import checklist
 
+Importers: nginx, kong, envoy, traefik (dynamic config YAML), haproxy
+(config file), openapi. All share the same contract: output passes
+`dwara-cli validate`, unsupported constructs become YAML-comment warnings.
+
 ## NGINX
 
 ```sh

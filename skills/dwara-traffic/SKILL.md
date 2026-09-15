@@ -7,7 +7,7 @@ metadata:
   author: shristilabs
   repo: https://github.com/shristilabs/dwara
   docs: https://shristilabs.github.io/dwara/
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Dwara traffic management
@@ -83,13 +83,14 @@ coalescing), `transforms` (set/add/remove headers, query add),
 
 | Need | Surface |
 | --- | --- |
-| h2/h2c | listener `protocol`/upstream `protocol`; h2 upstream needs TLS or h2c prior knowledge |
-| HTTP/3 ingress + upstream | `protocol: h3` (listener with `tls` + `alt_svc` advertisement; upstream over QUIC, TLS 1.3 always) |
-| gRPC / gRPC-Web | zero-config proxying, trailers pass through; `grpc_web` route block (framing/transcoding + CORS) |
+| h2/h2c | listener `protocol` http/https; upstream `protocol: http2` (h2+TLS) or `h2c` (prior knowledge) |
+| HTTP/3 ingress + upstream | `protocol: h3` — compiled into every build (listener with `tls` + string `alt_svc` like `h3=":8444"; ma=86400`; upstream over QUIC, TLS 1.3 always, trust via `trusted_ca_file`) |
+| gRPC | zero-config proxying over h2 upstreams, trailers pass through |
+| gRPC-Web | `grpc_web` route block (`enabled: true`, `transcoding: {enabled, descriptors[]}` with FileDescriptorSets) — config validates; request-path translation is scaffolded, verify in your build |
 | WebSocket | route `websocket` block: `origins` (missing Origin = reject 403), `max_frames_per_sec`, `idle_timeout_s`, `max_frame_size_bytes` |
-| L4 TCP/UDP | listener `protocol: tcp|udp` + `l4` block (`passthrough`/`sni`/`terminate`, `sni_routes`); UDP LB is per-datagram source hash |
-| Protocol translation | route `translation: {from, to}`: rest->grpc, rest->graphql, soap->rest (partial wiring - verify with validate) |
-| TLS everywhere | terminate (multi-SNI) / SNI passthrough; `pq: true` for post-quantum X25519MLKEM768 hybrid (experimental, FIPS-incompatible) |
+| L4 TCP/UDP | listener `protocol: tcp|udp` + `l4` block — compiled into every build; UDP LB is per-datagram source hash |
+| Protocol translation | route `translation: {kind, graphql|soap}` for rest<->graphql and rest<->soap — config validates; request-path translation is scaffolded. JSON<->gRPC goes through `grpc_web.transcoding`, not `translation` |
+| TLS everywhere | terminate (multi-SNI) / SNI passthrough; `pq: true` for post-quantum X25519MLKEM768 hybrid — compiled into every build (experimental, FIPS-incompatible) |
 
 Runnable examples: [assets/traffic.yaml](assets/traffic.yaml).
 

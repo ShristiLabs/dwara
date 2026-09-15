@@ -62,17 +62,12 @@ Built-in stages in fixed order:
 acl -> rate_limit -> authn -> authz -> validate -> transform -> cache -> route
 ```
 
-Customize with:
-
-```yaml
-filter_chain:
-  order: [acl, rate_limit, authn, authz, validate, transform, cache, route]
-  # must be a PERMUTATION of all eight stages
-  dry_run: [authz]        # stages running in observe-only mode
-```
-
-Gateway-level by default; per-route `filter_chain` overrides. Consequences
-worth internalizing:
+`filter_chain.order` (gateway or per-route) validates as a permutation of
+all eight stages and parses cleanly - but applying a custom order on the
+live path is not wired yet; the dataplane runs the fixed order above.
+The live dry-run mechanisms are the per-attachment `dry_run` flags
+(authorization blocks, policies, WAF), not `filter_chain.dry_run`.
+Consequences worth internalizing:
 
 - `authn`/`authz` run **before** route match - plugins and transforms see
   an authenticated context on `auth_required` routes (consumer resolved),

@@ -7,21 +7,24 @@ metadata:
   author: shristilabs
   repo: https://github.com/shristilabs/dwara
   docs: https://shristilabs.github.io/dwara/
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Migrating to Dwara
 
 Dwara ships importers that convert foreign gateway configs into
-`dwara.yaml`. **Every importer appends unsupported-construct warnings as
+`dwara.yaml` (NGINX, Kong, Envoy, Traefik, HAProxy, OpenAPI). **Every
+importer appends unsupported-construct warnings as
 YAML comments** and its output always passes `dwara-cli validate` - the
 migration loop is: import -> read the warnings -> fill the gaps by hand ->
 validate -> lint -> diff against reality.
 
 ```sh
-dwara-cli import nginx  nginx.conf   --output dwara.yaml
-dwara-cli import kong   kong.yaml   --output dwara.yaml
-dwara-cli import envoy  envoy.yaml   --output dwara.yaml
+dwara-cli import nginx   nginx.conf    --output dwara.yaml
+dwara-cli import kong    kong.yaml     --output dwara.yaml
+dwara-cli import envoy   envoy.yaml    --output dwara.yaml
+dwara-cli import traefik traefik.yml   --output dwara.yaml
+dwara-cli import haproxy haproxy.cfg   --output dwara.yaml
 dwara-cli import openapi petstore.yaml --output dwara.yaml [--mock]
 ```
 

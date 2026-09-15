@@ -1,5 +1,11 @@
 # proxy-wasm development walkthrough
 
+> Status: the scaffold, toolchain, registry, and `plugins:` config are
+> live; dispatching plugins on the live request path is the remaining
+> wiring (the dataplane currently runs a no-wasm placeholder). Build and
+> publish plugins today; verify dispatch in your build before depending
+> on it in production.
+
 ## Scaffold and build
 
 ```sh
@@ -25,6 +31,9 @@ plugin entry (and mirror in the manifest) so the host calls you at the
 right points.
 
 ## Loading in config
+
+(The block parses and validates today; request-path execution follows the
+dispatch status above.)
 
 ```yaml
 plugins:

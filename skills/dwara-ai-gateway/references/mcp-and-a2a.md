@@ -76,8 +76,8 @@ ai:
 
 Status notes: task cancellation/status negotiation for long-running tasks
 is stubbed; the gateway does not serve `/.well-known/agent-card.json`.
-If the build lacks A2A support, the block is accepted with a validation
-warning and stays inert - check your binary's schema/build.
+A2A is compiled into every build (no cargo feature) - an agent alias
+routes like any provider.
 
 ## When to use which
 
