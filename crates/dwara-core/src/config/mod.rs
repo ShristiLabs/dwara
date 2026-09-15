@@ -419,9 +419,10 @@ pub struct Gateway {
     /// Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm
     /// module loaded at startup and run on the request pipeline phases
     /// it declares. Routes reference plugins by name via their
-    /// `plugins` field. The `wasm` cargo feature must be enabled for
-    /// plugins to actually load and run; without it, the block is
-    /// accepted but inert (plugins are not instantiated).
+    /// `plugins` field. The plugin runtime (loading + dispatching the
+    /// chain on the request path) is scaffolded: the block parses and
+    /// validates in every build, and the dataplane runs a no-wasm
+    /// placeholder until dispatch lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
     /// SCALE-12 (#192): remote/signed plugin registry configuration.
@@ -463,11 +464,10 @@ pub struct Gateway {
     /// (auto-generated from OpenAPI specs), environment profiles
     /// (dev/staging/prod config overlays), and the API journey
     /// recorder (request flow visualization for debugging). Absent
-    /// (the default): no lifecycle surface. When present and the
-    /// `api_lifecycle` cargo feature is compiled in, the portal is
-    /// served at its configured path, the profile overlay is applied
-    /// at config load, and journeys are recorded. When the feature is
-    /// NOT compiled in, the block is accepted but inert (validation
+    /// (the default): no lifecycle surface. The portal serving, profile
+    /// overlay application, and journey recording are scaffolded: the
+    /// block is accepted in every build and is inert until the runtime
+    /// wiring lands (validation
     /// warns). See [`LifecycleConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleConfig>,
@@ -1118,9 +1118,8 @@ pub struct FleetConfig {
 ///   through the gateway as a JSON document for debugging, stored via
 ///   the existing analytics raw table.
 ///
-/// When the `api_lifecycle` cargo feature is NOT compiled in, the
-/// block is accepted but inert (validation warns, mirroring the
-/// `a2a`/`graphql` pattern).
+/// The block is accepted in every build and is inert until the
+/// runtime wiring lands (validation warns).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleConfig {
@@ -2648,9 +2647,8 @@ pub struct Listener {
     /// upstream that receives the spliced stream (or, when
     /// `sni_routing` is true, the upstream selected by the TLS
     /// ClientHello SNI via the upstream's `tls.sni_routes` -- reusing
-    /// the SNI extraction from DW-008 TLS passthrough). Feature-gated
-    /// behind the `l4` cargo feature; when the feature is off the
-    /// block is accepted but inert (validation warns).
+    /// the SNI extraction from DW-008 TLS passthrough). Compiled into
+    /// every build (no cargo feature).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l4: Option<L4Config>,
     /// HTTP/2 flow-control tuning for this listener (PERF-11, #244).
@@ -2709,9 +2707,8 @@ pub enum ListenerProtocol {
     /// HTTP/3 (QUIC) ingress (DW-088). A UDP socket is bound on the
     /// listener's address:port; the QUIC handshake uses the `tls`
     /// block's certificates (terminate mode only — passthrough is
-    /// rejected). Feature-gated behind the `h3` cargo feature on
-    /// `dwara-bin`; when the feature is off, validation rejects
-    /// `protocol: h3` with a clear message. The `alt_svc` field on
+    /// rejected). Compiled into every build (no cargo feature; QUIC
+    /// via the unconditional `quinn`/`h3` deps). The `alt_svc` field on
     /// sibling H1/H2 listeners advertises this listener's H3 port to
     /// clients for protocol upgrade discovery.
     H3,
@@ -2719,17 +2716,15 @@ pub enum ListenerProtocol {
     /// listener's address:port; accepted connections are spliced
     /// byte-for-byte to an upstream endpoint (optionally selected by
     /// peeking the TLS ClientHello SNI, reusing the SNI extraction
-    /// from DW-008 TLS passthrough). Requires the `l4` cargo feature
-    /// on dwara-bin; when the feature is off, the listener is accepted
-    /// but inert (validation warns). The `l4` block configures the
+    /// from DW-008 TLS passthrough). Compiled into every build (no
+    /// cargo feature). The `l4` block configures the
     /// upstream and SNI-routing flag.
     Tcp,
     /// L4 UDP proxying (DW-103). A UDP socket is bound on the
     /// listener's address:port; datagrams are forwarded to an upstream
     /// endpoint. STUBBED: the UDP dispatcher returns Unimplemented --
-    /// UDP session semantics and NAT timeouts are a follow-up. Requires
-    /// the `l4` cargo feature; when the feature is off, the listener is
-    /// accepted but inert (validation warns). The `l4` block configures
+    /// UDP session semantics and NAT timeouts are a follow-up. Compiled
+    /// into every build (no cargo feature). The `l4` block configures
     /// the upstream.
     Udp,
 }
@@ -2784,14 +2779,12 @@ pub struct ListenerTls {
     #[serde(default, skip_serializing_if = "is_default_zero_rtt")]
     pub zero_rtt: ZeroRttPolicy,
     /// DW-105: opt in to post-quantum hybrid key exchange
-    /// (X25519+ML-KEM) for this listener. When `true` AND the `pq`
-    /// cargo feature is ON, the X25519+ML-KEM hybrid kx group is
+    /// (X25519+ML-KEM) for this listener. When `true`, the
+    /// X25519+ML-KEM hybrid kx group is
     /// prepended to the rustls provider's kx group list, PREFERRING
     /// the hybrid group while keeping the classical X25519 fallback
-    /// for non-PQ clients. When the `pq` cargo feature is OFF, `pq:
-    /// true` is accepted by the parser (additive-only, strict serde
-    /// preserved) but is INERT: no kx group is prepended, and
-    /// validation emits a warning issue. EXPERIMENTAL: the rustls PQ
+    /// for non-PQ clients. Compiled into every build (no cargo
+    /// feature). EXPERIMENTAL: the rustls PQ
     /// API is not yet stable. Rejected when combined with FIPS mode
     /// (ML-KEM is not on the FIPS-validated list for aws-lc-rs).
     /// Terminate mode only (passthrough does not terminate TLS, so
@@ -3193,12 +3186,10 @@ pub struct Route {
     pub waf: Option<RouteWaf>,
     /// GraphQL awareness (DW-099): query depth/complexity limits and
     /// optional persisted-query enforcement for routes that front a
-    /// GraphQL server. When enabled (and the `graphql` cargo feature
-    /// is compiled in), the gateway rejects abusive queries before
-    /// the route limits and authentication. Absent (the default): no
-    /// GraphQL checks. When the `graphql` feature is NOT compiled in,
-    /// the block is accepted but inert (the config round-trips, the
-    /// runtime check does not run). See [`RouteGraphql`].
+    /// GraphQL server. When enabled, the gateway rejects abusive
+    /// queries before the route limits and authentication. Absent
+    /// (the default): no GraphQL checks. Compiled into every build
+    /// (no cargo feature). See [`RouteGraphql`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql: Option<RouteGraphql>,
     /// gRPC-Web framing translation + JSON-to-gRPC transcoding (DW-101):
@@ -3206,22 +3197,20 @@ pub struct Route {
     /// gRPC for the upstream and wraps the response back. When
     /// transcoding is enabled, JSON requests are translated to/from
     /// protobuf using .proto descriptors supplied via config. Absent
-    /// (the default): no translation. When the `grpc_web` cargo feature
-    /// is NOT compiled in, the block is accepted but inert (the config
-    /// round-trips; validation warns; the runtime translation does not
-    /// run). See [`GrpcWeb`].
+    /// (the default): no translation. The block parses and validates in
+    /// every build (no cargo feature); the runtime translation is
+    /// scaffolded and not yet dispatched from the request path. See
+    /// [`GrpcWeb`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grpc_web: Option<GrpcWeb>,
     /// Protocol translation (DW-100): translates the request/response
     /// bodies between two wire protocols on this route's forward and
-    /// response paths. When enabled (and the relevant cargo feature is
-    /// compiled in), the gateway converts the client's body to the
-    /// upstream's wire format and the upstream's response back to the
-    /// client's wire format. Absent (the default): no translation.
-    /// When the `protocol_translation` cargo feature is NOT compiled
-    /// in, the block is accepted but inert (the config round-trips;
-    /// validation warns; the runtime translation does not run). The
-    /// SOAP/XML kinds additionally require the `soap` cargo feature.
+    /// response paths. When enabled, the gateway converts the client's
+    /// body to the upstream's wire format and the upstream's response
+    /// back to the client's wire format. Absent (the default): no
+    /// translation. The block parses and validates in every build (no
+    /// cargo feature); the runtime translation is scaffolded and not
+    /// yet dispatched from the request path.
     /// See [`Translation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<Translation>,
@@ -3263,8 +3252,9 @@ pub struct Route {
     pub fault_injection: Option<FaultInjection>,
     /// Plugin names to run on this route (DW-055). Each name must
     /// reference a plugin defined in the top-level `plugins` list.
-    /// Plugins run in declaration order at their declared phases. The
-    /// `wasm` cargo feature must be enabled for plugins to load.
+    /// Plugins run in declaration order at their declared phases.
+    /// (Request-path plugin dispatch is scaffolded; see the
+    /// top-level `plugins` field docs.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
     /// SCALE-12 (#191): per-route filter-chain ordering and dry-run
@@ -3712,7 +3702,7 @@ fn is_default_crs_threshold(v: &u32) -> bool {
 
 /// Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).
 ///
-/// When enabled (and the `graphql` cargo feature is compiled in), the
+/// When enabled (compiled into every build; no cargo feature), the
 /// gateway enforces query depth/complexity limits and optional
 /// persisted-query enforcement on every request the route matches,
 /// BEFORE the route limits and authentication. A query whose depth or
@@ -3721,10 +3711,8 @@ fn is_default_crs_threshold(v: &u32) -> bool {
 /// query whose SHA-256 hash is not in the persisted-query store is
 /// rejected with 400 (`graphql_persisted_query_required`).
 ///
-/// The check is feature-gated: when the `graphql` cargo feature is NOT
-/// compiled in, the block is accepted by the schema and validation but
-/// is inert at runtime (no check runs). This lets configs round-trip
-/// across builds with and without the feature.
+/// The check is compiled into every build (no cargo feature): a
+/// config carrying the block behaves identically in any build.
 ///
 /// Depth is the maximum brace-nesting level of the query (the
 /// top-level operation body is depth 1). Complexity is the sum of
@@ -3866,10 +3854,10 @@ fn is_graphql_persisted_store_empty(v: &std::collections::HashMap<String, String
 /// protobuf response back to JSON. The mapping is driven by .proto
 /// descriptors supplied via config.
 ///
-/// Feature-gated behind the `grpc_web` cargo feature. When the feature
-/// is NOT compiled in, the block is accepted but inert (the config
-/// round-trips; validation warns; the runtime translation does not
-/// run). See [`GrpcWebTranscoding`] and [`GrpcWebDescriptor`].
+/// The block parses and validates in every build (no cargo feature);
+/// the runtime framing/transcoding translation is scaffolded and not
+/// yet dispatched from the request path. See [`GrpcWebTranscoding`] and
+/// [`GrpcWebDescriptor`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcWeb {
@@ -3940,11 +3928,9 @@ pub struct GrpcWebDescriptor {
 /// paths. The `kind` selects the translation direction; the `graphql`
 /// and `soap` sub-blocks carry the direction-specific config.
 ///
-/// Feature-gated behind the `protocol_translation` cargo feature (and
-/// the SOAP kinds additionally behind the `soap` cargo feature). When
-/// the relevant feature is NOT compiled in, the block is accepted but
-/// inert (the config round-trips; validation warns; the runtime
-/// translation does not run).
+/// The block parses and validates in every build (no cargo feature);
+/// the runtime translators are scaffolded and not yet dispatched from
+/// the request path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Translation {
@@ -4906,12 +4892,11 @@ pub enum RouteAction {
     /// to an upstream, the route action runs a WASM module that
     /// generates the response directly. The module implements a simple
     /// request->response handler ABI over the existing wasmtime runtime
-    /// (the `wasm` cargo feature). The route's `service` is still
+    /// (compiled into every build; no cargo feature). The route's
+    /// `service` is still
     /// required by the schema (the frozen vocabulary) but never dialed
-    /// -- the whole point is serving without a backend. The runtime is
-    /// feature-gated behind the `nano_services` cargo feature; when the
-    /// feature is off the action is accepted but inert (validation
-    /// warns, the route returns 502). See [`NanoServiceAction`].
+    /// -- the whole point is serving without a backend. See
+    /// [`NanoServiceAction`].
     NanoService {
         #[serde(flatten)]
         nano: NanoServiceAction,
@@ -5494,13 +5479,11 @@ pub struct Upstream {
     pub locality: Option<UpstreamLocality>,
     /// DW-105: opt in to post-quantum hybrid key exchange
     /// (X25519+ML-KEM) for this upstream's TLS connections. When
-    /// `true` AND the `pq` cargo feature is ON, the X25519+ML-KEM
+    /// `true`, the X25519+ML-KEM
     /// hybrid kx group is prepended to the rustls client config's kx
     /// group list, PREFERRING the hybrid group while keeping the
-    /// classical X25519 fallback for non-PQ upstreams. When the `pq`
-    /// cargo feature is OFF, `pq: true` is accepted by the parser
-    /// (additive-only, strict serde preserved) but is INERT: no kx
-    /// group is prepended, and validation emits a warning issue.
+    /// classical X25519 fallback for non-PQ upstreams. Compiled into
+    /// every build (no cargo feature).
     /// EXPERIMENTAL: the rustls PQ API is not yet stable. Only
     /// meaningful for the TLS protocols (`https`, `http2`); validation
     /// rejects `pq: true` on an `http1` upstream (no TLS is
@@ -5513,11 +5496,9 @@ pub struct Upstream {
     /// installs a custom certificate verifier that extracts the peer
     /// cert's SubjectPublicKeyInfo, computes its SHA-256, and compares
     /// against the configured pins. A mismatch rejects the connection
-    /// (fail-closed: no fallback to CA-based verification). The
-    /// `cert_pinning` config block is always accepted by the parser
-    /// (additive-only, strict serde preserved); when the
-    /// `cert_pinning` cargo feature is OFF it is INERT (validation
-    /// emits a warning). Only meaningful for the TLS protocols
+    /// (fail-closed: no fallback to CA-based verification). Compiled
+    /// into every build (no cargo feature). Only meaningful for the
+    /// TLS protocols
     /// (`https`, `http2`); validation rejects it on an `http1`
     /// upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]

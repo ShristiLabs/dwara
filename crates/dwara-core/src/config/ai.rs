@@ -92,9 +92,8 @@ pub struct AiConfig {
     /// response (after), and blocks, redacts, or logs per its
     /// `action`. Policy-scoped rules apply only to consumers
     /// attaching a listed policy; an empty `policies` list applies
-    /// to all. Schema enforcement requires the `openapi_validation`
-    /// cargo feature (jsonschema); without it, schema rules are
-    /// accepted but inert.
+    /// to all. Schema enforcement uses the unconditional `jsonschema`
+    /// dependency and works in every build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<AiGuardrails>,
     /// Semantic cache (DW-083 `ai.semantic_cache`): an
@@ -137,8 +136,7 @@ pub struct AiConfig {
     /// an Agent Card (discovery doc, file path or inline JSON). The
     /// adapter translates a canonical chat request into an A2A
     /// task-submit body; the task lifecycle is STUBBED pending spec
-    /// freeze. Feature-gated behind the `a2a` cargo feature: without
-    /// it the block is accepted but inert (validation warns). Absent
+    /// freeze. Compiled into every build (no cargo feature). Absent
     /// (the default): no A2A surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
@@ -263,9 +261,8 @@ pub enum AiProviderKind {
     /// canonical chat request into an A2A task-submit body and parses
     /// the task response back. The task lifecycle state machine is
     /// implemented against the A2A Protocol Specification draft (legal
-    /// and illegal transitions are enforced). Feature-gated behind
-    /// the `a2a` cargo feature; without it the `ai.a2a` block is
-    /// accepted but inert.
+    /// and illegal transitions are enforced). Compiled into every
+    /// build (no cargo feature).
     A2a,
     /// AI-01: Azure OpenAI. Uses the Azure deployment URL format
     /// (`/openai/deployments/{deployment}/chat/completions?api-version=...`)
@@ -704,9 +701,8 @@ pub struct AiGuardrailRule {
     pub patterns: Vec<String>,
     /// JSON schema for output schema enforcement (`schema` kind
     /// only). The response content (parsed as JSON) is validated
-    /// against this schema; a violation blocks the response.
-    /// Requires the `openapi_validation` cargo feature (jsonschema);
-    /// without it, schema rules are accepted but inert.
+    /// against this schema; a violation blocks the response. Uses the
+    /// unconditional `jsonschema` dependency; works in every build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
     /// Policy names this rule attaches to. Empty (the default) means
@@ -744,8 +740,7 @@ pub enum AiGuardrailKind {
     /// Output schema enforcement: the response content is validated
     /// against the declared JSON schema. Applied at the response
     /// phase (non-streaming only — streaming cannot validate a
-    /// schema on partial content). Requires the
-    /// `openapi_validation` cargo feature.
+    /// schema on partial content). Works in every build.
     Schema,
 }
 
@@ -804,9 +799,8 @@ fn default_semantic_cache_embedding_timeout_ms() -> u64 {
 /// with no provider call and no token spend. Uses an external
 /// embedding service (OpenAI-compatible /v1/embeddings API) to
 /// vectorize prompts and `hnsw_rs` (pure Rust HNSW) for approximate
-/// nearest neighbor search. Feature-gated behind the
-/// `semantic_cache` cargo feature; without it the config is accepted
-/// but the cache is a no-op.
+/// nearest neighbor search. Compiled into every build (`hnsw_rs` is
+/// an unconditional dependency).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticCacheConfig {
@@ -1324,9 +1318,7 @@ pub struct AiMcpSessions {
 /// the remote A2A agents the gateway can route chat requests to and
 /// the session policy for agent-to-agent task sessions. The block is
 /// ADDITIVE: absent (the default), the gateway has no A2A surface.
-/// Feature-gated behind the `a2a` cargo feature; without it the block
-/// is accepted but inert (validation warns, the runtime wires no A2A
-/// providers).
+/// Compiled into every build (no cargo feature).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct A2aConfig {

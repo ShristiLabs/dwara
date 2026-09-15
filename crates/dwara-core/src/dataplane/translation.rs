@@ -10,20 +10,18 @@
 //!
 //! ## Translators
 //!
-//! Three translators ship behind two cargo features:
+//! Three translators compile into every build (no cargo features):
 //!
 //! - **REST <-> gRPC** (DW-101, shared): the gRPC-Web transcoding engine
 //!   in [`super::grpc_web`] already translates JSON <-> protobuf; this
-//!   feature reuses it through the shared trait. Compiled under
-//!   `protocol_translation` (which implies `grpc_web`).
+//!   seam reuses it through the shared trait.
 //! - **REST <-> GraphQL** ([`super::translation_graphql`]): translates a
 //!   REST JSON body to a GraphQL query using a config-supplied query
-//!   template, and a GraphQL response back to a REST JSON body. Compiled
-//!   under `protocol_translation`.
+//!   template, and a GraphQL response back to a REST JSON body.
 //! - **SOAP/XML** ([`super::translation_soap`]): translates SOAP XML
 //!   envelopes to REST JSON and back, using a minimal hand-rolled XML
 //!   parser (no external XML crate, to avoid deny.toml review and binary
-//!   size). Compiled under the separate `soap` feature.
+//!   size).
 //!
 //! ## Why a shared trait
 //!

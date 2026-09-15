@@ -38,13 +38,12 @@
 //! clients. The mapping follows the gRPC HTTP/JSON specification (the
 //! `google.rpc.Code` -> HTTP status table).
 //!
-//! ## Feature gating
+//! ## Status
 //!
-//! The entire module compiles only when the `grpc_web` cargo feature is
-//! enabled. The config schema (`GrpcWeb`, `GrpcWebTranscoding`,
-//! `GrpcWebDescriptor`) is always present so configs round-trip without
-//! the feature; when the feature is off the block is accepted but inert
-//! (validation warns, the runtime translation does not run).
+//! The module compiles into every build (no cargo feature). The config
+//! schema (`GrpcWeb`, `GrpcWebTranscoding`, `GrpcWebDescriptor`) parses
+//! and validates; the runtime framing/transcoding translation is
+//! scaffolded and not yet dispatched from the request path.
 
 use std::collections::HashMap;
 

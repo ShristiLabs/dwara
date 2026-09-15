@@ -281,7 +281,7 @@
       ]
     },
     "plugins": {
-      "description": "Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases\nit declares. Routes reference plugins by name via their\n`plugins` field. The `wasm` cargo feature must be enabled for\nplugins to actually load and run; without it, the block is\naccepted but inert (plugins are not instantiated).",
+      "description": "Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases\nit declares. Routes reference plugins by name via their\n`plugins` field. The plugin runtime (loading + dispatching the\nchain on the request path) is scaffolded: the block parses and\nvalidates in every build, and the dataplane runs a no-wasm\nplaceholder until dispatch lands.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/PluginConfig"
@@ -332,7 +332,7 @@
       ]
     },
     "lifecycle": {
-      "description": "API lifecycle management (DW-110): the developer portal\n(auto-generated from OpenAPI specs), environment profiles\n(dev/staging/prod config overlays), and the API journey\nrecorder (request flow visualization for debugging). Absent\n(the default): no lifecycle surface. When present and the\n`api_lifecycle` cargo feature is compiled in, the portal is\nserved at its configured path, the profile overlay is applied\nat config load, and journeys are recorded. When the feature is\nNOT compiled in, the block is accepted but inert (validation\nwarns). See [`LifecycleConfig`].",
+      "description": "API lifecycle management (DW-110): the developer portal\n(auto-generated from OpenAPI specs), environment profiles\n(dev/staging/prod config overlays), and the API journey\nrecorder (request flow visualization for debugging). Absent\n(the default): no lifecycle surface. The portal serving, profile\noverlay application, and journey recording are scaffolded: the\nblock is accepted in every build and is inert until the runtime\nwiring lands (validation\nwarns). See [`LifecycleConfig`].",
       "anyOf": [
         {
           "$ref": "#/$defs/LifecycleConfig"
@@ -428,7 +428,7 @@
           ]
         },
         "l4": {
-          "description": "L4 proxying configuration (DW-103). Only meaningful on\n`protocol: tcp` and `protocol: udp` listeners; rejected by\nvalidation on other protocols. The `upstream` field names the\nupstream that receives the spliced stream (or, when\n`sni_routing` is true, the upstream selected by the TLS\nClientHello SNI via the upstream's `tls.sni_routes` -- reusing\nthe SNI extraction from DW-008 TLS passthrough). Feature-gated\nbehind the `l4` cargo feature; when the feature is off the\nblock is accepted but inert (validation warns).",
+          "description": "L4 proxying configuration (DW-103). Only meaningful on\n`protocol: tcp` and `protocol: udp` listeners; rejected by\nvalidation on other protocols. The `upstream` field names the\nupstream that receives the spliced stream (or, when\n`sni_routing` is true, the upstream selected by the TLS\nClientHello SNI via the upstream's `tls.sni_routes` -- reusing\nthe SNI extraction from DW-008 TLS passthrough). Compiled into\nevery build (no cargo feature).",
           "anyOf": [
             {
               "$ref": "#/$defs/L4Config"
@@ -467,17 +467,17 @@
           ]
         },
         {
-          "description": "HTTP/3 (QUIC) ingress (DW-088). A UDP socket is bound on the\nlistener's address:port; the QUIC handshake uses the `tls`\nblock's certificates (terminate mode only — passthrough is\nrejected). Feature-gated behind the `h3` cargo feature on\n`dwara-bin`; when the feature is off, validation rejects\n`protocol: h3` with a clear message. The `alt_svc` field on\nsibling H1/H2 listeners advertises this listener's H3 port to\nclients for protocol upgrade discovery.",
+          "description": "HTTP/3 (QUIC) ingress (DW-088). A UDP socket is bound on the\nlistener's address:port; the QUIC handshake uses the `tls`\nblock's certificates (terminate mode only — passthrough is\nrejected). Compiled into every build (no cargo feature; QUIC\nvia the unconditional `quinn`/`h3` deps). The `alt_svc` field on\nsibling H1/H2 listeners advertises this listener's H3 port to\nclients for protocol upgrade discovery.",
           "type": "string",
           "const": "h3"
         },
         {
-          "description": "L4 TCP proxying (DW-103). A raw TCP socket is bound on the\nlistener's address:port; accepted connections are spliced\nbyte-for-byte to an upstream endpoint (optionally selected by\npeeking the TLS ClientHello SNI, reusing the SNI extraction\nfrom DW-008 TLS passthrough). Requires the `l4` cargo feature\non dwara-bin; when the feature is off, the listener is accepted\nbut inert (validation warns). The `l4` block configures the\nupstream and SNI-routing flag.",
+          "description": "L4 TCP proxying (DW-103). A raw TCP socket is bound on the\nlistener's address:port; accepted connections are spliced\nbyte-for-byte to an upstream endpoint (optionally selected by\npeeking the TLS ClientHello SNI, reusing the SNI extraction\nfrom DW-008 TLS passthrough). Compiled into every build (no\ncargo feature). The `l4` block configures the\nupstream and SNI-routing flag.",
           "type": "string",
           "const": "tcp"
         },
         {
-          "description": "L4 UDP proxying (DW-103). A UDP socket is bound on the\nlistener's address:port; datagrams are forwarded to an upstream\nendpoint. STUBBED: the UDP dispatcher returns Unimplemented --\nUDP session semantics and NAT timeouts are a follow-up. Requires\nthe `l4` cargo feature; when the feature is off, the listener is\naccepted but inert (validation warns). The `l4` block configures\nthe upstream.",
+          "description": "L4 UDP proxying (DW-103). A UDP socket is bound on the\nlistener's address:port; datagrams are forwarded to an upstream\nendpoint. STUBBED: the UDP dispatcher returns Unimplemented --\nUDP session semantics and NAT timeouts are a follow-up. Compiled\ninto every build (no cargo feature). The `l4` block configures\nthe upstream.",
           "type": "string",
           "const": "udp"
         }
@@ -531,7 +531,7 @@
           "$ref": "#/$defs/ZeroRttPolicy"
         },
         "pq": {
-          "description": "DW-105: opt in to post-quantum hybrid key exchange\n(X25519+ML-KEM) for this listener. When `true` AND the `pq`\ncargo feature is ON, the X25519+ML-KEM hybrid kx group is\nprepended to the rustls provider's kx group list, PREFERRING\nthe hybrid group while keeping the classical X25519 fallback\nfor non-PQ clients. When the `pq` cargo feature is OFF, `pq:\ntrue` is accepted by the parser (additive-only, strict serde\npreserved) but is INERT: no kx group is prepended, and\nvalidation emits a warning issue. EXPERIMENTAL: the rustls PQ\nAPI is not yet stable. Rejected when combined with FIPS mode\n(ML-KEM is not on the FIPS-validated list for aws-lc-rs).\nTerminate mode only (passthrough does not terminate TLS, so\nthe kx group list is irrelevant); validation rejects `pq: true`\non a passthrough listener.",
+          "description": "DW-105: opt in to post-quantum hybrid key exchange\n(X25519+ML-KEM) for this listener. When `true`, the\nX25519+ML-KEM hybrid kx group is\nprepended to the rustls provider's kx group list, PREFERRING\nthe hybrid group while keeping the classical X25519 fallback\nfor non-PQ clients. Compiled into every build (no cargo\nfeature). EXPERIMENTAL: the rustls PQ\nAPI is not yet stable. Rejected when combined with FIPS mode\n(ML-KEM is not on the FIPS-validated list for aws-lc-rs).\nTerminate mode only (passthrough does not terminate TLS, so\nthe kx group list is irrelevant); validation rejects `pq: true`\non a passthrough listener.",
           "type": "boolean"
         },
         "acme": {
@@ -1104,7 +1104,7 @@
           ]
         },
         "graphql": {
-          "description": "GraphQL awareness (DW-099): query depth/complexity limits and\noptional persisted-query enforcement for routes that front a\nGraphQL server. When enabled (and the `graphql` cargo feature\nis compiled in), the gateway rejects abusive queries before\nthe route limits and authentication. Absent (the default): no\nGraphQL checks. When the `graphql` feature is NOT compiled in,\nthe block is accepted but inert (the config round-trips, the\nruntime check does not run). See [`RouteGraphql`].",
+          "description": "GraphQL awareness (DW-099): query depth/complexity limits and\noptional persisted-query enforcement for routes that front a\nGraphQL server. When enabled, the gateway rejects abusive\nqueries before the route limits and authentication. Absent\n(the default): no GraphQL checks. Compiled into every build\n(no cargo feature). See [`RouteGraphql`].",
           "anyOf": [
             {
               "$ref": "#/$defs/RouteGraphql"
@@ -1115,7 +1115,7 @@
           ]
         },
         "grpc_web": {
-          "description": "gRPC-Web framing translation + JSON-to-gRPC transcoding (DW-101):\nwhen enabled, the gateway translates gRPC-Web framing to native\ngRPC for the upstream and wraps the response back. When\ntranscoding is enabled, JSON requests are translated to/from\nprotobuf using .proto descriptors supplied via config. Absent\n(the default): no translation. When the `grpc_web` cargo feature\nis NOT compiled in, the block is accepted but inert (the config\nround-trips; validation warns; the runtime translation does not\nrun). See [`GrpcWeb`].",
+          "description": "gRPC-Web framing translation + JSON-to-gRPC transcoding (DW-101):\nwhen enabled, the gateway translates gRPC-Web framing to native\ngRPC for the upstream and wraps the response back. When\ntranscoding is enabled, JSON requests are translated to/from\nprotobuf using .proto descriptors supplied via config. Absent\n(the default): no translation. The block parses and validates in\nevery build (no cargo feature); the runtime translation is\nscaffolded and not yet dispatched from the request path. See\n[`GrpcWeb`].",
           "anyOf": [
             {
               "$ref": "#/$defs/GrpcWeb"
@@ -1126,7 +1126,7 @@
           ]
         },
         "translation": {
-          "description": "Protocol translation (DW-100): translates the request/response\nbodies between two wire protocols on this route's forward and\nresponse paths. When enabled (and the relevant cargo feature is\ncompiled in), the gateway converts the client's body to the\nupstream's wire format and the upstream's response back to the\nclient's wire format. Absent (the default): no translation.\nWhen the `protocol_translation` cargo feature is NOT compiled\nin, the block is accepted but inert (the config round-trips;\nvalidation warns; the runtime translation does not run). The\nSOAP/XML kinds additionally require the `soap` cargo feature.\nSee [`Translation`].",
+          "description": "Protocol translation (DW-100): translates the request/response\nbodies between two wire protocols on this route's forward and\nresponse paths. When enabled, the gateway converts the client's\nbody to the upstream's wire format and the upstream's response\nback to the client's wire format. Absent (the default): no\ntranslation. The block parses and validates in every build (no\ncargo feature); the runtime translation is scaffolded and not\nyet dispatched from the request path.\nSee [`Translation`].",
           "anyOf": [
             {
               "$ref": "#/$defs/Translation"
@@ -1181,7 +1181,7 @@
           ]
         },
         "plugins": {
-          "description": "Plugin names to run on this route (DW-055). Each name must\nreference a plugin defined in the top-level `plugins` list.\nPlugins run in declaration order at their declared phases. The\n`wasm` cargo feature must be enabled for plugins to load.",
+          "description": "Plugin names to run on this route (DW-055). Each name must\nreference a plugin defined in the top-level `plugins` list.\nPlugins run in declaration order at their declared phases.\n(Request-path plugin dispatch is scaffolded; see the\ntop-level `plugins` field docs.)",
           "type": "array",
           "items": {
             "type": "string"
@@ -1493,7 +1493,7 @@
           ]
         },
         {
-          "description": "WASM route handler (nano-service, DW-106): instead of proxying\nto an upstream, the route action runs a WASM module that\ngenerates the response directly. The module implements a simple\nrequest->response handler ABI over the existing wasmtime runtime\n(the `wasm` cargo feature). The route's `service` is still\nrequired by the schema (the frozen vocabulary) but never dialed\n-- the whole point is serving without a backend. The runtime is\nfeature-gated behind the `nano_services` cargo feature; when the\nfeature is off the action is accepted but inert (validation\nwarns, the route returns 502). See [`NanoServiceAction`].",
+          "description": "WASM route handler (nano-service, DW-106): instead of proxying\nto an upstream, the route action runs a WASM module that\ngenerates the response directly. The module implements a simple\nrequest->response handler ABI over the existing wasmtime runtime\n(compiled into every build; no cargo feature). The route's\n`service` is still\nrequired by the schema (the frozen vocabulary) but never dialed\n-- the whole point is serving without a backend. See\n[`NanoServiceAction`].",
           "type": "object",
           "properties": {
             "module": {
@@ -2375,7 +2375,7 @@
       "additionalProperties": false
     },
     "RouteGraphql": {
-      "description": "Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).\n\nWhen enabled (and the `graphql` cargo feature is compiled in), the\ngateway enforces query depth/complexity limits and optional\npersisted-query enforcement on every request the route matches,\nBEFORE the route limits and authentication. A query whose depth or\ncomplexity exceeds the configured limits is rejected with 400\n(`graphql_depth_exceeded` or `graphql_complexity_exceeded`); a\nquery whose SHA-256 hash is not in the persisted-query store is\nrejected with 400 (`graphql_persisted_query_required`).\n\nThe check is feature-gated: when the `graphql` cargo feature is NOT\ncompiled in, the block is accepted by the schema and validation but\nis inert at runtime (no check runs). This lets configs round-trip\nacross builds with and without the feature.\n\nDepth is the maximum brace-nesting level of the query (the\ntop-level operation body is depth 1). Complexity is the sum of\nper-field costs: each field's cost is looked up in\n`cost_per_field`, falling back to `complexity_coefficient` (default\n1) when the field name is not in the map.\n\nBoth are computed by a\nbounded hand-rolled scanner (no external GraphQL parser dependency).",
+      "description": "Route-scoped GraphQL awareness config (DW-099, `routes[].graphql`).\n\nWhen enabled (compiled into every build; no cargo feature), the\ngateway enforces query depth/complexity limits and optional\npersisted-query enforcement on every request the route matches,\nBEFORE the route limits and authentication. A query whose depth or\ncomplexity exceeds the configured limits is rejected with 400\n(`graphql_depth_exceeded` or `graphql_complexity_exceeded`); a\nquery whose SHA-256 hash is not in the persisted-query store is\nrejected with 400 (`graphql_persisted_query_required`).\n\nThe check is compiled into every build (no cargo feature): a\nconfig carrying the block behaves identically in any build.\n\nDepth is the maximum brace-nesting level of the query (the\ntop-level operation body is depth 1). Complexity is the sum of\nper-field costs: each field's cost is looked up in\n`cost_per_field`, falling back to `complexity_coefficient` (default\n1) when the field name is not in the map.\n\nBoth are computed by a\nbounded hand-rolled scanner (no external GraphQL parser dependency).",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2468,7 +2468,7 @@
       "additionalProperties": false
     },
     "GrpcWeb": {
-      "description": "Route-scoped gRPC-Web policy (DW-101, `routes[].grpc_web`).\n\nWhen enabled, the gateway translates gRPC-Web framing (the browser-\nfriendly variant that replaces HTTP/2 trailers with a trailing\nframe) to native gRPC for the upstream, and wraps the native gRPC\nresponse back into gRPC-Web framing for the browser. Streaming\n(server-streaming and bidi) is supported: each upstream data chunk\nbecomes its own gRPC-Web data frame, and the trailers become a\nfinal gRPC-Web trailer frame.\n\nWhen `transcoding` is enabled, the gateway additionally accepts\nplain JSON requests (Content-Type: application/json) and translates\nthem to protobuf wire bytes for the upstream, and translates the\nprotobuf response back to JSON. The mapping is driven by .proto\ndescriptors supplied via config.\n\nFeature-gated behind the `grpc_web` cargo feature. When the feature\nis NOT compiled in, the block is accepted but inert (the config\nround-trips; validation warns; the runtime translation does not\nrun). See [`GrpcWebTranscoding`] and [`GrpcWebDescriptor`].",
+      "description": "Route-scoped gRPC-Web policy (DW-101, `routes[].grpc_web`).\n\nWhen enabled, the gateway translates gRPC-Web framing (the browser-\nfriendly variant that replaces HTTP/2 trailers with a trailing\nframe) to native gRPC for the upstream, and wraps the native gRPC\nresponse back into gRPC-Web framing for the browser. Streaming\n(server-streaming and bidi) is supported: each upstream data chunk\nbecomes its own gRPC-Web data frame, and the trailers become a\nfinal gRPC-Web trailer frame.\n\nWhen `transcoding` is enabled, the gateway additionally accepts\nplain JSON requests (Content-Type: application/json) and translates\nthem to protobuf wire bytes for the upstream, and translates the\nprotobuf response back to JSON. The mapping is driven by .proto\ndescriptors supplied via config.\n\nThe block parses and validates in every build (no cargo feature);\nthe runtime framing/transcoding translation is scaffolded and not\nyet dispatched from the request path. See [`GrpcWebTranscoding`] and\n[`GrpcWebDescriptor`].",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2532,7 +2532,7 @@
       ]
     },
     "Translation": {
-      "description": "Route-scoped protocol translation policy (DW-100,\n`routes[].translation`).\n\nWhen enabled, the gateway translates the request/response bodies\nbetween two wire protocols on this route's forward and response\npaths. The `kind` selects the translation direction; the `graphql`\nand `soap` sub-blocks carry the direction-specific config.\n\nFeature-gated behind the `protocol_translation` cargo feature (and\nthe SOAP kinds additionally behind the `soap` cargo feature). When\nthe relevant feature is NOT compiled in, the block is accepted but\ninert (the config round-trips; validation warns; the runtime\ntranslation does not run).",
+      "description": "Route-scoped protocol translation policy (DW-100,\n`routes[].translation`).\n\nWhen enabled, the gateway translates the request/response bodies\nbetween two wire protocols on this route's forward and response\npaths. The `kind` selects the translation direction; the `graphql`\nand `soap` sub-blocks carry the direction-specific config.\n\nThe block parses and validates in every build (no cargo feature);\nthe runtime translators are scaffolded and not yet dispatched from\nthe request path.",
       "type": "object",
       "properties": {
         "kind": {
@@ -3404,11 +3404,11 @@
           ]
         },
         "pq": {
-          "description": "DW-105: opt in to post-quantum hybrid key exchange\n(X25519+ML-KEM) for this upstream's TLS connections. When\n`true` AND the `pq` cargo feature is ON, the X25519+ML-KEM\nhybrid kx group is prepended to the rustls client config's kx\ngroup list, PREFERRING the hybrid group while keeping the\nclassical X25519 fallback for non-PQ upstreams. When the `pq`\ncargo feature is OFF, `pq: true` is accepted by the parser\n(additive-only, strict serde preserved) but is INERT: no kx\ngroup is prepended, and validation emits a warning issue.\nEXPERIMENTAL: the rustls PQ API is not yet stable. Only\nmeaningful for the TLS protocols (`https`, `http2`); validation\nrejects `pq: true` on an `http1` upstream (no TLS is\nnegotiated). Rejected when combined with FIPS mode (ML-KEM is\nnot on the FIPS-validated list for aws-lc-rs).",
+          "description": "DW-105: opt in to post-quantum hybrid key exchange\n(X25519+ML-KEM) for this upstream's TLS connections. When\n`true`, the X25519+ML-KEM\nhybrid kx group is prepended to the rustls client config's kx\ngroup list, PREFERRING the hybrid group while keeping the\nclassical X25519 fallback for non-PQ upstreams. Compiled into\nevery build (no cargo feature).\nEXPERIMENTAL: the rustls PQ API is not yet stable. Only\nmeaningful for the TLS protocols (`https`, `http2`); validation\nrejects `pq: true` on an `http1` upstream (no TLS is\nnegotiated). Rejected when combined with FIPS mode (ML-KEM is\nnot on the FIPS-validated list for aws-lc-rs).",
           "type": "boolean"
         },
         "cert_pinning": {
-          "description": "DW-109 / SEC-04: upstream TLS certificate pinning by SPKI\nSHA-256 hash. When present, the gateway's outbound TLS client\ninstalls a custom certificate verifier that extracts the peer\ncert's SubjectPublicKeyInfo, computes its SHA-256, and compares\nagainst the configured pins. A mismatch rejects the connection\n(fail-closed: no fallback to CA-based verification). The\n`cert_pinning` config block is always accepted by the parser\n(additive-only, strict serde preserved); when the\n`cert_pinning` cargo feature is OFF it is INERT (validation\nemits a warning). Only meaningful for the TLS protocols\n(`https`, `http2`); validation rejects it on an `http1`\nupstream.",
+          "description": "DW-109 / SEC-04: upstream TLS certificate pinning by SPKI\nSHA-256 hash. When present, the gateway's outbound TLS client\ninstalls a custom certificate verifier that extracts the peer\ncert's SubjectPublicKeyInfo, computes its SHA-256, and compares\nagainst the configured pins. A mismatch rejects the connection\n(fail-closed: no fallback to CA-based verification). Compiled\ninto every build (no cargo feature). Only meaningful for the\nTLS protocols\n(`https`, `http2`); validation rejects it on an `http1`\nupstream.",
           "anyOf": [
             {
               "$ref": "#/$defs/CertPinningConfig"
@@ -6520,7 +6520,7 @@
           ]
         },
         "guardrails": {
-          "description": "Guardrails (DW-082): prompt-injection heuristics, PII\ndetection, banned-content filters, and output schema\nenforcement as a middleware chain on the AI proxy action.\nAbsent (the default): no guardrails — every prompt and\nresponse passes through uninspected. When present, each rule\ninspects the prompt (before the provider call) and/or the\nresponse (after), and blocks, redacts, or logs per its\n`action`. Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies\nto all. Schema enforcement requires the `openapi_validation`\ncargo feature (jsonschema); without it, schema rules are\naccepted but inert.",
+          "description": "Guardrails (DW-082): prompt-injection heuristics, PII\ndetection, banned-content filters, and output schema\nenforcement as a middleware chain on the AI proxy action.\nAbsent (the default): no guardrails — every prompt and\nresponse passes through uninspected. When present, each rule\ninspects the prompt (before the provider call) and/or the\nresponse (after), and blocks, redacts, or logs per its\n`action`. Policy-scoped rules apply only to consumers\nattaching a listed policy; an empty `policies` list applies\nto all. Schema enforcement uses the unconditional `jsonschema`\ndependency and works in every build.",
           "anyOf": [
             {
               "$ref": "#/$defs/AiGuardrails"
@@ -6571,7 +6571,7 @@
           ]
         },
         "a2a": {
-          "description": "A2A (agent-to-agent) protocol support (DW-114 `ai.a2a`):\nconfigures remote A2A agents that the gateway can route chat\nrequests to. Each agent names an upstream (the transport) and\nan Agent Card (discovery doc, file path or inline JSON). The\nadapter translates a canonical chat request into an A2A\ntask-submit body; the task lifecycle is STUBBED pending spec\nfreeze. Feature-gated behind the `a2a` cargo feature: without\nit the block is accepted but inert (validation warns). Absent\n(the default): no A2A surface.",
+          "description": "A2A (agent-to-agent) protocol support (DW-114 `ai.a2a`):\nconfigures remote A2A agents that the gateway can route chat\nrequests to. Each agent names an upstream (the transport) and\nan Agent Card (discovery doc, file path or inline JSON). The\nadapter translates a canonical chat request into an A2A\ntask-submit body; the task lifecycle is STUBBED pending spec\nfreeze. Compiled into every build (no cargo feature). Absent\n(the default): no A2A surface.",
           "anyOf": [
             {
               "$ref": "#/$defs/A2aConfig"
@@ -6667,7 +6667,7 @@
           "const": "gemini"
         },
         {
-          "description": "DW-114: A2A (agent-to-agent) protocol. An A2A provider is a\nconfigured `ai.a2a.agents[]` entry: the adapter translates a\ncanonical chat request into an A2A task-submit body and parses\nthe task response back. The task lifecycle state machine is\nimplemented against the A2A Protocol Specification draft (legal\nand illegal transitions are enforced). Feature-gated behind\nthe `a2a` cargo feature; without it the `ai.a2a` block is\naccepted but inert.",
+          "description": "DW-114: A2A (agent-to-agent) protocol. An A2A provider is a\nconfigured `ai.a2a.agents[]` entry: the adapter translates a\ncanonical chat request into an A2A task-submit body and parses\nthe task response back. The task lifecycle state machine is\nimplemented against the A2A Protocol Specification draft (legal\nand illegal transitions are enforced). Compiled into every\nbuild (no cargo feature).",
           "type": "string",
           "const": "a2a"
         },
@@ -7064,7 +7064,7 @@
           }
         },
         "schema": {
-          "description": "JSON schema for output schema enforcement (`schema` kind\nonly). The response content (parsed as JSON) is validated\nagainst this schema; a violation blocks the response.\nRequires the `openapi_validation` cargo feature (jsonschema);\nwithout it, schema rules are accepted but inert."
+          "description": "JSON schema for output schema enforcement (`schema` kind\nonly). The response content (parsed as JSON) is validated\nagainst this schema; a violation blocks the response. Uses the\nunconditional `jsonschema` dependency; works in every build."
         },
         "policies": {
           "description": "Policy names this rule attaches to. Empty (the default) means\nthe rule applies to ALL consumers. When non-empty, the rule\napplies only to consumers whose attached policies (the\nconsumer > route > service > listener > global chain) include\nat least one listed name.",
@@ -7100,7 +7100,7 @@
           "const": "banned"
         },
         {
-          "description": "Output schema enforcement: the response content is validated\nagainst the declared JSON schema. Applied at the response\nphase (non-streaming only — streaming cannot validate a\nschema on partial content). Requires the\n`openapi_validation` cargo feature.",
+          "description": "Output schema enforcement: the response content is validated\nagainst the declared JSON schema. Applied at the response\nphase (non-streaming only — streaming cannot validate a\nschema on partial content). Works in every build.",
           "type": "string",
           "const": "schema"
         }
@@ -7147,7 +7147,7 @@
       ]
     },
     "SemanticCacheConfig": {
-      "description": "Semantic cache config (DW-083 `ai.semantic_cache`): an\nembedding-similarity cache for AI prompts. A paraphrased prompt\nwithin the cosine-similarity threshold returns the cached response\nwith no provider call and no token spend. Uses an external\nembedding service (OpenAI-compatible /v1/embeddings API) to\nvectorize prompts and `hnsw_rs` (pure Rust HNSW) for approximate\nnearest neighbor search. Feature-gated behind the\n`semantic_cache` cargo feature; without it the config is accepted\nbut the cache is a no-op.",
+      "description": "Semantic cache config (DW-083 `ai.semantic_cache`): an\nembedding-similarity cache for AI prompts. A paraphrased prompt\nwithin the cosine-similarity threshold returns the cached response\nwith no provider call and no token spend. Uses an external\nembedding service (OpenAI-compatible /v1/embeddings API) to\nvectorize prompts and `hnsw_rs` (pure Rust HNSW) for approximate\nnearest neighbor search. Compiled into every build (`hnsw_rs` is\nan unconditional dependency).",
       "type": "object",
       "properties": {
         "enabled": {
@@ -7759,7 +7759,7 @@
       "additionalProperties": false
     },
     "A2aConfig": {
-      "description": "A2A (agent-to-agent) protocol config (DW-114 `ai.a2a`). Declares\nthe remote A2A agents the gateway can route chat requests to and\nthe session policy for agent-to-agent task sessions. The block is\nADDITIVE: absent (the default), the gateway has no A2A surface.\nFeature-gated behind the `a2a` cargo feature; without it the block\nis accepted but inert (validation warns, the runtime wires no A2A\nproviders).",
+      "description": "A2A (agent-to-agent) protocol config (DW-114 `ai.a2a`). Declares\nthe remote A2A agents the gateway can route chat requests to and\nthe session policy for agent-to-agent task sessions. The block is\nADDITIVE: absent (the default), the gateway has no A2A surface.\nCompiled into every build (no cargo feature).",
       "type": "object",
       "properties": {
         "enabled": {
@@ -7989,7 +7989,7 @@
       ]
     },
     "LifecycleConfig": {
-      "description": "API lifecycle management config (DW-110, `gateway.lifecycle`).\n\nThree sub-concerns, each additive and independently enabled:\n\n- `portal` -- the developer portal: a read-only static HTML page\n  auto-generated from the configured OpenAPI spec sources, served\n  at a reserved path.\n- `profiles` -- environment profiles: dev/staging/prod config\n  overlays. The profile is selected via the `DWARA_PROFILE` env\n  var; the selected profile's patch is merged onto the base config\n  at load time.\n- `journey` -- the API journey recorder: records the request flow\n  through the gateway as a JSON document for debugging, stored via\n  the existing analytics raw table.\n\nWhen the `api_lifecycle` cargo feature is NOT compiled in, the\nblock is accepted but inert (validation warns, mirroring the\n`a2a`/`graphql` pattern).",
+      "description": "API lifecycle management config (DW-110, `gateway.lifecycle`).\n\nThree sub-concerns, each additive and independently enabled:\n\n- `portal` -- the developer portal: a read-only static HTML page\n  auto-generated from the configured OpenAPI spec sources, served\n  at a reserved path.\n- `profiles` -- environment profiles: dev/staging/prod config\n  overlays. The profile is selected via the `DWARA_PROFILE` env\n  var; the selected profile's patch is merged onto the base config\n  at load time.\n- `journey` -- the API journey recorder: records the request flow\n  through the gateway as a JSON document for debugging, stored via\n  the existing analytics raw table.\n\nThe block is accepted in every build and is inert until the\nruntime wiring lands (validation warns).",
       "type": "object",
       "properties": {
         "portal": {
@@ -8121,11 +8121,11 @@
       "additionalProperties": false
     },
     "MeshConfig": {
-      "description": "Top-level service mesh config (DW-107, `gateway.mesh`).\n\nWhen present and the `mesh` cargo feature is compiled in, the\ngateway runs as a sidecar in each pod: an init container configures\niptables/TPROXY redirects so all traffic to and from the local\napplication flows through the sidecar, which terminates mTLS\n(inbound) and wraps mTLS (outbound) using SPIFFE/SPIRE X.509 SVIDs.\nWhen the `mesh` feature is NOT compiled in, the block is accepted\nbut inert (validation warns, no sidecar listeners or SPIFFE client\nare wired). Ent-only: validation warns when mesh is configured\nwithout the `ent` feature.",
+      "description": "Top-level service mesh config (DW-107, `gateway.mesh`).\n\nWhen present, the gateway is configured to run as a sidecar in each\npod: an init container configures\niptables/TPROXY redirects so all traffic to and from the local\napplication flows through the sidecar, which terminates mTLS\n(inbound) and wraps mTLS (outbound) using SPIFFE/SPIRE X.509 SVIDs.\nThe mesh runtime is scaffolded and Enterprise-only: the block is\naccepted but inert (validation warns; no sidecar listeners or\nSPIFFE client are wired) without the `ent` feature and until the\nsidecar bootstrap is production-ready.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Master switch. Default false: the mesh is inert even when the\n`mesh` cargo feature is compiled in. This lets operators stage\nthe config ahead of activating the surface.",
+          "description": "Master switch. Default false: the mesh is inert when false\n(the runtime is scaffolded regardless). This lets operators stage\nthe config ahead of activating the surface.",
           "type": "boolean"
         },
         "mode": {

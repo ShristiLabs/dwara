@@ -7602,10 +7602,8 @@ where
         } => respond(*status, body.as_deref(), headers),
         RouteAction::NanoService { nano } => {
             // DW-106: nano-service action. The runtime dispatch is
-            // feature-gated behind the `nano_services` cargo feature;
-            // when the feature is off the route returns 502 (the
-            // config schema is always present so configs round-trip,
-            // but the WASM runtime is not compiled in).
+            // compiled into every build (no cargo feature; the WASM
+            // runtime is an unconditional dependency).
             {
                 serve_nano_service(req, &route.name, nano, rid, &dp.observability_arc()).await
             }

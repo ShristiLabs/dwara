@@ -3,10 +3,10 @@
 //! The top-level `mesh` block configures service mesh mode: dwara runs
 //! as a sidecar in each pod, intercepting traffic via iptables/TPROXY
 //! redirect, with mTLS identity provided by SPIFFE/SPIRE (X.509 SVIDs).
-//! The schema is always present so configs round-trip without the
-//! `mesh` cargo feature; when the feature is off the block is accepted
-//! but inert (validation warns). Ent-only: validation warns when mesh
-//! is configured without the `ent` feature.
+//! The schema is always present so configs round-trip; the mesh runtime
+//! is scaffolded and Enterprise-only: validation warns when mesh is
+//! configured without the `ent` feature (or when the scaffolded
+//! runtime is not wired).
 //!
 //! See the `mesh` domain module for the sidecar
 //! controller and SPIFFE client scaffolds.
@@ -44,20 +44,20 @@ impl std::fmt::Display for MeshMode {
 
 /// Top-level service mesh config (DW-107, `gateway.mesh`).
 ///
-/// When present and the `mesh` cargo feature is compiled in, the
-/// gateway runs as a sidecar in each pod: an init container configures
+/// When present, the gateway is configured to run as a sidecar in each
+/// pod: an init container configures
 /// iptables/TPROXY redirects so all traffic to and from the local
 /// application flows through the sidecar, which terminates mTLS
 /// (inbound) and wraps mTLS (outbound) using SPIFFE/SPIRE X.509 SVIDs.
-/// When the `mesh` feature is NOT compiled in, the block is accepted
-/// but inert (validation warns, no sidecar listeners or SPIFFE client
-/// are wired). Ent-only: validation warns when mesh is configured
-/// without the `ent` feature.
+/// The mesh runtime is scaffolded and Enterprise-only: the block is
+/// accepted but inert (validation warns; no sidecar listeners or
+/// SPIFFE client are wired) without the `ent` feature and until the
+/// sidecar bootstrap is production-ready.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MeshConfig {
-    /// Master switch. Default false: the mesh is inert even when the
-    /// `mesh` cargo feature is compiled in. This lets operators stage
+    /// Master switch. Default false: the mesh is inert when false
+    /// (the runtime is scaffolded regardless). This lets operators stage
     /// the config ahead of activating the surface.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,

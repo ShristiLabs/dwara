@@ -21,7 +21,8 @@
 //!
 //! ## Feature gate
 //!
-//! The `k8s` cargo feature must be enabled.
+//! None: the module compiles into every build (no `k8s` cargo
+//! feature).
 
 use std::collections::HashMap;
 

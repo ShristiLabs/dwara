@@ -1,7 +1,7 @@
 //! Service mesh mode (DW-107): sidecar traffic interception plus
 //! SPIFFE/SPIRE mTLS identity.
 //!
-//! This module is SCAFFOLDED behind the `mesh` cargo feature. The
+//! This module is SCAFFOLDED (Enterprise-only). The
 //! service mesh mode runs dwara as a SIDECAR in each pod: an init
 //! container configures iptables (or TPROXY) redirects so all inbound
 //! traffic to the local application and all outbound traffic from the
@@ -49,15 +49,14 @@
 //!   channel over the Unix socket; the fetch methods return a clear
 //!   "not yet connected" error until the proto client is wired.
 //!
-//! # Feature gate
+//! # Gating
 //!
-//! The `mesh` cargo feature is flag-only (no new deps). When it is OFF,
-//! the `mesh` config block is accepted but inert: validation warns, and
-//! no sidecar listeners or SPIFFE client are wired. When it is ON, the
-//! scaffold compiles; the actual iptables/Workload API wiring lands
-//! when production-ready. Ent-only: validation warns when mesh is
-//! configured without the `ent` feature (mirrors the FIPS/credential-
-//! pool ent-gate pattern).
+//! The scaffold compiles into every build (there is no `mesh` cargo
+//! feature). The `mesh` config block is accepted but inert: validation
+//! warns, and no sidecar listeners or SPIFFE client are wired until the
+//! sidecar bootstrap is production-ready. Ent-only: validation warns
+//! when mesh is configured without the `ent` feature (mirrors the
+//! FIPS/credential-pool ent-gate pattern).
 //!
 //! # Dependency direction
 //!

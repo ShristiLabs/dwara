@@ -1067,9 +1067,8 @@ const NANO_SERVICE_MAX_TIMEOUT_MS: u64 = 5_000;
 
 /// Validate a nano-service route action (DW-106): the module file must
 /// exist and be readable, `memory_limit` must be > 0 and <= 64 MiB, and
-/// `execution_timeout_ms` must be > 0 and <= 5000ms. When the
-/// `nano_services` cargo feature is off, a warning is emitted (the
-/// action is accepted but inert -- the route returns 502 at runtime).
+/// `execution_timeout_ms` must be > 0 and <= 5000ms. (The nano-service
+/// runtime dispatch is compiled into every build; no cargo feature.)
 fn validate_nano_service(
     name: &str,
     nano: &crate::config::NanoServiceAction,
@@ -1799,9 +1798,9 @@ fn validate_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
 /// Validate the `gateway.plugins` list (DW-055 / DW-119): each plugin
 /// must set exactly one of `wasm` or `native` (mutually exclusive), and
 /// must declare a non-empty `phases` list. Duplicate plugin names are
-/// flagged. A `native` plugin requires the `plugins` cargo feature at
-/// build time (enforced by the feature gate on the registry; validation
-/// only checks the config shape). A `wasm` plugin's file existence is
+/// flagged. (The plugin runtime is scaffolded: config shape is checked
+/// here; loading and dispatching the chain on the request path is
+/// landing iteratively.) A `wasm` plugin's file existence is
 /// checked by the WASM lifecycle manager at load time, not here (the
 /// file may not be present in the validation environment).
 fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
@@ -4663,16 +4662,18 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
     // auth resolvability, model alias refs).
     validate_ai(gateway, &mut issues);
 
-    // DW-111: FIPS 140-3 mode primitive restrictions. When the `fips`
-    // cargo feature is ON, reject non-approved primitives at config
+    // DW-111: FIPS 140-3 mode primitive restrictions. When FIPS mode is
+    // active (Enterprise `ent` build + license claim), reject
+    // non-approved primitives at config
     // validation: Ed25519 certificates (not on the FIPS-validated list
     // for aws-lc-rs) and Argon2 credential hashing (not FIPS-approved).
-    // When the feature is OFF, the check is inert (no issues produced).
+    // When FIPS mode is not active, the check is inert (no issues
+    // produced).
     validate_fips(gateway, &mut issues);
 
-    // DW-105: post-quantum TLS validation. When `pq: true` is configured
-    // but the `pq` cargo feature is off, emit a warning issue (the config
-    // is accepted but inert). When `pq: true` and FIPS mode is active,
+    // DW-105: post-quantum TLS validation. PQ hybrid key exchange is
+    // compiled into every build (the feature-off warning is vestigial
+    // and never fires). When `pq: true` and FIPS mode is active,
     // reject (ML-KEM is not on the FIPS-validated list). When `pq: true`
     // is on a passthrough listener or an http1 upstream, reject (no TLS
     // is terminated/negotiated).
@@ -6075,9 +6076,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         // block, validate that depth_limit and complexity_limit are
         // > 0 (a 0 limit would reject every query or none, neither
         // is a useful configuration), and that persisted-query
-        // hashes are non-empty strings. The block is accepted when
-        // the `graphql` cargo feature is not compiled in (the config
-        // round-trips; the runtime check is feature-gated), so
+        // hashes are non-empty strings. The block is compiled into
+        // every build (no cargo feature), so
         // validation runs unconditionally -- the schema is always
         // present.
         if let Some(graphql) = &r.graphql {
@@ -6140,8 +6140,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         // file must exist and be readable at validation time (a missing
         // or unreadable descriptor would otherwise publish fine and
         // fail every transcoded request at runtime). The config schema
-        // is always present (the block round-trips without the
-        // `grpc_web` cargo feature), so validation runs
+        // is always present (the block parses and validates in every
+        // build; no cargo feature), so validation runs
         // unconditionally; descriptor files are checked only when the
         // block is enabled so a staged-but-inert config does not fail.
         if let Some(grpc_web) = &r.grpc_web {
@@ -6180,9 +6180,10 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         // `rest_to_graphql`). A `rest_to_soap` or `soap_to_rest` kind
         // requires a `soap` block with an `operation` name, and
         // `rest_to_soap` additionally requires a `namespace`. The
-        // config schema is always present (the block round-trips
-        // without the cargo feature), so validation runs
-        // unconditionally; the runtime translation is feature-gated.
+        // config schema is always present (the block parses and
+        // validates in every build; no cargo feature), so validation
+        // runs unconditionally; the runtime translation is scaffolded
+        // (not yet dispatched from the request path).
         if let Some(translation) = &r.translation {
             match translation.kind {
                 TranslationKind::RestToGraphql => match &translation.graphql {
@@ -6652,8 +6653,8 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
         // SEC-04 / DW-109: cert_pinning validation. The block is always
         // accepted by the parser (additive-only); validation enforces:
         // (1) only on TLS upstreams, (2) non-empty pin list, (3) each
-        // pin is 64 lowercase hex chars, (4) a warning when the
-        // `cert_pinning` cargo feature is OFF (the block is inert).
+        // pin is 64 lowercase hex chars. (Compiled into every build;
+        // no cargo feature.)
         if let Some(cp) = &u.cert_pinning {
             let tls = matches!(
                 u.protocol,
@@ -8046,16 +8047,14 @@ fn validate_fips(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
 
 /// DW-105: post-quantum TLS validation. Enforces three rules:
 ///
-/// 1. **Feature-off warning**: when `pq: true` is configured on a
-///    listener or upstream but the `pq` cargo feature is OFF, emit a
-///    warning issue naming the field. The config is ACCEPTED (additive-
-///    only, strict serde preserved) but is INERT: no kx group is
-///    prepended. The operator sees the warning so they know the build
-///    does not include the PQ feature.
+/// 1. **Feature-off warning**: vestigial. PQ hybrid key exchange is
+///    compiled into every build (`PqMode::current()` is always
+///    `Enabled`), so this warning never fires; the branch remains for
+///    the day the kx group is conditionally absent.
 /// 2. **FIPS incompatibility**: when `pq: true` is configured AND FIPS
-///    mode is active (the `fips` cargo feature is ON), REJECT with an
+///    mode is active (Enterprise `ent` build), REJECT with an
 ///    error issue. ML-KEM is not on the FIPS-validated list for
-///    aws-lc-rs, so the two features must not combine unless both
+///    aws-lc-rs, so the two must not combine unless both
 ///    algorithms are on a validated list.
 /// 3. **Protocol relevance**: `pq: true` on a passthrough listener (no
 ///    TLS termination) or an `http1` upstream (no TLS negotiation) is

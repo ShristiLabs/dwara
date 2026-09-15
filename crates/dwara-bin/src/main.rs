@@ -47,16 +47,12 @@
 //!   lines emitted, 0.0-1.0, default 1.0; 5xx responses are always
 //!   logged (see dwara-core's observability docs).
 //! - `DWARA_OTLP_ENDPOINT` (DW-021, #126): base OTLP collector endpoint
-//!   (e.g. `http://collector:4318`; `/v1/traces` is appended). LIVE only
-//!   when the binary is built with the default-off `otlp` cargo feature —
-//!   the opentelemetry stack is real megabytes against the DW-026 musl
-//!   size budget, so the default build keeps this variable reserved but
-//!   INERT (spans still exist; only the wire exporter is absent —
-//!   dwara-core::observability documents the decision, the bin's `otlp`
-//!   module the wiring). With the feature enabled and the variable set,
-//!   the root/phase spans export over http/protobuf and are flushed
-//!   (bounded) on the SIGTERM/SIGINT drain path; feature enabled with
-//!   the variable unset = one INFO line and no exporter.
+//!   (e.g. `http://collector:4318`; `/v1/traces` is appended). Compiled
+//!   into every build (no cargo feature; the opentelemetry stack is an
+//!   unconditional dependency). With the variable set, the root/phase
+//!   spans export over http/protobuf and are flushed (bounded) on the
+//!   SIGTERM/SIGINT drain path; the variable unset = one INFO line and
+//!   no exporter.
 //! - `DWARA_ADMIN_DEV` (DW-022): "1" serves the admin API as PLAINTEXT
 //!   on 127.0.0.1 — DEV ONLY, refuses to start for a non-loopback
 //!   admin bind, and must never be set in production (mTLS is the
@@ -116,15 +112,12 @@ mod listeners;
 mod reload;
 mod upgrade;
 
-// #126: OTLP trace export lives behind the default-off `otlp` cargo
-// feature (musl size budget; see the module docs). Feature OFF = the
-// module does not exist and DWARA_OTLP_ENDPOINT stays inert.
+// #126: OTLP trace/metrics export (wired unconditionally; see the
+// module docs).
 mod otlp;
 
-// DW-088: HTTP/3 (QUIC) ingress lives behind the default-off `h3`
-// cargo feature (quinn+h3 add significant compile time and binary
-// size). Feature OFF = the module does not exist and `protocol: h3`
-// is rejected at config validation.
+// DW-088: HTTP/3 (QUIC) ingress (quinn+h3 are unconditional
+// dependencies; an h3 listener binds in every build).
 mod h3;
 
 use std::collections::BTreeMap;
@@ -333,7 +326,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // DW-111: FIPS mode license assertion. A license that carries the
     // `fips` feature claim REQUIRES the gateway to be running in FIPS
     // mode. When the license requires FIPS but the gateway is not built
-    // with the `fips` cargo feature, refuse to start (exit 1). This is a
+    // with the `ent` cargo feature (whose FIPS enforcement is active),
+    // refuse to start (exit 1). This is a
     // config-time check: the assertion runs after the gate is built and
     // before enterprise features engage.
     if let Err(msg) = license_gate.assert_fips_compliance() {
