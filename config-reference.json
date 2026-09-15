@@ -281,7 +281,7 @@
       ]
     },
     "plugins": {
-      "description": "Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm\nmodule loaded at startup and run on the request pipeline phases\nit declares. Routes reference plugins by name via their\n`plugins` field. The plugin runtime (loading + dispatching the\nchain on the request path) is scaffolded: the block parses and\nvalidates in every build, and the dataplane runs a no-wasm\nplaceholder until dispatch lands.",
+      "description": "Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm\nmodule loaded and compiled with every config generation\n(checksum-keyed hot-swap) and run on the request pipeline\nphases it declares. Routes reference plugins by name via their\n`plugins` field; the dataplane dispatches them through the\nunified plugin chain (DW-157). A plugin whose .wasm cannot be\nread or compiled is marked crashed at load time (logged) and\nroutes referencing it answer 500 fail-closed.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/PluginConfig"
@@ -1181,7 +1181,7 @@
           ]
         },
         "plugins": {
-          "description": "Plugin names to run on this route (DW-055). Each name must\nreference a plugin defined in the top-level `plugins` list.\nPlugins run in declaration order at their declared phases.\n(Request-path plugin dispatch is scaffolded; see the\ntop-level `plugins` field docs.)",
+          "description": "Plugin names to run on this route (DW-055). Each name must\nreference a plugin defined in the top-level `plugins` list.\nPlugins run in declaration order at their declared phases\n(request-path dispatch, DW-157). Routes without plugins take\nthe untouched fast path.",
           "type": "array",
           "items": {
             "type": "string"

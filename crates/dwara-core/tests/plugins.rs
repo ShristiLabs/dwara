@@ -13,7 +13,9 @@
 //! - native filter registration (registry lookup, duplicate, not-found)
 //! - config parse with `native:` (and backward-compat with `wasm:`)
 //! - validation: exactly one of wasm/native, non-empty phases,
-//!   duplicate names, unknown route plugin references
+//!   duplicate names, unknown or duplicate route plugin references
+//! - a native factory construction failure REPORTED by the chain
+//!   (fail-closed material, never a silent skip)
 //! - a native filter modifying request headers/body
 //! - a native filter short-circuiting with a local response
 //! - a native + stub-WASM plugin in the same phase slot via the unified
@@ -482,6 +484,51 @@ routes:
 }
 
 #[test]
+fn validation_rejects_duplicate_route_plugin_references() {
+    // DW-157: the request-path chain executes every reference in the
+    // route's plugins list, so a repeated name would run the plugin
+    // TWICE; validation rejects the duplicate at publish time.
+    let yaml = r#"
+listeners: []
+upstreams:
+  - name: u1
+    endpoints:
+      - address: 127.0.0.1
+        port: 8080
+services:
+  - name: s1
+    upstream: u1
+consumers: []
+policies: []
+plugins:
+  - name: real
+    native: add-header
+    phases: [request_headers]
+routes:
+  - name: r1
+    service: s1
+    match:
+      path:
+        type: exact
+        value: /api
+    action:
+      type: proxy
+    plugins:
+      - real
+      - real
+"#;
+    let gateway = parse_gateway(yaml).expect("parses");
+    let issues = validate(&gateway);
+    assert!(
+        issues.iter().any(|i| i.entity == "route"
+            && i.name == "r1"
+            && i.field == "plugins"
+            && i.message.contains("more than once")),
+        "expected duplicate-plugin-ref issue, got {issues:?}"
+    );
+}
+
+#[test]
 fn validation_accepts_valid_native_plugin() {
     let yaml = r#"
 listeners: []
@@ -524,7 +571,12 @@ fn chain_native_filter_modifies_request_headers() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, headers) =
         chain.on_request_headers(vec![("host".to_string(), "example.com".to_string())]);
     assert_eq!(outcome, ChainOutcome::Continue);
@@ -544,7 +596,12 @@ fn chain_native_filter_modifies_request_body() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, body) = chain.on_request_body(b"hello".to_vec());
     assert_eq!(outcome, ChainOutcome::Continue);
     assert_eq!(body, b"hello-appended".to_vec());
@@ -562,7 +619,12 @@ fn chain_native_filter_modifies_response_headers() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, headers) =
         chain.on_response_headers(vec![("content-type".to_string(), "text/html".to_string())]);
     assert_eq!(outcome, ChainOutcome::Continue);
@@ -583,7 +645,12 @@ fn chain_native_filter_short_circuits_with_local_response() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, _headers) = chain.on_request_headers(vec![("host".to_string(), "x".to_string())]);
     match outcome {
         ChainOutcome::LocalResponse(resp) => {
@@ -592,6 +659,40 @@ fn chain_native_filter_short_circuits_with_local_response() {
         }
         other => panic!("expected LocalResponse, got {other:?}"),
     }
+}
+
+#[test]
+fn chain_reports_native_create_failure_instead_of_skipping() {
+    // DW-157 fail-closed contract: a REGISTERED native filter whose
+    // factory errors must be reported, never silently skipped — the
+    // caller (plugin_dispatch) turns the failure into the fail-closed
+    // 500 `plugin_unavailable`.
+    let registry = NativeRegistry::new();
+    registry
+        .register(
+            "broken-factory",
+            Box::new(|_cfg: &Option<String>| {
+                Err("factory exploded".to_string()) as Result<Box<dyn NativeFilter>, String>
+            }),
+        )
+        .unwrap();
+    let configs = configs_map(vec![PluginConfig {
+        name: "p".to_string(),
+        wasm: None,
+        source: None,
+        native: Some("broken-factory".to_string()),
+        phases: vec![PluginPhase::RequestHeaders],
+        config: None,
+        limits: None,
+    }]);
+    let (chain, failures) = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        chain.is_empty(),
+        "the failed entry must not run: nothing is built for it"
+    );
+    assert_eq!(failures.len(), 1, "the failure is reported, not skipped");
+    assert_eq!(failures[0].plugin, "p");
+    assert!(failures[0].message.contains("factory exploded"));
 }
 
 #[test]
@@ -606,10 +707,18 @@ fn chain_native_filter_error_becomes_chain_error() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, _headers) = chain.on_request_headers(vec![("host".to_string(), "x".to_string())]);
     match outcome {
-        ChainOutcome::Error(msg) => assert!(msg.contains("intentional filter error")),
+        ChainOutcome::Error { plugin, message } => {
+            assert_eq!(plugin, "p");
+            assert!(message.contains("intentional filter error"));
+        }
         other => panic!("expected Error, got {other:?}"),
     }
 }
@@ -618,7 +727,8 @@ fn chain_native_filter_error_becomes_chain_error() {
 fn chain_empty_when_no_plugins_match() {
     let registry = make_registry();
     let configs = HashMap::new();
-    let chain = PluginChain::new(&[], &configs, &registry, NoWasm);
+    let (chain, create_failures) = PluginChain::new(&[], &configs, &registry, NoWasm);
+    assert!(create_failures.is_empty());
     assert!(chain.is_empty());
 }
 
@@ -636,7 +746,12 @@ fn chain_skips_phases_not_declared() {
         config: None,
         limits: None,
     }]);
-    let mut chain = PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(
+        create_failures.is_empty(),
+        "no construction failures: {create_failures:?}"
+    );
     let (outcome, body) = chain.on_request_body(b"orig".to_vec());
     assert_eq!(outcome, ChainOutcome::Continue);
     assert_eq!(body, b"orig".to_vec());
@@ -679,12 +794,13 @@ fn chain_native_and_wasm_same_phase_slot() {
         called: Vec::new(),
         add_header: ("x-wasm".to_string(), "yes".to_string()),
     };
-    let mut chain = PluginChain::new(
+    let (mut chain, create_failures) = PluginChain::new(
         &["n".to_string(), "w".to_string()],
         &configs,
         &registry,
         stub,
     );
+    assert!(create_failures.is_empty());
     let (outcome, headers) =
         chain.on_request_headers(vec![("host".to_string(), "example.com".to_string())]);
     assert_eq!(outcome, ChainOutcome::Continue);
@@ -757,12 +873,13 @@ fn chain_wasm_short_circuits_before_later_native() {
             (ChainOutcome::Continue, b)
         }
     }
-    let mut chain = PluginChain::new(
+    let (mut chain, create_failures) = PluginChain::new(
         &["w".to_string(), "n".to_string()],
         &configs,
         &registry,
         DenyWasm,
     );
+    assert!(create_failures.is_empty());
     let (outcome, _headers) = chain.on_request_headers(vec![("host".to_string(), "x".to_string())]);
     match outcome {
         ChainOutcome::LocalResponse(resp) => {
@@ -802,12 +919,13 @@ fn chain_native_short_circuits_before_later_wasm() {
         called: Vec::new(),
         add_header: ("x-wasm".to_string(), "yes".to_string()),
     };
-    let mut chain = PluginChain::new(
+    let (mut chain, create_failures) = PluginChain::new(
         &["n".to_string(), "w".to_string()],
         &configs,
         &registry,
         stub,
     );
+    assert!(create_failures.is_empty());
     let (outcome, _headers) = chain.on_request_headers(vec![("host".to_string(), "x".to_string())]);
     match outcome {
         ChainOutcome::LocalResponse(resp) => {

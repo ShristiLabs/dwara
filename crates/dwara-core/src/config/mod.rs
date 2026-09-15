@@ -417,12 +417,13 @@ pub struct Gateway {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_convergence: Option<ConfigConvergenceConfig>,
     /// Proxy-wasm plugin definitions (DW-055). Each plugin is a .wasm
-    /// module loaded at startup and run on the request pipeline phases
-    /// it declares. Routes reference plugins by name via their
-    /// `plugins` field. The plugin runtime (loading + dispatching the
-    /// chain on the request path) is scaffolded: the block parses and
-    /// validates in every build, and the dataplane runs a no-wasm
-    /// placeholder until dispatch lands.
+    /// module loaded and compiled with every config generation
+    /// (checksum-keyed hot-swap) and run on the request pipeline
+    /// phases it declares. Routes reference plugins by name via their
+    /// `plugins` field; the dataplane dispatches them through the
+    /// unified plugin chain (DW-157). A plugin whose .wasm cannot be
+    /// read or compiled is marked crashed at load time (logged) and
+    /// routes referencing it answer 500 fail-closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginConfig>,
     /// SCALE-12 (#192): remote/signed plugin registry configuration.
@@ -3252,9 +3253,9 @@ pub struct Route {
     pub fault_injection: Option<FaultInjection>,
     /// Plugin names to run on this route (DW-055). Each name must
     /// reference a plugin defined in the top-level `plugins` list.
-    /// Plugins run in declaration order at their declared phases.
-    /// (Request-path plugin dispatch is scaffolded; see the
-    /// top-level `plugins` field docs.)
+    /// Plugins run in declaration order at their declared phases
+    /// (request-path dispatch, DW-157). Routes without plugins take
+    /// the untouched fast path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
     /// SCALE-12 (#191): per-route filter-chain ordering and dry-run

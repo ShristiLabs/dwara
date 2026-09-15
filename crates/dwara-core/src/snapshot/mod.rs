@@ -1798,11 +1798,12 @@ fn validate_quotas(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
 /// Validate the `gateway.plugins` list (DW-055 / DW-119): each plugin
 /// must set exactly one of `wasm` or `native` (mutually exclusive), and
 /// must declare a non-empty `phases` list. Duplicate plugin names are
-/// flagged. (The plugin runtime is scaffolded: config shape is checked
-/// here; loading and dispatching the chain on the request path is
-/// landing iteratively.) A `wasm` plugin's file existence is
-/// checked by the WASM lifecycle manager at load time, not here (the
-/// file may not be present in the validation environment).
+/// flagged. Route references to unknown names are rejected (see the
+/// route validation pass). A `wasm` plugin's file existence and
+/// compilability are checked by the WASM lifecycle manager at LOAD
+/// time (DW-157: a broken .wasm is marked crashed there and routes
+/// referencing it answer 500 fail-closed), not here — the file may not
+/// be present in the validation environment.
 fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
     let mut seen = std::collections::BTreeSet::new();
     for p in &gateway.plugins {
@@ -5806,8 +5807,19 @@ pub fn validate(gateway: &Gateway) -> Vec<ValidationIssue> {
             }
         }
         // DW-055/DW-119: route plugin references must name a plugin
-        // defined in the top-level `plugins` list.
+        // defined in the top-level `plugins` list, and each name at
+        // most once (DW-157: the request-path chain executes every
+        // reference, so a duplicate would run the plugin twice).
+        let mut route_plugins = std::collections::BTreeSet::new();
         for p in &r.plugins {
+            if !route_plugins.insert(p.as_str()) {
+                issues.push(issue(
+                    "route",
+                    &r.name,
+                    "plugins",
+                    format!("references plugin '{p}' more than once"),
+                ));
+            }
             if !plugin_names.contains(p.as_str()) {
                 issues.push(issue(
                     "route",

@@ -14,8 +14,8 @@
 //! ## Phase contract (section 9.3)
 //!
 //! The phases and their outcome semantics mirror the proxy-wasm host
-//! exactly (see `wasm::runner::PhaseOutcome` when the `wasm` feature is
-//! enabled). The four HTTP filter phases are:
+//! exactly (see `wasm::runner::PhaseOutcome`). The four HTTP filter
+//! phases are:
 //!
 //! 1. `request_headers` -- after route resolution, before authn.
 //! 2. `request_body` -- after authn/authz/rate-limit, before upstream.
@@ -28,8 +28,8 @@
 //! ## Unified dispatch
 //!
 //! [`PluginChain`] is the single integration seam the dataplane calls.
-//! Given a route's plugin names, the loaded WASM runner (when the `wasm`
-//! feature is on), and the native registry, it builds the per-request
+//! Given a route's plugin names, the loaded WASM runner, and the native
+//! registry, it builds the per-request
 //! execution list combining native filters and WASM instances IN PHASE
 //! ORDER (deterministic, using the same ordering logic as
 //! `wasm::lifecycle::PluginLifecycle::phase_order`). It exposes the same
@@ -40,21 +40,25 @@
 //!
 //! `plugins` depends on `config` only. It does NOT depend on `wasm`:
 //! the unified chain is generic over a [`WasmDispatch`] adapter so the
-//! `wasm` domain (which may depend on `plugins`) can bridge its
-//! per-request instances into the chain without an upward import. This
-//! keeps the dependency direction strictly downward.
+//! `wasm` domain (which depends on `plugins`) can bridge its per-request
+//! instances into the chain without an upward import. This keeps the
+//! dependency direction strictly downward.
 //!
-//! ## Feature gate
+//! ## Dispatch wiring (DW-157)
 //!
-//! The module is feature-gated behind the `plugins` cargo feature
-//! (default OFF). When `plugins` is on but `wasm` is off, only native
-//! filters work; when both are on, both work. The unified dispatch
-//! handles both.
+//! Both filter paths compile unconditionally in the OSS build (there
+//! are no cargo features for plugins): the dataplane builds one
+//! [`PluginChain`] per request on routes that reference plugins
+//! (`dataplane::plugin_dispatch`) and drives it at the four phase
+//! points above, always through the `wasm` domain's `WasmChainAdapter`
+//! (native-only chains carry an EMPTY instance set, so every per-name
+//! WASM dispatch passes through). [`NoWasm`] remains the no-op adapter
+//! for tests.
 
 pub mod chain;
 pub mod filter;
 pub mod registry;
 
-pub use chain::{ChainOutcome, NoWasm, PluginChain, WasmDispatch};
+pub use chain::{ChainOutcome, NativeCreateFailure, NoWasm, PluginChain, WasmDispatch};
 pub use filter::{FilterOutcome, LocalResponse, NativeFilter};
 pub use registry::{NativeFilterFactory, NativeRegistry, RegistryError};

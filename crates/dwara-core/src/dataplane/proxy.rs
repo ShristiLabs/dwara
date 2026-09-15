@@ -272,12 +272,14 @@ use crate::config::net::peer_is_trusted;
 use crate::config::{
     Consumer, ConsumerType, Gateway, NameValueMatch, PathRewrite, Route, RouteAction, RouteMatch,
 };
+use crate::dataplane::plugin_dispatch::{self, RequestPlugins};
 use crate::dataplane::split::{mint_affinity_id, read_cookie};
 use crate::dataplane::upstream::{
     refresh_observation_gauges, UpstreamBody, UpstreamError, UpstreamRegistry,
 };
 use crate::extensions::rate_limiter::{RateLimitEngine, RateLimitOutcome};
 use crate::observability::{self, AccessRecord, ListenerLabel, Observability};
+use crate::plugins::NativeRegistry;
 use crate::resilience::retries::RetryParams;
 use crate::security::authn::{
     AuthError, Authenticator, CompositeAuthenticator, Identity, JwksCacheEntry,
@@ -285,6 +287,7 @@ use crate::security::authn::{
 use crate::snapshot::RouteTable;
 use crate::snapshot::{ConfigState, Snapshot};
 use crate::state::store::StateStore;
+use crate::wasm::lifecycle::PluginLifecycle;
 
 /// Body type of every proxied/gateway-generated response: a small
 /// fully-buffered gateway message (`Full`), the untouched streaming
@@ -888,6 +891,23 @@ pub struct DataPlane {
     /// per request (an Arc bump), and in-flight lookups keep the
     /// reader they loaded across a swap. None = geo-UNKNOWN.
     geoip: arc_swap::ArcSwapOption<crate::security::geoip::GeoipDb>,
+    /// DW-157: the proxy-wasm plugin lifecycle — loaded/compiled with
+    /// every config generation (checksum-keyed: an unchanged plugin
+    /// keeps its health state, a changed one resets). ONE lifecycle
+    /// lives on the dataplane across generations so crash/health state
+    /// survives a reload of an unchanged plugin set; `reload_plugins`
+    /// (called from `new` and every `refresh`) re-loads it wholesale.
+    plugins: Arc<PluginLifecycle>,
+    /// DW-157: the CURRENT generation's plugin configs keyed by name —
+    /// pre-keyed once per generation so the per-request chain build
+    /// (`plugin_dispatch::RequestPlugins::build`) borrows a ready map
+    /// instead of allocating one on the hot path.
+    plugin_configs: ArcSwap<HashMap<String, crate::config::PluginConfig>>,
+    /// DW-157: the native filter registry. Compiled-in filters register
+    /// factories here at startup; config selects one with `native:` on
+    /// a plugin. Empty until something registers (a config referencing
+    /// an unregistered name fails closed at request time).
+    native_plugins: NativeRegistry,
     /// DW-031: the Redis connection for the distributed rate limiter
     /// (ent feature only). Set once at startup by dwara-bin when the
     /// config carries a `redis_rate_limiter` block AND the license
@@ -1166,6 +1186,9 @@ impl DataPlane {
             response_cache: Arc::new(crate::dataplane::response_cache::ResponseCache::default()),
             analytics: arc_swap::ArcSwapOption::empty(),
             geoip: arc_swap::ArcSwapOption::empty(),
+            plugins: Arc::new(PluginLifecycle::new()),
+            plugin_configs: ArcSwap::from_pointee(HashMap::new()),
+            native_plugins: NativeRegistry::new(),
             #[cfg(feature = "ent")]
             redis_conn: std::sync::RwLock::new(None),
             #[cfg(feature = "ent")]
@@ -1181,6 +1204,9 @@ impl DataPlane {
         // every subsequent generation; construction builds the FIRST
         // one inline, so both paths must seed the collector).
         dp.obs.set_route_slos(slos);
+        // DW-157: the startup generation's plugins (refresh() handles
+        // every subsequent generation).
+        dp.reload_plugins();
         dp.rebuild_authn();
         // DW-094 (Ent): apply the edge's locality context (from env vars
         // or edge labels) to every upstream's load balancer. On `refresh`,
@@ -1763,6 +1789,10 @@ impl DataPlane {
         if let Some(stream) = self.record_stream() {
             stream.set_enabled(armed);
         }
+        // DW-157: the new generation's plugins (configs keyed, routes
+        // registered, .wasm loaded/compiled checksum-keyed) — plugin
+        // changes take effect on the next request, no restart.
+        self.reload_plugins();
         self.rebuild_authn();
         // DW-094 (Ent): re-apply the edge's locality context to the new
         // registry's balancers (the registry was just rebuilt with fresh
@@ -1778,6 +1808,119 @@ impl DataPlane {
     /// routes through the same generation the dataplane serves.
     pub(super) fn current(&self) -> Arc<Generation> {
         self.current.load_full()
+    }
+
+    /// DW-157: reload the plugin runtime for the CURRENT generation:
+    /// key the generation's plugin configs by name (the per-request
+    /// chain build borrows the ready map), replace the lifecycle's
+    /// route -> plugins mapping (failure-isolation bookkeeping), and
+    /// load + compile every `plugins[]` entry. The load itself is
+    /// per-plugin fail-closed (an unreadable or uncompilable .wasm is
+    /// marked Crashed and logged; routes referencing it answer 500) —
+    /// the only whole-reload failure is wasmtime engine construction,
+    /// and on THAT failure the previous lifecycle state survives
+    /// untouched (the load replaces its maps only on success):
+    /// unchanged plugins keep serving, and a plugin whose bytes changed
+    /// this generation keeps serving the OLD bytes until the next
+    /// successful reload. A plugin whose definition (config fields) or
+    /// .wasm checksum changed invalidates the response cache of every
+    /// route referencing it (DW-037 epoch bump — stored bytes were
+    /// shaped by the old plugin and must never replay). Called from
+    /// `new` and every `refresh`, so plugins hot-swap with generations
+    /// exactly like the rest of the compiled state.
+    fn reload_plugins(&self) {
+        let gen = self.current();
+        let gateway = gen.snapshot.gateway();
+        let previous_configs = self.plugin_configs.load_full();
+        // Pre-load checksums (the lifecycle computes them): a byte
+        // change with an unchanged route is the cache-invalidation
+        // trigger the route-equality check in `note_generation` cannot
+        // see.
+        let old_checksums: HashMap<String, String> = gateway
+            .plugins
+            .iter()
+            .filter_map(|p| {
+                self.plugins
+                    .get_plugin(&p.name)
+                    .map(|lp| (p.name.clone(), lp.checksum.clone()))
+            })
+            .collect();
+        let mut configs = HashMap::with_capacity(gateway.plugins.len());
+        for plugin in &gateway.plugins {
+            configs.insert(plugin.name.clone(), plugin.clone());
+        }
+        self.plugin_configs.store(Arc::new(configs));
+        let mut routes = HashMap::with_capacity(gateway.routes.len());
+        for route in &gateway.routes {
+            if !route.plugins.is_empty() {
+                routes.insert(route.name.clone(), route.plugins.clone());
+            }
+        }
+        self.plugins.set_route_plugins(routes);
+        if let Err(e) = self.plugins.load(&gateway.plugins) {
+            tracing::error!(
+                code = "plugin_runtime_unavailable",
+                "DW-157: the plugin runtime could not be constructed: {e}; the \
+                 previous plugin state keeps serving (changed plugins keep their \
+                 old bytes) until the next successful reload"
+            );
+            return;
+        }
+        // DW-037/DW-157: a plugin whose definition or bytes changed
+        // invalidates every route referencing it. Only a PREVIOUS
+        // non-empty plugin set can have shaped cached bytes — the first
+        // load (startup) bumps nothing.
+        if !previous_configs.is_empty() {
+            let mut changed: Vec<&str> = Vec::new();
+            for plugin in &gateway.plugins {
+                let config_changed = previous_configs.get(&plugin.name) != Some(plugin);
+                let new_checksum = self.plugins.get_plugin(&plugin.name).map(|lp| lp.checksum);
+                let checksum_changed = old_checksums.get(&plugin.name) != new_checksum.as_ref();
+                if config_changed || checksum_changed {
+                    changed.push(plugin.name.as_str());
+                }
+            }
+            if !changed.is_empty() {
+                for route in &gateway.routes {
+                    if route.plugins.iter().any(|n| changed.contains(&n.as_str())) {
+                        self.response_cache.bump_route(&route.name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// DW-157: the native filter registry. Compiled-in filters register
+    /// factories here at startup (config selects one with `native:` on
+    /// a plugin); the dataplane's per-request chain resolves names
+    /// against it.
+    pub fn native_plugin_registry(&self) -> &NativeRegistry {
+        &self.native_plugins
+    }
+
+    /// DW-157: build the per-request plugin chain for `route` (the
+    /// fail-closed health gate + WASM instantiation + unified chain).
+    /// `Ok(None)` for a plugin-less route (zero allocations, the guard
+    /// on the configs map never even loads); the `Err` response is
+    /// returned to the client immediately by the caller. pub(super):
+    /// the response cache's background revalidation (DW-037) runs the
+    /// response phases on its refresh path through the same gate.
+    pub(super) fn build_request_plugins(
+        &self,
+        route: &Route,
+        rid: &str,
+    ) -> Result<Option<RequestPlugins>, plugin_dispatch::PluginExit> {
+        if route.plugins.is_empty() {
+            return Ok(None);
+        }
+        RequestPlugins::build(
+            &self.plugins,
+            &self.plugin_configs.load(),
+            &self.native_plugins,
+            route,
+            &self.obs,
+            rid,
+        )
     }
 
     /// DW-091: apply new service split weights atomically (transient,
@@ -3698,6 +3841,46 @@ where
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
     let mut req = req;
+
+    // Plugin chain (DW-157): the earliest post-resolution phase —
+    // `request_headers` runs BEFORE authn (the documented contract, so
+    // authn sees plugin-modified headers). Built only when the route
+    // references plugins: a plugin-less route gets `None` here before
+    // any allocation and skips every phase call below unchanged (the
+    // fast path this pipeline is tuned for). The health gate is
+    // fail-closed: a Crashed/Disabled/not-loaded plugin (or a native
+    // name missing from the registry) answers 500 `plugin_unavailable`
+    // on THIS route only. `RequestPlugins`' Drop runs `on_done` on
+    // every exit path from here on.
+    let mut plugins = match dp.build_request_plugins(route, rid) {
+        Ok(plugins) => plugins,
+        Err(resp) => {
+            rec.plugin_short_circuit = true;
+            return *resp;
+        }
+    };
+    if let Some(p) = plugins.as_mut() {
+        // The proxy-wasm `:path` convention: the full request target
+        // (path + query). See plugin_dispatch's header conventions.
+        let method = req.method().clone();
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_else(|| req.uri().path().to_string());
+        if let Err(resp) = p.request_headers_phase(
+            &method,
+            &path_and_query,
+            req.headers_mut(),
+            &dp.obs,
+            rid,
+            &route.name,
+        ) {
+            rec.plugin_short_circuit = true;
+            return *resp;
+        }
+    }
+
     // Anomaly scoring (DW-090): lightweight statistical detection of
     // abusive request patterns. Runs AFTER the WAF-lite filter (which
     // is in the caller, `handle`) and BEFORE the route limits — it is
@@ -4635,118 +4818,92 @@ where
     // buffered bytes are replayed to the action below (proxy or mock
     // alike). A cache HIT skips validation (the cached response was
     // already validated when it was first fetched).
+    //
+    // DW-157: the plugin `request_body` phase (when the route's chain
+    // declares it) runs FIRST — buffering the body within the route's
+    // body cap (over-cap fails closed, 500 `plugin_body_too_large`),
+    // letting the chain rewrite the bytes — so validation sees the
+    // POST-plugin body, the body the action will actually dispatch. A
+    // cache HIT skips the plugin body phase too (no forward happens).
+    let cache_hit = replayed.is_some();
     let mut resp = if let Some(resp) = replayed {
         resp
-    } else {
-        // Validate the request body before dispatching the action. On
-        // success, the body is replaced with the buffered bytes (a
-        // `Full<Bytes>` body) so the action sees the full body. On
-        // failure, a 400 is returned immediately.
-        if let Some(rv) = &route.request_validation {
-            match validate_and_replay_body(req, &rv.body_schema).await {
-                Ok(validated_req) => {
-                    dispatch_action(
-                        validated_req,
-                        route,
-                        &gen,
-                        idx,
-                        service,
-                        &params,
-                        peer,
-                        identity.as_ref(),
-                        rid,
-                        rec,
-                        &mut global_permit,
-                        dp,
-                        client_cert.as_ref(),
-                        &applicable_policies,
-                    )
-                    .await
-                }
-                Err(violation) => {
-                    // SEC-14: dry-run mode logs the violation but does
-                    // NOT reject the request. The body is replayed
-                    // (already buffered by validate_and_replay_body)
-                    // and forwarded to the action. The metric
-                    // `dwara_policy_dry_run_total{phase="request_validation"}`
-                    // is incremented.
-                    if rv.dry_run {
-                        tracing::warn!(
-                            code = "validation_failed_dry_run",
-                            request_id = %rid,
-                            route = %route.name,
-                            path = %violation,
-                            "request body failed validation (dry-run: request forwarded)"
-                        );
-                        // Re-buffer the body for dispatch. The
-                        // validate_and_replay_body already consumed
-                        // the body; in dry-run we need to re-read it.
-                        // Since the body was already collected, we
-                        // build an empty body here — the violation
-                        // was on the already-consumed bytes. This is
-                        // a limitation of the current dry-run: the
-                        // body is consumed by validation. A future
-                        // change will buffer before validation so
-                        // dry-run can replay.
-                        //
-                        // For now, dry-run still rejects (the body
-                        // is consumed) but logs the violation with
-                        // the dry_run code so operators can monitor
-                        // before switching to enforce mode.
-                        let mut resp = simple(
-                            StatusCode::BAD_REQUEST,
-                            "validation_failed_dry_run",
-                            &format!(
-                                "request body does not match the expected schema (dry-run): {violation}"
-                            ),
-                            rid,
-                        );
-                        stamp_security_headers(
-                            &mut resp,
-                            gen.snapshot.route_table().effective_security_headers(idx),
-                        );
-                        return resp;
-                    }
-                    tracing::warn!(
-                        code = "validation_failed",
-                        request_id = %rid,
-                        route = %route.name,
-                        path = %violation,
-                        "request body failed validation"
-                    );
-                    let mut resp = simple(
-                        StatusCode::BAD_REQUEST,
-                        "validation_failed",
-                        &format!("request body does not match the expected schema: {violation}"),
-                        rid,
-                    );
-                    stamp_security_headers(
-                        &mut resp,
-                        gen.snapshot.route_table().effective_security_headers(idx),
-                    );
-                    return resp;
-                }
-            }
-        } else {
-            dispatch_action(
+    } else if plugins.as_ref().is_some_and(|p| p.needs_request_body()) {
+        let p = plugins.as_mut().expect("plugin chain checked above");
+        match p
+            .request_body_phase(
                 req,
-                route,
-                &gen,
-                idx,
-                service,
-                &params,
-                peer,
-                identity.as_ref(),
+                plugin_dispatch::plugin_body_cap(route),
+                &dp.obs,
                 rid,
-                rec,
-                &mut global_permit,
-                dp,
-                client_cert.as_ref(),
-                &applicable_policies,
+                &route.name,
             )
             .await
+        {
+            Ok(buffered) => {
+                dispatch_validated(
+                    buffered,
+                    route,
+                    &gen,
+                    idx,
+                    service,
+                    &params,
+                    peer,
+                    identity.as_ref(),
+                    rid,
+                    rec,
+                    &mut global_permit,
+                    dp,
+                    client_cert.as_ref(),
+                    &applicable_policies,
+                )
+                .await
+            }
+            Err(resp) => {
+                rec.plugin_short_circuit = true;
+                return *resp;
+            }
         }
+    } else {
+        dispatch_validated(
+            req,
+            route,
+            &gen,
+            idx,
+            service,
+            &params,
+            peer,
+            identity.as_ref(),
+            rid,
+            rec,
+            &mut global_permit,
+            dp,
+            client_cert.as_ref(),
+            &applicable_policies,
+        )
+        .await
     };
+
+    // Plugin `response_headers` phase (DW-157): after the response
+    // arrives (any action), before masking (the documented contract).
+    // Uniform across actions — plugins attach to the ROUTE, and a
+    // respond/redirect/mock response is as much "the route's response"
+    // as a proxied one. `:status` rides the map for visibility; the
+    // status itself is pipeline-owned. A cache HIT skips the phase (the
+    // stored bytes/headers are post-plugin, the same replay semantics
+    // masking and the transforms follow — replaying them would apply a
+    // header-stamping or body-rewriting plugin twice).
+    if !cache_hit {
+        if let Some(p) = plugins.as_mut() {
+            let status = resp.status();
+            if let Err(short) =
+                p.response_headers_phase(status, resp.headers_mut(), &dp.obs, rid, &route.name)
+            {
+                rec.plugin_short_circuit = true;
+                return *short;
+            }
+        }
+    }
 
     // Response field masking (DW-029), the decoration tail's FIRST
     // stage and the security floor of the response path: the effective
@@ -4774,6 +4931,36 @@ where
                 rid,
             )
             .await;
+        }
+    }
+
+    // Plugin `response_body` phase (DW-157): after masking, before the
+    // operator transforms and compression (the documented contract —
+    // the operator's ops keep the final word over the bytes, the same
+    // philosophy the rest of the tail follows). Only chains declaring
+    // the phase buffer anything: masking already established the
+    // buffered path when it ran, otherwise the phase buffers within
+    // the route's body cap (over-cap fails closed, 500
+    // `plugin_body_too_large`). Bodiless statuses pass through. A
+    // cache HIT skips the phase (stored bytes are post-plugin — see
+    // the response_headers note above).
+    if !cache_hit && plugins.as_ref().is_some_and(|p| p.needs_response_body()) {
+        let p = plugins.as_mut().expect("plugin chain checked above");
+        match p
+            .response_body_phase(
+                resp,
+                plugin_dispatch::plugin_body_cap(route),
+                &dp.obs,
+                rid,
+                &route.name,
+            )
+            .await
+        {
+            Ok(passed) => resp = passed,
+            Err(short) => {
+                rec.plugin_short_circuit = true;
+                return *short;
+            }
         }
     }
 
@@ -4920,6 +5107,142 @@ where
         apply_rate_headers(resp.headers_mut(), limit, remaining, reset_epoch_s);
     }
     resp
+}
+
+/// Request validation (DW-047) + the route action dispatch, extracted
+/// from `handle_routed` so the plugin request_body phase (DW-157) hands
+/// its buffered post-plugin body through the SAME validation path the
+/// un-buffered body takes: when the route carries a
+/// `request_validation.body_schema`, the body is validated against the
+/// minimal JSON-Schema subset before the action; a mismatch answers
+/// 400 `validation_failed` (dry-run answers 400 with the dry-run code,
+/// the pre-DW-157 limitation preserved verbatim). Without validation
+/// the action runs directly.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_validated<B>(
+    req: Request<B>,
+    route: &Route,
+    gen: &Arc<Generation>,
+    idx: usize,
+    service: Option<&crate::config::Service>,
+    params: &[(String, String)],
+    peer: IpAddr,
+    identity: Option<&Identity>,
+    rid: &str,
+    rec: &mut AccessRecord,
+    global_permit: &mut Option<OwnedSemaphorePermit>,
+    dp: &Arc<DataPlane>,
+    client_cert: Option<&Arc<crate::security::authn::ClientCertificate>>,
+    applicable_policies: &[String],
+) -> Response<ProxyBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    if let Some(rv) = &route.request_validation {
+        match validate_and_replay_body(req, &rv.body_schema).await {
+            Ok(validated_req) => {
+                dispatch_action(
+                    validated_req,
+                    route,
+                    gen,
+                    idx,
+                    service,
+                    params,
+                    peer,
+                    identity,
+                    rid,
+                    rec,
+                    global_permit,
+                    dp,
+                    client_cert,
+                    applicable_policies,
+                )
+                .await
+            }
+            Err(violation) => {
+                // SEC-14: dry-run mode logs the violation but does
+                // NOT reject the request. The body is replayed
+                // (already buffered by validate_and_replay_body)
+                // and forwarded to the action. The metric
+                // `dwara_policy_dry_run_total{phase="request_validation"}`
+                // is incremented.
+                if rv.dry_run {
+                    tracing::warn!(
+                        code = "validation_failed_dry_run",
+                        request_id = %rid,
+                        route = %route.name,
+                        path = %violation,
+                        "request body failed validation (dry-run: request forwarded)"
+                    );
+                    // Re-buffer the body for dispatch. The
+                    // validate_and_replay_body already consumed
+                    // the body; in dry-run we need to re-read it.
+                    // Since the body was already collected, we
+                    // build an empty body here — the violation
+                    // was on the already-consumed bytes. This is
+                    // a limitation of the current dry-run: the
+                    // body is consumed by validation. A future
+                    // change will buffer before validation so
+                    // dry-run can replay.
+                    //
+                    // For now, dry-run still rejects (the body
+                    // is consumed) but logs the violation with
+                    // the dry_run code so operators can monitor
+                    // before switching to enforce mode.
+                    let mut resp = simple(
+                        StatusCode::BAD_REQUEST,
+                        "validation_failed_dry_run",
+                        &format!(
+                            "request body does not match the expected schema (dry-run): {violation}"
+                        ),
+                        rid,
+                    );
+                    stamp_security_headers(
+                        &mut resp,
+                        gen.snapshot.route_table().effective_security_headers(idx),
+                    );
+                    return resp;
+                }
+                tracing::warn!(
+                    code = "validation_failed",
+                    request_id = %rid,
+                    route = %route.name,
+                    path = %violation,
+                    "request body failed validation"
+                );
+                let mut resp = simple(
+                    StatusCode::BAD_REQUEST,
+                    "validation_failed",
+                    &format!("request body does not match the expected schema: {violation}"),
+                    rid,
+                );
+                stamp_security_headers(
+                    &mut resp,
+                    gen.snapshot.route_table().effective_security_headers(idx),
+                );
+                resp
+            }
+        }
+    } else {
+        dispatch_action(
+            req,
+            route,
+            gen,
+            idx,
+            service,
+            params,
+            peer,
+            identity,
+            rid,
+            rec,
+            global_permit,
+            dp,
+            client_cert,
+            applicable_policies,
+        )
+        .await
+    }
 }
 
 /// Stamp the route's security-header policy (DW-028) onto a gateway

@@ -3,11 +3,10 @@
 //!
 //! The [`PluginRunner`] holds compiled plugin modules keyed by name and
 //! provides per-request methods to run each phase. The proxy pipeline
-//! calls these methods at the appropriate points in the request path.
-//!
-//! When the `wasm` feature is not enabled, this module is not compiled
-//! and the proxy pipeline skips plugin calls entirely (the config
-//! `plugins` block is accepted but inert).
+//! calls these methods at the appropriate points in the request path
+//! (wired end-to-end by `dataplane::plugin_dispatch`, DW-157). This
+//! module compiles unconditionally in the OSS build — there are no
+//! cargo features for the plugin runtime.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -116,8 +115,11 @@ impl PluginRunner {
     }
 
     /// Create per-request instances for all plugins named on a route.
-    /// Returns `None` if no plugins are configured or the `wasm`
-    /// feature is not enabled.
+    /// Returns `None` when no named plugin has a compiled module (the
+    /// caller treats that as fail-closed unavailability when the route
+    /// does reference WASM plugins — DW-157). A plugin whose module
+    /// fails to instantiate is skipped here with a warn; the caller is
+    /// expected to verify coverage via [`PluginInstances::contains`].
     pub fn instantiate(&self, plugin_names: &[String]) -> Option<PluginInstances> {
         if plugin_names.is_empty() {
             return None;
@@ -148,9 +150,46 @@ impl PluginRunner {
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
+
+    /// Whether a compiled module exists for `name` (DW-157). The
+    /// lifecycle manager uses this at load time to mark plugins whose
+    /// .wasm failed to read or compile as crashed (fail-closed),
+    /// instead of leaving them reading as healthy with no module
+    /// behind them.
+    pub fn has(&self, name: &str) -> bool {
+        self.modules.contains_key(name)
+    }
 }
 
 impl PluginInstances {
+    /// The empty instance set (DW-157): the adapter for chains with no
+    /// WASM plugins (native-only routes) — every per-name dispatch
+    /// passes through unchanged.
+    pub fn empty() -> Self {
+        Self {
+            instances: Vec::new(),
+        }
+    }
+
+    /// Whether an instance exists for `name`. The dataplane's
+    /// fail-closed gate (DW-157) uses this to verify that instantiation
+    /// covered every WASM plugin a route references before the request
+    /// proceeds.
+    pub fn contains(&self, name: &str) -> bool {
+        self.instances.iter().any(|(n, _)| n == name)
+    }
+
+    /// The named plugin's instance (DW-157). The unified-chain adapter
+    /// dispatches per plugin NAME (the chain interleaves native filters
+    /// between WASM entries), so it needs mutable access to exactly one
+    /// instance at a time. `None` when no instance exists for `name`.
+    pub fn instance_mut(&mut self, name: &str) -> Option<&mut PluginInstance> {
+        self.instances
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, inst)| inst)
+    }
+
     /// Run `proxy_on_request_headers` on all instances. Returns the
     /// outcome and the (possibly modified) headers.
     pub fn on_request_headers(

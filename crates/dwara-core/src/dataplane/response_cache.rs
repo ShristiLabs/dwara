@@ -894,31 +894,84 @@ impl ResponseCache {
         )
         .await;
         // The foreground store stage expects post-masking/
-        // post-transform bytes; apply the same stages here.
-        if let Some(masking) = gen.snapshot.route_table().masking(idx) {
-            resp = transforms::mask_response_body(
-                resp,
-                masking,
-                flow.identity
-                    .as_ref()
-                    .map(|i| i.groups.as_slice())
-                    .unwrap_or(&[]),
-                &route.name,
-                flow.identity.as_ref().map(|i| i.consumer_name.as_str()),
+        // post-transform bytes; apply the same stages here. The plugin
+        // response phases (DW-157) run in the SAME positions the
+        // foreground runs them (headers before masking, body between
+        // masking and the transforms) so the stored bytes are
+        // uniformly post-plugin regardless of which path refreshed the
+        // entry. A plugin failure fails closed: the 500 replaces the
+        // upstream response and flows to the store stage, which vetoes
+        // a non-storable outcome (the stale entry stands until the next
+        // refresh).
+        let mut plugin_failed = false;
+        let mut plugins = match dp.build_request_plugins(route, &rid) {
+            Ok(plugins) => plugins,
+            Err(short) => {
+                rec.plugin_short_circuit = true;
+                resp = *short;
+                plugin_failed = true;
+                None
+            }
+        };
+        if let Some(p) = plugins.as_mut() {
+            let status = resp.status();
+            if let Err(short) = p.response_headers_phase(
+                status,
+                resp.headers_mut(),
+                dp.observability(),
                 &rid,
-            )
-            .await;
+                &route.name,
+            ) {
+                rec.plugin_short_circuit = true;
+                resp = *short;
+                plugin_failed = true;
+            }
         }
-        if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
-            resp = transforms::transform_response_body(resp, compiled, &rid).await;
-        }
-        if let Some(ops) = route
-            .transforms
-            .as_ref()
-            .and_then(|t| t.response.as_ref())
-            .and_then(|r| r.headers.as_ref())
-        {
-            transforms::apply_header_ops(resp.headers_mut(), ops);
+        if !plugin_failed {
+            if let Some(masking) = gen.snapshot.route_table().masking(idx) {
+                resp = transforms::mask_response_body(
+                    resp,
+                    masking,
+                    flow.identity
+                        .as_ref()
+                        .map(|i| i.groups.as_slice())
+                        .unwrap_or(&[]),
+                    &route.name,
+                    flow.identity.as_ref().map(|i| i.consumer_name.as_str()),
+                    &rid,
+                )
+                .await;
+            }
+            if plugins.as_ref().is_some_and(|p| p.needs_response_body()) {
+                let p = plugins.as_mut().expect("plugin chain checked above");
+                match p
+                    .response_body_phase(
+                        resp,
+                        super::plugin_dispatch::plugin_body_cap(route),
+                        dp.observability(),
+                        &rid,
+                        &route.name,
+                    )
+                    .await
+                {
+                    Ok(passed) => resp = passed,
+                    Err(short) => {
+                        rec.plugin_short_circuit = true;
+                        resp = *short;
+                    }
+                }
+            }
+            if let Some(compiled) = gen.snapshot.route_table().response_body_ops(idx) {
+                resp = transforms::transform_response_body(resp, compiled, &rid).await;
+            }
+            if let Some(ops) = route
+                .transforms
+                .as_ref()
+                .and_then(|t| t.response.as_ref())
+                .and_then(|r| r.headers.as_ref())
+            {
+                transforms::apply_header_ops(resp.headers_mut(), ops);
+            }
         }
         // The response is discarded: only the store (and its metrics)
         // matter. X-Cache stamping on it is harmless and consistent.

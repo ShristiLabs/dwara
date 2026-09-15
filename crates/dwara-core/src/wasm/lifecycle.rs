@@ -13,7 +13,11 @@
 //! A crashed plugin returns 500 on affected routes only, never
 //! gateway-wide. The plugin lifecycle manager tracks which plugins
 //! are healthy and which routes use them. When a plugin crashes, only
-//! the routes that reference that plugin are affected.
+//! the routes that reference that plugin are affected. The dataplane
+//! reloads plugins with every config generation (DW-157): a plugin
+//! whose .wasm fails to read or compile is marked Crashed HERE, at
+//! load time, so routes referencing it fail closed from the first
+//! request of the new generation.
 //!
 //! ## Hot-swap on reload
 //!
@@ -21,11 +25,8 @@
 //! plugins that changed (by checksum) and swaps them in atomically.
 //! Plugins that did not change are reused (no recompilation).
 //!
-//! ## Feature gate
-//!
-//! The `wasm` cargo feature must be enabled (this module builds on
-//! the DW-055 proxy-wasm host). Without it, the module is not
-//! compiled and the gateway runs without plugin support.
+//! This module compiles unconditionally in the OSS build — there are
+//! no cargo features for the plugin runtime.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,8 +76,13 @@ impl PluginLifecycle {
     }
 
     /// Load plugins from config. Compiles each plugin's .wasm module
-    /// and stores it. Plugins that fail to compile are marked as
-    /// Crashed (not skipped -- the operator should know).
+    /// and stores it. Failure isolation is per plugin (DW-157): a
+    /// .wasm that cannot be read or compiled marks THAT plugin Crashed
+    /// (logged, visible to the operator at publish time) instead of
+    /// failing the whole publish — routes referencing a crashed plugin
+    /// answer 500 fail-closed, every other plugin keeps serving. The
+    /// only whole-load failure is engine construction
+    /// ([`LoadError::Compile`]).
     pub fn load(&self, configs: &[PluginConfig]) -> Result<(), LoadError> {
         let mut plugins = HashMap::new();
 
@@ -89,29 +95,56 @@ impl PluginLifecycle {
                 Some(p) => p.clone(),
                 None => continue,
             };
-            // Read the .wasm file and compute checksum.
-            let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| LoadError::FileRead {
-                plugin: config.name.clone(),
-                path: wasm_path.clone(),
-                error: e.to_string(),
-            })?;
-
-            let checksum = sha256_hex(&wasm_bytes);
-
-            // Check if the plugin changed (hot-swap).
-            let existing = self.plugins.read().unwrap();
-            let health = if let Some(prev) = existing.get(&config.name) {
-                if prev.checksum == checksum {
-                    // Unchanged: keep the previous health.
-                    prev.health.clone()
-                } else {
-                    // Changed: reset to Healthy.
-                    PluginHealth::Healthy
+            // Read the .wasm file and compute checksum. A read failure
+            // is recorded with an EMPTY checksum (never produced by a
+            // successful read) so a persistently broken file keeps
+            // incrementing its crash count across reloads.
+            let (checksum, health) = match std::fs::read(&wasm_path) {
+                Ok(wasm_bytes) => {
+                    let checksum = sha256_hex(&wasm_bytes);
+                    // Check if the plugin changed (hot-swap).
+                    let existing = self.plugins.read().unwrap();
+                    let health = if let Some(prev) = existing.get(&config.name) {
+                        if prev.checksum == checksum {
+                            // Unchanged: keep the previous health.
+                            prev.health.clone()
+                        } else {
+                            // Changed: reset to Healthy.
+                            PluginHealth::Healthy
+                        }
+                    } else {
+                        PluginHealth::Healthy
+                    };
+                    drop(existing);
+                    (checksum, health)
                 }
-            } else {
-                PluginHealth::Healthy
+                Err(e) => {
+                    let crash_count = {
+                        let existing = self.plugins.read().unwrap();
+                        match existing.get(&config.name) {
+                            Some(prev) => match &prev.health {
+                                PluginHealth::Crashed { crash_count, .. } => crash_count + 1,
+                                _ => 1,
+                            },
+                            None => 1,
+                        }
+                    };
+                    tracing::error!(
+                        code = "plugin_load_failed",
+                        plugin = %config.name,
+                        path = %wasm_path,
+                        error = %e,
+                        "DW-157: plugin .wasm unreadable; routes referencing it fail closed (500)"
+                    );
+                    (
+                        String::new(),
+                        PluginHealth::Crashed {
+                            error: format!("cannot read {wasm_path}: {e}"),
+                            crash_count,
+                        },
+                    )
+                }
             };
-            drop(existing);
 
             plugins.insert(
                 config.name.clone(),
@@ -126,10 +159,42 @@ impl PluginLifecycle {
         // Build the plugin runner.
         let runner = PluginRunner::new(configs).map_err(|e| LoadError::Compile { error: e })?;
 
+        // A WASM plugin with no compiled module (read failed above, or
+        // the module failed to compile inside the runner) must read as
+        // Crashed, not Healthy: a Healthy entry with no module would
+        // otherwise pass the request-path health gate and then silently
+        // skip dispatch. Fail closed (DW-157).
+        {
+            for (name, lp) in plugins.iter_mut() {
+                if lp.config.wasm.is_some()
+                    && !runner.has(name)
+                    && matches!(lp.health, PluginHealth::Healthy)
+                {
+                    tracing::error!(
+                        code = "plugin_compile_failed",
+                        plugin = %name,
+                        "DW-157: plugin .wasm failed to compile; routes referencing it fail closed (500)"
+                    );
+                    lp.health = PluginHealth::Crashed {
+                        error: "plugin failed to compile".to_string(),
+                        crash_count: 1,
+                    };
+                }
+            }
+        }
+
         *self.plugins.write().unwrap() = plugins;
         *self.runner.write().unwrap() = Some(runner);
 
         Ok(())
+    }
+
+    /// Replace the route -> plugins mapping wholesale (DW-157). The
+    /// dataplane calls this on every generation swap so routes removed
+    /// from the config stop mapping to plugin names (a per-route
+    /// `register_route` insert-only API would leak stale routes).
+    pub fn set_route_plugins(&self, routes: HashMap<String, Vec<String>>) {
+        *self.route_plugins.write().unwrap() = routes;
     }
 
     /// Register which plugins a route uses (for failure isolation).
@@ -338,29 +403,19 @@ impl Default for PluginLifecycle {
     }
 }
 
-/// An error loading plugins.
+/// An error loading plugins. Per-plugin failures (an unreadable or
+/// uncompilable .wasm) do NOT appear here — they mark that plugin
+/// Crashed and the load succeeds (DW-157); only a failure that takes
+/// the whole plugin runtime down (wasmtime engine construction) does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
-    /// A .wasm file could not be read.
-    FileRead {
-        plugin: String,
-        path: String,
-        error: String,
-    },
-    /// A plugin failed to compile.
+    /// The plugin runtime could not be constructed (engine failure).
     Compile { error: String },
 }
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoadError::FileRead {
-                plugin,
-                path,
-                error,
-            } => {
-                write!(f, "plugin '{plugin}': cannot read {path}: {error}")
-            }
             LoadError::Compile { error } => {
                 write!(f, "plugin compile error: {error}")
             }
@@ -827,16 +882,71 @@ mod tests {
     }
 
     #[test]
-    fn load_error_file_read_display() {
-        let err = LoadError::FileRead {
-            plugin: "test".to_string(),
-            path: "/tmp/test.wasm".to_string(),
-            error: "not found".to_string(),
+    fn load_marks_unreadable_wasm_crashed_and_succeeds() {
+        // DW-157: a per-plugin failure must not fail the whole load —
+        // the plugin reads as Crashed (fail-closed for routes
+        // referencing it) and the crash count keeps growing across
+        // reloads of the same broken file.
+        let lifecycle = PluginLifecycle::new();
+        let configs = vec![make_plugin_config("broken", "/nonexistent/dwara-test.wasm")];
+        lifecycle
+            .load(&configs)
+            .expect("load succeeds with per-plugin isolation");
+        assert_eq!(lifecycle.plugin_count(), 1);
+        assert_eq!(lifecycle.crashed_count(), 1);
+        let plugin = lifecycle
+            .get_plugin("broken")
+            .expect("broken plugin tracked");
+        match plugin.health {
+            PluginHealth::Crashed { crash_count, .. } => assert_eq!(crash_count, 1),
+            other => panic!("expected Crashed, got {other:?}"),
+        }
+        // Reload the same broken file: still Ok, crash count grows.
+        lifecycle.load(&configs).expect("reload succeeds");
+        let plugin = lifecycle.get_plugin("broken").unwrap();
+        match plugin.health {
+            PluginHealth::Crashed { crash_count, .. } => assert_eq!(crash_count, 2),
+            other => panic!("expected Crashed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_route_plugins_replaces_wholesale() {
+        let lifecycle = PluginLifecycle::new();
+        {
+            let mut plugins = lifecycle.plugins.write().unwrap();
+            plugins.insert(
+                "broken-plugin".to_string(),
+                LoadedPlugin {
+                    config: make_plugin_config("broken-plugin", "/tmp/test.wasm"),
+                    checksum: "abc123".to_string(),
+                    health: PluginHealth::Crashed {
+                        error: "panic".to_string(),
+                        crash_count: 1,
+                    },
+                },
+            );
+        }
+        lifecycle.register_route("stale", &["broken-plugin".to_string()]);
+        assert!(lifecycle.route_should_500("stale"));
+        let mut next = HashMap::new();
+        next.insert("fresh".to_string(), vec!["broken-plugin".to_string()]);
+        lifecycle.set_route_plugins(next);
+        assert!(
+            !lifecycle.route_should_500("stale"),
+            "the replaced mapping no longer exists"
+        );
+        assert!(lifecycle.route_should_500("fresh"));
+    }
+
+    #[test]
+    fn load_error_compile_display() {
+        let err = LoadError::Compile {
+            error: "wasmtime engine failed".to_string(),
         };
         let s = format!("{err}");
-        assert!(s.contains("test"));
-        assert!(s.contains("/tmp/test.wasm"));
-        assert!(s.contains("not found"));
+        assert!(s.contains("compile"));
+        assert!(s.contains("wasmtime engine failed"));
     }
 
     #[test]

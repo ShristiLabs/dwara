@@ -2,9 +2,10 @@
 //!
 //! This module implements a proxy-wasm ABI host on top of wasmtime,
 //! allowing dwara to run community Kong/Envoy proxy-wasm filters
-//! unmodified. The host is feature-gated behind the `wasm` cargo
-//! feature (default OFF) because wasmtime + cranelift are significant
-//! binary size against the DW-026 25MB budget.
+//! unmodified. The host compiles unconditionally in the OSS build
+//! (there are no cargo features for it): `dataplane::plugin_dispatch`
+//! (DW-157) drives it on the live request path for routes that
+//! reference plugins.
 //!
 //! ## Architecture
 //!
@@ -46,11 +47,10 @@ pub mod abi;
 pub mod host;
 pub mod lifecycle;
 pub mod runner;
-// DW-119: the WASM-to-unified-chain adapter. Gated behind both the
-// `wasm` and `plugins` features: it bridges the proxy-wasm host's
-// per-request instances into the unified plugin chain (plugins domain)
-// so native filters and WASM plugins share the same phase slot. When
-// only `wasm` is on, the adapter is absent (the chain uses NoWasm).
+// DW-119: the WASM-to-unified-chain adapter. Bridges the proxy-wasm
+// host's per-request instances into the unified plugin chain (plugins
+// domain) so native filters and WASM plugins share the same phase
+// slot; compiles unconditionally alongside the rest of the host.
 pub mod adapter;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};

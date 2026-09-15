@@ -183,6 +183,15 @@
 //! - `dwara_nano_service_duration_seconds{route}` histogram (DW-106) —
 //!   nano-service `handle` call duration, by route (config-bounded
 //!   label).
+//! - `dwara_plugin_failures_total{name,reason}` counter (DW-157) —
+//!   plugin dispatch failures, by plugin name (config-bounded) and
+//!   reason (`crashed`, `disabled`, `not_loaded`, `not_registered`,
+//!   `instantiate_failed`, `trap`, `body_too_large`,
+//!   `response_stream_ended` — a closed set).
+//!   One increment per request the plugin chain answered with an error
+//!   (a plugin short-circuit via `send_http_response` is a plugin
+//!   DECISION, not a failure, and is not counted; the access-log
+//!   `plugin_short_circuit` flag marks those).
 //! - `dwara_graphql_complexity{route}` gauge (DW-099) — last query
 //!   complexity for a GraphQL-configured route (config-bounded label).
 //! - `dwara_l4_connections_total{listener,protocol}` counter (DW-103) —
@@ -336,6 +345,11 @@ pub struct AccessRecord {
     pub rate_limited: bool,
     pub broken: bool,
     pub shed: bool,
+    /// A plugin chain answered this request instead of the route's
+    /// action (DW-157): a `send_http_response` short-circuit or a
+    /// fail-closed plugin error (500 `plugin_unavailable` /
+    /// `plugin_failed` / `plugin_body_too_large`).
+    pub plugin_short_circuit: bool,
     pub status: u16,
     pub duration_ms: f64,
     /// Inbound request body bytes (PERF-12, #209): the declared
@@ -374,6 +388,7 @@ impl AccessRecord {
             rate_limited: false,
             broken: false,
             shed: false,
+            plugin_short_circuit: false,
             status: 0,
             duration_ms: 0.0,
             bytes_in: 0,
@@ -407,6 +422,7 @@ pub fn emit_access(rec: &AccessRecord) {
         rate_limited = rec.rate_limited,
         broken = rec.broken,
         shed = rec.shed,
+        plugin_short_circuit = rec.plugin_short_circuit,
         bytes_in = rec.bytes_in,
         bytes_out = bytes_out,
         "access"
@@ -821,6 +837,15 @@ pub struct Observability {
     /// (config-bounded label). Observed once per request (success,
     /// error, and timeout alike).
     nano_service_duration_seconds: HistogramVec,
+    /// DW-157: plugin dispatch failures, by plugin `name`
+    /// (config-bounded) and `reason` (the CLOSED set `crashed`,
+    /// `disabled`, `not_loaded`, `not_registered`,
+    /// `instantiate_failed`, `trap`, `body_too_large`,
+    /// `response_stream_ended`). One increment
+    /// per request the plugin chain answered with an error; a plugin's
+    /// deliberate `send_http_response` short-circuit is a decision, not
+    /// a failure, and is not counted.
+    plugin_failures_total: IntCounterVec,
     /// DW-105: post-quantum TLS handshake outcomes — a CLOSED label set
     /// (`success`, `fallback`, `disabled`), one increment per PQ-
     /// configured handshake. `success` = the X25519+ML-KEM hybrid kx
@@ -1632,6 +1657,21 @@ impl Observability {
             &["route"],
         )
         .expect("valid metric definition");
+        let plugin_failures_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_plugin_failures_total",
+                "Plugin dispatch failures (DW-157), by plugin name and \
+                 reason. name is the config-declared plugin name \
+                 (config-bounded); reason is the closed set crashed, \
+                 disabled, not_loaded, not_registered, instantiate_failed, \
+                 trap, body_too_large, response_stream_ended. Counted once \
+                 per request the plugin \
+                 chain answered with an error (a send_http_response \
+                 short-circuit is a plugin decision, not a failure).",
+            ),
+            &["name", "reason"],
+        )
+        .expect("valid metric definition");
         let tls_pq_handshakes_total = IntCounterVec::new(
             Opts::new(
                 "dwara_tls_pq_handshakes_total",
@@ -1886,6 +1926,7 @@ impl Observability {
             Box::new(a2a_sessions_total.clone()),
             Box::new(nano_service_requests_total.clone()),
             Box::new(nano_service_duration_seconds.clone()),
+            Box::new(plugin_failures_total.clone()),
             Box::new(tls_pq_handshakes_total.clone()),
             Box::new(rate_limiter_adaptive_factor.clone()),
             Box::new(rate_limiter_origin_signal_total.clone()),
@@ -1987,6 +2028,7 @@ impl Observability {
             a2a_sessions_total,
             nano_service_requests_total,
             nano_service_duration_seconds,
+            plugin_failures_total,
             tls_pq_handshakes_total,
             rate_limiter_adaptive_factor,
             rate_limiter_origin_signal_total,
@@ -2651,6 +2693,22 @@ impl Observability {
         self.nano_service_duration_seconds
             .with_label_values(&[route])
             .observe(seconds);
+    }
+
+    /// Count one plugin dispatch failure (DW-157) in
+    /// `dwara_plugin_failures_total{name,reason}`. `name` is the
+    /// config-declared plugin name (config-bounded); `reason` is one of
+    /// the closed set `crashed`, `disabled`, `not_loaded`,
+    /// `not_registered`, `instantiate_failed`, `trap`,
+    /// `body_too_large`, `response_stream_ended`. Counted once per
+    /// request the plugin chain
+    /// answered with an error — a plugin's `send_http_response`
+    /// short-circuit is a decision, not a failure, and is not counted
+    /// (the access-log `plugin_short_circuit` flag marks those).
+    pub fn record_plugin_failure(&self, name: &str, reason: &str) {
+        self.plugin_failures_total
+            .with_label_values(&[name, reason])
+            .inc();
     }
 
     /// Count one post-quantum TLS handshake outcome (DW-105) in

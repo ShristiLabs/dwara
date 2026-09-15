@@ -60,6 +60,15 @@ pub mod hardening;
 // runtime handler is feature-gated. When the feature is off the action
 // is accepted but inert (validation warns, the route returns 502).
 pub mod nano_service;
+// DW-157: request-path plugin dispatch. Wires the route `plugins`
+// list into the live request path — the fail-closed health gate over
+// the plugin lifecycle, per-request WASM instantiation, the unified
+// plugin chain (native + WASM in config order), and the four phase
+// points (request_headers before authn, request_body before the
+// action, response_headers before masking, response_body after
+// masking). Compiles unconditionally; routes without plugins take the
+// untouched fast path.
+pub mod plugin_dispatch;
 pub mod proxy;
 pub mod proxy_proto;
 // DW-102: replay time-travel debugging (pure decision replayer).

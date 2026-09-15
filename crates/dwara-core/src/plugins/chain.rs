@@ -17,9 +17,9 @@
 //! once `wasm` depends on `plugins` for the adapter). Instead, the
 //! chain is generic over a [`WasmDispatch`] trait -- a minimal
 //! per-request interface the `wasm` domain implements to bridge its
-//! `PluginInstances` into the unified chain. When the `wasm` feature is
-//! off, the chain is constructed with [`NoWasm`] and only native filters
-//! run.
+//! `PluginInstances` into the unified chain. The proxy-wasm host
+//! always compiles (DW-157); [`NoWasm`] serves native-only chains and
+//! tests.
 //!
 //! ## Attachment semantics equivalence
 //!
@@ -49,18 +49,21 @@ pub enum ChainOutcome {
     /// return this response immediately.
     LocalResponse(LocalResponse),
     /// A plugin errored (native filter error or WASM trap). The proxy
-    /// should return a 500.
-    Error(String),
+    /// should return a 500. `plugin` names the failing entry so the
+    /// dataplane can attribute the failure in logs and metrics
+    /// (`dwara_plugin_failures_total{name,reason}`, DW-157).
+    Error { plugin: String, message: String },
 }
 
 /// A minimal per-request WASM dispatch interface the `wasm` domain
 /// implements to bridge its `PluginInstances` into the unified chain.
 ///
 /// The chain calls these methods on the adapter for each WASM plugin in
-/// the phase, in order. The adapter holds the per-request WASM
-/// instances and delegates to `PluginInstances`'s phase methods. When
-/// the `wasm` feature is off, [`NoWasm`] is a no-op adapter that always
-/// returns [`ChainOutcome::Continue`].
+/// the phase, in order, passing the plugin's NAME: the adapter holds
+/// the per-request WASM instances keyed by name and dispatches to
+/// exactly that instance (so a chain interleaving native filters and
+/// WASM plugins in one phase runs each entry exactly once). [`NoWasm`]
+/// is a no-op adapter that always returns [`ChainOutcome::Continue`].
 pub trait WasmDispatch {
     /// Run `on_request_headers` for the named WASM plugin. Returns the
     /// outcome and the (possibly modified) headers.
@@ -90,9 +93,9 @@ pub trait WasmDispatch {
     fn on_done(&mut self) {}
 }
 
-/// A no-op WASM dispatch adapter for builds without the `wasm` feature
-/// (or routes with no WASM plugins). Every method returns
-/// [`ChainOutcome::Continue`] with the input unchanged.
+/// A no-op WASM dispatch adapter for native-only chains (and tests).
+/// Every method returns [`ChainOutcome::Continue`] with the input
+/// unchanged.
 #[derive(Default)]
 pub struct NoWasm;
 
@@ -123,11 +126,25 @@ impl WasmDispatch for NoWasm {
 }
 
 /// One entry in the per-request execution list: either a native filter
-/// or a reference to a WASM plugin by name (dispatched via the
-/// [`WasmDispatch`] adapter).
+/// (with its plugin name, for failure attribution) or a reference to a
+/// WASM plugin by name (dispatched via the [`WasmDispatch`] adapter).
 enum ChainEntry {
-    Native(Box<dyn NativeFilter>),
+    Native(String, Box<dyn NativeFilter>),
     Wasm(String),
+}
+
+/// A native filter whose factory errored while the chain was being
+/// built (DW-157). The configured filter could not be constructed, so
+/// it NEVER runs; the chain reports the failure instead of silently
+/// skipping the entry, and the caller must fail closed (a request the
+/// gate admitted must not proceed without a plugin its route
+/// configures).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeCreateFailure {
+    /// The config-declared plugin name (failure attribution).
+    pub plugin: String,
+    /// The factory's error message.
+    pub message: String,
 }
 
 /// The unified per-request plugin chain.
@@ -152,20 +169,25 @@ impl<W: WasmDispatch> PluginChain<W> {
     /// `plugin_names` is the route's `plugins` list (declaration order).
     /// `configs` is the gateway's top-level `plugins` list keyed by
     /// name. `registry` provides native filter factories. `wasm` is the
-    /// per-request WASM dispatch adapter (use [`NoWasm`] when the
-    /// `wasm` feature is off or the route has no WASM plugins).
+    /// per-request WASM dispatch adapter (use [`NoWasm`] for native-only
+    /// chains).
     ///
+    /// Returns the chain and the list of native entries whose factory
+    /// ERRORED ([`NativeCreateFailure`]) — fail-closed material (DW-157):
+    /// the configured filter never runs, so the caller must answer the
+    /// request with the fail-closed 500 rather than proceed without it;
+    /// the chain deliberately does NOT silently skip a reported entry.
     /// A plugin name that is neither a native filter in the registry nor
     /// a WASM plugin in `configs` is silently skipped (it was already
-    /// flagged by validation as an unknown reference). A native filter
-    /// whose factory errors is also skipped (construction failure is
-    /// logged by the caller via validation/health, not the request path).
+    /// flagged by validation as an unknown reference, and the
+    /// dataplane's health gate fails closed on it before the chain is
+    /// built).
     pub fn new(
         plugin_names: &[String],
         configs: &HashMap<String, PluginConfig>,
         registry: &NativeRegistry,
         wasm: W,
-    ) -> Self {
+    ) -> (Self, Vec<NativeCreateFailure>) {
         // The deterministic phase order: for each phase, the plugins
         // that declare it, in route-declaration order. This matches
         // wasm::lifecycle::PluginLifecycle::phase_order exactly.
@@ -177,6 +199,7 @@ impl<W: WasmDispatch> PluginChain<W> {
         ];
 
         let mut phases: HashMap<PluginPhase, Vec<ChainEntry>> = HashMap::new();
+        let mut create_failures = Vec::new();
         for phase in &phase_list {
             let mut entries = Vec::new();
             for name in plugin_names {
@@ -187,8 +210,12 @@ impl<W: WasmDispatch> PluginChain<W> {
                     continue;
                 }
                 if let Some(native_name) = &config.native {
-                    if let Ok(filter) = registry.create(native_name, &config.config) {
-                        entries.push(ChainEntry::Native(filter));
+                    match registry.create(native_name, &config.config) {
+                        Ok(filter) => entries.push(ChainEntry::Native(name.clone(), filter)),
+                        Err(e) => create_failures.push(NativeCreateFailure {
+                            plugin: name.clone(),
+                            message: e.to_string(),
+                        }),
                     }
                 } else if config.wasm.is_some() {
                     entries.push(ChainEntry::Wasm(name.clone()));
@@ -199,12 +226,20 @@ impl<W: WasmDispatch> PluginChain<W> {
             }
         }
 
-        Self { phases, wasm }
+        (Self { phases, wasm }, create_failures)
     }
 
     /// Whether the chain has any plugins at all.
     pub fn is_empty(&self) -> bool {
         self.phases.is_empty()
+    }
+
+    /// Whether at least one plugin declares the given phase. The
+    /// dataplane uses this to decide whether a body phase requires
+    /// buffering (DW-157): a route whose plugins declare no body phase
+    /// keeps its zero-buffering streaming path.
+    pub fn has_phase(&self, phase: PluginPhase) -> bool {
+        self.phases.contains_key(&phase)
     }
 
     /// Run the `request_headers` phase across all plugins in order.
@@ -219,15 +254,23 @@ impl<W: WasmDispatch> PluginChain<W> {
         let mut current = headers;
         for entry in entries.iter_mut() {
             match entry {
-                ChainEntry::Native(filter) => match filter.on_request_headers(current.clone()) {
-                    FilterOutcome::Continue { headers, .. } => current = headers,
-                    FilterOutcome::LocalResponse(resp) => {
-                        return (ChainOutcome::LocalResponse(resp), current);
+                ChainEntry::Native(name, filter) => {
+                    match filter.on_request_headers(current.clone()) {
+                        FilterOutcome::Continue { headers, .. } => current = headers,
+                        FilterOutcome::LocalResponse(resp) => {
+                            return (ChainOutcome::LocalResponse(resp), current);
+                        }
+                        FilterOutcome::Error(e) => {
+                            return (
+                                ChainOutcome::Error {
+                                    plugin: name.clone(),
+                                    message: e,
+                                },
+                                current,
+                            );
+                        }
                     }
-                    FilterOutcome::Error(e) => {
-                        return (ChainOutcome::Error(e), current);
-                    }
-                },
+                }
                 ChainEntry::Wasm(name) => {
                     let (outcome, h) = self.wasm.on_request_headers(name.as_str(), current);
                     match outcome {
@@ -235,7 +278,7 @@ impl<W: WasmDispatch> PluginChain<W> {
                         ChainOutcome::LocalResponse(resp) => {
                             return (ChainOutcome::LocalResponse(resp), h);
                         }
-                        ChainOutcome::Error(e) => return (ChainOutcome::Error(e), h),
+                        ChainOutcome::Error { .. } => return (outcome, h),
                     }
                 }
             }
@@ -252,12 +295,20 @@ impl<W: WasmDispatch> PluginChain<W> {
         let mut current = body;
         for entry in entries.iter_mut() {
             match entry {
-                ChainEntry::Native(filter) => match filter.on_request_body(current.clone()) {
+                ChainEntry::Native(name, filter) => match filter.on_request_body(current.clone()) {
                     FilterOutcome::Continue { body, .. } => current = body,
                     FilterOutcome::LocalResponse(resp) => {
                         return (ChainOutcome::LocalResponse(resp), current);
                     }
-                    FilterOutcome::Error(e) => return (ChainOutcome::Error(e), current),
+                    FilterOutcome::Error(e) => {
+                        return (
+                            ChainOutcome::Error {
+                                plugin: name.clone(),
+                                message: e,
+                            },
+                            current,
+                        );
+                    }
                 },
                 ChainEntry::Wasm(name) => {
                     let (outcome, b) = self.wasm.on_request_body(name.as_str(), current);
@@ -266,7 +317,7 @@ impl<W: WasmDispatch> PluginChain<W> {
                         ChainOutcome::LocalResponse(resp) => {
                             return (ChainOutcome::LocalResponse(resp), b);
                         }
-                        ChainOutcome::Error(e) => return (ChainOutcome::Error(e), b),
+                        ChainOutcome::Error { .. } => return (outcome, b),
                     }
                 }
             }
@@ -286,13 +337,23 @@ impl<W: WasmDispatch> PluginChain<W> {
         let mut current = headers;
         for entry in entries.iter_mut() {
             match entry {
-                ChainEntry::Native(filter) => match filter.on_response_headers(current.clone()) {
-                    FilterOutcome::Continue { headers, .. } => current = headers,
-                    FilterOutcome::LocalResponse(resp) => {
-                        return (ChainOutcome::LocalResponse(resp), current);
+                ChainEntry::Native(name, filter) => {
+                    match filter.on_response_headers(current.clone()) {
+                        FilterOutcome::Continue { headers, .. } => current = headers,
+                        FilterOutcome::LocalResponse(resp) => {
+                            return (ChainOutcome::LocalResponse(resp), current);
+                        }
+                        FilterOutcome::Error(e) => {
+                            return (
+                                ChainOutcome::Error {
+                                    plugin: name.clone(),
+                                    message: e,
+                                },
+                                current,
+                            );
+                        }
                     }
-                    FilterOutcome::Error(e) => return (ChainOutcome::Error(e), current),
-                },
+                }
                 ChainEntry::Wasm(name) => {
                     let (outcome, h) = self.wasm.on_response_headers(name.as_str(), current);
                     match outcome {
@@ -300,7 +361,7 @@ impl<W: WasmDispatch> PluginChain<W> {
                         ChainOutcome::LocalResponse(resp) => {
                             return (ChainOutcome::LocalResponse(resp), h);
                         }
-                        ChainOutcome::Error(e) => return (ChainOutcome::Error(e), h),
+                        ChainOutcome::Error { .. } => return (outcome, h),
                     }
                 }
             }
@@ -317,13 +378,23 @@ impl<W: WasmDispatch> PluginChain<W> {
         let mut current = body;
         for entry in entries.iter_mut() {
             match entry {
-                ChainEntry::Native(filter) => match filter.on_response_body(current.clone()) {
-                    FilterOutcome::Continue { body, .. } => current = body,
-                    FilterOutcome::LocalResponse(resp) => {
-                        return (ChainOutcome::LocalResponse(resp), current);
+                ChainEntry::Native(name, filter) => {
+                    match filter.on_response_body(current.clone()) {
+                        FilterOutcome::Continue { body, .. } => current = body,
+                        FilterOutcome::LocalResponse(resp) => {
+                            return (ChainOutcome::LocalResponse(resp), current);
+                        }
+                        FilterOutcome::Error(e) => {
+                            return (
+                                ChainOutcome::Error {
+                                    plugin: name.clone(),
+                                    message: e,
+                                },
+                                current,
+                            );
+                        }
                     }
-                    FilterOutcome::Error(e) => return (ChainOutcome::Error(e), current),
-                },
+                }
                 ChainEntry::Wasm(name) => {
                     let (outcome, b) = self.wasm.on_response_body(name.as_str(), current);
                     match outcome {
@@ -331,7 +402,7 @@ impl<W: WasmDispatch> PluginChain<W> {
                         ChainOutcome::LocalResponse(resp) => {
                             return (ChainOutcome::LocalResponse(resp), b);
                         }
-                        ChainOutcome::Error(e) => return (ChainOutcome::Error(e), b),
+                        ChainOutcome::Error { .. } => return (outcome, b),
                     }
                 }
             }
