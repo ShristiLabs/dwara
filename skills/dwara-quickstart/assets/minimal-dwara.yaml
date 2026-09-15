@@ -1,0 +1,45 @@
+# Minimal runnable Dwara config (single plaintext listener, one
+# gateway-served route). The placeholder upstream is required by the schema
+# but never dialed: `respond` actions are answered by the gateway itself.
+#
+# Run:   DWARA_CONFIG=./minimal-dwara.yaml ./dwara
+# Check: curl -i http://127.0.0.1:8080/
+#        curl -i http://127.0.0.1:8080/healthz   (reserved path)
+#
+# This file follows the quickstart/oss/dwara.yaml shapes and stays
+# schema-valid; verify after edits:  dwara-cli validate minimal-dwara.yaml
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+routes:
+  - name: hello
+    service: placeholder-service
+    match:
+      path:
+        type: exact
+        value: /
+    action:
+      type: respond
+      status: 200
+      body: hello from dwara
+      headers:
+        Content-Type: text/plain
+
+services:
+  - name: placeholder-service
+    upstream: placeholder-upstream
+
+upstreams:
+  - name: placeholder-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 9999
+
+# Reserved paths /healthz, /readyz, /metrics are served by the gateway on
+# every listener without any route entry.

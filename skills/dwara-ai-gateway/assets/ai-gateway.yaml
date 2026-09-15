@@ -1,0 +1,145 @@
+# Focused AI-gateway starting config: two providers, three alias shapes,
+# pricing, budget policy, guardrails, logging. Trimmed from
+# quickstart/oss/dwara.yaml (schema-valid shapes).
+#
+# Validate:  dwara-cli validate ai-gateway.yaml
+# Secrets:   set OPENAI_AUTH_HEADER="Bearer sk-..." and
+#            ANTHROPIC_API_KEY="sk-..." before starting the gateway
+#            (whole-value rule: the prefix lives inside the env var).
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+routes:
+  - name: ai-chat
+    service: ai-service
+    match:
+      path:
+        type: exact
+        value: /v1/chat/completions
+      methods:
+        - POST
+    action:
+      type: ai
+    auth_required: true
+    policies:
+      - ai-token-budget
+
+services:
+  - name: ai-service
+    upstream: openai-transport      # schema-required; AI routes dial the
+                                    # provider upstreams, not this one
+
+upstreams:
+  - name: openai-transport
+    load_balancer: round_robin
+    protocol: https
+    endpoints:
+      - address: api.openai.com
+        port: 443
+    timeouts:
+      connect_ms: 5000
+      read_ms: 120000               # LLMs are slow; keep read generous
+
+  - name: anthropic-transport
+    load_balancer: round_robin
+    protocol: https
+    endpoints:
+      - address: api.anthropic.com
+        port: 443
+    timeouts:
+      connect_ms: 5000
+      read_ms: 120000
+
+consumers:
+  - name: demo-app
+    type: user
+    credentials:
+      - type: api_key
+        key: change-me-demo-key
+
+policies:
+  - name: ai-token-budget
+    token_budget:
+      tokens_per_min: 200000
+      cost_per_day_micros: 5000000
+      scope: policy                 # shared team window
+
+ai:
+  providers:
+    - name: openai
+      kind: openai
+      upstream: openai-transport
+      auth:
+        header: Authorization
+        value: ${OPENAI_AUTH_HEADER}
+    - name: anthropic
+      kind: anthropic
+      upstream: anthropic-transport
+      auth:
+        header: x-api-key
+        value: ${ANTHROPIC_API_KEY}
+
+  models:
+    gpt-4o-mini:
+      provider: openai
+      provider_model: gpt-4o-mini
+    gpt-4o:                          # failover shape
+      provider: openai
+      provider_model: gpt-4o
+      failover:
+        - provider: anthropic
+          provider_model: claude-sonnet-4-5
+    smart-router:                    # routing-policy shape
+      provider: openai
+      provider_model: gpt-4o-mini
+      routing_policy: complexity-escalation
+
+  pricing:                           # price EVERY reachable alias
+    gpt-4o:
+      input_per_1k_micros: 250
+      output_per_1k_micros: 1000
+    gpt-4o-mini:
+      input_per_1k_micros: 15
+      output_per_1k_micros: 60
+    claude-sonnet-4-5:
+      input_per_1k_micros: 300
+      output_per_1k_micros: 1500
+
+  routing_policies:
+    complexity-escalation:
+      kind: fallback_chain
+      cheap: gpt-4o-mini
+      escalate_to: gpt-4o
+      classifier_url: http://127.0.0.1:9090/classify
+      classifier_model: complexity
+      threshold: 0.5
+      timeout_ms: 1000
+
+  guardrails:
+    rules:
+      - name: block-injection
+        kind: injection
+        action: block
+        phase: prompt
+      - name: redact-pii
+        kind: pii
+        action: redact
+        phase: both
+
+  logging:
+    enabled: true
+    sample_rate: 0.1
+    retention_secs: 604800
+    redaction:
+      patterns: ["[0-9]{16}"]
+      replacement: "[REDACTED]"
+
+# Smoke test once running:
+#   curl -s http://127.0.0.1:8080/v1/chat/completions \
+#     -H 'Content-Type: application/json' \
+#     -H 'X-API-Key: change-me-demo-key' \
+#     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'

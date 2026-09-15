@@ -1,0 +1,110 @@
+# Security baseline starting config: API-key consumer, JWT provider,
+# layered authorization, WAF, security headers. Trimmed from
+# quickstart/oss/dwara.yaml (schema-valid shapes).
+# Validate:  dwara-cli validate security-baseline.yaml
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+    # TLS variant: protocol: https + tls: { mode: terminate, cert_file,
+    # key_file, client_ca_file (optional mTLS) }
+    authorization:                 # listener-level link of the chain
+      ip_acl:
+        allow: [10.0.0.0/8, 192.168.0.0/16, 127.0.0.1]
+        default: allow
+
+routes:
+  - name: api-v1
+    service: api-service
+    match:
+      path:
+        type: prefix
+        value: /v1/
+      methods: [GET, POST, PUT, DELETE]
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    auth_required: true            # no credential -> 401 before authz
+    authorization:                 # route-level: the most specific level
+      allowed_consumers: [mobile-app]
+      allowed_groups: [internal]
+      # required_scopes: [read]    # JWT-authenticated callers only
+      ip_acl:
+        default: allow
+    security_headers:
+      hsts_max_age_secs: 31536000
+      hsts_include_subdomains: true
+      nosniff: true
+      frame_options: deny
+      content_security_policy: "default-src 'self'"
+    limits:
+      max_body_bytes: 1048576
+      max_header_bytes: 8192
+      max_header_count: 50
+    waf:
+      enabled: true
+      filters: [sqli, xss, path_traversal]
+      max_body_inspect_bytes: 4096
+
+services:
+  - name: api-service
+    upstream: api-upstream
+
+upstreams:
+  - name: api-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 9000
+
+consumers:
+  - name: mobile-app
+    type: user
+    groups: [internal]
+    credentials:
+      - type: api_key
+        key: change-me-mobile-key      # production: ${MOBILE_API_KEY}
+      - type: jwt
+        issuer: https://auth.example.com
+        audiences: [api-service]
+    quotas:
+      daily_requests: 100000
+      monthly_requests: 1000000
+
+policies:
+  - name: api-rate-limit
+    rate_limit:
+      requests: 1000
+      window_seconds: 60
+
+# Gateway-level: least specific link
+authorization:
+  ip_acl:
+    default: allow
+
+jwt_providers:
+  - name: auth0
+    jwks_url: https://auth.example.com/.well-known/jwks.json
+    issuer: https://auth.example.com
+    audience: api-service
+    consumer: mobile-app
+    algorithms: [RS256, ES256]
+    leeway_secs: 30
+    refresh_secs: 300
+
+# GeoIP variant (needs a real .mmdb on disk):
+# geoip:
+#   path: /etc/dwara/GeoLite2-Country.mmdb
+# then add to any authorization block:
+#   geoip:
+#     denied_countries: [XX]
+
+# Smoke tests once running:
+#   401: curl -i http://127.0.0.1:8080/v1/anything
+#   200: curl -i http://127.0.0.1:8080/v1/anything -H 'X-API-Key: change-me-mobile-key'
+#   403: curl -i http://127.0.0.1:8080/v1/anything -H 'X-API-Key: change-me-mobile-key' \
+#          -H 'X-Forwarded-For: 10.6.0.9'   (if a deny CIDR were configured)

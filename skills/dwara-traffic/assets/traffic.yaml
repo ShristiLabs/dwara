@@ -1,0 +1,148 @@
+# Traffic-management starting config: matching precedence demo, resilient
+# upstream, canary split with auto-analysis, caching + transforms.
+# Trimmed from quickstart/oss/dwara.yaml (schema-valid shapes).
+# Validate:  dwara-cli validate traffic.yaml
+
+listeners:
+  - name: edge-http
+    address: 0.0.0.0
+    port: 8080
+    protocol: http
+
+routes:
+  # prefix route with prefix strip - the workhorse shape
+  - name: api-v1
+    service: api-service
+    match:
+      path:
+        type: prefix
+        value: /v1/
+      methods: [GET, POST, PUT, DELETE]
+    action:
+      type: proxy
+      rewrite:
+        type: strip_prefix
+    transforms:
+      request:
+        headers:
+          set:
+            X-Forwarded-By: dwara
+    cache:
+      ttl_secs: 60
+      stale_while_revalidate_secs: 300
+      vary: [accept]
+    priority: 8
+
+  # regex route - note: exact beats regex beats prefix regardless of order
+  - name: users-by-id
+    service: api-service
+    match:
+      path:
+        type: regex
+        value: /v1/users/[^/]+
+    action:
+      type: proxy
+
+  # gateway-served health endpoint (never dials upstream)
+  - name: healthz
+    service: api-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+
+  # canary traffic through the split service
+  - name: canary
+    service: canary-service
+    match:
+      path:
+        type: prefix
+        value: /v1/canary
+    action:
+      type: proxy
+
+services:
+  - name: api-service
+    upstream: api-upstream
+
+  - name: canary-service
+    split:
+      targets:                       # keep TOTAL constant when ramping
+        - upstream: api-upstream
+          weight: 90
+        - upstream: canary-upstream
+          weight: 10
+      canary_analysis:               # exactly 2 targets
+        window_seconds: 300
+        step: 5
+        min_requests: 100
+        cooldown_seconds: 60
+        promote: { metric: error_rate, threshold: 0.01 }
+        rollback: { metric: error_rate, threshold: 0.05 }
+
+upstreams:
+  - name: api-upstream
+    load_balancer: least_requests
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1           # point at your backend
+        port: 9000
+        weight: 3
+    health:                           # passive outlier detection
+      consecutive_failures: 5
+      eject_ms: 30000
+      failure_ratio: 0.5
+      failure_min_volume: 20
+      half_open_probes: 1
+      window_ms: 60000
+    active_health:
+      kind: http
+      path: /healthz
+      interval_ms: 5000
+      timeout_ms: 2000
+      jitter_ms: 500
+      failure_threshold: 3
+      success_threshold: 2
+    retries:                          # errors -> retry; slowness -> hedge
+      attempts: 3
+      backoff_base_ms: 25
+      backoff_cap_ms: 250
+      budget_percent: 10
+      buffer_max_bytes: 1048576       # required for hedging
+      retry_statuses: [502, 503, 504]
+      hedge:
+        hedge_after_ms: 200
+        hedge_max: 1
+    timeouts:
+      connect_ms: 2000
+      read_ms: 30000
+      write_ms: 30000
+    breaker:
+      consecutive_failures: 5
+      error_ratio: 0.5
+      error_volume: 20
+      open_ms: 30000
+      half_open_probes: 1
+    connection_cap: 100
+    max_pending: 50
+    slow_start_ms: 10000
+
+  - name: canary-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 9100
+
+# Gateway protection
+max_concurrent_requests: 10000
+admission_queue:
+  enabled: true
+  max_queue_size: 1000
+  queue_timeout_ms: 5000
+  per_priority: true
+load_shed_dry_run: false              # flip true to observe before enforcing
