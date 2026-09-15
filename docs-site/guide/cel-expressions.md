@@ -21,14 +21,15 @@ CEL replaces ad-hoc template strings with a typed, sandboxed
 expression language that fails fast on type errors at compile time.
 
 ::: info Status
-The CEL engine is a compile-time capability (`cel`, default OFF; see
-[Editions](./editions#compile-time-feature-packs)) and is not included
-in the published OSS binaries. The engine and the shared
-`RequestContext` type are complete and test-covered as library
-components. The config wiring for the use sites below has not landed
-yet -- the keys shown (`match.condition`, CEL-valued transform
-values, `rate_limit.key`, policy `condition`) are the target surface
-and are not in the generated
+The CEL engine compiles into every build — there is no `cel` cargo
+feature (an optional `cel-jit` feature JIT-compiles expressions via
+cranelift for faster evaluation; builds without it fall back to the
+interpreter). The engine and the shared `RequestContext` type are
+complete and test-covered as library components. The config wiring
+for the use sites below has not landed yet -- the keys shown
+(`match.condition`, CEL-valued transform values, `rate_limit.key`,
+policy `condition`) are the target surface and are not in the
+generated
 [configuration schema](../reference/configuration-schema). This page
 documents the expression language and that target wiring.
 :::

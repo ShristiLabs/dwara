@@ -3,18 +3,15 @@
 The web console is a single-page application served from the gateway's
 mTLS admin listener. It provides a browser-based dashboard for
 inspecting the running gateway -- routes, services, upstreams, health,
-metrics, and recent requests -- without any external dependencies.
+metrics, and recent requests -- plus create/edit/delete flows and a
+config editor, all without external dependencies. Every console
+operation is a call to the same mTLS-authenticated admin API the CLI
+uses, so the console's powers are exactly the admin API's powers
+(including your RBAC role).
 
-The console ships in two modes:
-
-- **Read-only (OSS)**: the default build serves a view-only dashboard.
-  You can inspect routes, services, health, metrics, and recent requests
-  but cannot modify any state.
-- **CRUD (Enterprise)**: the v2 console (see
-  [Console v2 (Enterprise)](#console-v2-enterprise)) adds full create,
-  read, update, and delete operations, fleet views, a config editor, and
-  a workspace switcher. Build with `--features ent` and present a valid
-  license.
+The enterprise edition adds fleet-scale surfaces on top (see
+[Enterprise surfaces](#enterprise-surfaces)): workspace switching for
+multi-tenant deployments and fleet views for CP/DP split topologies.
 
 ## When to use this
 
@@ -26,9 +23,10 @@ Use the web console when:
   metrics in one place.
 - You don't have a separate observability dashboard set up yet.
 
-The console is **read-only** in the OSS build: it cannot modify config,
-purge cache, or change any state. All mutations go through the admin API
-or CLI. The enterprise v2 console (below) adds CRUD operations.
+The console can modify state (create, edit, and delete routes,
+upstreams, and other entities; validate and publish config) in every
+build -- subject to your admin RBAC role. A `readonly`-role principal
+sees the same views without mutation affordances.
 
 ## Enabling
 
@@ -103,40 +101,7 @@ rate, active requests.
 The last N requests from the analytics store (if analytics is
 enabled): timestamp, method, path, status, latency, consumer, route.
 
-## Console v2 (Enterprise)
-
-The v2 console is an enterprise feature: build with `--features ent`
-and present a valid license (see [Enterprise licensing](./licensing)).
-It includes all of the v1 read-only views above plus CRUD operations,
-fleet views, a config editor, and a workspace switcher.
-
-```sh
-cargo build --release --features ent
-```
-
-### CRUD views
-
-Routes, services, policies, and consumers can be created, edited, and
-deleted directly from the console. Each CRUD view is backed by the
-admin API mutation endpoints -- `POST` to create, `PATCH` to update,
-and `DELETE` to remove -- so the console is a UI over the same
-mTLS-authenticated admin API described in [Admin API](./admin-api).
-The v1 read-only views remain available; the CRUD views layer
-edit/delete affordances on top of them.
-
-### Fleet views
-
-For CP/DP split fleets (see [CP/DP split](./cp-dp-split)), the v2
-console adds two fleet views:
-
-- **Version skew status** -- `GET /fleet/skew` returns per-edge version
-  compatibility against the controller, flagging edges that are behind
-  or ahead of the configured skew policy.
-- **Fleet status** -- `GET /fleet/status` returns the full fleet
-  configuration and every registered edge's version, so you can see the
-  whole fleet in one place.
-
-### Config editor
+## Config editor
 
 A built-in YAML editor lets you edit the gateway config in-browser. The
 editor offers two actions:
@@ -151,21 +116,31 @@ editor offers two actions:
   a single instance and across the fleet in a CP/DP split (see
   [Cluster sync](./cluster-sync)).
 
-### Workspace switcher
+## Enterprise surfaces
 
-For multi-tenant deployments (see
-[Workspaces](./workspaces), [RBAC](./rbac), and [audit
-log](./audit-log)), the v2 console
-adds a workspace switcher. `GET /workspaces` lists the workspaces the
-authenticated admin principal can access; selecting one scopes every
-view and CRUD operation to that workspace.
+Two console surfaces require the enterprise edition (build with
+`--features ent` and a valid license; see
+[Enterprise licensing](./licensing)) because the endpoints behind them
+are enterprise features:
+
+- **Workspace switcher** (multi-tenant deployments; see
+  [Workspaces](./workspaces), [RBAC](./rbac), and [audit
+  log](./audit-log)): `GET /workspaces` lists the workspaces the
+  authenticated admin principal can access; selecting one scopes every
+  view and CRUD operation to that workspace.
+- **Fleet views** (CP/DP split fleets; see [CP/DP split](./cp-dp-split)):
+  - **Version skew status** -- `GET /fleet/skew` returns per-edge version
+    compatibility against the controller, flagging edges that are behind
+    or ahead of the configured skew policy.
+  - **Fleet status** -- `GET /fleet/status` returns the full fleet
+    configuration and every registered edge's version, so you can see
+    the whole fleet in one place.
 
 ## Limitations
 
-- **Read-only (OSS)**: the default build's console cannot modify any
-  state. Use the admin API or CLI for mutations. CRUD operations
-  (create, edit, delete) require the enterprise edition -- build with
-  `--features ent` and a valid license to enable the v2 console.
+- **Mutations are admin-API mutations**: the console is exactly as
+  powerful as the admin API and your RBAC role allow -- there is no
+  separate console permission model.
 - **No historical data**: the console shows the current state and
   recent requests only. For historical analysis, use the analytics
   API or an external dashboard.
@@ -176,9 +151,9 @@ view and CRUD operation to that workspace.
   [Admin API](./admin-api#dev-fallback-never-in-production)) also
   serves the console in plaintext.
 
-## Console v3: live charts, CRUD flows, AI ops
+## Live charts, CRUD flows, AI ops
 
-Console v3 adds three new capabilities:
+The console additionally ships:
 
 - **Live dashboard**: a "Live" view with real-time stat cards (active
   requests, RPS, p50/p95/p99 latency, error rate) and a canvas-based

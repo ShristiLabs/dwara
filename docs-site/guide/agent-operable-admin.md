@@ -7,18 +7,19 @@ permissions (RBAC), argument validation against each tool's JSON
 Schema, and typed error responses.
 
 ::: info Status
-The MCP server is a compile-time capability (`mcp`, default OFF; see
-[Editions](./editions#compile-time-feature-packs)) and is not included
-in the published OSS binaries. It is currently a library surface in
-`dwara-core`: the server, protocol types, standard tools, and RBAC
-checks are complete and test-covered. Transport adapters for HTTP
-JSON-RPC, SSE (server-sent events), and stdio are available so an
-embedding (or a future Dwara release) can mount the `McpServer` on
-the admin listener or a local stdio bridge. The `McpTransport` enum
-selects the transport; SSE helpers (`encode_sse_response`,
-`encode_sse_error`) format JSON-RPC responses as SSE frames. Until a
-transport is mounted by an embedding, this page documents the tool
-surface such an integration exposes.
+The MCP admin server compiles into every build as a library surface
+in `dwara-core` — there is no `mcp` cargo feature (see
+[Editions](./editions#scaffolded-surfaces); the `ai.mcp` *gateway*
+described in [AI MCP gateway](./ai-mcp-gateway) is a separate,
+live capability on the proxy path). The server, protocol types,
+standard tools, and RBAC checks are complete and test-covered.
+Transport adapters for HTTP JSON-RPC, SSE (server-sent events), and
+stdio are available so an embedding (or a future Dwara release) can
+mount the `McpServer` on the admin listener or a local stdio bridge.
+The `McpTransport` enum selects the transport; SSE helpers
+(`encode_sse_response`, `encode_sse_error`) format JSON-RPC responses
+as SSE frames. Until a transport is mounted by an embedding, this
+page documents the tool surface such an integration exposes.
 :::
 
 ## When to use this

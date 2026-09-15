@@ -7,13 +7,13 @@ patterns, mobile API consolidation, and reducing client-side request
 chattiness.
 
 ::: info Status
-Aggregation is a compile-time capability (`aggregation`, default
-OFF; see [Editions](./editions#compile-time-feature-packs)) and is
-not included in the published OSS binaries. The composition core
-(specs, JSONPath shaping, fail policies, size caps) is complete and
-test-covered as a library component. The config wiring has not landed
-yet -- the `aggregations:` block and `type: aggregate` route action
-below illustrate the target surface and are not in the generated
+Aggregation compiles into every build — there is no `aggregation`
+cargo feature (see [Editions](./editions#scaffolded-surfaces)). The
+composition core (specs, JSONPath shaping, fail policies, size caps)
+is complete and test-covered as a library component. The config
+wiring has not landed yet -- the `aggregations:` block and
+`type: aggregate` route action below illustrate the target surface
+and are not in the generated
 [configuration schema](../reference/configuration-schema).
 :::
 

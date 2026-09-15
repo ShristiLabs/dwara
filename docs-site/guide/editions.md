@@ -62,8 +62,9 @@ requires the `ent` build and a license.
 | gRPC and WebSocket proxying | OSS | — |
 | CORS, compression, request limits | OSS | — |
 | Dynamic upstream discovery (DNS) | OSS | — |
-| API aggregation (multi-upstream composition) | OSS | — |
-| OpenAPI import, mock mode, response validation | OSS | — |
+| API aggregation (multi-upstream composition) | Scaffolded* | — |
+| OpenAPI import, mock mode | OSS | — |
+| OpenAPI response validation | Scaffolded* | — |
 | Kubernetes Gateway API / Ingress translation | OSS | — |
 | HTTP/3 (QUIC) ingress and upstream | OSS | — |
 | L4 TCP/UDP proxying with SNI routing reuse | OSS | — |
@@ -96,8 +97,8 @@ requires the `ent` build and a license.
 | Authorization chain (consumer/route/service/listener/global, IP ACL) | OSS | — |
 | Secrets via `${...}` references (env, file, static) | OSS | — |
 | HashiCorp Vault and KMS secret resolution | — | Ent |
-| Cedar policy / OPA authorization | OSS | — |
-| CEL expressions in policies | OSS | — |
+| Cedar policy / OPA authorization | Scaffolded* | — |
+| CEL expressions in policies | Scaffolded* | — |
 | FIPS 140-3 mode (cipher-suite restriction, primitive allowlist) | — | Ent |
 | Post-quantum TLS hybrid key exchange (X25519 + ML-KEM) | OSS | — |
 | Workspaces (multi-tenant config partitioning) | — | Ent |
@@ -116,7 +117,8 @@ requires the `ent` build and a license.
 | Config convergence across instances (Redis-backed) | — | Ent |
 | Cluster sync GA (conflict resolution, split-brain guards, version skew) | — | Ent |
 | CP/DP split (`dwara-controller` / `dwara-edge` fleet) | — | Ent |
-| Web console v2 (CRUD + fleet) | — | Ent |
+| Web console (dashboard, CRUD, config editor) | OSS | — |
+| Console workspace / fleet views | — | Ent |
 | Fleet operations (version skew, rolling upgrades) | — | Ent |
 | tokio-console diagnostics integration | OSS | — |
 
@@ -176,6 +178,9 @@ requires the `ent` build and a license.
 The extension traits are OSS in both editions — enterprise backends
 (Redis, Vault) are simply additional implementations of the same seams.
 
+\* **Scaffolded** — compiled into every build but not yet dispatched
+or config-wired; see [Scaffolded surfaces](#scaffolded-surfaces).
+
 ## How gating works
 
 There are two gates, and every enterprise feature passes both:
@@ -195,16 +200,42 @@ the gateway to the OSS feature set (traffic keeps flowing; fleet
 coordination pauses), and the `dwara_license_status` metric tells you
 which state you are in. See [Enterprise licensing](./licensing).
 
-### Compile-time feature packs
+### Scaffolded surfaces
 
-Separate from the edition question, some advanced surfaces ship as
-optional compile-time capabilities — `wasm` (the proxy-wasm host),
-`plugins` (native filters), `cel`, `aggregation`, `mcp`. They are
-default-OFF and not included in the published binaries: their library
-components are complete in the source tree, and a build that carries
-one enables its config block. A config block for a capability the
-build lacks is rejected at validation — unlike an enterprise feature
-in an OSS build, which parses and validates but stays inert. Status
+Separate from the edition question, some advanced surfaces are
+compiled into every build but are not yet active on the gateway's
+request or admin path. There are no compile-time feature packs: the
+only cargo features are `ent`, the test-only `loom`, and the optional
+`cel-jit` accelerator. What varies is dispatch and config wiring:
+
+- **proxy-wasm host and native filter chain** — host, runner,
+  lifecycle manager, and the `plugins:` config block all exist; the
+  live dataplane still runs a no-wasm placeholder while chain
+  dispatch lands.
+- **CEL expressions** — engine compiled in (plus the optional
+  `cel-jit`); no config keys consume expressions yet.
+- **Cedar policy and OPA authorization** — both authorizers compiled
+  in; no `authz:` config keys yet (the built-in rules under
+  `authorization:` are the live path).
+- **API aggregation** — composition core compiled in; no config block
+  yet.
+- **OpenAPI response validation** — engine compiled in; no
+  route-level config block yet.
+- **Agent-operable MCP admin server** — protocol and tools compiled
+  as a library; no transport is mounted on the admin listener yet
+  (the `ai.mcp` gateway is live).
+- **Protocol translation and gRPC-Web transcoding** — `translation:`
+  route config parses and validates; request-path translation is not
+  dispatched yet.
+- **ACME certificate automation** — config block and module accepted;
+  runtime issuance wiring has not landed.
+- **API lifecycle (portal, profiles, journey)** — config key
+  accepted; inert today.
+
+The accurate mental model for these is "compiled in, and accepted
+where a config block exists, but nothing executes them yet" — unlike
+an enterprise feature in an OSS build, which is likewise
+inert-but-accepted for a different reason (no license claim). Status
 notes on the individual guide pages say where each capability stands
 today.
 

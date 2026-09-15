@@ -7,6 +7,14 @@ clients traverse the published surface. The lifecycle block is the
 operator-facing layer on top of the routing config: it does not change how
 traffic is proxied, it records what the API is and who used it.
 
+::: info Status
+The `lifecycle:` block parses and validates in every build (there is
+no `api_lifecycle` cargo feature), but the portal serving, profile
+overlay application, and journey recording are not wired into the
+gateway runtime yet — the block is accepted but inert today. See
+[Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
+:::
+
 ## When to use this
 
 Use the lifecycle block when you are running the gateway as the front door
@@ -19,37 +27,21 @@ unchanged; the lifecycle layer is purely additive metadata and tooling.
 
 ## Configuration
 
-Add a `lifecycle` block under `gateway`. It is optional and off by default.
+Add a top-level `lifecycle` block. It is optional and absent by default.
 
 ```yaml
-gateway:
-  lifecycle:
-    portal:
-      enabled: true
-      base_url: https://portal.example.com
-      auth:
-        oidc:
-          issuer: https://idp.example.com
-          client_id: dwara-portal
-    environments:
-      - name: dev
-        upstream_suffix: .dev.internal
-        policy_overrides:
-          rate_limit:
-            routes:
-              - name: api
-                rps: 1000
-      - name: staging
-        upstream_suffix: .staging.internal
-      - name: prod
-        upstream_suffix: .prod.internal
-        policy_overrides:
-          security_headers:
-            hsts_max_age_secs: 31536000
-    journey_recorder:
-      enabled: true
-      sampling_pct: 5
-      retention_days: 30
+lifecycle:
+  portal:
+    enabled: true
+    path: /portal
+  profiles:
+    base_config: /etc/dwara/base.yaml
+    profile_overrides:
+      dev: /etc/dwara/overrides/dev.yaml
+      prod: /etc/dwara/overrides/prod.yaml
+  journey:
+    enabled: true
+    retention_hours: 720
 ```
 
 ## Developer portal

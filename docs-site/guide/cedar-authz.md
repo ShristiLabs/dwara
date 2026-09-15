@@ -9,14 +9,14 @@ Cedar is one of two external policy engines Dwara supports for
 authorization; the other, [OPA authorization](./opa-authz), is
 queried over HTTP. Both complement the built-in authz
 (consumer/route/service policies) -- see
-[Authorization](./authorization) -- and sit behind a single
-compile-time capability (`cedar`, default OFF, no license) that
-covers both engines. See [Editions: OSS vs Enterprise](./editions)
-for how capabilities differ from enterprise features.
+[Authorization](./authorization) -- and both compile into every build
+as library components. See [Editions: OSS vs Enterprise](./editions)
+for how these scaffolded surfaces differ from enterprise features.
 
 ::: info Status
-The pack is not included in the published OSS binaries. The
-in-process Cedar authorizer, like the OPA HTTP client, is complete
+The Cedar authorizer compiles into every build — there is no `cedar`
+cargo feature (see [Editions](./editions#scaffolded-surfaces)). The
+in-process authorizer, like the OPA HTTP client, is complete
 and test-covered as a library component. The config wiring has not
 landed yet -- the `authz:` blocks below illustrate the target
 surface (the built-in rules live under `authorization:` today) and

@@ -7,6 +7,15 @@ native gRPC over HTTP/2. The gateway handles the framing translation in both
 directions, so a browser `fetch` against the gateway looks like gRPC-Web
 while the upstream sees a normal gRPC call.
 
+::: info Status
+The `grpc_web:` route block parses and validates in every build (there
+is no `grpc_web` cargo feature), but the framing translation is not
+yet dispatched from the proxy path — a route carrying the block
+forwards traffic untranslated today. The framing and transcoding
+translators are implemented and test-covered as library components.
+See [Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
+:::
+
 ## When to use this
 
 Use a `grpc_web` route when browser code needs to call a gRPC backend and you
@@ -18,9 +27,9 @@ unchanged -- it does not add gRPC-Web framing.
 
 ## Configuration
 
-Add a `grpc_web` block to a route that fronts a gRPC upstream. The upstream
-should declare `protocol: http2` (TLS with h2 ALPN) so the gateway dials it
-as native gRPC.
+Add a `grpc_web` block to a route that fronts a gRPC upstream. `enabled`
+turns framing translation on; the `transcoding` sub-block additionally
+enables JSON-to-gRPC transcoding:
 
 ```yaml
 routes:
@@ -29,22 +38,28 @@ routes:
     match:
       path: { type: prefix, value: /pkg.Service/ }
     grpc_web:
-      mode: framing
-      cors:
-        origins:
-          - https://app.example.com
-        credentials: true
+      enabled: true
+      transcoding:
+        enabled: true
+        descriptors:
+          - file: /etc/dwara/protos/user-api.pb
+            package: pkg
+            service: UserService
     action:
       type: proxy
-      upstream:
-        protocol: http2
-        trusted_ca_file: /etc/dwara/upstream-ca.pem
 ```
 
-## Framing modes
+The upstream should declare `protocol: http2` (h2 with TLS; use
+`trusted_ca_file` for a private CA) so the gateway dials it as native
+gRPC. CORS for browser clients is the ordinary route-level
+[CORS](./cors) block — there is no separate `cors` key inside
+`grpc_web`.
 
-`mode: framing` translates gRPC-Web's base64-or-binary framed body into
-native gRPC trailers-in-body and back. The gateway:
+## Framing and transcoding
+
+`enabled: true` (the master switch; the block is inert when false)
+translates gRPC-Web's base64-or-binary framed body into native gRPC
+trailers-in-body and back. The gateway:
 
 - accepts `Content-Type: application/grpc-web` and
   `application/grpc-web+proto` from the browser
@@ -53,23 +68,15 @@ native gRPC trailers-in-body and back. The gateway:
 - converts the upstream's gRPC trailers (`grpc-status`, `grpc-message`) into
   the gRPC-Web trailer frame the browser expects
 
-`mode: transcoding` additionally accepts a JSON request body
+`transcoding.enabled: true` additionally accepts a JSON request body
 (`Content-Type: application/json`) and transcodes it to the protobuf message
 the upstream expects, and transcodes the protobuf response back to JSON. This
 lets a browser call the RPC with plain `fetch` and JSON, no protobuf
 dependency on the client. The mapping follows the gRPC HTTP/JSON transcoding
-convention driven by the `google.api.http` annotations in the service's
-`.proto`.
-
-## CORS for browser clients
-
-Browsers enforce CORS on the gRPC-Web call, so a browser-facing route
-typically needs a CORS policy. The `cors` block inside `grpc_web` is the same
-shape as the route-level [CORS](./cors) config but is scoped to the
-gRPC-Web handshake, so preflight responses carry the right
-`Access-Control-Allow-Headers` for gRPC-Web (`x-grpc-web`, `x-user-agent`,
-`grpc-status`, `grpc-message`) automatically. Set `credentials: true` only
-when the upstream relies on cookies or client certs the browser must send.
+convention driven by the `google.api.http` annotations in the `.proto`
+descriptors listed under `transcoding.descriptors` (each entry: `file` — a
+`FileDescriptorSet` as produced by `protoc --descriptor_set_out=...`,
+`package`, and `service`).
 
 ## Streaming
 

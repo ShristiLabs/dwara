@@ -8,6 +8,16 @@ certificate for upstream connections, and verifies peer SVIDs against
 the trust bundle. The peer's SPIFFE ID (extracted from the URI SAN of
 its verified certificate) becomes the identity for policy decisions.
 
+::: info Status
+Part of the mesh surface, which is **config-accepted, runtime
+stubbed** and Enterprise-gated: the `mesh.spire` config block parses
+and validates, but the SPIRE Workload API client's gRPC transport is
+compiled only into `--features ent` builds, and the surrounding mesh
+runtime (sidecar redirects, SPIFFE-ID-in-handshake verification) is
+scaffolded. See [Service mesh](./service-mesh) for the full
+implementation-status note.
+:::
+
 ## When to use this
 
 Use SPIFFE/SPIRE when:

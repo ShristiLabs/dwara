@@ -13,12 +13,15 @@ Dwara is licensed under the [Apache License 2.0](./LICENSE) and developed
 in the open at [shristilabs/dwara](https://github.com/shristilabs/dwara).
 
 > **Status:** pre-1.0. The OSS core (proxying, TLS, routing, resilience,
-> security, observability, AI gateway, analytics) is stable and
-> production-shaped. Enterprise and extension features (CP/DP split, Wasm
-> plugins, CEL, aggregation, MCP, K8s translator, fleet operations, global
-> load balancing, FIPS mode, post-quantum TLS, service mesh, protocol
-> translation, nano-services, API lifecycle, A2A protocol) are
-> feature-gated and shipping iteratively. See the
+> security, observability, AI gateway, analytics, HTTP/3, L4 proxying,
+> Kubernetes Gateway API translation, nano-services) is stable and
+> production-shaped. Enterprise features (CP/DP split, fleet operations,
+> global load balancing, FIPS mode, service mesh, Redis-backed shared
+> state) build with `--features ent` behind a license. A few advanced
+> surfaces (Wasm plugin dispatch, CEL config wiring, Cedar/OPA authz,
+> aggregation, OpenAPI response validation, protocol translation,
+> ACME, API lifecycle) compile in but are scaffolded — not yet active
+> on the request path. See the
 > [changelog](./CHANGELOG.md) for what shipped.
 
 ## Documentation

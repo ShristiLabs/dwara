@@ -10,12 +10,11 @@ routed to it is translated into an A2A task-submit call, so clients
 keep speaking the OpenAI-shaped chat API while the peer speaks A2A.
 
 **Status: partial.** The provider adapter (routing, task-submit
-translation, Agent Card parsing) is wired; the A2A task lifecycle --
+translation, Agent Card parsing) is wired and compiled into every
+build (there is no `a2a` cargo feature); the A2A task lifecycle --
 long-running task negotiation, cancellation, and status endpoints --
-is stubbed pending spec freeze. The block is feature-gated behind the
-`a2a` cargo feature: without it, config is accepted but inert
-(validation warns). There is no `/.well-known/agent-card.json`
-discovery endpoint in this build.
+is stubbed pending spec freeze. There is no
+`/.well-known/agent-card.json` discovery endpoint in this build.
 
 ## When to use this
 

@@ -5,6 +5,17 @@ verification and optional Ed25519 signature verification. This
 enables fleet-consistent plugin pinning: all gateways in a fleet
 reference the same registry and get the same signed artifacts.
 
+::: info Status
+The registry tooling is live today: `dwara-cli plugin search` /
+`plugin install` work against a registry (default
+`https://registry.dwara.dev/plugins`), and the `plugin_registry:`
+config block plus per-plugin `source:` entries parse and validate in
+every build. Loading and dispatching registry-sourced plugins on the
+request path follows the plugin runtime's status — see
+[Proxy-Wasm plugins](./proxy-wasm-plugins) and
+[Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
+:::
+
 ## When to use this
 
 - A fleet of gateways must run byte-identical plugin builds, pinned

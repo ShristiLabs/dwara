@@ -135,19 +135,21 @@ sequence and the `DWARA_UPGRADE_*` env vars.
 ## `import`
 
 ```sh
-dwara-cli import nginx  nginx.conf  --output dwara.yaml
-dwara-cli import kong   kong.yaml   --output dwara.yaml
-dwara-cli import envoy  envoy.yaml  --output dwara.yaml
+dwara-cli import nginx   nginx.conf    --output dwara.yaml
+dwara-cli import kong    kong.yaml     --output dwara.yaml
+dwara-cli import envoy   envoy.yaml    --output dwara.yaml
+dwara-cli import traefik traefik.yml   --output dwara.yaml
+dwara-cli import haproxy haproxy.cfg   --output dwara.yaml
 dwara-cli import openapi petstore.yaml --output dwara.yaml
 dwara-cli import openapi petstore.yaml --output dwara.yaml --mock
 ```
 
-Scaffolds a Dwara config from an existing NGINX, Kong, or Envoy
-config, or from an OpenAPI 3.x spec. With `--mock`, the OpenAPI import
-reads response examples and generates mock route actions instead of
-proxy actions, producing a fully functional mock API without any
-backend. Unsupported constructs are appended as YAML-comment warnings.
-See [Config import](./config-import) and
+Scaffolds a Dwara config from an existing NGINX, Kong, Envoy, Traefik,
+or HAProxy config, or from an OpenAPI 3.x spec. With `--mock`, the
+OpenAPI import reads response examples and generates mock route actions
+instead of proxy actions, producing a fully functional mock API without
+any backend. Unsupported constructs are appended as YAML-comment
+warnings. See [Config import](./config-import) and
 [OpenAPI import and mock mode](./openapi-import).
 
 ## `tf`
@@ -161,14 +163,34 @@ dwara-cli tf apply  --admin http://127.0.0.1:2019 --state dwara.tfstate
 Terraform-compatible state export/plan/apply over the admin API. See
 [Terraform state tool](./terraform-state).
 
-## `plugin new`
+## `plugin`
 
 ```sh
 dwara-cli plugin new my-plugin
+dwara-cli plugin search [query] [--registry URL]
+dwara-cli plugin install <name> [--registry URL] [--digest HASH] [-o DIR]
 ```
 
-Scaffolds a ready-to-build proxy-wasm plugin crate. See
-[Plugin SDK](./plugin-sdk).
+`plugin new` scaffolds a ready-to-build proxy-wasm plugin crate (see
+[Plugin SDK](./plugin-sdk)). `plugin search` and `plugin install` work
+against a plugin registry (default `https://registry.dwara.dev/plugins`,
+override with `--registry` or the `DWARA_PLUGIN_REGISTRY` env var;
+requires `curl`). Installs are digest-pinned — pass `--digest` or take
+the digest the registry reports. See
+[Plugin registry](./plugin-registry).
+
+## `replay`
+
+```sh
+dwara-cli replay capture --duration 60s --output trace.dwara
+dwara-cli replay run --trace trace.dwara [--config dwara.yaml] [--diff]
+```
+
+Captures a redacted ring buffer of live traffic (max 10 minutes) and
+replays it offline against a config, reporting a MATCH/DIVERGENCE table
+(`--diff`). Read-only with respect to production: capture never blocks
+the dataplane and secrets are redacted unless `--include-secrets` is
+passed. See [Replay debugging](./replay-debugging).
 
 ## `k8s conformance-report`
 
@@ -176,10 +198,8 @@ Scaffolds a ready-to-build proxy-wasm plugin crate. See
 dwara-cli k8s conformance-report
 ```
 
-Emits the upstream Gateway API conformance report YAML. Feature-gated:
-requires building `dwara-cli` with the `k8s` feature
-(`cargo build -p dwara-cli --bin dwara-cli`); the
-published OSS binaries do not include it. See
+Emits the upstream Gateway API conformance report YAML. It is compiled
+into the standard `dwara-cli` build (no cargo feature required). See
 [Kubernetes Gateway API](./kubernetes-gateway-api).
 
 ## `status`

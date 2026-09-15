@@ -27,9 +27,10 @@ where the gateway terminates TLS directly on port 443.
 
 ## Enabling
 
-ACME is compiled into the OSS build (config-accepted, runtime stubbed).
-The config block is always accepted by the parser; when the feature is
-OFF, validation warns that the block is inert.
+ACME is compiled into every build (config-accepted, runtime stubbed —
+there is no cargo feature for it). The config block is always accepted
+by the parser; because the runtime is a stub, validation warns that
+the block is inert.
 
 ```sh
 cargo build -p dwara-bin

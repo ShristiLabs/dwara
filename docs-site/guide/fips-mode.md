@@ -67,8 +67,12 @@ boundary.
 ## Compliance posture
 
 ::: info Status
-The `fips` feature wires the gateway to a FIPS-validated crypto provider
-and enforces the approved-only cipher list and startup self-test. The
+FIPS mode is part of the Enterprise edition: enforcement is compiled
+in by the `ent` cargo feature and activated by a license claim (there
+is no separate `fips` cargo feature; the aws-lc-rs FIPS provider
+itself is installed in every build, and OSS builds expose the
+self-test attestation on `/healthz` without enforcing the
+approved-only cipher list). The
 FIPS 140-3 validation certificate itself is a property of the underlying
 crypto module, not the gateway binary -- a deployment that needs a
 formal FIPS attestation must run the gateway on a platform whose crypto

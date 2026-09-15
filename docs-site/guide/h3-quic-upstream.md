@@ -28,16 +28,16 @@ for many concurrent streams to the same upstream.
 
 ## Enabling
 
-The h3 upstream transport is compiled into the default build alongside HTTP/3
-ingress (default OFF), because both pull in the `quinn` (QUIC) and `h3`
-crates:
+The h3 upstream transport is compiled into every build alongside HTTP/3
+ingress — there is no cargo feature to enable; the `quinn` (QUIC) and
+`h3` crates are unconditional dependencies:
 
 ```sh
 cargo build -p dwara-bin
 ```
 
-In a default build the feature is absent and `upstream.protocol: h3` is
-accepted but inert -- the upstream connects over HTTP/1.1 instead.
+An upstream with `protocol: h3` dials over QUIC as soon as it appears
+in the config.
 
 ## Configuration
 
@@ -50,15 +50,14 @@ upstreams:
       - address: 10.0.0.7
         port: 8443
     protocol: h3
-    tls:
-      cert_file: /etc/dwara/upstream-ca.pem
+    trusted_ca_file: /etc/dwara/upstream-ca.pem
 ```
 
 QUIC mandates TLS 1.3, so the upstream connection is always encrypted --
-there is no cleartext h3 equivalent of h2c. The `tls` block supplies the
-CA used to validate the upstream's certificate. The same certificate
-trust model as an `https`/`http2` upstream applies; only the transport
-differs.
+there is no cleartext h3 equivalent of h2c. `trusted_ca_file` supplies
+the CA used to validate the upstream's certificate (the same trust
+model as an `https`/`http2` upstream; `use_system_roots: true` uses the
+OS trust store instead). Only the transport differs.
 
 ## How it differs from HTTP/3 ingress
 
@@ -79,9 +78,8 @@ separately per listener and per upstream.
 
 ## Notes
 
-- The `h3` feature pulls in the `quinn` and `h3` crates, increasing the
-  binary size. That is why the feature is default OFF -- enable it only
-  in builds that serve or proxy h3 traffic.
+- The `quinn` and `h3` crates increase the binary size; they are
+  compiled in unconditionally.
 - An h3 upstream cannot fall back to cleartext; QUIC is always
   encrypted, so the `tls` block is required.
 - Connection pooling for h3 upstreams reuses a single QUIC connection

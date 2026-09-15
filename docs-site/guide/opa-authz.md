@@ -8,15 +8,15 @@ OPA is one of two external policy engines Dwara supports for
 authorization; the other, [Cedar authorization](./cedar-authz),
 evaluates policies in-process. Both complement the built-in authz
 (consumer/route/service policies) -- see
-[Authorization](./authorization) -- and sit behind a single
-compile-time capability (`cedar`, default OFF, no license) that
-covers both engines. See [Editions: OSS vs Enterprise](./editions)
-for how capabilities differ from enterprise features.
+[Authorization](./authorization) -- and both compile into every build
+as library components. See [Editions: OSS vs Enterprise](./editions)
+for how these scaffolded surfaces differ from enterprise features.
 
 ::: info Status
-The pack is not included in the published OSS binaries. The OPA
-HTTP client (with decision caching and a `fail_closed` mode), like
-the in-process Cedar authorizer, is complete and test-covered as a
+The OPA HTTP client compiles into every build — there is no cargo
+feature for it (see [Editions](./editions#scaffolded-surfaces)). The
+client (with decision caching and a `fail_closed` mode), like the
+in-process Cedar authorizer, is complete and test-covered as a
 library component. The config wiring has not landed yet -- the
 `authz:` blocks below illustrate the target surface (the built-in
 rules live under `authorization:` today) and the Cedar/OPA keys are

@@ -5,6 +5,16 @@ order. You can configure per-phase dry-run mode (log but don't
 enforce) and override the default ordering at both the gateway and
 per-route level.
 
+::: info Status
+The `filter_chain:` block (gateway and per-route) parses and validates
+in every build — `order` must be a permutation of all eight phases.
+Applying a custom order or per-phase dry-run from this block on the
+live request path is not wired yet: the dataplane runs the fixed
+default order below (per-attachment `dry_run` flags on authorization
+and policies are the live dry-run mechanism). See
+[Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
+:::
+
 ## Default phase order
 
 The gateway executes these phases in order for every request:

@@ -6,6 +6,17 @@ side changing. The gateway owns the impedance mismatch: it parses the
 inbound request in the client's protocol, produces the equivalent request in
 the upstream's protocol, and translates the response back.
 
+::: info Status
+The `translation:` route block parses and validates in every build
+(there are no `protocol_translation`/`soap` cargo features), but the
+runtime translators are not yet dispatched from the proxy path — a
+route carrying a `translation` block forwards traffic untranslated
+today. The GraphQL and SOAP translators are implemented and
+test-covered as library components; wiring them into the request path
+is landing iteratively. See
+[Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
+:::
+
 ## When to use this
 
 Use protocol translation when you are modernizing an estate incrementally --
@@ -18,43 +29,39 @@ unchanged.
 
 ## Configuration
 
-Add a `translation` block to the route. The `from` and `to` fields name the
-client-facing and upstream-facing protocols; the gateway validates that the
-pair is a supported translation.
+Add a `translation` block to the route. The `kind` selects the direction;
+the `graphql`/`soap` sub-blocks carry the direction-specific config:
 
 ```yaml
 routes:
-  - name: legacy-to-grpc
-    service: grpc-svc
+  - name: users-via-graphql
+    service: graphql-svc
     match:
       path: { type: prefix, value: /v1/users }
     translation:
-      from: rest
-      to: grpc
-      mapping: /etc/dwara/protos/user-api.yaml
-      grpc_service: pkg.UserService
+      kind: rest_to_graphql
+      graphql:
+        query_template: "query($id: ID!) { user(id: $id) { name email } }"
+        upstream_path: /graphql
     action:
       type: proxy
-      upstream:
-        protocol: http2
-        trusted_ca_file: /etc/dwara/upstream-ca.pem
 ```
+
+The upstream protocol is set on the upstream itself (e.g.
+`protocol: https` with `trusted_ca_file`), not on the route action.
 
 ## Supported translations
 
-| From | To | Notes |
+| `kind` | Direction | Notes |
 | --- | --- | --- |
-| `rest` | `grpc` | REST path/query/body mapped to a gRPC request via the mapping file; response protobuf trans-coded to JSON. |
-| `rest` | `graphql` | REST parameters become GraphQL variables; the gateway issues a fixed query from the mapping file and returns the selection as JSON. |
-| `soap` | `rest` | SOAP/XML envelope parsed into JSON fields; REST response re-wrapped into a SOAP envelope for the client. **(Partially wired: the `SoapTranslator` is implemented but not yet dispatched from the proxy path; the `soap` feature compiles the translator but the proxy does not call it today.)** |
+| `rest_to_graphql` | REST/JSON client -> GraphQL upstream | The gateway builds a GraphQL query from `query_template` and the REST JSON body (`$variable` references resolve from the body's top-level fields and are also sent as the `variables` map). |
+| `graphql_to_rest` | GraphQL client -> REST upstream | The gateway unwraps the GraphQL `data` envelope into a REST JSON body on the response path. |
+| `rest_to_soap` | REST/JSON client -> SOAP/XML upstream | The gateway wraps the JSON body in a SOAP envelope with the configured `operation` name and `namespace`. |
+| `soap_to_rest` | SOAP/XML client -> REST/JSON upstream | The gateway parses the SOAP envelope and converts the Body's payload element to JSON. |
 
-The `mapping` file is the contract between the two protocols. For REST-to-gRPC
-it follows the gRPC HTTP/JSON transcoding convention driven by
-`google.api.http` annotations, so the same `.proto` annotations that power
-[gRPC-Web transcoding](./grpc-web) apply here. For REST-to-GraphQL it pairs a
-REST path with a named GraphQL operation and a variable binding. For
-SOAP-to-REST it maps WSDL operations to REST verbs and XML element paths to
-JSON fields.
+REST-to-gRPC is not a `translation` kind — JSON-to-gRPC transcoding is
+part of [gRPC-Web](./grpc-web) (`grpc_web.transcoding`, driven by
+`google.api.http` annotations in `.proto` descriptors).
 
 ## Error handling
 

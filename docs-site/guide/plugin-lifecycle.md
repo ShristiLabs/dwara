@@ -6,13 +6,12 @@ companion to [Proxy-Wasm plugins](./proxy-wasm-plugins) and [Native
 plugin filters](./native-plugins).
 
 ::: info Status
-The plugin runtime is a compile-time capability (`wasm` for the
-proxy-wasm host, `plugins` for native filters; both default OFF -- see
-[Editions](./editions#compile-time-feature-packs)) and is not included
-in the published OSS binaries. The lifecycle manager, runner, and
-unified dispatch chain are complete and test-covered as library
-components; wiring them into the gateway's request path is landing
-iteratively (see the [changelog](https://github.com/shristilabs/dwara/blob/main/CHANGELOG.md)).
+The plugin runtime compiles into every build — there are no
+`wasm`/`plugins` cargo features (see
+[Editions](./editions#scaffolded-surfaces)). The lifecycle manager,
+runner, and unified dispatch chain are complete and test-covered as
+library components; wiring them into the gateway's request path is
+landing iteratively (see the [changelog](https://github.com/shristilabs/dwara/blob/main/CHANGELOG.md)).
 This page documents the lifecycle behavior the runtime implements.
 :::
 

@@ -20,21 +20,23 @@ themselves:
    Enterprise features are the ones that span *multiple* gateway
    instances or need external infrastructure. See
    [Editions](./editions).
-2. **Capability** — *which optional surfaces this build carries*.
-   Advanced surfaces ship as compile-time capabilities (`wasm` for the
-   proxy-wasm host, `plugins` for native filters, `cel`, `aggregation`,
-   `mcp`, ...). They are default-OFF and not included in the published
-   binaries; a config block for a capability the build lacks is
-   rejected at validation. See
-   [compile-time feature packs](./editions#compile-time-feature-packs).
+2. **Capability** — *which optional surfaces are active in this build*.
+   There are no compile-time feature packs: the only cargo features are
+   `ent` (Enterprise), the test-only `loom`, and the optional `cel-jit`
+   accelerator. Advanced surfaces (the proxy-wasm host and native filter
+   chain, CEL, Cedar/OPA, aggregation, OpenAPI response validation, the
+   MCP admin server, ...) compile into every build; the ones whose
+   dispatch or config wiring has not landed yet are scaffolded. See
+   [scaffolded surfaces](./editions#scaffolded-surfaces).
 3. **Config** — *what this particular gateway does*. A single strict
    YAML file declares the routing chain, identity, policy, and
    observability. This page is mostly about this axis.
 
 A feature that is Enterprise-only is inert-but-accepted in an OSS build
-(it parses and validates, then is ignored). A capability that is not
-compiled in is rejected at validation if its config block appears. The
-two are different failure modes — know which axis you are on.
+(it parses and validates, then is ignored). A scaffolded surface is
+accepted too — where a config block exists it parses and validates, but
+nothing executes it yet. The two look identical in the config and differ
+only in behavior — know which axis you are on.
 
 ## The core routing chain
 
