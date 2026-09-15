@@ -418,7 +418,7 @@ impl RawRecord {
             upstream: rec.upstream.clone().unwrap_or_default(),
             method: rec.method.clone(),
             status: rec.status,
-            status_class: crate::observability::status_class(rec.status),
+            status_class: crate::observability::status_class(rec.status).to_owned(),
             duration_ms: rec.duration_ms,
             attempts: rec.attempts,
             rate_limited: rec.rate_limited,

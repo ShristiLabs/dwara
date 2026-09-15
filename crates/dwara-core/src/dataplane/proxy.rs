@@ -3346,8 +3346,11 @@ where
     // order: exact, then regex by specificity, then prefix by length.
     let candidates = gen.snapshot.route_table().find_candidates(&path);
     let mut idx = None;
-    let mut params = Vec::new();
-    for (cand_idx, cand_params) in &candidates {
+    // PERF: remember the WINNER's position instead of cloning its params
+    // Vec (a clone of (String, String) pairs per request); the params are
+    // moved out of `candidates` below, once, for the winner only.
+    let mut winner = None;
+    for (pos, (cand_idx, _)) in candidates.iter().enumerate() {
         let Some(route) = gateway.routes.get(*cand_idx) else {
             continue;
         };
@@ -3357,13 +3360,18 @@ where
             &req,
         ) {
             idx = Some(*cand_idx);
-            params = cand_params.clone();
+            winner = Some(pos);
             break;
         }
     }
     let Some(idx) = idx else {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
+    let params = candidates
+        .into_iter()
+        .nth(winner.expect("winner position recorded when idx is Some"))
+        .map(|(_, params)| params)
+        .unwrap_or_default();
     let Some(route) = gateway.routes.get(idx) else {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
@@ -3543,7 +3551,22 @@ where
                     dp.obs.record_waf(&route.name, "all", "passed");
                 }
                 let req = Request::from_parts(parts, result.body);
-                return handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await;
+                // `listener_cfg` borrows this function's `gen` (via
+                // `gateway`), so the Arc is cloned into the call rather
+                // than moved — the borrow must outlive the await.
+                return handle_routed(
+                    dp,
+                    peer,
+                    req,
+                    rid,
+                    rec,
+                    root,
+                    Arc::clone(&gen),
+                    idx,
+                    params,
+                    listener_cfg,
+                )
+                .await;
             }
             if head_match.is_none() {
                 dp.obs.record_waf(&route.name, "all", "passed");
@@ -3610,11 +3633,35 @@ where
                 parts,
                 crate::dataplane::graphql::GraphqlBody::new(collected),
             );
-            return handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await;
+            return handle_routed(
+                dp,
+                peer,
+                req,
+                rid,
+                rec,
+                root,
+                Arc::clone(&gen),
+                idx,
+                params,
+                listener_cfg,
+            )
+            .await;
         }
     }
 
-    handle_routed(dp, peer, req, rid, rec, root, gen, idx, params).await
+    handle_routed(
+        dp,
+        peer,
+        req,
+        rid,
+        rec,
+        root,
+        Arc::clone(&gen),
+        idx,
+        params,
+        listener_cfg,
+    )
+    .await
 }
 
 /// The post-WAF request path (DW-051 split point): everything from the
@@ -3637,18 +3684,16 @@ async fn handle_routed<B>(
     gen: Arc<Generation>,
     idx: usize,
     params: Vec<(String, String)>,
+    // PERF: the accepting listener's config, resolved ONCE in the
+    // caller (`handle_inner`) — this function used to repeat the same
+    // linear name scan over `gateway.listeners` per request.
+    listener_cfg: Option<&crate::config::Listener>,
 ) -> Response<ProxyBody>
 where
     B: hyper::body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     let gateway = gen.snapshot.gateway();
-    let listener_cfg = req.extensions().get::<ListenerLabel>().and_then(|l| {
-        gateway
-            .listeners
-            .iter()
-            .find(|li| li.name.as_str() == &*l.0)
-    });
     let Some(route) = gateway.routes.get(idx) else {
         return unrouted_response(dp, gateway, listener_cfg, peer, rid, rec).await;
     };
@@ -4605,6 +4650,7 @@ where
                         route,
                         &gen,
                         idx,
+                        service,
                         &params,
                         peer,
                         identity.as_ref(),
@@ -4687,6 +4733,7 @@ where
                 route,
                 &gen,
                 idx,
+                service,
                 &params,
                 peer,
                 identity.as_ref(),
@@ -5487,7 +5534,9 @@ fn resolve_json_pointer(
 
 // Eleven parameters is the price of keeping every input explicit on the
 // per-request proxy path (no per-request allocation of a context struct);
-// DW-021's request id, access record, and metrics are the newest.
+// DW-021's request id, access record, and metrics are the newest. The
+// `service` reference is resolved once by the caller (PERF: this function
+// used to repeat the linear name scan over `gateway.services` per request).
 // pub(super): the response cache's background revalidation (DW-037)
 // drives the same forward path with a synthetic conditional GET.
 #[allow(clippy::too_many_arguments)]
@@ -5497,6 +5546,7 @@ pub(super) async fn proxy_request<B>(
     mut req: Request<B>,
     route: &Route,
     route_idx: usize,
+    service: Option<&crate::config::Service>,
     params: &[(String, String)],
     global_permit: &mut Option<OwnedSemaphorePermit>,
     identity: Option<&Identity>,
@@ -5513,7 +5563,7 @@ where
 {
     let obs: &Observability = obs_arc;
     let gateway = gen.snapshot.gateway();
-    let Some(service) = gateway.services.iter().find(|s| s.name == route.service) else {
+    let Some(service) = service else {
         // Validation rejects dangling references, so this is a generation
         // tear; keep it classified rather than panicking.
         return simple(
@@ -6056,6 +6106,29 @@ where
     // it as the dispatch hash key fallback instead of calling
     // peer.to_string() on every retry attempt.
     let peer_key = peer_str.clone();
+    // PERF: single-attempt fast path. The full `http::request::Parts`
+    // (including the whole HeaderMap) used to be cloned on every loop
+    // iteration — pure overhead for the common case where a second
+    // attempt can never run: a retry requires a replayable body AND
+    // `rp.attempts >= 1` (`done_tries` is 1 after the first send, and
+    // `may_retry = done_tries <= rp.attempts && replay.is_some()`), and
+    // a hedge copy also requires `replay` (`hedge_race` borrows the
+    // parts for each copy). When none of those hold the parts are MOVED
+    // into the one and only Request; the multi-attempt path retains the
+    // parts in `parts_cell` and keeps the per-iteration clone (each sent
+    // request consumes its own copy).
+    let single_attempt = replay.is_none() || (rp.attempts == 0 && !hedge_enabled);
+    let mut parts_cell = Some(out_req_parts);
+    let mut prebuilt = if single_attempt {
+        Some(Request::from_parts(
+            parts_cell.take().expect("single-attempt owns the parts"),
+            first_body
+                .take()
+                .expect("first body present on the first attempt"),
+        ))
+    } else {
+        None
+    };
     loop {
         // Breaker admission (DW-015) precedes every attempt: endpoint
         // pick, dial, and any remaining retries. Checked per iteration so
@@ -6075,16 +6148,30 @@ where
                 return breaker_open(retry_after_ms, rid);
             }
         }
-        let body = match first_body.take() {
-            Some(body) => body,
+        let out_req = match prebuilt.take() {
+            Some(req) => req,
             None => {
-                // Unreachable: the only `continue` into this branch requires
-                // `may_retry`, which requires `replay.is_some()`.
-                debug_assert!(replay.is_some(), "retry requires a replayable body");
-                AttemptBody::Replay(replay.clone().expect("retry requires a replayable body"))
+                let body = match first_body.take() {
+                    Some(body) => body,
+                    None => {
+                        // Unreachable: the only `continue` into this branch
+                        // requires `may_retry`, which requires
+                        // `replay.is_some()`.
+                        debug_assert!(replay.is_some(), "retry requires a replayable body");
+                        AttemptBody::Replay(
+                            replay.clone().expect("retry requires a replayable body"),
+                        )
+                    }
+                };
+                Request::from_parts(
+                    parts_cell
+                        .as_ref()
+                        .expect("multi-attempt retains the parts")
+                        .clone(),
+                    body,
+                )
             }
         };
-        let out_req = Request::from_parts(out_req_parts.clone(), body);
         // One span per upstream attempt (DW-021); the balancer's pick
         // runs inside it under its own `upstream_pick` span (see the
         // upstream handle). Instrumented onto the send future — no span
@@ -6134,7 +6221,9 @@ where
                 send,
                 hedge,
                 &handle,
-                &out_req_parts,
+                parts_cell
+                    .as_ref()
+                    .expect("hedge implies multi-attempt retains the parts"),
                 replay.as_ref().expect("hedge requires replay"),
                 dispatch_hash_key,
                 rid,
@@ -7285,6 +7374,9 @@ async fn dispatch_action<B>(
     route: &Route,
     gen: &Arc<Generation>,
     idx: usize,
+    // PERF: pre-resolved by the caller (handle_routed) — see the
+    // `proxy_request` doc note on the same threading.
+    service: Option<&crate::config::Service>,
     params: &[(String, String)],
     peer: IpAddr,
     identity: Option<&crate::security::authn::Identity>,
@@ -7476,6 +7568,7 @@ where
                     req,
                     route,
                     idx,
+                    service,
                     params,
                     global_permit,
                     identity,
@@ -8119,7 +8212,11 @@ async fn try_acquire_queued(
 ///
 /// Returns the `Connection` token list collected before stripping (original
 /// case, deduplicated, order preserved) so the tunneling caller can rebuild
-/// a `Connection` header with the surviving tokens.
+/// a `Connection` header with the surviving tokens. The owned list is
+/// materialized only when `keep_upgrade` is set — the one caller that
+/// consumes it is the upgrade-tunneling path; everyone else gets an empty
+/// Vec (PERF: no per-request String allocations for the ubiquitous
+/// `Connection: keep-alive`).
 ///
 /// (Public so the DW-024 micro-benchmark can exercise it directly; it is
 /// not part of the stable public surface.)
@@ -8128,9 +8225,12 @@ pub fn strip_hop_by_hop(
     keep_upgrade: bool,
     preserve_te: bool,
 ) -> Vec<String> {
+    // PERF: the tokens borrow the header values (&str slices) instead of
+    // owning a String per token, and the comparison stays case-insensitive
+    // in the filter closure (no lowercased copy). The owned list the
+    // tunnel path needs is materialized BEFORE the removal loop so the
+    // borrow ends before `headers` is mutated.
     let tokens = connection_tokens(headers);
-    // PERF: avoid allocating a lowercased Vec<String> — compare
-    // case-insensitively in the filter closure instead.
     let drop: Vec<HeaderName> = headers
         .keys()
         .filter(|name| {
@@ -8152,10 +8252,15 @@ pub fn strip_hop_by_hop(
         })
         .cloned()
         .collect();
+    let owned: Vec<String> = if keep_upgrade {
+        tokens.iter().map(|t| t.to_string()).collect()
+    } else {
+        Vec::new()
+    };
     for name in drop {
         headers.remove(&name);
     }
-    tokens
+    owned
 }
 
 /// Whether a request is gRPC (DW-039): HTTP/2 with an
@@ -8213,14 +8318,16 @@ struct WsPoliceDecision {
 
 /// Deduplicated tokens across ALL `Connection` header lines (an HTTP/1
 /// message may carry several; `get` alone only consults the first).
-fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
+/// PERF: borrows slices of the header values — the common one-token
+/// request pays one Vec, zero Strings.
+fn connection_tokens(headers: &HeaderMap) -> Vec<&str> {
+    let mut tokens: Vec<&str> = Vec::new();
     for value in headers.get_all(CONNECTION) {
         let Ok(v) = value.to_str() else { continue };
         for t in v.split(',') {
             let t = t.trim();
             if !t.is_empty() && !tokens.iter().any(|e| e.eq_ignore_ascii_case(t)) {
-                tokens.push(t.to_string());
+                tokens.push(t);
             }
         }
     }

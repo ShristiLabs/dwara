@@ -289,6 +289,49 @@ fn compile_builds_route_table_with_precedence() {
 }
 
 #[test]
+fn find_candidates_orders_prefixes_longest_first_and_duplicates_in_declaration_order() {
+    // PERF-03 (#205) + DP-06 (#254): the trie-backed candidate walk must
+    // reproduce the old scan-and-sort output exactly — longest prefix
+    // first, then duplicate configured prefixes (one trie node) in
+    // declaration order. A flat reverse of the collected walk would
+    // flip the duplicates' order.
+    let mut gw = good_gateway();
+    let mut dup_a = gw.routes[1].clone();
+    dup_a.name = "dup-a-first".into();
+    dup_a.r#match.path.value = "/p".into();
+    let mut dup_b = gw.routes[1].clone();
+    dup_b.name = "dup-a-second".into();
+    // Trailing slash trims to the SAME prefix: both land on one node.
+    dup_b.r#match.path.value = "/p/".into();
+    let mut deeper = gw.routes[1].clone();
+    deeper.name = "deeper".into();
+    deeper.r#match.path.value = "/p/q".into();
+    let idx_dup_a = gw.routes.len();
+    let idx_dup_b = idx_dup_a + 1;
+    let idx_deeper = idx_dup_a + 2;
+    gw.routes.push(dup_a);
+    gw.routes.push(dup_b);
+    gw.routes.push(deeper);
+    let compiled = compile(&gw).expect("good config compiles");
+    let rt = compiled.route_table();
+
+    let order: Vec<usize> = rt
+        .find_candidates("/p/q/x")
+        .into_iter()
+        .map(|(idx, _)| idx)
+        .collect();
+    assert_eq!(
+        order,
+        vec![idx_deeper, idx_dup_a, idx_dup_b],
+        "longest prefix first; duplicates in declaration order"
+    );
+
+    // find_full keeps first-declared-wins on the duplicate node.
+    assert_eq!(rt.find("/p/q/x"), Some(idx_deeper));
+    assert_eq!(rt.find("/p/other"), Some(idx_dup_a));
+}
+
+#[test]
 fn compile_rejects_invalid_regex() {
     let mut gw = good_gateway();
     gw.routes[2].r#match.path.value = "/old/(unclosed".into();

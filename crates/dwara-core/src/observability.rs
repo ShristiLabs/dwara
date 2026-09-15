@@ -292,8 +292,23 @@ const TOKENS_PER_REQUEST_BUCKETS: &[f64] = &[
 ];
 
 /// Prometheus status-class label ("2xx", "5xx", ...).
-pub fn status_class(status: u16) -> String {
-    format!("{}xx", status / 100)
+///
+/// PERF: a `&'static str` per class, not a `format!` — this fires on
+/// the per-request and per-attempt metric recording paths, and the
+/// label text is one of ten fixed spellings.
+pub fn status_class(status: u16) -> &'static str {
+    match status / 100 {
+        0 => "0xx",
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        6 => "6xx",
+        7 => "7xx",
+        8 => "8xx",
+        _ => "9xx",
+    }
 }
 
 /// The accumulated access-log record for one request. The proxy fills
@@ -2016,7 +2031,7 @@ impl Observability {
     /// Count and observe one completed request.
     pub fn record_request(&self, route: &str, listener: &str, status: u16, elapsed: Duration) {
         self.requests_total
-            .with_label_values(&[route, listener, &status_class(status)])
+            .with_label_values(&[route, listener, status_class(status)])
             .inc();
         self.request_duration
             .with_label_values(&[route])
@@ -2027,7 +2042,7 @@ impl Observability {
     /// dispatch never resolved an endpoint).
     pub fn record_upstream_attempt(&self, upstream: &str, endpoint: &str, status: u16) {
         self.upstream_attempts_total
-            .with_label_values(&[upstream, endpoint, &status_class(status)])
+            .with_label_values(&[upstream, endpoint, status_class(status)])
             .inc();
     }
 
@@ -3096,6 +3111,17 @@ impl SloRouteState {
 /// Prometheus gathers (scrape time — see the section docs).
 struct SloState {
     routes: std::sync::RwLock<std::collections::HashMap<String, SloRouteState>>,
+    /// PERF: `record` runs on EVERY completed request, but most fleets
+    /// configure no route SLOs — the empty-map case still paid a
+    /// `RwLock::write` (exclusive across every worker thread) per
+    /// request. This flag gates that lock away entirely; it is
+    /// maintained under the same write guard as the map swap, so
+    /// `false` implies the map is empty and `record`'s `get_mut` would
+    /// have missed anyway. A record racing a generation swap can slip
+    /// one sample into the outgoing map or skip one in the incoming
+    /// map — the same tolerance the pre-existing swap race already
+    /// had, and far below one window's noise floor.
+    configured: std::sync::atomic::AtomicBool,
     burn_rate: prometheus::GaugeVec,
     target: prometheus::GaugeVec,
 }
@@ -3128,6 +3154,7 @@ impl SloState {
         .expect("valid metric definition");
         SloState {
             routes: std::sync::RwLock::new(std::collections::HashMap::new()),
+            configured: std::sync::atomic::AtomicBool::new(false),
             burn_rate,
             target,
         }
@@ -3160,11 +3187,24 @@ impl SloState {
         for (name, targets) in slos {
             routes.insert(name, SloRouteState::new(targets));
         }
+        // Maintained under the write guard so a `record` in flight sees
+        // either the fully swapped map with the flag set, or the gate
+        // closed and no lock at all (see the field docs).
+        self.configured.store(
+            !routes.is_empty(),
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     /// Record one completed request's outcome for a configured route
     /// (no-op for routes without an SLO — the common case).
     fn record(&self, route: &str, status: u16, duration_ms: f64, now_ms: i64) {
+        if !self
+            .configured
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
         if let Some(state) = self.routes.write().expect("slo state lock").get_mut(route) {
             let error = status >= 500;
             let over_latency = state

@@ -74,11 +74,14 @@
 //! choices.
 
 use std::collections::BTreeMap;
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
+use http::uri::Authority;
+use http::HeaderValue;
 
 use crate::config::limits::{KETAMA_VNODES, MAGLEV_TABLE_SIZE};
 use crate::config::{Endpoint, LoadBalancer, PassiveHealth, PeakEwmaConfig};
@@ -135,10 +138,36 @@ fn system_now_ns() -> u64 {
         .unwrap_or(0)
 }
 
+/// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
+/// parseable URI authority; `[::1]:8080` is.
+///
+/// PERF: lives here (next to the endpoint rows it describes) because it
+/// is computed ONCE per endpoint at [`LbState`] build time; the dispatch
+/// path clones the result instead of formatting it per attempt.
+fn endpoint_authority(address: &str, port: u16) -> Arc<str> {
+    // PERF: single format! instead of two (host + authority).
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{address}]:{port}").into()
+    } else {
+        format!("{address}:{port}").into()
+    }
+}
+
 /// One endpoint's runtime row inside an [`LbState`].
 struct LbEndpoint {
     address: String,
     port: u16,
+    /// PERF: the endpoint's dial authority ("address:port", IPv6
+    /// bracketed) and its parsed HTTP forms, computed once here instead
+    /// of formatted + parsed on every dispatch. The `Arc<str>` and the
+    /// refcount-backed `Authority`/`HeaderValue` clones cost an atomic
+    /// bump per pick. The parsed pair is `None` only if the configured
+    /// address somehow fails to parse (validation rejects those); the
+    /// send path then falls back to parsing the authority string per
+    /// attempt — exactly the pre-optimization behavior.
+    authority: Arc<str>,
+    http_authority: Option<Authority>,
+    host_value: Option<HeaderValue>,
     /// Configured weight (>= 1; validation enforces).
     weight: u32,
     /// DW-094 (Ent): the endpoint's region (e.g. `us-east-1`), used
@@ -178,9 +207,13 @@ struct LbEndpoint {
 
 impl LbEndpoint {
     fn new(e: &Endpoint) -> Self {
+        let authority = endpoint_authority(&e.address, e.port);
         LbEndpoint {
             address: e.address.clone(),
             port: e.port,
+            authority: Arc::clone(&authority),
+            http_authority: Authority::from_str(&authority).ok(),
+            host_value: HeaderValue::from_str(&authority).ok(),
             weight: e.weight.max(1),
             region: e.region.clone(),
             zone: e.zone.clone(),
@@ -198,9 +231,14 @@ impl LbEndpoint {
     /// a pick racing the rebuild cannot strand a phase step in the old
     /// state (#128).
     fn carried_from(old: &LbEndpoint, e: &Endpoint) -> Self {
+        // same_target guarantees address:port — and therefore the whole
+        // precomputed authority trio — is unchanged; carry it by clone.
         LbEndpoint {
             address: old.address.clone(),
             port: old.port,
+            authority: Arc::clone(&old.authority),
+            http_authority: old.http_authority.clone(),
+            host_value: old.host_value.clone(),
             weight: e.weight.max(1),
             region: e.region.clone(),
             zone: e.zone.clone(),
@@ -1017,6 +1055,12 @@ impl UpstreamLb {
             idx,
             address: e.address.clone(),
             port: e.port,
+            // PERF: the precomputed authority trio travels with the
+            // pick (refcount bumps) — the send path formats and parses
+            // nothing per attempt.
+            authority: Arc::clone(&e.authority),
+            http_authority: e.http_authority.clone(),
+            host_value: e.host_value.clone(),
             health,
             guard: Some(InflightGuard { state, idx }),
         })
@@ -1392,6 +1436,14 @@ pub struct Dispatch {
     pub address: String,
     /// Picked endpoint's port.
     pub port: u16,
+    /// PERF: the endpoint's precomputed dial authority and its parsed
+    /// HTTP forms, cloned from the [`LbEndpoint`] row at pick time —
+    /// built once per endpoint at state build, so a dispatch formats
+    /// and parses nothing. `pub(crate)`: consumed by the upstream send
+    /// path, not part of the public surface.
+    pub(crate) authority: Arc<str>,
+    pub(crate) http_authority: Option<Authority>,
+    pub(crate) host_value: Option<HeaderValue>,
     /// Passive health report handle for the picked endpoint, present only
     /// when the upstream configures `health`. The send path reports the
     /// outcome (transport error / status >= 500 = failure) when the
@@ -1439,6 +1491,28 @@ mod tests {
             .collect()
     }
     // --- slow start ---------------------------------------------------------
+
+    #[test]
+    fn endpoint_authority_brackets_ipv6_and_precomputes_parseable_forms() {
+        // PERF precompute contract: the authority is built once per
+        // endpoint (IPv6 literals bracketed — `::1:8080` is not a
+        // parseable URI authority, `[::1]:8080` is) and its parsed
+        // Authority/HeaderValue forms succeed for every address
+        // validation accepts.
+        let eps = eps(&[("::1", 8080, 1), ("10.0.0.7", 80, 1)]);
+        let v6 = LbEndpoint::new(&eps[0]);
+        assert_eq!(&*v6.authority, "[::1]:8080");
+        assert!(v6.http_authority.is_some(), "bracketed v6 parses");
+        assert!(v6.host_value.is_some());
+        let v4 = LbEndpoint::new(&eps[1]);
+        assert_eq!(&*v4.authority, "10.0.0.7:80");
+        assert!(v4.http_authority.is_some());
+        assert!(v4.host_value.is_some());
+        // carried_from keeps the trio unchanged for a same-target
+        // endpoint (no recompute drift across rebuilds).
+        let carried = LbEndpoint::carried_from(&v6, &eps[0]);
+        assert_eq!(carried.authority, v6.authority);
+    }
 
     #[test]
     fn slow_start_ramps_effective_weight_from_floor_to_full() {

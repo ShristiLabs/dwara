@@ -1240,17 +1240,6 @@ pub struct UpstreamHandle {
     body_completion_inflight: bool,
 }
 
-/// `address:port` with IPv6 literals bracketed. `::1:8080` is not a
-/// parseable URI authority; `[::1]:8080` is.
-fn endpoint_authority(address: &str, port: u16) -> String {
-    // PERF: single format! instead of two (host + authority).
-    if address.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{address}]:{port}")
-    } else {
-        format!("{address}:{port}")
-    }
-}
-
 impl UpstreamHandle {
     /// Upstream name this handle serves.
     pub fn name(&self) -> &str {
@@ -1461,7 +1450,7 @@ impl UpstreamHandle {
         // endpoint resolution, and in-flight acquisition all run against
         // ONE state snapshot (pick_for_dispatch), so a concurrent reload
         // cannot detach the guard from the picked endpoint.
-        let (mut dispatch, authority) = {
+        let mut dispatch = {
             // DW-021: the pick phase is its own span so a full trace
             // shows pick separately from the attempt that contains it.
             let span = tracing::info_span!(
@@ -1474,10 +1463,13 @@ impl UpstreamHandle {
                 .lb
                 .pick_for_dispatch(hash_key)
                 .ok_or(UpstreamError::NoEndpoints)?;
-            let authority = endpoint_authority(&dispatch.address, dispatch.port);
-            span.record("endpoint", authority.as_str());
-            *picked = Some(authority.clone());
-            (dispatch, authority)
+            // PERF: the authority (and its parsed forms) are precomputed
+            // per endpoint at LB-state build — no per-attempt format or
+            // parse. One owned String is retained for the caller's
+            // picked-endpoint label.
+            span.record("endpoint", &*dispatch.authority);
+            *picked = Some(dispatch.authority.to_string());
+            dispatch
         };
         // DW-108: H3 upstreams dispatch over QUIC, not the TCP/TLS pooled
         // client. The LB pick, in-flight guard, health reporting, and
@@ -1511,7 +1503,7 @@ impl UpstreamHandle {
                         };
                         let mut h3_req = hyper::Request::builder()
                             .method(method)
-                            .uri(format!("https://{authority}{}", path.as_str()));
+                            .uri(format!("https://{}{}", dispatch.authority, path.as_str()));
                         if let Some(h) = h3_req.headers_mut() {
                             *h = headers;
                         }
@@ -1550,15 +1542,23 @@ impl UpstreamHandle {
         // PERF: construct the Uri from parts instead of format!() + parse.
         // The previous code allocated a String for the full URI
         // ("scheme://authority/path") and then parsed it; from_parts
-        // reuses the already-allocated authority String and the cloned
+        // reuses the precomputed authority (a refcount clone from the
+        // LB endpoint row — no per-attempt parse) and the cloned
         // PathAndQuery (an Arc-bump clone from the inbound URI), avoiding
         // the intermediate full-URI String allocation and the full-URI
         // parse pass.
         let uri = {
             let scheme = Scheme::try_from(self.scheme)
                 .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
-            let auth = Authority::from_str(&authority)
-                .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?;
+            // The precomputed parse fails only for a mis-configured
+            // endpoint address that validation already rejects; fall back
+            // to parsing the authority string (the pre-optimization
+            // behavior) rather than inventing a new failure mode.
+            let auth = match dispatch.http_authority.clone() {
+                Some(auth) => auth,
+                None => Authority::from_str(&dispatch.authority)
+                    .map_err(|e| UpstreamError::Io(std::io::Error::other(e.to_string())))?,
+            };
             let mut parts = http::uri::Parts::default();
             parts.scheme = Some(scheme);
             parts.authority = Some(auth);
@@ -1569,7 +1569,14 @@ impl UpstreamHandle {
         *req.uri_mut() = uri;
         // The gateway, not the client, names the origin it dials: the
         // picked endpoint's authority replaces any Host the caller set.
-        if let Ok(v) = hyper::header::HeaderValue::from_str(&authority) {
+        // PERF: the HeaderValue is precomputed with the authority; the
+        // fallback (and the skip-on-failure shape) mirrors the Uri note
+        // above — unreachable for validated configs.
+        let host = dispatch
+            .host_value
+            .clone()
+            .or_else(|| hyper::header::HeaderValue::from_str(&dispatch.authority).ok());
+        if let Some(v) = host {
             req.headers_mut().insert(hyper::header::HOST, v);
         }
         // Normalize the HTTP version for the pool's protocol: an inbound h2

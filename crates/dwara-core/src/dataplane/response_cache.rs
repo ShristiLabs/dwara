@@ -872,12 +872,16 @@ impl ResponseCache {
             "cache".to_string(),
         );
         let mut no_permit: Option<OwnedSemaphorePermit> = None;
+        // PERF: resolve the service once here; `proxy_request` takes the
+        // pre-resolved reference (the request path must not re-scan).
+        let service = gateway.services.iter().find(|s| s.name == route.service);
         let mut resp = super::proxy::proxy_request(
             &gen,
             flow.peer,
             req,
             route,
             idx,
+            service,
             &_params,
             &mut no_permit,
             flow.identity.as_ref(),

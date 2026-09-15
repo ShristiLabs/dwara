@@ -8520,19 +8520,22 @@ fn validate_json_schema(
 /// O(n) linear scan over all prefix routes.
 ///
 /// PERF-03 (#205): A radix trie for longest-prefix matching. Each
-/// node stores an optional route index (set when a prefix ends at
-/// this node) and children keyed by the next byte. Lookup traverses
-/// the trie following the path bytes, recording the last node with
-/// a route index — that is the longest prefix match.
+/// node stores the route indices whose prefix ends at this node
+/// (empty for internal nodes) and children keyed by the next byte.
+/// Lookup traverses the trie following the path bytes, recording the
+/// last node carrying indices — that is the longest prefix match.
 ///
 /// O(k) lookup where k is the path length, replacing the previous
 /// O(n) linear scan over all prefix routes.
 #[derive(Debug, Default)]
 struct PrefixTrie {
-    /// The route index stored at this node, if a prefix ends here.
-    /// `None` means this node is an internal node (no prefix ends
-    /// here, but longer prefixes pass through it).
-    route_idx: Option<usize>,
+    /// Route indices of prefixes ending at this node, in declaration
+    /// order. Empty means this node is internal (no prefix ends here,
+    /// but longer prefixes pass through it). More than one entry means
+    /// duplicate configured prefixes — each is a distinct fall-through
+    /// candidate for `find_candidates` (DP-06), while `longest_match`
+    /// takes the first entry (first-declared wins).
+    route_idxs: Vec<usize>,
     /// Child nodes keyed by the next byte of the prefix.
     children: std::collections::HashMap<u8, Box<PrefixTrie>>,
 }
@@ -8542,9 +8545,11 @@ impl PrefixTrie {
         Self::default()
     }
 
-    /// Insert a prefix and its route index. The first-declared route
-    /// wins on equal-length ties, so we do NOT overwrite an existing
-    /// `route_idx` at the same node.
+    /// Insert a prefix and its route index. Every route declared with
+    /// this exact prefix is kept, in declaration order: the candidate
+    /// fall-through walks all of them (the first-declared-wins tie rule
+    /// for `find_full` is applied by `longest_match` reading the first
+    /// entry).
     fn insert(&mut self, prefix: &str, idx: usize) {
         let mut node = self;
         for &byte in prefix.as_bytes() {
@@ -8553,10 +8558,7 @@ impl PrefixTrie {
                 .entry(byte)
                 .or_insert_with(|| Box::new(PrefixTrie::new()));
         }
-        // First-declared wins: do not overwrite.
-        if node.route_idx.is_none() {
-            node.route_idx = Some(idx);
-        }
+        node.route_idxs.push(idx);
     }
 
     /// Longest-prefix-match: traverse the trie following the path
@@ -8564,19 +8566,47 @@ impl PrefixTrie {
     /// the route index of the longest matching prefix, or `None`.
     fn longest_match(&self, path: &str) -> Option<usize> {
         let mut node = self;
-        let mut best = node.route_idx;
+        let mut best = node.route_idxs.first().copied();
         for &byte in path.as_bytes() {
             match node.children.get(&byte) {
                 Some(child) => {
                     node = child;
-                    if node.route_idx.is_some() {
-                        best = node.route_idx;
+                    if let Some(&idx) = node.route_idxs.first() {
+                        best = Some(idx);
                     }
                 }
                 None => break,
             }
         }
         best
+    }
+
+    /// Every prefix match along the path, ONE SLICE PER MATCHED NODE,
+    /// in increasing-depth (= increasing prefix length) order. The
+    /// root is included first (an empty configured prefix — `/`
+    /// trimmed — matches every path), so a caller wanting longest-first
+    /// reverses the NODE order while keeping each node's slice in
+    /// declaration order: the flat Vec cannot simply be reversed, or
+    /// duplicate configured prefixes at one node would flip their
+    /// fall-through order.
+    fn collect_matches(&self, path: &str) -> Vec<&[usize]> {
+        let mut node = self;
+        let mut out = Vec::new();
+        if !node.route_idxs.is_empty() {
+            out.push(&node.route_idxs[..]);
+        }
+        for &byte in path.as_bytes() {
+            match node.children.get(&byte) {
+                Some(child) => {
+                    node = child;
+                    if !node.route_idxs.is_empty() {
+                        out.push(&node.route_idxs[..]);
+                    }
+                }
+                None => break,
+            }
+        }
+        out
     }
 }
 
@@ -8754,22 +8784,27 @@ impl RouteTable {
             regex_matches.push((self.regex_scores[i], i));
         }
         // Sort by score descending; stable sort preserves declaration
-        // order for ties.
-        regex_matches.sort_by(|a, b| b.0.cmp(&a.0));
+        // order for ties. PERF: skipped entirely for the 0/1-match cases
+        // (the overwhelming majority — sorting one element is a no-op).
+        if regex_matches.len() > 1 {
+            regex_matches.sort_by(|a, b| b.0.cmp(&a.0));
+        }
         for (_, i) in regex_matches {
             candidates.push((self.regex_indices[i], Vec::new()));
         }
 
-        // 3. Prefix matches, longest first.
-        let mut prefix_matches: Vec<(usize, usize)> = Vec::new();
-        for (prefix, idx) in &self.prefixes {
-            if path.starts_with(prefix.as_str()) {
-                prefix_matches.push((prefix.len(), *idx));
+        // 3. Prefix matches, longest first. PERF-03 (#205): the trie
+        // walk visits only nodes along the path — O(k) in the path
+        // length — replacing the O(n) scan-and-sort over every
+        // configured prefix. The walk yields matched nodes in
+        // increasing-depth order; reversing the node order gives
+        // longest-first while each node's slice stays in declaration
+        // order (duplicate configured prefixes fall through in
+        // declaration order, matching the old stable sort's output).
+        for idxs in self.prefix_trie.collect_matches(path).iter().rev() {
+            for &idx in *idxs {
+                candidates.push((idx, Vec::new()));
             }
-        }
-        prefix_matches.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, idx) in prefix_matches {
-            candidates.push((idx, Vec::new()));
         }
 
         candidates
@@ -9249,9 +9284,11 @@ pub fn compile(gateway: &Gateway) -> Result<Compiled, CompileError> {
             PathMatchKind::Prefix => {
                 let prefix = path.value.trim_end_matches('/').to_string();
                 // PERF-03 (#205): insert into the trie for O(k) lookup.
-                // First-declared wins on equal-length ties, so insert
-                // before pushing to the Vec (which preserves order for
-                // Debug output only).
+                // Duplicate prefixes each keep their own entry in the
+                // node (declaration order) so the candidate fall-through
+                // (find_candidates) offers all of them; `find_full`'s
+                // first-declared-wins tie rule reads the node's first
+                // entry. The Vec mirrors the trie for Debug output only.
                 prefix_trie.insert(&prefix, idx);
                 prefixes.push((prefix, idx));
             }

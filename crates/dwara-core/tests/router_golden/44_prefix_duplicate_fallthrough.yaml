@@ -1,0 +1,20 @@
+# name: duplicate-prefix-falls-through-in-declaration-order
+# Two routes declare the SAME prefix (they compile to one trie node).
+# The first-declared wins while its criteria pass; when they miss, the
+# router falls through to the second declaration (DP-06, #254) — the
+# node keeps BOTH indices in declaration order for the candidate walk.
+# Regression guard for the PERF-03 trie wiring in find_candidates: a
+# flat reverse of the collected matches would flip this order.
+routes:
+  - name: declared-first-post-only
+    service: svc
+    match:
+      path: {type: prefix, value: /api}
+      methods: [POST]
+    action: {type: proxy}
+  - name: declared-second
+    service: svc
+    match: {path: {type: prefix, value: /api}}
+    action: {type: proxy}
+request: {method: GET, path: /api/users}
+expect: {route: declared-second}
