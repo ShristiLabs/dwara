@@ -471,16 +471,23 @@ impl std::error::Error for ValidationError {}
 
 /// Compute a SHA-256 hex digest of a byte slice.
 fn sha256_hex(data: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    // We use a simple hash here (not cryptographic SHA-256) to avoid
-    // pulling in a SHA-256 dependency. In production, this should be
-    // a real SHA-256 checksum. The hash is used for change detection
-    // (hot-swap), not security.
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    // Real SHA-256 (DW-158): the digest is exposed on the plugin
+    // status surface (`GET /plugins`, `dwara-cli status`), where an
+    // operator compares digests across a fleet and against a registry
+    // pin's sha256 — a private hash would not survive that comparison.
+    // The value is also the hot-swap change-detection key (two loads of
+    // the same bytes always produce the same digest, which is all that
+    // comparison needs).
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest.iter() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 // White-box tests staying in src/ per AGENTS.md: these tests directly
@@ -879,6 +886,19 @@ mod tests {
         let hash1 = sha256_hex(b"hello");
         let hash2 = sha256_hex(b"world");
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn sha256_hex_is_real_sha256_full_width() {
+        // DW-158: the digest is exposed on the plugin status surface and
+        // compared against registry pins, so it must be a true SHA-256
+        // (64 lowercase hex chars, the standard "hello world" vector).
+        let digest = sha256_hex(b"hello world");
+        assert_eq!(digest.len(), 64);
+        assert_eq!(
+            digest,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]

@@ -84,7 +84,7 @@ use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 
-use crate::config::{PluginConfig, PluginPhase, Route};
+use crate::config::{Gateway, PluginConfig, PluginPhase, Route};
 use crate::dataplane::proxy::ProxyBody;
 use crate::observability::Observability;
 use crate::plugins::{ChainOutcome, LocalResponse, NativeRegistry, PluginChain};
@@ -554,6 +554,188 @@ impl RequestPlugins {
             }
         }
     }
+}
+
+// --- Plugin status surface (DW-158) ---------------------------------------
+
+/// A plugin's observable lifecycle state for the status surface (`GET
+/// /plugins`, `dwara-cli status`, `dwara_plugin_total{state}`). The
+/// three lifecycle states come from [`PluginHealth`]; the two extra
+/// states cover plugins that are declared in the config but unusable
+/// BEFORE the lifecycle can judge them (the same conditions the
+/// request-path gate fails closed on, so the status surface never
+/// shows a plugin as serving when its routes answer 500).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginStatusState {
+    /// Loaded and serving: a healthy WASM plugin or a registered
+    /// native filter.
+    Healthy,
+    /// The .wasm could not be read or compiled (lifecycle judgment);
+    /// routes referencing it fail closed.
+    Crashed { error: String, crash_count: u32 },
+    /// Disabled (manually or by a circuit breaker); routes referencing
+    /// it fail closed.
+    Disabled { reason: String },
+    /// Declared but not present in the running plugin runtime: a
+    /// registry `source:` artifact (resolution is DW-165 follow-up
+    /// work) or a generation tear after a failed engine rebuild.
+    NotLoaded,
+    /// A native filter whose registered name has no factory in the
+    /// registry; routes referencing it fail closed.
+    NotRegistered,
+}
+
+impl PluginStatusState {
+    /// The closed label vocabulary shared by `GET /plugins`, the CLI
+    /// status section, and `dwara_plugin_total{state}` — one mapping,
+    /// three surfaces, no drift.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PluginStatusState::Healthy => "healthy",
+            PluginStatusState::Crashed { .. } => "crashed",
+            PluginStatusState::Disabled { .. } => "disabled",
+            PluginStatusState::NotLoaded => "not_loaded",
+            PluginStatusState::NotRegistered => "not_registered",
+        }
+    }
+}
+
+/// One plugin's status entry (DW-158): what the admin endpoint, the
+/// CLI, and the per-state gauge are all built from.
+#[derive(Clone, Debug)]
+pub struct PluginStatusEntry {
+    /// The config-declared plugin name.
+    pub name: String,
+    /// `"wasm"` (local `.wasm` path), `"registry"` (remote source), or
+    /// `"native"` (compiled-in filter).
+    pub kind: &'static str,
+    /// Where the plugin comes from: the `.wasm` path, the registry
+    /// URL, or the registered native filter name.
+    pub source: String,
+    /// SHA-256 digest of the loaded `.wasm` artifact (hot-swap
+    /// change-detection key). Empty when there is no digest to report:
+    /// native plugins (no artifact), registry plugins before their
+    /// artifact is resolved, or a `.wasm` that could not be read.
+    pub sha256: String,
+    /// The plugin's lifecycle state.
+    pub state: PluginStatusState,
+    /// Effective resource limits — configured value or the documented
+    /// default — as `(fuel, memory_mb, timeout_ms)`. `None` for native
+    /// plugins (in-process; the config schema documents `limits` as
+    /// wasm-only).
+    pub limits: Option<(u64, usize, u64)>,
+    /// The phases the plugin declared (config order).
+    pub phases: Vec<PluginPhase>,
+    /// Route names whose `plugins` list references this plugin (config
+    /// order) — the blast radius of a state change.
+    pub referenced_by: Vec<String>,
+}
+
+/// Enumerate the generation's declared plugins as status entries
+/// (DW-158), in config order. Health and digest come from the live
+/// [`PluginLifecycle`] (WASM), the [`NativeRegistry`] (native names),
+/// or are `NotLoaded` (registry `source:` until DW-165). The
+/// dataplane serves this through `DataPlane::plugin_statuses` (the
+/// admin `GET /plugins` handler) and folds it into
+/// `dwara_plugin_total{state}` at publish time — the same enumeration,
+/// so the endpoint, the CLI, and the metric can never disagree.
+pub fn plugin_statuses(
+    lifecycle: &PluginLifecycle,
+    registry: &NativeRegistry,
+    gateway: &Gateway,
+) -> Vec<PluginStatusEntry> {
+    gateway
+        .plugins
+        .iter()
+        .map(|config| {
+            let referenced_by: Vec<String> = gateway
+                .routes
+                .iter()
+                .filter(|r| r.plugins.iter().any(|n| n == &config.name))
+                .map(|r| r.name.clone())
+                .collect();
+            let (kind, source, sha256, state, limits) = if let Some(native) = &config.native {
+                // DW-119: a compiled-in filter. The registry lookup IS
+                // its health: an unregistered name fails closed at
+                // request time exactly like a crashed plugin.
+                let state = if registry.contains(native) {
+                    PluginStatusState::Healthy
+                } else {
+                    PluginStatusState::NotRegistered
+                };
+                ("native", native.clone(), String::new(), state, None)
+            } else if let Some(src) = &config.source {
+                // SCALE-12 (#192): a remote artifact. Registry
+                // resolution is not implemented (DW-165): the plugin
+                // never enters the lifecycle, so it reads as not
+                // loaded — fail-closed, and visible as such here.
+                (
+                    "registry",
+                    src.url.clone(),
+                    String::new(),
+                    PluginStatusState::NotLoaded,
+                    Some(effective_limits(config)),
+                )
+            } else {
+                // A local .wasm plugin: health and digest come from the
+                // lifecycle, which loads/compiles with every
+                // generation (checksum-keyed).
+                let loaded = lifecycle.get_plugin(&config.name);
+                let (sha256, state) = match &loaded {
+                    None => (String::new(), PluginStatusState::NotLoaded),
+                    Some(lp) => {
+                        let state = match &lp.health {
+                            PluginHealth::Healthy => PluginStatusState::Healthy,
+                            PluginHealth::Crashed { error, crash_count } => {
+                                PluginStatusState::Crashed {
+                                    error: error.clone(),
+                                    crash_count: *crash_count,
+                                }
+                            }
+                            PluginHealth::Disabled { reason } => PluginStatusState::Disabled {
+                                reason: reason.clone(),
+                            },
+                        };
+                        (lp.checksum.clone(), state)
+                    }
+                };
+                (
+                    "wasm",
+                    config.wasm.clone().unwrap_or_default(),
+                    sha256,
+                    state,
+                    Some(effective_limits(config)),
+                )
+            };
+            PluginStatusEntry {
+                name: config.name.clone(),
+                kind,
+                source,
+                sha256,
+                state,
+                limits,
+                phases: config.phases.clone(),
+                referenced_by,
+            }
+        })
+        .collect()
+}
+
+/// A plugin's effective limits: the configured value where set, else
+/// the documented defaults (the same defaults the runner instantiates
+/// with, single-sourced from [`crate::wasm::PluginLimits::default`]).
+fn effective_limits(config: &PluginConfig) -> (u64, usize, u64) {
+    let defaults = crate::wasm::PluginLimits::default();
+    let limits = config.limits.as_ref();
+    (
+        limits.and_then(|l| l.fuel).unwrap_or(defaults.fuel),
+        limits
+            .and_then(|l| l.memory_mb)
+            .unwrap_or(defaults.memory_mb),
+        limits
+            .and_then(|l| l.timeout_ms)
+            .unwrap_or(defaults.timeout_ms),
+    )
 }
 
 /// Group a header list by name (first-seen order), preserving each

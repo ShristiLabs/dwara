@@ -35,6 +35,12 @@
 //!   (when a store is attached), per-upstream breaker states, the
 //!   active-requests gauge, the config generation, and the response
 //!   cache's live-entry estimate and purge count (DW-037).
+//! - `GET /plugins` — the plugin status surface (DW-158): per plugin,
+//!   its kind and source (local `.wasm` path / registry URL /
+//!   registered native name), SHA-256 digest, lifecycle state with
+//!   error and crash count, effective limits, declared phases, and the
+//!   routes referencing it — the operator's answer to "which plugins
+//!   are loaded, and which routes fail closed if one is not".
 //! - `POST /cache/purge` — response-cache invalidation (DW-037 +
 //!   DP-04): body `{"route": "<name>"}`, `{"all": true}`,
 //!   `{"tag": "<tag>"}` (DP-04, purge by upstream `Cache-Tags`), or
@@ -96,6 +102,7 @@ mod workspace_admin;
 
 use bytes::Bytes;
 use dwara_core::config::{gateway_to_yaml, parse_gateway, AdminConfig, Gateway};
+use dwara_core::dataplane::plugin_dispatch::PluginStatusState;
 use dwara_core::observability::{envelope_body, resolve_request_id};
 use dwara_core::proxy::DataPlane;
 use dwara_core::snapshot::{compile, ConfigState};
@@ -305,6 +312,53 @@ fn health_body(ctx: &AdminContext) -> serde_json::Value {
         "ready": ctx.dp.ready(),
         "config_generation": snapshot.generation(),
         "upstreams": upstreams,
+    })
+}
+
+/// GET /plugins (DW-158): the plugin status surface — one entry per
+/// plugin the current generation declares, in config order, with the
+/// lifecycle state an operator needs to answer "is anything failing
+/// closed, and which routes are affected?". Everything comes from the
+/// dataplane's live enumeration (`DataPlane::plugin_statuses`, the
+/// same one `dwara_plugin_total{state}` is folded from), so the
+/// endpoint and the metric cannot disagree. Never secret material:
+/// sources are config-declared paths/URLs/names, digests are content
+/// hashes, and error strings are load/compile failures.
+fn plugins_body(ctx: &AdminContext) -> serde_json::Value {
+    let entries = ctx.dp.plugin_statuses();
+    let plugins: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|p| {
+            let (error, crash_count) = match &p.state {
+                PluginStatusState::Crashed { error, crash_count } => {
+                    (Some(error.clone()), *crash_count)
+                }
+                PluginStatusState::Disabled { reason } => (Some(reason.clone()), 0),
+                _ => (None, 0),
+            };
+            serde_json::json!({
+                "name": p.name,
+                "kind": p.kind,
+                "source": p.source,
+                "sha256": p.sha256,
+                "state": p.state.label(),
+                "error": error,
+                "crash_count": crash_count,
+                "limits": p.limits.as_ref().map(|(fuel, memory_mb, timeout_ms)| {
+                    serde_json::json!({
+                        "fuel": fuel,
+                        "memory_mb": memory_mb,
+                        "timeout_ms": timeout_ms,
+                    })
+                }),
+                "phases": p.phases.iter().map(|ph| ph.as_str()).collect::<Vec<_>>(),
+                "referenced_by": p.referenced_by,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "config_generation": ctx.state.snapshot().generation(),
+        "plugins": plugins,
     })
 }
 
@@ -1968,6 +2022,14 @@ fn openapi_spec() -> String {
         &[("get", "Envoy-style cluster dump", "debug")],
     );
     add(
+        "/v1/plugins",
+        &[(
+            "get",
+            "Plugin status (lifecycle, digest, references)",
+            "plugins",
+        )],
+    );
+    add(
         "/v1/config_dump",
         &[("get", "Redacted config dump (JSON)", "debug")],
     );
@@ -2299,6 +2361,11 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
         // algorithm, scheme, connection/request counters, breaker state,
         // and per-endpoint health + inflight counts.
         ("GET", "/clusters") => json_response(200, clusters_body(&ctx)),
+        // GET /plugins (DW-158): the plugin status surface — per plugin:
+        // kind, source, digest, lifecycle state (+ error, crash count),
+        // effective limits, declared phases, and the routes referencing
+        // it. Read-only; served under both /plugins and /v1/plugins.
+        ("GET", "/plugins") => json_response(200, plugins_body(&ctx)),
         // GET /config_dump (DW-072): the full published gateway config as
         // redacted JSON with generation/hash headers (Envoy-style
         // structured dump; the existing GET /config returns YAML).
@@ -2672,6 +2739,7 @@ async fn handle(ctx: Arc<AdminContext>, req: Request<Incoming>) -> Response<Admi
             | "/health"
             | "/stats"
             | "/clusters"
+            | "/plugins"
             | "/config_dump"
             | "/runtime_info"
             | "/cache/purge"

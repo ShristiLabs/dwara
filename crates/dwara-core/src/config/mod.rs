@@ -7102,6 +7102,19 @@ pub enum PluginPhase {
     ResponseBody,
 }
 
+impl PluginPhase {
+    /// The phase's stable wire label (the serde name), for the plugin
+    /// status surface (`GET /plugins`, DW-158).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PluginPhase::RequestHeaders => "request_headers",
+            PluginPhase::RequestBody => "request_body",
+            PluginPhase::ResponseHeaders => "response_headers",
+            PluginPhase::ResponseBody => "response_body",
+        }
+    }
+}
+
 /// SCALE-12 (#191): formalized request-pipeline filter phases. The
 /// default order is the order the variants are declared (the same
 /// order the dataplane has always executed them). Per-route

@@ -389,6 +389,155 @@ async fn get_health_and_stats_shape() {
     assert!(stats["schema_version"].is_null());
 }
 
+// --- GET /plugins (DW-158) ------------------------------------------------
+
+/// A gateway config with three plugins: a healthy local .wasm (a
+/// minimal valid module -- an empty module compiles fine), a crashed
+/// one (.wasm path that does not exist; the lifecycle marks it Crashed
+/// at load, DW-157), and a native filter whose name has no registered
+/// factory. One route references the first two; the native one is
+/// referenced by nothing.
+fn plugins_config_yaml(good_wasm: &str) -> String {
+    format!(
+        "listeners:\n  - name: main\n    address: 127.0.0.1\n    port: 18080\n\
+         routes:\n  - name: plugged\n    service: svc\n\
+         \x20   match:\n      path:\n        type: prefix\n        value: /api\n\
+         \x20   action:\n      type: proxy\n    plugins: [good, bad]\n\
+         services:\n  - name: svc\n    upstream: echo\n\
+         upstreams:\n  - name: echo\n    endpoints:\n      - {{ address: 127.0.0.1, port: 1 }}\n\
+         plugins:\n  - name: good\n    wasm: {good_wasm}\n    phases: [request_headers]\n\
+         \x20 - name: bad\n    wasm: /nonexistent/dwara-test-bad.wasm\n    phases: [request_headers]\n\
+         \x20 - name: orphan\n    native: not_a_registered_filter\n    phases: [request_headers]\n"
+    )
+}
+
+#[tokio::test]
+async fn get_plugins_lists_state_digest_and_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pki = Pki::new(dir.path());
+    tls::install_aws_lc_rs_provider();
+    let (cert, key) = pki.issue("localhost");
+    let admin_cfg = dwara_core::config::AdminConfig {
+        bind: "127.0.0.1:0".to_string(),
+        tls: dwara_core::config::AdminTlsConfig {
+            cert_file: cert.display().to_string(),
+            key_file: key.display().to_string(),
+            client_ca_file: pki.ca_path().display().to_string(),
+        },
+        rbac: None,
+        api_tokens: None,
+        audit: None,
+    };
+    let mode = ListenMode::mtls(&admin_cfg).expect("mtls mode builds");
+    // A minimal valid .wasm module (magic + version, empty body):
+    // readable and compilable, so its lifecycle state is Healthy.
+    let wasm_path = dir.path().join("good.wasm");
+    std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").unwrap();
+    let server = start_with_config(
+        mode,
+        dir,
+        &plugins_config_yaml(&wasm_path.display().to_string()),
+    )
+    .await;
+    let (cert, key) = pki.issue("admin-client");
+    let c = (pem(&cert), pem(&key));
+
+    let (status, _, body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /plugins HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let plugins: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(plugins["config_generation"], 1);
+    let list = plugins["plugins"].as_array().unwrap();
+    assert_eq!(list.len(), 3);
+
+    // Healthy local .wasm: digest, effective limits, phases, references.
+    let good = list.iter().find(|p| p["name"] == "good").unwrap();
+    assert_eq!(good["kind"], "wasm");
+    assert_eq!(good["source"], wasm_path.display().to_string());
+    assert_eq!(good["state"], "healthy");
+    assert!(good["error"].is_null());
+    assert_eq!(good["crash_count"], 0);
+    let digest = good["sha256"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert_eq!(good["limits"]["fuel"], 1_000_000);
+    assert_eq!(good["limits"]["memory_mb"], 32);
+    assert_eq!(good["limits"]["timeout_ms"], 100);
+    assert_eq!(good["phases"], serde_json::json!(["request_headers"]));
+    assert_eq!(good["referenced_by"], serde_json::json!(["plugged"]));
+
+    // Crashed .wasm: the error names the unreadable path, the digest is
+    // empty (never read), and the referencing routes are visible.
+    let bad = list.iter().find(|p| p["name"] == "bad").unwrap();
+    assert_eq!(bad["state"], "crashed");
+    let error = bad["error"].as_str().unwrap();
+    assert!(
+        error.contains("cannot read"),
+        "error names the unreadable path: {error}"
+    );
+    assert_eq!(bad["crash_count"], 1);
+    assert_eq!(bad["sha256"], "");
+    assert_eq!(bad["referenced_by"], serde_json::json!(["plugged"]));
+
+    // Unregistered native filter: not usable, unreferenced, wasm-only
+    // limits are null.
+    let orphan = list.iter().find(|p| p["name"] == "orphan").unwrap();
+    assert_eq!(orphan["kind"], "native");
+    assert_eq!(orphan["state"], "not_registered");
+    assert!(orphan["limits"].is_null());
+    assert_eq!(orphan["referenced_by"], serde_json::json!([]));
+
+    // The /v1/ alias serves the same handler (USA-05).
+    let (status, _, v1_body) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /v1/plugins HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(v1_body, body);
+
+    // Read-only surface: a mutating method on the known path is 405.
+    let (status, _, _) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "POST /plugins HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 405);
+
+    // The OpenAPI spec documents the path (USA-05).
+    let (status, _, spec) = request(
+        server.addr,
+        &pki.ca_path(),
+        Some((&c.0, &c.1)),
+        "GET /v1/openapi.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(spec.contains("\"/v1/plugins\""));
+
+    // The per-state metric is published from the same enumeration
+    // (DW-158): one healthy, one crashed, one not_registered.
+    let metrics = server.dp.observability().render();
+    assert!(metrics.contains("dwara_plugin_total{state=\"healthy\"} 1"));
+    assert!(metrics.contains("dwara_plugin_total{state=\"crashed\"} 1"));
+    assert!(metrics.contains("dwara_plugin_total{state=\"not_registered\"} 1"));
+    assert!(metrics.contains("dwara_plugin_total{state=\"disabled\"} 0"));
+    assert!(metrics.contains("dwara_plugin_total{state=\"not_loaded\"} 0"));
+}
+
 #[tokio::test]
 async fn unknown_path_and_wrong_method_use_error_envelope() {
     let dir = tempfile::tempdir().unwrap();

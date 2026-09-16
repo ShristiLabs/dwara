@@ -192,6 +192,14 @@
 //!   (a plugin short-circuit via `send_http_response` is a plugin
 //!   DECISION, not a failure, and is not counted; the access-log
 //!   `plugin_short_circuit` flag marks those).
+//! - `dwara_plugin_total{state}` gauge (DW-158) — plugins loaded per
+//!   lifecycle state (`healthy`, `crashed`, `disabled`, `not_loaded`,
+//!   `not_registered` — a closed five-value set over the generation's
+//!   declared plugins, the same enumeration `GET /plugins` serves).
+//!   Refreshed at publish time (every config generation); state changes
+//!   that happen between publishes (a crash counted at request time)
+//!   land on the next publish or are visible per-request in
+//!   `dwara_plugin_failures_total`.
 //! - `dwara_graphql_complexity{route}` gauge (DW-099) — last query
 //!   complexity for a GraphQL-configured route (config-bounded label).
 //! - `dwara_l4_connections_total{listener,protocol}` counter (DW-103) —
@@ -846,6 +854,14 @@ pub struct Observability {
     /// deliberate `send_http_response` short-circuit is a decision, not
     /// a failure, and is not counted.
     plugin_failures_total: IntCounterVec,
+    /// DW-158: plugins per lifecycle state — the CLOSED label set
+    /// `healthy`, `crashed`, `disabled`, `not_loaded`,
+    /// `not_registered` (an unregistered native filter or an
+    /// unresolved registry source is unusable exactly like a crashed
+    /// plugin — routes referencing it fail closed). One series per
+    /// state over the generation's declared plugins (the same
+    /// enumeration `GET /plugins` serves), refreshed at publish time.
+    plugin_total: IntGaugeVec,
     /// DW-105: post-quantum TLS handshake outcomes — a CLOSED label set
     /// (`success`, `fallback`, `disabled`), one increment per PQ-
     /// configured handshake. `success` = the X25519+ML-KEM hybrid kx
@@ -1672,6 +1688,22 @@ impl Observability {
             &["name", "reason"],
         )
         .expect("valid metric definition");
+        let plugin_total = IntGaugeVec::new(
+            Opts::new(
+                "dwara_plugin_total",
+                "Plugins per lifecycle state (DW-158), refreshed at \
+                 publish time. state: healthy, crashed (load or compile \
+                 failed; routes referencing it answer 500), disabled, \
+                 not_loaded (declared but absent from the runtime -- an \
+                 unresolved registry source or a failed engine rebuild), \
+                 not_registered (native filter name with no registered \
+                 factory). A closed five-value label set over the \
+                 generation's declared plugins -- the same enumeration \
+                 GET /plugins serves.",
+            ),
+            &["state"],
+        )
+        .expect("valid metric definition");
         let tls_pq_handshakes_total = IntCounterVec::new(
             Opts::new(
                 "dwara_tls_pq_handshakes_total",
@@ -1927,6 +1959,7 @@ impl Observability {
             Box::new(nano_service_requests_total.clone()),
             Box::new(nano_service_duration_seconds.clone()),
             Box::new(plugin_failures_total.clone()),
+            Box::new(plugin_total.clone()),
             Box::new(tls_pq_handshakes_total.clone()),
             Box::new(rate_limiter_adaptive_factor.clone()),
             Box::new(rate_limiter_origin_signal_total.clone()),
@@ -2029,6 +2062,7 @@ impl Observability {
             nano_service_requests_total,
             nano_service_duration_seconds,
             plugin_failures_total,
+            plugin_total,
             tls_pq_handshakes_total,
             rate_limiter_adaptive_factor,
             rate_limiter_origin_signal_total,
@@ -2709,6 +2743,17 @@ impl Observability {
         self.plugin_failures_total
             .with_label_values(&[name, reason])
             .inc();
+    }
+
+    /// Set one state's plugin count (DW-158) in
+    /// `dwara_plugin_total{state}`. `state` is one of the closed set
+    /// `healthy`, `crashed`, `disabled`, `not_loaded`,
+    /// `not_registered`. The dataplane sets every state's series on
+    /// each publish (`reload_plugins`), so a reload that removes the
+    /// last plugin of a state drives its series back to zero instead of
+    /// stranding the previous count.
+    pub fn set_plugin_state_total(&self, state: &str, total: i64) {
+        self.plugin_total.with_label_values(&[state]).set(total);
     }
 
     /// Count one post-quantum TLS handshake outcome (DW-105) in

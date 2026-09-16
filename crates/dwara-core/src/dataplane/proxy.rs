@@ -1864,8 +1864,10 @@ impl DataPlane {
                  previous plugin state keeps serving (changed plugins keep their \
                  old bytes) until the next successful reload"
             );
+            self.publish_plugin_state_metrics(gateway);
             return;
         }
+        self.publish_plugin_state_metrics(gateway);
         // DW-037/DW-157: a plugin whose definition or bytes changed
         // invalidates every route referencing it. Only a PREVIOUS
         // non-empty plugin set can have shaped cached bytes — the first
@@ -1888,6 +1890,54 @@ impl DataPlane {
                 }
             }
         }
+    }
+
+    /// DW-158: refresh `dwara_plugin_total{state}` from the live
+    /// plugin status — the same enumeration [`Self::plugin_statuses`]
+    /// serves — so the metric and the endpoint can never disagree.
+    /// Called at the end of every `reload_plugins` (both the
+    /// load-success and engine-failure paths: after a failed rebuild
+    /// the lifecycle still describes what is serving, and any newly
+    /// declared plugin correctly reads as not loaded). Every state's
+    /// series is set on each publish, so a generation that removes the
+    /// last plugin of a state drives its series to zero instead of
+    /// stranding the previous count.
+    fn publish_plugin_state_metrics(&self, gateway: &crate::config::Gateway) {
+        let statuses =
+            plugin_dispatch::plugin_statuses(&self.plugins, &self.native_plugins, gateway);
+        let mut counts: HashMap<&'static str, i64> = HashMap::with_capacity(5);
+        for status in &statuses {
+            *counts.entry(status.state.label()).or_insert(0) += 1;
+        }
+        for state in [
+            "healthy",
+            "crashed",
+            "disabled",
+            "not_loaded",
+            "not_registered",
+        ] {
+            self.obs
+                .set_plugin_state_total(state, counts.get(state).copied().unwrap_or(0));
+        }
+    }
+
+    /// DW-158: read accessor for the plugin lifecycle (the `/plugins`
+    /// status surface and tests). Read-only by design — every mutation
+    /// flows through `reload_plugins` on generation swap, never through
+    /// an accessor handed to a presentation layer.
+    pub fn plugin_lifecycle(&self) -> &PluginLifecycle {
+        &self.plugins
+    }
+
+    /// DW-158: the plugin status surface — one entry per plugin the
+    /// CURRENT generation declares (config order), with kind, source,
+    /// digest, lifecycle state, effective limits, declared phases, and
+    /// the routes referencing it. Backs the admin `GET /plugins`
+    /// endpoint and the CLI status section.
+    pub fn plugin_statuses(&self) -> Vec<plugin_dispatch::PluginStatusEntry> {
+        let gen = self.current();
+        let gateway = gen.snapshot.gateway();
+        plugin_dispatch::plugin_statuses(&self.plugins, &self.native_plugins, gateway)
     }
 
     /// DW-157: the native filter registry. Compiled-in filters register

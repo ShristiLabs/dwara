@@ -1,7 +1,8 @@
 //! `dwara status` / `dwara top` (USA-02, #179): live operator views over
 //! the admin API. `status` prints a one-shot snapshot (generation,
-//! listeners, health, breakers, active requests); `top` refreshes a live
-//! table of upstream load-balancer state and shedding.
+//! listeners, health, breakers, active requests, plugin states, DW-158);
+//! `top` refreshes a live table of upstream load-balancer state and
+//! shedding.
 //!
 //! Both reuse the same plaintext HTTP/1.1 admin client the `tf` tool
 //! uses (hyper, TokioIo). The admin URL defaults to
@@ -89,13 +90,19 @@ pub fn resolve_admin(admin: Option<&str>) -> String {
 }
 
 /// `dwara status`: one-shot snapshot of the running gateway. Queries
-/// `/runtime_info`, `/health`, and `/stats` and renders a human-readable
-/// summary. Exit 0 on success, 1 on error.
+/// `/runtime_info`, `/health`, `/stats`, and (when the gateway serves
+/// it) `/plugins`, and renders a human-readable summary. Exit 0 on
+/// success, 1 on error.
 pub async fn status(admin_url: &str) -> Result<String, String> {
     let client = AdminClient::new(admin_url)?;
     let info = client.get_json("/runtime_info").await?;
     let health = client.get_json("/health").await?;
     let stats = client.get_json("/stats").await?;
+    // The plugins section is best-effort (DW-158): against a gateway
+    // older than the endpoint the rest of the status view must still
+    // render, so a failed /plugins fetch omits the section instead of
+    // failing the command.
+    let plugins = client.get_json("/plugins").await.ok();
 
     let mut out = String::new();
     out.push_str("dwara gateway status\n");
@@ -166,7 +173,40 @@ pub async fn status(admin_url: &str) -> Result<String, String> {
         out.push_str(&format!("cache: {entries} entries, {purges} purges\n"));
     }
 
+    if let Some(plugins) = plugins.as_ref() {
+        out.push_str(&render_plugins(plugins));
+    }
+
     Ok(out)
+}
+
+/// Render the plugins section (DW-158) from the `/plugins` JSON: one
+/// line per plugin — name, state, and the error detail for the
+/// non-healthy states — so an operator can see at a glance which
+/// routes are failing closed and why. Pure function so it is
+/// unit-testable without a live gateway (the same approach as
+/// `render_top`).
+pub fn render_plugins(plugins: &Value) -> String {
+    let empty = Vec::new();
+    let list = plugins
+        .get("plugins")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if list.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("plugins:\n");
+    for plugin in list {
+        let name = plugin.get("name").and_then(Value::as_str).unwrap_or("?");
+        let state = plugin.get("state").and_then(Value::as_str).unwrap_or("?");
+        out.push_str(&format!("  {name:<30} {state}"));
+        if let Some(error) = plugin.get("error").and_then(Value::as_str) {
+            out.push_str(&format!(" ({error})"));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// `dwara top`: a live, refreshing view of upstream load-balancer state
@@ -327,6 +367,43 @@ mod tests {
         assert!(out.contains("round_robin"));
         assert!(out.contains("closed"));
         assert!(out.contains("10.0.0.1:8080"));
+    }
+
+    #[test]
+    fn render_plugins_empty_is_blank() {
+        // A gateway with no plugins configured renders no section at
+        // all (nothing to report), and a malformed body degrades the
+        // same way instead of panicking.
+        assert_eq!(render_plugins(&serde_json::json!({"plugins": []})), "");
+        assert_eq!(render_plugins(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn render_plugins_lists_states_and_errors() {
+        let plugins = serde_json::json!({
+            "config_generation": 3,
+            "plugins": [
+                {"name": "adder", "kind": "wasm", "state": "healthy", "error": null,
+                 "crash_count": 0, "referenced_by": ["api"]},
+                {"name": "broken", "kind": "wasm", "state": "crashed",
+                 "error": "cannot read /etc/dwara/broken.wasm: no such file",
+                 "crash_count": 2, "referenced_by": ["api"]},
+                {"name": "gate", "kind": "native", "state": "not_registered",
+                 "error": null, "crash_count": 0, "referenced_by": []},
+            ]
+        });
+        let out = render_plugins(&plugins);
+        assert!(out.starts_with("plugins:\n"));
+        assert!(out.contains("adder") && out.contains("healthy"));
+        assert!(out.contains("broken"));
+        assert!(out.contains("crashed"));
+        assert!(out.contains("cannot read /etc/dwara/broken.wasm"));
+        assert!(out.contains("gate") && out.contains("not_registered"));
+        // No error detail on the healthy line (name is padded to width).
+        let adder_line = out.lines().find(|l| l.contains("adder")).unwrap();
+        assert!(adder_line.starts_with("  adder"));
+        assert!(adder_line.ends_with("healthy"));
+        assert!(!adder_line.contains("("));
     }
 
     #[test]

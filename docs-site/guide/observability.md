@@ -76,6 +76,8 @@ and cleartext listener just like `/healthz` (see
 | `dwara_ai_budget_denied_total` | counter | `kind` |
 | `dwara_ai_semantic_cache_hits_total` | counter | `model` |
 | `dwara_ai_semantic_cache_misses_total` | counter | `model` |
+| `dwara_plugin_total` | gauge | `state` |
+| `dwara_plugin_failures_total` | counter | `name`, `reason` |
 
 Label cardinality is deliberately config-bounded — there is no
 consumer-name label anywhere, and the rate-limiter series are
@@ -94,6 +96,30 @@ would have rejected, by phase (`route_limits`, `authz`,
 `grafana/dwara-overview.json`; import it in Grafana via
 Dashboards → New → Import and point it at a Prometheus instance
 scraping the gateway's `/metrics`.
+
+### Plugin metrics
+
+The two plugin families describe the same runtime from two angles —
+stock (how many plugins are in each state) and flow (how often plugin
+dispatch fails):
+
+- `dwara_plugin_total{state}` — a gauge counting plugins per lifecycle
+  state: `healthy`, `crashed` (the `.wasm` could not be read or
+  compiled; its routes answer `500 plugin_unavailable`), `disabled`,
+  `not_loaded` (declared but absent from the running runtime), and
+  `not_registered` (a `native:` filter name with no registered
+  implementation). Refreshed on every config publish; the per-plugin
+  detail (digest, error text, affected routes) is in
+  [`GET /plugins`](./admin-api#plugin-status-get-plugins) and the
+  plugins section of `dwara-cli status`.
+- `dwara_plugin_failures_total{name,reason}` — a counter incremented
+  once per request the plugin chain answered with an error, by plugin
+  name (config-bounded) and reason (`crashed`, `disabled`,
+  `not_loaded`, `not_registered`, `instantiate_failed`, `trap`,
+  `body_too_large`, `response_stream_ended`). A plugin that answers a
+  request itself (`send_http_response`) is making a decision, not
+  failing — those requests are marked `plugin_short_circuit` in the
+  access log instead. See [Plugin lifecycle](./plugin-lifecycle).
 
 ## Error envelope
 

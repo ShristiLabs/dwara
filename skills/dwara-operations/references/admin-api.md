@@ -33,6 +33,7 @@ Safe edit pattern: fetch the source file (not the redacted echo), edit,
 | `GET /runtime_info` | Version, uptime, generation, config hash, readiness |
 | `GET /stats` (+`?format=prometheus`) | Schema version, breaker states, `active_requests`; Prometheus dump |
 | `GET /clusters` | Envoy-style cluster dump |
+| `GET /plugins` | Per-plugin status: kind/source, SHA-256 digest, lifecycle state (`healthy`/`crashed`/`disabled`/`not_loaded`/`not_registered`) with `error` + `crash_count`, limits, phases, `referenced_by` routes. Any non-`healthy` state = those routes fail closed (`500 plugin_unavailable`). |
 | `GET /config_dump` | Full config as redacted JSON |
 | `POST /cache/purge` | Body `{"route": name}` \| `{"all": true}` \| `{"tag": t}` \| `{"url": u, "prefix": bool}` |
 

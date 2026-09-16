@@ -143,6 +143,7 @@ configure retention at the log collector, not in the gateway.
 | `GET /stats` | store schema version, per-upstream breaker state, `active_requests`, config generation |
 | `GET /stats?format=prometheus` | full Prometheus text-format metric dump — the same output as the `/metrics` endpoint, reachable through the admin surface for Envoy-style tooling |
 | `GET /clusters` | Envoy-style cluster dump: per upstream — algorithm, scheme, connection/request counters, breaker state, and per-endpoint health + inflight counts |
+| `GET /plugins` | per-plugin status: kind and source (local `.wasm` path / registry URL / registered native filter name), SHA-256 digest, lifecycle state with error and crash count, effective limits, declared phases, and the routes referencing it — see [Plugin status](#plugin-status-get-plugins) |
 | `GET /config_dump` | full published gateway config as redacted JSON with generation/hash headers — the structured equivalent of `GET /config` (which returns YAML) |
 | `GET /runtime_info` | process-level runtime info: version, uptime, config generation, config hash, readiness |
 | `POST /cache/purge` | response-cache invalidation: `{\"route\": \"<name>\"}` to purge one route's entries (O(1) epoch advance), `{\"all\": true}` to advance the epoch for every cache-enabled route, `{\"tag\": \"<tag>\"}` to delete every entry the upstream tagged with that `Cache-Tags` value, or `{\"url\": \"<path[?query]>\", \"prefix\": false}` to delete entries for an exact or prefix-matched request URL (responses `hit`/`stale` become `miss` on next request) |
@@ -156,6 +157,59 @@ configure retention at the log collector, not in the gateway.
 | `GET /upstreams`, `GET /upstreams/{name}`, `POST /upstreams`, `PUT /upstreams/{name}`, `DELETE /upstreams/{name}` | entity-level CRUD for upstreams (same semantics as routes) |
 | `GET /consumers`, `GET /consumers/{name}`, `POST /consumers`, `PUT /consumers/{name}`, `DELETE /consumers/{name}` | entity-level CRUD for consumers (same semantics as routes) |
 | `GET /policies`, `GET /policies/{name}`, `POST /policies`, `PUT /policies/{name}`, `DELETE /policies/{name}` | entity-level CRUD for policies (same semantics as routes) |
+
+### Plugin status (`GET /plugins`)
+
+One entry per plugin the current config generation declares, in
+declaration order:
+
+```json
+{
+  "config_generation": 3,
+  "plugins": [
+    {
+      "name": "header-adder",
+      "kind": "wasm",
+      "source": "/etc/dwara/plugins/header-adder.wasm",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "state": "healthy",
+      "error": null,
+      "crash_count": 0,
+      "limits": { "fuel": 1000000, "memory_mb": 32, "timeout_ms": 100 },
+      "phases": ["request_headers", "response_headers"],
+      "referenced_by": ["api"]
+    },
+    {
+      "name": "legacy-guard",
+      "kind": "wasm",
+      "source": "/etc/dwara/plugins/legacy-guard.wasm",
+      "sha256": "",
+      "state": "crashed",
+      "error": "cannot read /etc/dwara/plugins/legacy-guard.wasm: No such file or directory (os error 2)",
+      "crash_count": 1,
+      "limits": { "fuel": 1000000, "memory_mb": 32, "timeout_ms": 100 },
+      "phases": ["request_headers"],
+      "referenced_by": ["api", "internal"]
+    }
+  ]
+}
+```
+
+`state` is one of `healthy`, `crashed` (the `.wasm` could not be read
+or compiled), `disabled`, `not_loaded` (declared but absent from the
+running runtime — a registry `source:` whose artifact is not resolved),
+or `not_registered` (a `native:` filter name with no registered
+implementation). Every non-`healthy` state means the same thing
+operationally: the routes in `referenced_by` fail closed with
+`500 plugin_unavailable` until the plugin recovers (usually a config
+reload that fixes the plugin definition). `sha256` is empty when there
+is no digest to report (native plugins, unresolved registry artifacts,
+or a `.wasm` that could not be read); `limits` are the effective values
+(configured or defaults) and are `null` for native plugins. The same
+states feed the `dwara_plugin_total{state}` metric
+([Observability](./observability#metrics)) and the plugins section of
+`dwara-cli status` ([CLI](./cli)). See
+[Plugin lifecycle](./plugin-lifecycle) for how states transition.
 
 ### Entity CRUD and optimistic concurrency
 

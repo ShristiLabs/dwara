@@ -211,8 +211,11 @@ dwara-cli status --admin http://127.0.0.1:2019
 
 Prints a one-shot snapshot of the running gateway: version, uptime,
 readiness, config generation and hash, per-upstream endpoint health,
-circuit-breaker states, active request count, and cache stats. The
-admin URL defaults to `DWARA_ADMIN` or `http://127.0.0.1:2019`.
+circuit-breaker states, active request count, cache stats, and — when
+the config declares plugins — a plugins section listing each plugin's
+lifecycle state (with the load error for a crashed one; see
+[Admin API: plugin status](./admin-api#plugin-status-get-plugins)).
+The admin URL defaults to `DWARA_ADMIN` or `http://127.0.0.1:2019`.
 
 ## `top`
 

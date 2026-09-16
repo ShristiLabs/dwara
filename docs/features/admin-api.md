@@ -190,6 +190,31 @@ loud ERROR log rather than silently going dark for the rest of the
 process lifetime. Its bind set, like the data-plane listeners', is
 fixed at startup — a change to `admin.bind` needs a restart.
 
+## `GET /plugins`: the plugin status surface (DW-158, #276)
+
+One entry per plugin the current generation declares: kind and source
+(local `.wasm` path / registry URL / registered native name), the
+SHA-256 digest of the loaded artifact, lifecycle state (`healthy`,
+`crashed` with error and crash count, `disabled`, `not_loaded`,
+`not_registered`), effective limits, declared phases, and the routes
+referencing it (`referenced_by` — the blast radius of a state change).
+
+The handler is a thin JSON render over ONE enumeration:
+`DataPlane::plugin_statuses` (`dataplane/plugin_dispatch.rs::plugin_statuses`)
+walks the generation's `plugins` config against the live
+`PluginLifecycle` (WASM health and digest), the `NativeRegistry`
+(native names), and the routes (references). The same enumeration is
+folded into `dwara_plugin_total{state}` at publish time
+(`reload_plugins` → `publish_plugin_state_metrics`), so the endpoint,
+the CLI status section, and the metric share one state vocabulary and
+cannot drift. The two states beyond the lifecycle's own three
+(`not_loaded`, `not_registered`) exist because those plugins fail
+closed at request time exactly like crashed ones — the status surface
+must never show a plugin as serving when its routes answer 500. Tests:
+`admin_api::get_plugins_lists_state_digest_and_references`
+(dwara-admin, mTLS harness, healthy + crashed + unregistered-native
+fixtures), `status::render_plugins_*` (dwara-cli).
+
 ## OpenAPI spec and API versioning (#227)
 
 The admin API supports a `/v1/` path prefix for all endpoints. The
