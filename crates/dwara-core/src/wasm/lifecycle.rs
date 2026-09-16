@@ -29,7 +29,7 @@
 //! no cargo features for the plugin runtime.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::config::{PluginConfig, PluginPhase};
@@ -76,24 +76,99 @@ impl PluginLifecycle {
     }
 
     /// Load plugins from config. Compiles each plugin's .wasm module
-    /// and stores it. Failure isolation is per plugin (DW-157): a
-    /// .wasm that cannot be read or compiled marks THAT plugin Crashed
-    /// (logged, visible to the operator at publish time) instead of
-    /// failing the whole publish — routes referencing a crashed plugin
-    /// answer 500 fail-closed, every other plugin keeps serving. The
-    /// only whole-load failure is engine construction
-    /// ([`LoadError::Compile`]).
-    pub fn load(&self, configs: &[PluginConfig]) -> Result<(), LoadError> {
+    /// and stores it. `sources` carries the DW-165 registry-source
+    /// resolutions (built by [`crate::wasm::source::resolve_sources`]):
+    /// a resolved `source:` plugin loads from its verified local
+    /// artifact exactly like a `wasm:` plugin; an unresolved one is
+    /// marked Crashed with the step-named resolution error. Failure
+    /// isolation is per plugin (DW-157): a .wasm that cannot be read
+    /// or compiled — or a `source:` that could not be resolved or
+    /// verified — marks THAT plugin Crashed (logged, visible to the
+    /// operator at publish time) instead of failing the whole publish
+    /// — routes referencing a crashed plugin answer 500 fail-closed,
+    /// every other plugin keeps serving. The only whole-load failure
+    /// is engine construction ([`LoadError::Compile`]).
+    pub fn load(
+        &self,
+        configs: &[PluginConfig],
+        sources: &crate::wasm::source::SourceResolutions,
+    ) -> Result<(), LoadError> {
         let mut plugins = HashMap::new();
+        // DW-165: effective local artifact paths for the runner (a
+        // `source:` plugin has no `wasm` field; it loads from its
+        // resolved cache path).
+        let mut effective_paths: HashMap<String, PathBuf> = HashMap::new();
 
         for config in configs {
             // DW-119: a plugin is either `wasm:` or `native:`. The
             // lifecycle manager only loads WASM plugins here; native
             // filters are registered with the NativeRegistry and
             // dispatched by the unified plugin chain (plugins domain).
-            let wasm_path = match &config.wasm {
-                Some(p) => p.clone(),
-                None => continue,
+            let wasm_path: String = if let Some(p) = &config.wasm {
+                p.clone()
+            } else if let Some(_source) = &config.source {
+                // DW-165: registry-sourced plugin. Resolution ran
+                // before this step; its outcome decides whether there
+                // are verified bytes to load at all.
+                match sources.get(&config.name) {
+                    Some(Ok(path)) => {
+                        effective_paths.insert(config.name.clone(), path.clone());
+                        path.display().to_string()
+                    }
+                    Some(Err(e)) => {
+                        // Fail-closed (DW-157/165): never a partial
+                        // load. The error names the exact resolution
+                        // step (digest mismatch, download, signature).
+                        let crash_count = self.next_crash_count(&config.name);
+                        tracing::error!(
+                            code = "plugin_source_failed",
+                            plugin = %config.name,
+                            "DW-165: registry source could not be resolved: {e}; \
+                             routes referencing it fail closed (500)"
+                        );
+                        plugins.insert(
+                            config.name.clone(),
+                            LoadedPlugin {
+                                config: config.clone(),
+                                checksum: String::new(),
+                                health: PluginHealth::Crashed {
+                                    error: format!("source resolution failed: {e}"),
+                                    crash_count,
+                                },
+                            },
+                        );
+                        continue;
+                    }
+                    None => {
+                        // Defensive: the resolver covers every source
+                        // plugin; absence means an internal wiring bug,
+                        // and the safe answer is still fail-closed.
+                        let crash_count = self.next_crash_count(&config.name);
+                        tracing::error!(
+                            code = "plugin_source_failed",
+                            plugin = %config.name,
+                            "DW-165: registry source was not resolved (internal \
+                             error: resolver skipped this plugin); routes referencing \
+                             it fail closed (500)"
+                        );
+                        plugins.insert(
+                            config.name.clone(),
+                            LoadedPlugin {
+                                config: config.clone(),
+                                checksum: String::new(),
+                                health: PluginHealth::Crashed {
+                                    error: "source was not resolved (internal resolver \
+                                            error)"
+                                        .to_string(),
+                                    crash_count,
+                                },
+                            },
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                continue;
             };
             // Read the .wasm file and compute checksum. A read failure
             // is recorded with an EMPTY checksum (never produced by a
@@ -102,33 +177,48 @@ impl PluginLifecycle {
             let (checksum, health) = match std::fs::read(&wasm_path) {
                 Ok(wasm_bytes) => {
                     let checksum = sha256_hex(&wasm_bytes);
-                    // Check if the plugin changed (hot-swap).
-                    let existing = self.plugins.read().unwrap();
-                    let health = if let Some(prev) = existing.get(&config.name) {
-                        if prev.checksum == checksum {
-                            // Unchanged: keep the previous health.
-                            prev.health.clone()
+                    // DW-165 review parity re-check: the resolver
+                    // verified the bytes IT read; this load re-reads
+                    // the file (and an async reload may hand in a
+                    // resolution computed a moment earlier). If the
+                    // artifact changed in that window, the checksum
+                    // diverges from the pin: fail closed rather than
+                    // load unverified bytes.
+                    if let Some(src) = &config.source {
+                        if checksum != src.digest.to_ascii_lowercase() {
+                            let crash_count = self.next_crash_count(&config.name);
+                            tracing::error!(
+                                code = "plugin_source_digest_recheck_failed",
+                                plugin = %config.name,
+                                path = %wasm_path,
+                                "DW-165: the artifact changed between verification \
+                                 and load (pinned digest does not match the loaded \
+                                 bytes); routes referencing it fail closed (500)"
+                            );
+                            (
+                                String::new(),
+                                PluginHealth::Crashed {
+                                    error: format!(
+                                        "digest re-check failed: source.digest pins \
+                                         {} but the loaded module hashes to {checksum} \
+                                         (the artifact changed between verification \
+                                         and load)",
+                                        src.digest
+                                    ),
+                                    crash_count,
+                                },
+                            )
                         } else {
-                            // Changed: reset to Healthy.
-                            PluginHealth::Healthy
+                            let health = self.health_for_checksum(&config.name, &checksum);
+                            (checksum, health)
                         }
                     } else {
-                        PluginHealth::Healthy
-                    };
-                    drop(existing);
-                    (checksum, health)
+                        let health = self.health_for_checksum(&config.name, &checksum);
+                        (checksum, health)
+                    }
                 }
                 Err(e) => {
-                    let crash_count = {
-                        let existing = self.plugins.read().unwrap();
-                        match existing.get(&config.name) {
-                            Some(prev) => match &prev.health {
-                                PluginHealth::Crashed { crash_count, .. } => crash_count + 1,
-                                _ => 1,
-                            },
-                            None => 1,
-                        }
-                    };
+                    let crash_count = self.next_crash_count(&config.name);
                     tracing::error!(
                         code = "plugin_load_failed",
                         plugin = %config.name,
@@ -157,16 +247,18 @@ impl PluginLifecycle {
         }
 
         // Build the plugin runner.
-        let runner = PluginRunner::new(configs).map_err(|e| LoadError::Compile { error: e })?;
+        let runner = PluginRunner::new(configs, &effective_paths)
+            .map_err(|e| LoadError::Compile { error: e })?;
 
-        // A WASM plugin with no compiled module (read failed above, or
-        // the module failed to compile inside the runner) must read as
+        // A WASM plugin (local `wasm:` or resolved registry `source:`,
+        // DW-165) with no compiled module (read failed above, or the
+        // module failed to compile inside the runner) must read as
         // Crashed, not Healthy: a Healthy entry with no module would
         // otherwise pass the request-path health gate and then silently
         // skip dispatch. Fail closed (DW-157).
         {
             for (name, lp) in plugins.iter_mut() {
-                if lp.config.wasm.is_some()
+                if (lp.config.wasm.is_some() || lp.config.source.is_some())
                     && !runner.has(name)
                     && matches!(lp.health, PluginHealth::Healthy)
                 {
@@ -201,6 +293,36 @@ impl PluginLifecycle {
     pub fn register_route(&self, route_name: &str, plugin_names: &[String]) {
         let mut route_plugins = self.route_plugins.write().unwrap();
         route_plugins.insert(route_name.to_string(), plugin_names.to_vec());
+    }
+
+    /// Next crash count for `name`: the previous Crashed count + 1, or
+    /// 1 for a plugin that was healthy or absent (crash counts grow
+    /// across reloads of the same broken plugin — pinned by
+    /// `load_marks_unreadable_wasm_crashed_and_succeeds`). Extracted
+    /// from the load paths that each duplicated the bookkeeping.
+    fn next_crash_count(&self, name: &str) -> u32 {
+        let existing = self.plugins.read().unwrap();
+        match existing.get(name) {
+            Some(prev) => match &prev.health {
+                PluginHealth::Crashed { crash_count, .. } => crash_count + 1,
+                _ => 1,
+            },
+            None => 1,
+        }
+    }
+
+    /// Hot-swap health for a successfully read module (DW-157):
+    /// unchanged bytes keep the previous health, changed bytes reset
+    /// to Healthy (the recompile-on-change contract).
+    fn health_for_checksum(&self, name: &str, checksum: &str) -> PluginHealth {
+        let existing = self.plugins.read().unwrap();
+        if let Some(prev) = existing.get(name) {
+            if prev.checksum == checksum {
+                // Unchanged: keep the previous health.
+                return prev.health.clone();
+            }
+        }
+        PluginHealth::Healthy
     }
 
     /// Mark a plugin as crashed.
@@ -469,8 +591,10 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Compute a SHA-256 hex digest of a byte slice.
-fn sha256_hex(data: &[u8]) -> String {
+/// Compute a SHA-256 hex digest of a byte slice. pub(crate): the
+/// DW-165 source resolver reuses it for artifact digest verification
+/// (one digest spelling across the plugin surface).
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
     // Real SHA-256 (DW-158): the digest is exposed on the plugin
@@ -910,7 +1034,7 @@ mod tests {
         let lifecycle = PluginLifecycle::new();
         let configs = vec![make_plugin_config("broken", "/nonexistent/dwara-test.wasm")];
         lifecycle
-            .load(&configs)
+            .load(&configs, &HashMap::new())
             .expect("load succeeds with per-plugin isolation");
         assert_eq!(lifecycle.plugin_count(), 1);
         assert_eq!(lifecycle.crashed_count(), 1);
@@ -922,7 +1046,9 @@ mod tests {
             other => panic!("expected Crashed, got {other:?}"),
         }
         // Reload the same broken file: still Ok, crash count grows.
-        lifecycle.load(&configs).expect("reload succeeds");
+        lifecycle
+            .load(&configs, &HashMap::new())
+            .expect("reload succeeds");
         let plugin = lifecycle.get_plugin("broken").unwrap();
         match plugin.health {
             PluginHealth::Crashed { crash_count, .. } => assert_eq!(crash_count, 2),
@@ -967,6 +1093,82 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("compile"));
         assert!(s.contains("wasmtime engine failed"));
+    }
+
+    // --- DW-165: registry source plugins ---------------------------------
+
+    fn make_source_plugin(name: &str) -> PluginConfig {
+        PluginConfig {
+            name: name.to_string(),
+            wasm: None,
+            native: None,
+            source: Some(crate::config::PluginSourceConfig {
+                url: "https://registry.example.com/plugins/p.wasm".to_string(),
+                digest: "a".repeat(64),
+                signature: None,
+                public_key: None,
+                cache_path: None,
+            }),
+            phases: vec![PluginPhase::RequestHeaders],
+            config: None,
+            limits: None,
+        }
+    }
+
+    #[test]
+    fn load_marks_unresolved_source_crashed_and_succeeds() {
+        // DW-165: a source plugin whose resolution FAILED is Crashed
+        // with the step-named error — never a partial load — and the
+        // load (and publish) still succeeds for every other plugin.
+        let lifecycle = PluginLifecycle::new();
+        let configs = vec![make_source_plugin("remote")];
+        let mut sources = HashMap::new();
+        sources.insert(
+            "remote".to_string(),
+            Err(crate::wasm::source::SourceError::DigestMismatch {
+                plugin: "remote".to_string(),
+                origin: "downloaded",
+                expected: "a".repeat(64),
+                actual: "b".repeat(64),
+            }),
+        );
+        lifecycle
+            .load(&configs, &sources)
+            .expect("load succeeds with per-plugin isolation");
+        assert_eq!(lifecycle.crashed_count(), 1);
+        let plugin = lifecycle.get_plugin("remote").unwrap();
+        match &plugin.health {
+            PluginHealth::Crashed { error, crash_count } => {
+                assert_eq!(*crash_count, 1);
+                assert!(
+                    error.contains("digest verification failed"),
+                    "error names the step: {error}"
+                );
+                assert!(error.contains("remote"), "error names the plugin: {error}");
+            }
+            other => panic!("expected Crashed, got {other:?}"),
+        }
+        // An empty checksum means the artifact never loaded.
+        assert_eq!(plugin.checksum, "");
+    }
+
+    #[test]
+    fn load_marks_unresolved_entry_source_crashed() {
+        // Defensive branch: a source plugin missing from the resolver
+        // output entirely still fails closed (internal wiring bug, not
+        // a silent skip).
+        let lifecycle = PluginLifecycle::new();
+        let configs = vec![make_source_plugin("remote")];
+        lifecycle
+            .load(&configs, &HashMap::new())
+            .expect("load succeeds");
+        let plugin = lifecycle.get_plugin("remote").unwrap();
+        match &plugin.health {
+            PluginHealth::Crashed { error, .. } => {
+                assert!(error.contains("not resolved"), "got: {error}");
+            }
+            other => panic!("expected Crashed, got {other:?}"),
+        }
     }
 
     #[test]

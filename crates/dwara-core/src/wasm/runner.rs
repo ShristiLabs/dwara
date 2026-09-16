@@ -9,6 +9,7 @@
 //! cargo features for the plugin runtime.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::host::{PhaseResult, PluginInstance, PluginLimits, PluginModule, WasmEngine};
@@ -48,11 +49,17 @@ pub struct PluginInstances {
 }
 
 impl PluginRunner {
-    /// Build a runner from the gateway's `plugins` list. Compiles each
-    /// plugin's .wasm module and stores it keyed by name. Plugins that
+    /// Build a runner from the gateway's `plugins` list, compiling
+    /// each WASM plugin's module. A local plugin loads from its
+    /// `wasm:` path; a registry `source:` plugin (DW-165) has no
+    /// `wasm` field and loads from its resolved, verified artifact
+    /// path in `resolved` (see [`crate::wasm::source`]). Plugins that
     /// fail to compile are skipped (with a log warning); the gateway
     /// starts even if a plugin is broken.
-    pub fn new(plugins: &[crate::config::PluginConfig]) -> Result<Self, String> {
+    pub fn new(
+        plugins: &[crate::config::PluginConfig],
+        resolved: &HashMap<String, PathBuf>,
+    ) -> Result<Self, String> {
         let engine = WasmEngine::new()?;
         let mut modules = HashMap::new();
 
@@ -60,11 +67,22 @@ impl PluginRunner {
             // DW-119: a plugin is either `wasm:` or `native:`. The
             // runner only compiles WASM plugins; native filters are
             // handled by the unified plugin chain (plugins domain).
-            let wasm_path = match &plugin.wasm {
-                Some(p) => p,
-                None => continue,
+            let wasm_path: String = if let Some(p) = &plugin.wasm {
+                p.clone()
+            } else if plugin.source.is_some() {
+                // DW-165: registry-sourced plugin — the verified local
+                // artifact path from the resolver.
+                match resolved.get(&plugin.name) {
+                    Some(p) => p.display().to_string(),
+                    // No resolved path = resolution failed and the
+                    // lifecycle already marked the plugin Crashed;
+                    // nothing to compile here.
+                    None => continue,
+                }
+            } else {
+                continue;
             };
-            let wasm_bytes = match std::fs::read(wasm_path) {
+            let wasm_bytes = match std::fs::read(&wasm_path) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     tracing::warn!(

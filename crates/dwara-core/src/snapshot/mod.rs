@@ -1850,31 +1850,116 @@ fn validate_plugins(gateway: &Gateway, issues: &mut Vec<ValidationIssue>) {
                  request_body, response_headers, response_body",
             ));
         }
-        // SCALE-12 (#192): validate remote source config.
+        // SCALE-12 (#192)/DW-165: validate remote source config. The
+        // resolver (wasm::source) re-checks all of this defensively;
+        // validation gives the operator the earliest, field-named view.
         if let Some(src) = &p.source {
-            if src.digest.is_empty() {
+            let digest_ok =
+                src.digest.len() == 64 && src.digest.bytes().all(|b| b.is_ascii_hexdigit());
+            if !digest_ok {
+                let detail = if src.digest.len() != 64 {
+                    format!("got {} chars, expected 64", src.digest.len())
+                } else {
+                    "contains non-hex characters".to_string()
+                };
                 issues.push(issue(
                     "plugin",
                     &p.name,
                     "source.digest",
-                    "source digest must be a non-empty SHA-256 hex string",
+                    format!("source digest must be a hex-encoded SHA-256 string ({detail})"),
                 ));
             }
-            if !src.url.starts_with("https://") && !src.url.starts_with("oci://") {
+            if src.url.starts_with("oci://") {
                 issues.push(issue(
                     "plugin",
                     &p.name,
                     "source.url",
-                    "source url must use https:// or oci:// scheme",
+                    "oci:// plugin sources are not supported in this version; publish \
+                     the artifact over https:// or pre-fetch it with `dwara-cli plugin \
+                     install` and reference the local file with `wasm`",
                 ));
-            }
-            if src.signature.is_some() && src.public_key.is_none() {
+            } else if !src.url.starts_with("https://") {
                 issues.push(issue(
                     "plugin",
                     &p.name,
-                    "source.public_key",
-                    "source.public_key is required when source.signature is set",
+                    "source.url",
+                    "source url must use the https:// scheme (oci:// is not supported \
+                     in this version)",
                 ));
+            }
+            if let Some(pk) = &src.public_key {
+                if pk.len() != 64 || !pk.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    issues.push(issue(
+                        "plugin",
+                        &p.name,
+                        "source.public_key",
+                        "source.public_key must be a 32-byte Ed25519 key hex-encoded \
+                         (64 chars)",
+                    ));
+                }
+            }
+            if let Some(sig) = &src.signature {
+                if sig.len() != 128 || !sig.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    issues.push(issue(
+                        "plugin",
+                        &p.name,
+                        "source.signature",
+                        "source.signature must be a 64-byte Ed25519 signature \
+                         hex-encoded (128 chars)",
+                    ));
+                }
+            }
+            if src.signature.is_some() && src.public_key.is_none() {
+                // Still required per-plugin: registry-pinned keys alone
+                // do not identify which key signed THIS plugin unless
+                // the operator pins them via plugin_registry.
+                let registry_keys = gateway
+                    .plugin_registry
+                    .as_ref()
+                    .map(|r| !r.public_keys.is_empty())
+                    .unwrap_or(false);
+                if !registry_keys {
+                    issues.push(issue(
+                        "plugin",
+                        &p.name,
+                        "source.public_key",
+                        "source.public_key is required when source.signature is set \
+                         (or pin keys via plugin_registry.public_keys)",
+                    ));
+                }
+            }
+            if src.public_key.is_some() && src.signature.is_none() {
+                // Review finding: a key without a signature used to be
+                // silently ignored (nothing would be verified with it);
+                // that is a config mistake — reject it.
+                issues.push(issue(
+                    "plugin",
+                    &p.name,
+                    "source.signature",
+                    "source.signature is required when source.public_key is set \
+                     (a key without a signature verifies nothing — sign the \
+                     artifact or remove the key)",
+                ));
+            }
+            if let Some(cp) = &src.cache_path {
+                // Review finding (containment): cache_path is
+                // operator-chosen and the resolver creates directories
+                // and writes artifact bytes there — it must stay inside
+                // the cache dir. The rule lives on
+                // PluginSourceConfig (shared with the resolver's
+                // defensive re-check).
+                if let Some(reason) = crate::config::PluginSourceConfig::cache_path_violation(cp) {
+                    issues.push(issue(
+                        "plugin",
+                        &p.name,
+                        "source.cache_path",
+                        format!(
+                            "source.cache_path '{cp}' is not usable ({reason}); it must \
+                             be a relative path under plugin_registry.cache_dir with no \
+                             parent segments"
+                        ),
+                    ));
+                }
             }
         }
     }

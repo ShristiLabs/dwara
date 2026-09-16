@@ -27,18 +27,29 @@ admin API's plugin status surface (`GET /plugins`), the
 On every config publish (startup and reload), the plugin lifecycle
 manager, for each configured plugin:
 
-1. Reads the plugin's `.wasm` file from the configured path.
-2. Computes a checksum of the module (hot-swap keying).
-3. Compiles the module with wasmtime and validates the proxy-wasm ABI
+1. **Source resolution** (registry `source:` plugins only): resolve
+   the artifact to a verified local file -- cache lookup, download on
+   miss, SHA-256 digest verification, Ed25519 signature verification
+   when configured. See [Plugin registry](./plugin-registry) for the
+   pipeline, the cache layout, and the failure semantics.
+2. Reads the plugin's `.wasm` file (the configured path for `wasm:`
+   plugins, the resolved cache artifact for `source:` plugins).
+3. Computes a checksum of the module (hot-swap keying).
+4. Compiles the module with wasmtime and validates the proxy-wasm ABI
    (`proxy_on_vm_start` export at minimum, an exported linear
    `memory`, no unknown host imports) via the plugin runner.
-4. Tracks the plugin's health from the outcome.
+5. Tracks the plugin's health from the outcome.
 
 A plugin whose file cannot be read or whose module fails to compile is
 marked **Crashed at publish time** and logged (`plugin_load_failed` /
 `plugin_compile_failed`) -- the rest of the config still loads, and
 routes referencing the crashed plugin fail closed with 500
 `plugin_unavailable` from the first request of the new generation.
+A registry-sourced plugin that cannot be resolved follows the same
+contract: it is marked Crashed with an error naming the exact failed
+step (cache lookup, download, digest verification, signature
+verification), logged as `plugin_source_failed`, and its routes fail
+closed -- a partially-loaded or unverified artifact is never run.
 The operator is expected to know, not discover it later from silently
 missing behavior. (Native filters do not go through this path: they
 are registered in the
@@ -75,6 +86,11 @@ Transitions:
 - A read or compile failure at publish marks the plugin `Crashed`
   (logged as `plugin_load_failed` / `plugin_compile_failed`); the
   crash counter accumulates while the file stays broken.
+- A registry `source:` resolution failure marks the plugin `Crashed`
+  the same way (logged as `plugin_source_failed`): unreachable
+  registry with no cache, digest mismatch, or a rejected signature.
+  Fixing the cache or the registry and reloading publishes it
+  `Healthy` again.
 - A reload that fixes the file (the checksum changes, or the plugin
   re-publishes clean) resets the plugin to `Healthy`.
 - `mark_crashed` / `mark_healthy` / `disable` are lifecycle APIs for

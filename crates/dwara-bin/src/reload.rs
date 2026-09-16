@@ -98,7 +98,18 @@ pub(crate) async fn reload(
                     info.route_count,
                     old.generation(),
                 );
-                    dp.refresh();
+                    // DW-165 review: registry plugin-source resolution
+                    // does blocking IO (DNS via getaddrinfo, synchronous
+                    // TLS reads). Resolve it on the blocking pool — off
+                    // this async reload task — and hand the dataplane
+                    // the results, so refresh never runs network IO on a
+                    // worker thread. Bounded by the resolver's
+                    // per-publish budget (60s across all source plugins);
+                    // a JoinError (cancellation/panic) leaves an empty
+                    // map, which fails every source plugin closed for
+                    // this publish — the next reload retries.
+                    let sources = resolve_sources_off_worker(state).await;
+                    dp.refresh_with_sources(sources);
                     refresh_tls_states(&state.snapshot(), tls_states, trigger);
                     // DW-054: publish the new local generation to the
                     // convergence backend so other instances converge
@@ -161,6 +172,45 @@ pub(crate) async fn reload(
                 old.generation(),
                 old.content_hash()
             );
+        }
+    }
+}
+
+/// Resolve registry plugin sources (DW-165) on the blocking pool.
+///
+/// The resolver's downloader is synchronous by design (see
+/// `wasm::source`: resolution runs inside the synchronous
+/// `DataPlane::reload_plugins`, where a nested `block_on` would
+/// panic) — DNS via getaddrinfo and the sync TLS reads are blocking
+/// syscalls. Running it inside `spawn_blocking` keeps those syscalls
+/// off the async worker; the reload task awaits instead of holding
+/// the thread, and the resolver's per-publish budget (60s across all
+/// source plugins) bounds the wait. Configs without `source:` plugins
+/// skip the thread hop entirely.
+async fn resolve_sources_off_worker(
+    state: &ConfigState,
+) -> dwara_core::wasm::source::SourceResolutions {
+    let snapshot = state.snapshot();
+    if !snapshot
+        .gateway()
+        .plugins
+        .iter()
+        .any(|p| p.source.is_some())
+    {
+        return Default::default();
+    }
+    let published = snapshot.gateway().clone();
+    match tokio::task::spawn_blocking(move || dwara_core::wasm::source::resolve_sources(&published))
+        .await
+    {
+        Ok(sources) => sources,
+        Err(join_err) => {
+            tracing::warn!(
+                code = "plugin_source_resolution_join_failed",
+                "registry source resolution task failed: {join_err}; source \
+                 plugins fail closed for this publish"
+            );
+            Default::default()
         }
     }
 }

@@ -217,7 +217,10 @@ impl<W: WasmDispatch> PluginChain<W> {
                             message: e.to_string(),
                         }),
                     }
-                } else if config.wasm.is_some() {
+                } else if config.wasm.is_some() || config.source.is_some() {
+                    // DW-165: a registry `source:` plugin is a WASM
+                    // plugin whose artifact resolved to a verified
+                    // local file; it occupies the same phase slot.
                     entries.push(ChainEntry::Wasm(name.clone()));
                 }
             }

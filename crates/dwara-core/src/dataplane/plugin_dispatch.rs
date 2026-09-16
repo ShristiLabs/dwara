@@ -189,11 +189,10 @@ impl RequestPlugins {
                 }
                 continue;
             }
-            // A WASM plugin (`wasm:` or the registry `source:` variant).
-            // `source:` artifacts are not resolvable yet (registry
-            // loading is out of scope, DW-165): such a plugin never
-            // entered the lifecycle and reads as not loaded — fail
-            // closed rather than skipping it.
+            // A WASM plugin (`wasm:` or the registry `source:` variant,
+            // resolved to a verified local artifact at publish — DW-165).
+            // It must have entered the lifecycle this generation: a miss
+            // is a generation tear and fails closed rather than skipping.
             let Some(loaded) = lifecycle.get_plugin(name) else {
                 return Err(Box::new(unavailable(obs, name, "not_loaded", route, rid)));
             };
@@ -234,10 +233,11 @@ impl RequestPlugins {
         // successful load — every plugin then reads as not loaded
         // above; reaching here without one is a generation tear and
         // fails closed the same way.
-        let has_wasm = route
-            .plugins
-            .iter()
-            .any(|n| configs.get(n).is_some_and(|c| c.wasm.is_some()));
+        let has_wasm = route.plugins.iter().any(|n| {
+            configs
+                .get(n)
+                .is_some_and(|c| c.wasm.is_some() || c.source.is_some())
+        });
         let instances = if has_wasm {
             let Some(runner) = lifecycle.runner() else {
                 return Err(Box::new(unavailable(
@@ -270,7 +270,7 @@ impl RequestPlugins {
         for name in &route.plugins {
             let is_wasm = configs
                 .get(name)
-                .is_some_and(|c| c.wasm.is_some() && c.native.is_none());
+                .is_some_and(|c| (c.wasm.is_some() || c.source.is_some()) && c.native.is_none());
             if is_wasm && !instances.contains(name) {
                 tracing::warn!(
                     code = "plugin_unavailable",
@@ -577,8 +577,9 @@ pub enum PluginStatusState {
     /// it fail closed.
     Disabled { reason: String },
     /// Declared but not present in the running plugin runtime: a
-    /// registry `source:` artifact (resolution is DW-165 follow-up
-    /// work) or a generation tear after a failed engine rebuild.
+    /// registry `source:` artifact that has not been through a
+    /// resolution+load cycle yet, or a generation tear after a failed
+    /// engine rebuild.
     NotLoaded,
     /// A native filter whose registered name has no factory in the
     /// registry; routes referencing it fail closed.
@@ -633,12 +634,12 @@ pub struct PluginStatusEntry {
 
 /// Enumerate the generation's declared plugins as status entries
 /// (DW-158), in config order. Health and digest come from the live
-/// [`PluginLifecycle`] (WASM), the [`NativeRegistry`] (native names),
-/// or are `NotLoaded` (registry `source:` until DW-165). The
-/// dataplane serves this through `DataPlane::plugin_statuses` (the
-/// admin `GET /plugins` handler) and folds it into
-/// `dwara_plugin_total{state}` at publish time — the same enumeration,
-/// so the endpoint, the CLI, and the metric can never disagree.
+/// [`PluginLifecycle`] (WASM local and registry-resolved alike,
+/// DW-165) or the [`NativeRegistry`] (native names). The dataplane
+/// serves this through `DataPlane::plugin_statuses` (the admin `GET
+/// /plugins` handler) and folds it into `dwara_plugin_total{state}`
+/// at publish time — the same enumeration, so the endpoint, the CLI,
+/// and the metric can never disagree.
 pub fn plugin_statuses(
     lifecycle: &PluginLifecycle,
     registry: &NativeRegistry,
@@ -664,22 +665,19 @@ pub fn plugin_statuses(
                     PluginStatusState::NotRegistered
                 };
                 ("native", native.clone(), String::new(), state, None)
-            } else if let Some(src) = &config.source {
-                // SCALE-12 (#192): a remote artifact. Registry
-                // resolution is not implemented (DW-165): the plugin
-                // never enters the lifecycle, so it reads as not
-                // loaded — fail-closed, and visible as such here.
-                (
-                    "registry",
-                    src.url.clone(),
-                    String::new(),
-                    PluginStatusState::NotLoaded,
-                    Some(effective_limits(config)),
-                )
             } else {
-                // A local .wasm plugin: health and digest come from the
-                // lifecycle, which loads/compiles with every
-                // generation (checksum-keyed).
+                // A WASM plugin from either local origin: a `wasm:`
+                // path or a registry `source:` (SCALE-12/DW-165)
+                // resolved to a verified local artifact. Health and
+                // digest come from the lifecycle, which loads/compiles
+                // with every generation (checksum-keyed); a `source:`
+                // that failed resolution reads Crashed with the
+                // step-named error, its routes fail-closed.
+                let (kind, source) = if let Some(src) = &config.source {
+                    ("registry", src.url.clone())
+                } else {
+                    ("wasm", config.wasm.clone().unwrap_or_default())
+                };
                 let loaded = lifecycle.get_plugin(&config.name);
                 let (sha256, state) = match &loaded {
                     None => (String::new(), PluginStatusState::NotLoaded),
@@ -699,13 +697,7 @@ pub fn plugin_statuses(
                         (lp.checksum.clone(), state)
                     }
                 };
-                (
-                    "wasm",
-                    config.wasm.clone().unwrap_or_default(),
-                    sha256,
-                    state,
-                    Some(effective_limits(config)),
-                )
+                (kind, source, sha256, state, Some(effective_limits(config)))
             };
             PluginStatusEntry {
                 name: config.name.clone(),

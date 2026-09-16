@@ -52,6 +52,10 @@ pub mod runner;
 // domain) so native filters and WASM plugins share the same phase
 // slot; compiles unconditionally alongside the rest of the host.
 pub mod adapter;
+// DW-165: registry plugin source resolution (cache-first fetch,
+// SHA-256 digest + Ed25519 signature verification, atomic digest-
+// named cache) — the step before `lifecycle` loads the bytes.
+pub mod source;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};
 pub use host::{
@@ -60,3 +64,4 @@ pub use host::{
 };
 pub use lifecycle::{LoadError, LoadedPlugin, PluginHealth, PluginLifecycle, ValidationError};
 pub use runner::{PhaseOutcome, PluginInstances, PluginRunner};
+pub use source::{resolve_sources, SourceError, SourceResolutions, DEFAULT_CACHE_DIR};

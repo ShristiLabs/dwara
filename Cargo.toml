@@ -135,6 +135,12 @@ hmac = "0.12"
 argon2 = "0.5"
 base64 = "0.22"
 jsonwebtoken = "9"
+# DW-165: Ed25519 verification of registry-sourced plugin artifacts
+# (wasm::source). MIT OR Apache-2.0 (both allow-listed in deny.toml);
+# already in the lock via licensing-core (ent), so the OSS build gains
+# the compile but no new crates in the graph. Default features (fast
+# verify tables, std, zeroize); the gateway only verifies, never signs.
+ed25519-dalek = "2.2"
 # DW-032: chrono for license expiry/grace-period arithmetic (ent feature
 # only, but declared as a regular dep so the licensing module compiles
 # cleanly under both feature sets). MIT OR Apache-2.0 (both allow-listed);

@@ -1205,8 +1205,12 @@ impl DataPlane {
         // one inline, so both paths must seed the collector).
         dp.obs.set_route_slos(slos);
         // DW-157: the startup generation's plugins (refresh() handles
-        // every subsequent generation).
-        dp.reload_plugins();
+        // every subsequent generation). DW-165: registry sources are
+        // resolved here inline — startup is synchronous, and the
+        // resolver's per-publish budget bounds a hung registry.
+        dp.reload_plugins(crate::wasm::source::resolve_sources(
+            dp.state.snapshot().gateway(),
+        ));
         dp.rebuild_authn();
         // DW-094 (Ent): apply the edge's locality context (from env vars
         // or edge labels) to every upstream's load balancer. On `refresh`,
@@ -1619,8 +1623,38 @@ impl DataPlane {
     /// (the key stops authenticating; never stale plaintext). Both
     /// call sites — the binary's reload path and the admin publish
     /// path — invoke it only on the success side of a publish.
+    ///
+    /// DW-165 review: this inline variant resolves registry plugin
+    /// sources synchronously (bounded by the resolver's per-publish
+    /// budget). Async callers that must not run blocking IO on a
+    /// worker thread use [`Self::refresh_with_sources`] with
+    /// resolutions produced on `spawn_blocking`.
     pub fn refresh(&self) {
+        self.refresh_inner(None);
+    }
+
+    /// DW-165 review: refresh with PRE-RESOLVED registry plugin
+    /// sources. The binary's reload path runs
+    /// `wasm::source::resolve_sources` inside
+    /// `tokio::task::spawn_blocking` (DNS via getaddrinfo and the
+    /// sync TLS reads are blocking syscalls) and hands the result
+    /// here, so network IO never runs on an async worker thread. The
+    /// resolutions are keyed by plugin name; the lifecycle re-checks
+    /// each pinned digest against the loaded module's checksum before
+    /// trusting a handed-in path, so a resolution that predates the
+    /// generation being built can only fail closed.
+    pub fn refresh_with_sources(&self, sources: crate::wasm::source::SourceResolutions) {
+        self.refresh_inner(Some(sources));
+    }
+
+    /// The shared refresh body; `sources` carries pre-resolved
+    /// registry plugin sources (async reload path) or None to resolve
+    /// inline against the snapshot this refresh builds from (admin
+    /// path, tests).
+    fn refresh_inner(&self, sources: Option<crate::wasm::source::SourceResolutions>) {
         let snapshot = self.state.snapshot();
+        let sources =
+            sources.unwrap_or_else(|| crate::wasm::source::resolve_sources(snapshot.gateway()));
         let generation = snapshot.generation();
         let previous = self.current();
         let slos = compile_route_slos(&snapshot);
@@ -1791,8 +1825,11 @@ impl DataPlane {
         }
         // DW-157: the new generation's plugins (configs keyed, routes
         // registered, .wasm loaded/compiled checksum-keyed) — plugin
-        // changes take effect on the next request, no restart.
-        self.reload_plugins();
+        // changes take effect on the next request, no restart. The
+        // registry-source resolutions were produced by the caller
+        // (async reloads: spawn_blocking; sync callers: inline in
+        // refresh_inner, bounded by the per-publish budget).
+        self.reload_plugins(sources);
         self.rebuild_authn();
         // DW-094 (Ent): re-apply the edge's locality context to the new
         // registry's balancers (the registry was just rebuilt with fresh
@@ -1814,23 +1851,34 @@ impl DataPlane {
     /// key the generation's plugin configs by name (the per-request
     /// chain build borrows the ready map), replace the lifecycle's
     /// route -> plugins mapping (failure-isolation bookkeeping), and
-    /// load + compile every `plugins[]` entry. The load itself is
-    /// per-plugin fail-closed (an unreadable or uncompilable .wasm is
-    /// marked Crashed and logged; routes referencing it answer 500) —
-    /// the only whole-reload failure is wasmtime engine construction,
-    /// and on THAT failure the previous lifecycle state survives
-    /// untouched (the load replaces its maps only on success):
-    /// unchanged plugins keep serving, and a plugin whose bytes changed
-    /// this generation keeps serving the OLD bytes until the next
-    /// successful reload. A plugin whose definition (config fields) or
-    /// .wasm checksum changed invalidates the response cache of every
-    /// route referencing it (DW-037 epoch bump — stored bytes were
-    /// shaped by the old plugin and must never replay). Called from
-    /// `new` and every `refresh`, so plugins hot-swap with generations
-    /// exactly like the rest of the compiled state.
-    fn reload_plugins(&self) {
+    /// load + compile every `plugins[]` entry. DW-165: `source:`
+    /// plugins are resolved to verified local artifacts BEFORE the
+    /// wasm load step (cache-first; a miss downloads and verifies
+    /// digest/signature — `wasm::source`). The load itself is
+    /// per-plugin fail-closed (an unreadable or uncompilable .wasm, or
+    /// an unresolvable/unverifiable `source:`, is marked Crashed and
+    /// logged; routes referencing it answer 500) — the only
+    /// whole-reload failure is wasmtime engine construction, and on
+    /// THAT failure the previous lifecycle state survives untouched
+    /// (the load replaces its maps only on success): unchanged plugins
+    /// keep serving, and a plugin whose bytes changed this generation
+    /// keeps serving the OLD bytes until the next successful reload. A
+    /// plugin whose definition (config fields) or .wasm checksum
+    /// changed invalidates the response cache of every route
+    /// referencing it (DW-037 epoch bump — stored bytes were shaped by
+    /// the old plugin and must never replay). Called from `new` and
+    /// every `refresh`, so plugins hot-swap with generations exactly
+    /// like the rest of the compiled state.
+    fn reload_plugins(&self, sources: crate::wasm::source::SourceResolutions) {
         let gen = self.current();
         let gateway = gen.snapshot.gateway();
+        // DW-165: registry-source resolutions (cache lookup / download
+        // / digest + signature verification) were produced by the
+        // CALLER — async reloads resolve on `spawn_blocking` before
+        // refresh (no blocking network IO on an async worker), sync
+        // callers resolve inline in `refresh_inner`; both are bounded
+        // by the resolver's per-publish budget. The lifecycle re-checks
+        // each pinned digest against the loaded module's checksum.
         let previous_configs = self.plugin_configs.load_full();
         // Pre-load checksums (the lifecycle computes them): a byte
         // change with an unchanged route is the cache-invalidation
@@ -1857,7 +1905,7 @@ impl DataPlane {
             }
         }
         self.plugins.set_route_plugins(routes);
-        if let Err(e) = self.plugins.load(&gateway.plugins) {
+        if let Err(e) = self.plugins.load(&gateway.plugins, &sources) {
             tracing::error!(
                 code = "plugin_runtime_unavailable",
                 "DW-157: the plugin runtime could not be constructed: {e}; the \
