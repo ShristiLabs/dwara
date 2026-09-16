@@ -67,22 +67,23 @@ instance on reload.
 | `Crashed { error, crash_count }` | Failed fuel/export/instantiation bounds. Routes referencing it fail **closed** with 500 - by design |
 | `Disabled { reason }` | Deliberately off |
 
-No `/plugins` admin endpoint exists yet (documented follow-up) - watch
-logs + plugin metrics for state, and remove the config entry (reload) to
-disable.
+Plugin status is observable via `GET /plugins` on the admin API (and
+`dwara-cli status`): name, kind/source, SHA-256 digest, lifecycle
+state with error and crash_count, limits, phases, and the routes
+referencing each plugin. Remove the config entry (reload) to disable.
 
 ## Registry distribution
 
 ```yaml
 plugin_registry:
-  base_url: https://registry.dwara.dev/plugins   # default
+  base_url: https://shristilabs.github.io/dwara-plugins   # default (registry.dwara.dev will CNAME)
   public_keys: [...]                             # Ed25519 verification keys
   cache_dir: ...                                 # local cache
 
 plugins:
   - name: some-plugin
     source:
-      url: https://registry.dwara.dev/plugins/some-plugin.wasm   # or oci://...
+      url: https://shristilabs.github.io/dwara-plugins/some-plugin.wasm
       digest: <sha256>             # REQUIRED - pin it
       signature: ...               # optional Ed25519
       public_key: ...
@@ -94,7 +95,7 @@ CLI:
 ```sh
 dwara-cli plugin search [query] [--registry URL]
 dwara-cli plugin install <name> [--registry URL] [--digest HASH] [-o DIR]
-# env: DWARA_PLUGIN_REGISTRY (default https://registry.dwara.dev/plugins)
+# env: DWARA_PLUGIN_REGISTRY (default https://shristilabs.github.io/dwara-plugins)
 # requires curl
 ```
 

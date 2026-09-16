@@ -7,7 +7,7 @@ metadata:
   author: shristilabs
   repo: https://github.com/shristilabs/dwara
   docs: https://shristilabs.github.io/dwara/
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Extending Dwara
@@ -54,11 +54,14 @@ plugins:
 # routes opt in with:  plugins: [my-plugin]
 ```
 
-The lifecycle model (once dispatched): `Healthy` / `Crashed {error,
+The lifecycle model: `Healthy` / `Crashed {error,
 crash_count}` (routes referencing a crashed plugin fail **closed** with
 500) / `Disabled {reason}`. Loads are checksum-verified (SHA-256),
-exports-validated, hot-swappable by checksum. There is no `/plugins`
-admin endpoint yet - lifecycle state is observable in logs/metrics.
+exports-validated, hot-swappable by checksum. Plugin status is
+observable via `GET /plugins` on the admin API and the `dwara-cli
+status` plugins section. Plugins can also rewrite the request target
+(`:path`/`:method`/`:authority`) and make HTTP callouts
+(`proxy_http_call` with pause/resume, 5s cap, loop guard).
 
 Full walkthrough + registry distribution:
 [references/proxy-wasm.md](references/proxy-wasm.md).
@@ -106,7 +109,8 @@ resolved (on `auth_required` routes).
   Check built-ins first: `transforms`, `authorization`, `waf`, policies -
   most "plugin ideas" are config.
 - Need custom logic at the edge without rebuilding the gateway?
-  proxy-wasm plugin (scaffold + build today; watch dispatch landing).
+  proxy-wasm plugin (live on the request path: rewrites, short-circuits,
+  HTTP callouts).
 - Tight-loop performance or dwara-core types? Native filter (rebuild).
 - Building a product on dwara-core? Extension traits.
 - Whole route as sandboxed code? `action.type: nano_service`

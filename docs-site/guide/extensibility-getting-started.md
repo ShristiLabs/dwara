@@ -18,7 +18,7 @@ config grammar cannot express.
 | | [Proxy-Wasm plugin](./proxy-wasm-plugins) | [Native filter](./native-plugins) | [Nano-service](./nano-services) | [Extension trait](./extension-traits) |
 |---|---|---|---|---|
 | What it is | A route-attached request/response filter | A compiled-in Rust filter | A route handler AS WASM | A subsystem implementation for embedders |
-| What you can do | Inspect/modify headers and bodies, short-circuit with your own response, deny, tag | Same filter semantics as WASM, at native speed, with dwara-core types | Own the WHOLE response for a route — no upstream at all | Swap rate limiting, config sourcing, caching, analytics, or secrets for your own backend |
+| What you can do | Inspect/modify headers and bodies, rewrite the request target (`:path`/`:method`/`:authority`), short-circuit with your own response, deny, tag, make HTTP callouts to external services | Same filter semantics as WASM, at native speed, with dwara-core types | Own the WHOLE response for a route — no upstream at all | Swap rate limiting, config sourcing, caching, analytics, or secrets for your own backend |
 | Runs | In a wasmtime sandbox per request, on routes that reference it | Inside the gateway binary | In a wasmtime sandbox, as the route's action | In your binary that embeds dwara-core |
 | Written in | Rust (proxy-wasm SDK; other ABI-compatible languages in principle) | Rust | Any language emitting plain WASM (`#![no_std]` Rust, C, ...) | Rust |
 | Packaged as | `.wasm` (cdylib, `wasm32-wasip1`) | Compiled into a custom gateway build | `.wasm` handler module | A crate dependency + startup registration |
