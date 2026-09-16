@@ -17,8 +17,10 @@
 
 use sha2::{Digest, Sha256};
 
-/// The default plugin registry URL (the dwara community registry).
-const DEFAULT_REGISTRY: &str = "https://registry.dwara.dev/plugins";
+/// The default plugin registry URL (the dwara community registry,
+/// served as a static site from the shristilabs/dwara-plugins repo;
+/// registry.dwara.dev will CNAME here).
+const DEFAULT_REGISTRY: &str = "https://shristilabs.github.io/dwara-plugins";
 
 /// The result of a successful `plugin install` command.
 #[derive(Debug)]

@@ -177,7 +177,7 @@ dwara-cli plugin publish <wasm> --name NAME --version VERSION \
 
 `plugin new` scaffolds a ready-to-build proxy-wasm plugin crate (see
 [Plugin SDK](./plugin-sdk)). `plugin search` and `plugin install` work
-against a plugin registry (default `https://registry.dwara.dev/plugins`,
+against a plugin registry (default `https://shristilabs.github.io/dwara-plugins`,
 override with `--registry` or the `DWARA_PLUGIN_REGISTRY` env var;
 requires `curl`). When the registry lists several versions of a
 plugin, `install` picks the highest semantic version; pass
@@ -222,7 +222,7 @@ while the command runs.
 ```sh
 dwara-cli plugin publish target/wasm32-wasip1/release/my_plugin.wasm \
   --name my-plugin --version 1.0.0 \
-  --url https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm \
+  --url https://shristilabs.github.io/dwara-plugins/my-plugin-1.0.0.wasm \
   --key keys/plugin.key
 ```
 
@@ -237,7 +237,7 @@ in alphabetical key order, exactly as the tool prints them):
   "name": "my-plugin",
   "public_key": "9f2a7c3b1e8d...",
   "signature": "c41d8cd9...",
-  "url": "https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm",
+  "url": "https://shristilabs.github.io/dwara-plugins/my-plugin-1.0.0.wasm",
   "version": "1.0.0"
 }
 ```
@@ -246,7 +246,7 @@ in alphabetical key order, exactly as the tool prints them):
 the artifact bytes); unsigned entries omit them. Without `--url` the
 artifact URL defaults to
 `<registry>/<name>-<version>.wasm` (`--registry` / `DWARA_PLUGIN_REGISTRY`
-/ `https://registry.dwara.dev/plugins`).
+/ `https://shristilabs.github.io/dwara-plugins`).
 
 With `--pr`, the CLI opens the pull request itself using the GitHub
 CLI (`gh`): it fetches the registry's current `manifest.json`, merges
@@ -273,7 +273,7 @@ dwara-cli plugin keygen --out-dir keys
 #    Without --pr this prints the entry for a manual PR.
 dwara-cli plugin publish target/wasm32-wasip1/release/my_plugin.wasm \
   --name my-plugin --version 1.0.0 \
-  --url https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm \
+  --url https://shristilabs.github.io/dwara-plugins/my-plugin-1.0.0.wasm \
   --key keys/plugin.key --pr
 
 # 4. After the registry PR merges, gateways install with the same pin:

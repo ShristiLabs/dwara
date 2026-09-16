@@ -45,7 +45,7 @@ fn sha256_direct(bytes: &[u8]) -> String {
     hex
 }
 
-const BASE: &str = "https://registry.dwara.dev/plugins";
+const BASE: &str = "https://shristilabs.github.io/dwara-plugins";
 
 // --- entry generation ------------------------------------------------------
 

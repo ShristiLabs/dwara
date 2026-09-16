@@ -290,8 +290,10 @@ installed plugin 'rate-limiter' -> /var/lib/dwara/plugins/rate-limiter.wasm (dig
 ```
 
 The registry URL can be set via the `DWARA_PLUGIN_REGISTRY`
-environment variable or the `--registry` flag. The default is
-`https://registry.dwara.dev/plugins`.
+environment variable or the `--registry` flag. The default is the
+community registry at `https://shristilabs.github.io/dwara-plugins`
+(the `shristilabs/dwara-plugins` repo served as a static site;
+`registry.dwara.dev` will CNAME there).
 
 ## Requirements
 
