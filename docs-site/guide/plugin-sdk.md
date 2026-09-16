@@ -176,8 +176,8 @@ does not survive the request and is not shared across plugins.
 | `proxy_remove_header_map_value` | Supported | Removes every case-insensitive match. |
 | `proxy_get_header_map_pairs` | Supported | Request/response header maps in the spec wire format (LE entry count, LE length table, NUL-terminated strings — the layout the Rust SDK's `get_map` parses). Trailer maps read as empty. |
 | `proxy_set_header_map_pairs` | Partial | Replaces the **whole** map, parsing the same spec wire format (`set_map` output). Values are UTF-8 strings; a whole-map set cannot carry non-UTF-8 values (untouched headers keep theirs — see above). Trailer stores are accepted and discarded. |
-| `proxy_get_buffer_bytes` | Supported | Request body, response body, plugin configuration, VM configuration. |
-| `proxy_get_buffer_status` | Supported | Lengths for the same four buffers. |
+| `proxy_get_buffer_bytes` | Supported | Request body, response body, the delivered callout response body, plugin configuration, VM configuration. | 
+| `proxy_get_buffer_status` | Supported | Lengths for the same buffers. |
 | `proxy_set_buffer_bytes` | Partial | Request and response bodies only. The write **replaces the buffer from the offset to the end** (spec-range in-place edits are not supported). Configuration buffers are read-only. |
 | `proxy_send_local_response` | Supported | Short-circuits the request: status, headers (spec wire format, exactly what the Rust SDK's `send_http_response` serializes), and body are honored verbatim, the upstream is never dialed. Status-code details and the gRPC status parameter are ignored. A non-empty body without a content-type defaults to `application/json`. |
 | `proxy_log` | Partial | Lines are captured in the per-instance buffer, capped at **64 KiB per instance** (past the cap, the head of the overflowing line plus a truncation marker is kept and further lines are dropped); they are **not surfaced to the gateway log today**. No level filtering. |
@@ -188,9 +188,9 @@ does not survive the request and is not shared across plugins.
 
 | Hostcall | Status | Notes |
 |---|---|---|
-| `proxy_get_shared_data` / `proxy_set_shared_data` | Partial | A per-**instance** key/value map with CAS. Not shared across requests or plugins — every request starts with an empty map. Treat it as request-local scratch space, not cross-request state. |
+| `proxy_get_shared_data` / `proxy_set_shared_data` | Partial | A **VM-scoped** key/value map with CAS: one map per compiled plugin module, shared by every per-request instance of that plugin (the proxy-wasm contract; what a callout plugin's TTL cache is built on). Not shared across *different* plugins; a plugin definition change (`.wasm` checksum or `config` bytes) starts a fresh map on reload. The map is **capped per module**: at most 1024 entries and 1 MiB of key + value bytes. A set that would exceed either cap fails with `Err` instead of evicting — entries are never silently removed (a vanished rate-limit counter is a correctness bug; a refused set is a signal you can branch on). The Rust SDK surfaces the refusal as `Err(Status::CasMismatch)`: it is the only `set_shared_data` error status the SDK maps to a clean `Err` (every other status panics the module). A set that *replaces* an existing key stays allowed while it fits the byte cap, so updates never wedge. |
 | `proxy_define_metric` / `proxy_record_metric` / `proxy_increment_metric` / `proxy_get_metric` | Partial | Per-instance metric maps; **not exported** to the gateway's `/metrics` surface and reset every request. Emit gateway-visible signals from your plugin config or headers instead. |
-| `proxy_http_call` | Stub | Returns `InternalFailure`. The Rust SDK surfaces this as `Err(Status::InternalFailure)` from `dispatch_http_call`. |
+| `proxy_http_call` | Supported | HTTP callouts to `http://` and `https://` targets. See [HTTP callouts](#http-callouts-proxy_http_call) for the pause/resume contract, guardrails, and failure semantics. |
 | `proxy_grpc_call` / `proxy_grpc_stream` | Stub | Return `InternalFailure`; the SDK's `dispatch_grpc_call` / `open_grpc_stream` surface that as `Err`. No gRPC callouts. |
 | `proxy_grpc_send` / `proxy_grpc_cancel` / `proxy_grpc_close` | Stub | Return `InternalFailure`. The SDK wrappers for these (`send_grpc_stream_message`, `cancel_grpc_call`/`cancel_grpc_stream`) only map `BadArgument`/`NotFound` to `Err` — they **panic** on `InternalFailure`, which traps the module and fails closed as 500 `plugin_failed`. Host-safe, but the plugin dies rather than handling the error. |
 | `proxy_get_status` | Partial | Returns Ok with code `0` and no message: no gRPC callout is ever in flight, so there is no status to report. The SDK's `get_grpc_status` reads that as `(0, None)` (it panics on any non-Ok status, so the host must answer Ok). |
@@ -228,6 +228,68 @@ A module importing any **other** WASI function (files, sockets, more)
 fails to instantiate, and routes referencing it fail closed. Keep
 plugins to the subset above.
 
+## HTTP callouts (`proxy_http_call`)
+
+A plugin can make one or more HTTP requests to an external service
+during a phase and act on the answer — entitlement checks, experiment
+bucketing, fraud scores. The flow follows the proxy-wasm contract:
+
+1. your phase callback calls `dispatch_http_call(uri, headers, body,
+   trailers, timeout)` and returns `Action::Pause`;
+2. the gateway performs the exchange (the URI must be absolute
+   `http://` or `https://` — anything else answers
+   `Err(Status::BadArgument)` without touching the network) and
+   delivers the response to `on_http_call_response(token_id,
+   num_headers, body_size, num_trailers)`;
+3. inside that callback you read the response through
+   `get_http_call_response_header(s)` (`:status` rides the header map)
+   and `get_http_call_response_body`, decide (stamp headers,
+   `send_http_response`, or dispatch another callout), and resume.
+
+The `:method`/`:path` pseudo-headers in the dispatch header map steer
+the request (`:method` defaults to `GET`; a map `:path` applies when
+the URI itself carries no path — the URI-embedded target wins). The
+dispatch headers' ordinary names ride the callout request; framing
+headers (`host`, `content-length`, `connection`, ...) are owned by
+the gateway. **Request-head validation is fail-closed**: `:method`
+and every header name must be valid HTTP tokens, and no name, value,
+or map `:path` may contain CR, LF, or NUL — the gateway interpolates
+these into the request head verbatim, so anything else would be
+request splitting. A violating dispatch answers
+`Err(Status::BadArgument)` before any connection is opened. The Rust
+SDK's `HttpContext` exposes the callback on its `Context` impl.
+
+**Guardrails** (hard caps — no config knob):
+
+| Guard | Value |
+|---|---|
+| Timeout (your `Duration`, clamped) | 1 ms .. 5 s, a whole-exchange wall clock |
+| Callout rounds per phase per request | 8 (a runaway dispatch loop fails closed, metric reason `callout_loop`) |
+| Response body cap | 4 MiB (over-cap is an error, never truncation) |
+| Request-head grammar | `:method` and header names must be HTTP tokens; names, values, and `:path` must be CR/LF/NUL-free — a violating dispatch answers `Err(Status::BadArgument)`, no connection attempted |
+| Redirects | not followed — a 3xx is delivered to you as data |
+| SSRF | the gateway's `ssrf_filter` is applied at connect time against every resolved IP |
+
+**Failure semantics** (a deliberate difference from Envoy): any
+COMPLETED response is delivered to your plugin — non-2xx included,
+because only your plugin knows what a 403 from its decision service
+means. A callout that cannot complete (timeout, refused connection,
+over-cap body, SSRF rejection) never reaches the callback: the route
+fails closed with 500 `plugin_failed` (metric reason
+`callout_failed`), exactly like a plugin trap. Envoy instead delivers
+an empty callback and lets the plugin branch; dwara does not, because
+a plugin must not resume as though its decision input had arrived.
+Recipes wanting fail-open behavior scope it explicitly — a short
+timeout plus a fallback implemented without a callout, or an
+[extension trait](./extension-traits) instead of a plugin.
+
+Every callout is counted in
+`dwara_plugin_callouts_total{name,outcome}` with the closed outcome
+set `ok`, `timeout`, `error`, `loop_guard`.
+
+A runnable recipe (decision service + in-plugin TTL cache):
+[`demos/13-extensibility-usecases/07-per-request-decision/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/07-per-request-decision).
+
 ## Plugin configuration
 
 The gateway config's `config` string on a plugin entry is delivered as
@@ -264,6 +326,11 @@ only:
 - **Over-cap body**: a route whose plugins declare a body phase
   buffers the body up to the route's `limits.max_body_bytes` (default
   1 MiB). A larger body answers 500 `plugin_body_too_large`.
+- **Callout failure or runaway loop**: a plugin callout that cannot
+  complete (timeout, refused, over-cap) answers 500 `plugin_failed`
+  (metric reason `callout_failed`); a plugin exceeding 8 callout
+  rounds in one phase answers 500 `plugin_failed` (metric reason
+  `callout_loop`). See [HTTP callouts](#http-callouts-proxy_http_call).
 - **Streaming and encoded responses skip `response_body`**: SSE
   (`text/event-stream`), un-framed (no content-length) bodies, and
   content-encoded bodies pass through untouched — the skip is logged
@@ -275,9 +342,9 @@ only:
 Every failure increments
 `dwara_plugin_failures_total{name,reason}` (reasons include
 `instantiate_failed`, `trap`, `crashed`, `body_too_large`,
-`response_stream_ended`) and a request answered by a plugin
-(short-circuit **or** failure) sets the access log's
-`plugin_short_circuit` flag.
+`response_stream_ended`, `callout_failed`, `callout_loop`) and a
+request answered by a plugin (short-circuit **or** failure) sets the
+access log's `plugin_short_circuit` flag.
 
 ## Caching and signature interactions
 

@@ -1210,7 +1210,629 @@ fn abi_constants_match_proxy_wasm_spec() {
     assert_eq!(wasm::abi::BUFFER_REQUEST_TRAILERS, 1);
     assert_eq!(wasm::abi::BUFFER_RESPONSE_HEADERS, 2);
     assert_eq!(wasm::abi::BUFFER_RESPONSE_TRAILERS, 3);
+    // Callout-response maps/buffer (DW-167): the proxy-wasm MapType 6/7
+    // and BufferType 4 the Rust SDK's get_http_call_response_headers /
+    // get_http_call_response_body read (proxy-wasm 0.2.5 types.rs:
+    // HttpCallResponseHeaders = 6, HttpCallResponseTrailers = 7,
+    // HttpCallResponseBody = 4).
+    assert_eq!(wasm::abi::BUFFER_CALLOUT_RESPONSE_HEADERS, 6);
+    assert_eq!(wasm::abi::BUFFER_CALLOUT_RESPONSE_TRAILERS, 7);
+    assert_eq!(wasm::abi::BUFFER_CALLOUT_RESPONSE_BODY, 4);
     // Actions
     assert_eq!(ACTION_CONTINUE, 0);
+    assert_eq!(wasm::abi::ACTION_PAUSE, 1);
     assert_eq!(ACTION_END_STREAM, 2);
+}
+
+// --- HTTP callouts (DW-167) ------------------------------------------------
+//
+// The callout fixtures model the SDK's dispatch/response contract at
+// the host level: `proxy_http_call` (10 spec-arity params — URI
+// string, spec-serialized headers, optional body, spec-serialized
+// trailers, timeout in MILLISECONDS, token return pointer), then the
+// 5-parameter `proxy_on_http_call_response(context_id, token,
+// num_headers, body_size, num_trailers)` export (the shape the Rust
+// proxy-wasm SDK 0.2.5 emits; the SDK ignores the context slot and
+// routes by token) whose callback reads the response through MapType 6
+// (headers, `:status` first) and BufferType 4 (body).
+
+/// The imports every callout fixture needs.
+const CALLOUT_IMPORTS: &str = r#"
+  (import "env" "proxy_http_call"
+    (func $http_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_header_map_value"
+    (func $get_header (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_buffer_bytes"
+    (func $get_buffer (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_add_header_map_value"
+    (func $add_header (param i32 i32 i32 i32 i32) (result i32)))"#;
+
+/// A module whose `request_headers` dispatches ONE callout to the URI
+/// at data offset 65536 (length 65560-len) with the spec-serialized
+/// header map at 65600, timeout 5000ms, and returns Pause. Its
+/// `proxy_on_http_call_response` reads `:status` (MapType 6) and the
+/// body (BufferType 4), and records both in globals the test reads:
+/// `$seen_status` (the numeric :status) and appends the body bytes to
+/// memory the test dumps via a `$verdict_ptr` write.
+fn callout_dispatch_wat(uri: &str, map: &[(String, String)]) -> String {
+    let serialized = serialize_header_map_spec(map);
+    format!(
+        r#"(module
+  {CALLOUT_IMPORTS}
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (global $seen_status (mut i32) (i32.const 0))
+  (data (i32.const 65536) "{uri}")
+  (data (i32.const 65600) "{bytes}")
+  (data (i32.const 66000) ":status")
+  (data (i32.const 66032) "x-verdict")
+
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+
+  ;; request_headers: dispatch the callout, return Pause (1).
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})   ;; uri
+      (i32.const 65600) (i32.const {map_len})   ;; headers (spec map)
+      (i32.const 0) (i32.const 0)               ;; no body
+      (i32.const 0) (i32.const 0)               ;; no trailers
+      (i32.const 5000)                          ;; timeout ms
+      (i32.const 70000)))                       ;; token ptr
+    (i32.const 1))
+
+  ;; proxy_on_http_call_response(ctx, token, num_headers, body_size,
+  ;; num_trailers): read :status via MapType 6 and the body via
+  ;; BufferType 4, keep both for the test, stamp the verdict header.
+  (func (export "proxy_on_http_call_response") (param i32 i32 i32 i32 i32)
+    (local $vp i32) (local $vs i32)
+    (local.set $vp (call $proxy_on_memory_allocate (i32.const 4)))
+    (drop (call $get_header (i32.const 6) (i32.const 66000) (i32.const 7)
+              (local.get $vp) (i32.const 70004)))
+    ;; Store the status digits at 66100 for the test to read.
+    (i32.store8 (i32.const 66100) (i32.load8_u (i32.load (local.get $vp))))
+    (i32.store8 (i32.const 66101) (i32.load8_u (i32.add (i32.load (local.get $vp)) (i32.const 1))))
+    (i32.store8 (i32.const 66102) (i32.load8_u (i32.add (i32.load (local.get $vp)) (i32.const 2))))
+    ;; Read the first body bytes via BufferType 4 and stamp them as the
+    ;; x-verdict request header (the plugin's resumed decision).
+    (local.set $vs (call $proxy_on_memory_allocate (i32.const 4)))
+    (drop (call $get_buffer (i32.const 4) (i32.const 0) (i32.const 8)
+              (local.get $vs) (i32.const 70008)))
+    (drop (call $add_header (i32.const 0) (i32.const 66032) (i32.const 9)
+              (i32.load (local.get $vs)) (local.get 3)))
+  )
+
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        bytes = wat_bytes(&serialized),
+        uri_len = uri.len(),
+        map_len = serialized.len(),
+    )
+}
+
+#[test]
+fn callout_dispatch_pauses_and_delivers_response_round_trip() {
+    // The DW-167 core round trip at the host level: the phase export
+    // dispatches proxy_http_call and pauses; the host registers the
+    // pending callout (URI, method, headers, timeout); delivering a
+    // response invokes proxy_on_http_call_response, whose MapType 6 /
+    // BufferType 4 reads see the delivered data; the phase then
+    // resumes Continue with the callback's header mutation applied.
+    let uri = "http://127.0.0.1:1/decide?u=42";
+    let wat = callout_dispatch_wat(
+        uri,
+        &[
+            (":method".to_string(), "GET".to_string()),
+            (":authority".to_string(), "ignored.example".to_string()),
+            ("x-extra".to_string(), "1".to_string()),
+        ],
+    );
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(vec![(":path".to_string(), "/orig".to_string())]);
+    assert!(
+        matches!(result, wasm::PhaseResult::Pause),
+        "a dispatched callout must pause the phase, got {result:?}"
+    );
+
+    // The registered callout carries the parsed request: the URI's
+    // scheme/host/target (the map :authority is advisory and dropped),
+    // :method, the ordinary headers, and the timeout in ms.
+    let pending = instance.take_pending_callouts();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].token, 1);
+    assert_eq!(pending[0].uri, uri);
+    assert_eq!(pending[0].method, "GET");
+    assert_eq!(
+        pending[0].headers,
+        vec![("x-extra".to_string(), "1".to_string())]
+    );
+    assert_eq!(pending[0].timeout_ms, 5000);
+
+    // Deliver a completed (non-2xx) response: any status is data.
+    let resp = wasm::CalloutResponse {
+        status: 403,
+        headers: vec![("x-svc".to_string(), "deny".to_string())],
+        body: b"denied!".to_vec(),
+    };
+    let resumed = instance.deliver_callout_response(pending[0].token, &resp);
+    assert!(
+        matches!(resumed, wasm::PhaseResult::Continue),
+        "the callback ran without short-circuiting; expected Continue, got {resumed:?}"
+    );
+
+    // The callback read :status (three digits stored at 66100) and
+    // stamped the body's head as the x-verdict request header.
+    let memory = instance
+        .memory_bytes(66100, 3)
+        .expect("status digits readable");
+    assert_eq!(&memory, b"403");
+    let headers = instance.request_headers();
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-verdict" && v == "denied!"),
+        "the callback's header mutation must land on the request map, got {headers:?}"
+    );
+
+    // No further callouts: a second drive of the phase outcome sees the
+    // pause consumed.
+    assert!(instance.take_pending_callouts().is_empty());
+    instance.on_done();
+}
+
+#[test]
+fn callout_dispatch_rejects_non_http_scheme_with_bad_argument() {
+    // Scheme validation is fail-closed at the hostcall: a non-http(s)
+    // URI answers Status::BadArgument (2) — the one status (with Ok
+    // and InternalFailure) the Rust SDK's dispatch_http_call maps to a
+    // clean Err instead of panicking. The fixture checks the return
+    // value and returns Continue only when it is 2; nothing registers.
+    let wat = String::from(
+        r#"(module
+  (import "env" "proxy_http_call"
+    (func $http_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (data (i32.const 65536) "ftp://evil.example/x")
+  (data (i32.const 65600) "\00\00\00\00")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    ;; Record the hostcall's status at 66100, then Continue. (Returning
+    ;; the raw status would alias ACTION_END_STREAM=2.)
+    (i32.store8 (i32.const 66100)
+      (call $http_call
+        (i32.const 65536) (i32.const 21)
+        (i32.const 65600) (i32.const 4)
+        (i32.const 0) (i32.const 0)
+        (i32.const 0) (i32.const 0)
+        (i32.const 100)
+        (i32.const 70000)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+    );
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(Vec::new());
+    // The dispatch was refused (BadArgument), nothing registered, and
+    // the phase proceeds Continue; the recorded status byte proves the
+    // refusal was BadArgument (2), the status the Rust SDK surfaces as
+    // a clean Err from dispatch_http_call.
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    assert_eq!(
+        instance.memory_bytes(66100, 1).as_deref(),
+        Some(&[2u8][..]),
+        "the hostcall must answer Status::BadArgument for a non-http scheme"
+    );
+    assert!(instance.take_pending_callouts().is_empty());
+    instance.on_done();
+}
+
+#[test]
+fn callout_uri_path_from_header_map_when_uri_has_none() {
+    // The SDK convention (Envoy's dispatch shape): the URI names the
+    // origin and the map's :path carries the target when the URI has
+    // no path of its own. A URI-embedded target still wins.
+    let wat = callout_dispatch_wat(
+        "http://127.0.0.1:1",
+        &[
+            (":method".to_string(), "POST".to_string()),
+            (":path".to_string(), "/svc/verdict?a=b".to_string()),
+        ],
+    );
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+    assert!(matches!(
+        instance.on_request_headers(Vec::new()),
+        wasm::PhaseResult::Pause
+    ));
+    let pending = instance.take_pending_callouts();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].uri, "http://127.0.0.1:1/svc/verdict?a=b");
+    assert_eq!(pending[0].method, "POST");
+    instance.on_done();
+}
+
+#[test]
+fn shared_data_is_shared_across_instances_of_one_module() {
+    // DW-167: proxy_get/set_shared_data is VM-scoped (the proxy-wasm
+    // contract Envoy implements) — two per-request instances of the
+    // same compiled module see one map, which is what a callout
+    // plugin's TTL cache is built on. The fixture writes "k"->"v" with
+    // CAS 0 (insert) on the first instance's request phase.
+    let wat = r#"(module
+  (import "env" "proxy_set_shared_data"
+    (func $set_shared (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_shared_data"
+    (func $get_shared (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (data (i32.const 65536) "k")
+  (data (i32.const 65552) "v1")
+  (func (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (i32.const 1024))
+    (i32.const 1024))
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $set_shared (i32.const 65536) (i32.const 1)
+              (i32.const 65552) (i32.const 2) (i32.const 0)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#;
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut first = module.instantiate(&engine).expect("first instantiate");
+    let mut second = module.instantiate(&engine).expect("second instantiate");
+    assert!(matches!(
+        first.on_request_headers(Vec::new()),
+        wasm::PhaseResult::Continue
+    ));
+    // The second instance reads what the first wrote: same map, one
+    // value with CAS bumped past 0.
+    let shared = second.shared_data_snapshot();
+    assert_eq!(
+        shared.get("k"),
+        Some(&(b"v1".to_vec(), 1)),
+        "shared data must be VM-scoped across instances"
+    );
+    first.on_done();
+    second.on_done();
+}
+
+/// A rejection-shape callout fixture: `request_headers` dispatches ONE
+/// callout with the given URI and spec-serialized map, records the
+/// hostcall's status byte at 66100, and returns Continue. The map is
+/// embedded verbatim, so a test can plant CR/LF/NUL bytes in names,
+/// values, or `:method`.
+fn callout_rejection_wat(uri: &str, map: &[(String, String)]) -> String {
+    let serialized = serialize_header_map_spec(map);
+    format!(
+        r#"(module
+  (import "env" "proxy_http_call"
+    (func $http_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (data (i32.const 65536) "{uri}")
+  (data (i32.const 65600) "{bytes}")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    ;; Record the hostcall's status at 66100, then Continue. (Returning
+    ;; the raw status would alias ACTION_END_STREAM=2.)
+    (i32.store8 (i32.const 66100)
+      (call $http_call
+        (i32.const 65536) (i32.const {uri_len})
+        (i32.const 65600) (i32.const {map_len})
+        (i32.const 0) (i32.const 0)
+        (i32.const 0) (i32.const 0)
+        (i32.const 100)
+        (i32.const 70000)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        bytes = wat_bytes(&serialized),
+        uri_len = uri.len(),
+        map_len = serialized.len(),
+    )
+}
+
+/// Drive one rejection fixture: the dispatch must answer
+/// Status::BadArgument (2), register nothing, and leave the phase
+/// Continue (the canonical recipe — a plugin reflecting client data
+/// into a callout — cannot smuggle framing bytes past the hostcall).
+fn assert_callout_rejected(wat: &str) {
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+    assert!(matches!(
+        instance.on_request_headers(Vec::new()),
+        wasm::PhaseResult::Continue
+    ));
+    assert_eq!(
+        instance.memory_bytes(66100, 1).as_deref(),
+        Some(&[2u8][..]),
+        "the dispatch must answer Status::BadArgument"
+    );
+    assert!(
+        instance.take_pending_callouts().is_empty(),
+        "a rejected dispatch must register no callout"
+    );
+    instance.on_done();
+}
+
+#[test]
+fn callout_dispatch_rejects_crlf_header_value_with_bad_argument() {
+    // Request splitting through a header VALUE: the value is
+    // interpolated raw into the request head, so a CR/LF pair would
+    // start a smuggled header line on the gateway-initiated
+    // connection. Fail-closed at the hostcall: BadArgument, no
+    // registration, no network work.
+    assert_callout_rejected(&callout_rejection_wat(
+        "http://127.0.0.1:1/decide",
+        &[(
+            "x-injected".to_string(),
+            "ok\r\nHost: evil.example\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: evil.example"
+                .to_string(),
+        )],
+    ));
+}
+
+#[test]
+fn callout_dispatch_rejects_request_line_injection_via_method_with_bad_argument() {
+    // Request splitting through `:method`: a non-token method carries
+    // spaces and CR/LF straight into the request line. Fail-closed at
+    // the hostcall: BadArgument, no registration.
+    assert_callout_rejected(&callout_rejection_wat(
+        "http://127.0.0.1:1/decide",
+        &[
+            (
+                ":method".to_string(),
+                "GET /decide HTTP/1.1\r\nHost: evil.example".to_string(),
+            ),
+            ("x-extra".to_string(), "1".to_string()),
+        ],
+    ));
+    // A non-token method with NO framing bytes at all (a plain space)
+    // is equally invalid: the token grammar itself is enforced, not
+    // just the delimiter scan.
+    assert_callout_rejected(&callout_rejection_wat(
+        "http://127.0.0.1:1/decide",
+        &[(":method".to_string(), "GE T".to_string())],
+    ));
+}
+
+#[test]
+fn shared_data_total_bytes_cap_refuses_oversized_set() {
+    // The VM-scoped map is bounded per module (DW-167 review): a set
+    // whose key+value bytes would exceed the 1 MiB cap FAILS (the
+    // same error status as a CAS mismatch — the SDK's only branchable
+    // error for this hostcall) instead of evicting, and the get path
+    // is unaffected. The fixture: set "k"->"v1" (Ok), fill 1 MiB + 1
+    // bytes and try to store them (refused), then read "k" back.
+    let wat = r#"(module
+  (import "env" "proxy_set_shared_data"
+    (func $set_shared (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_shared_data"
+    (func $get_shared (param i32 i32 i32 i32 i32) (result i32)))
+  ;; 19 pages: the 1 MiB + 1 fill region ends at byte 1179649.
+  (memory (export "memory") 19 32)
+  (data (i32.const 65536) "k")
+  (data (i32.const 65552) "v1")
+  (data (i32.const 65568) "big")
+  (func (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (i32.const 1024))
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func $fill (param $i i32)
+    (loop $l
+      (i32.store8 (local.get $i) (i32.const 120))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 1179649)))))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    ;; Small set under the cap: Ok (0), recorded at 66100.
+    (i32.store8 (i32.const 66100)
+      (call $set_shared (i32.const 65536) (i32.const 1)
+                        (i32.const 65552) (i32.const 2) (i32.const 0)))
+    ;; 1 MiB + 1 bytes at 131072..1179649.
+    (call $fill (i32.const 131072))
+    ;; Oversized set: refused, recorded at 66104.
+    (i32.store8 (i32.const 66104)
+      (call $set_shared (i32.const 65568) (i32.const 3)
+                        (i32.const 131072) (i32.const 1048577) (i32.const 0)))
+    ;; Get "k" back: first value byte at 66108, CAS at 66112.
+    (drop (call $get_shared (i32.const 65536) (i32.const 1)
+                            (i32.const 70004) (i32.const 70008) (i32.const 70012)))
+    (i32.store8 (i32.const 66108) (i32.load8_u (i32.load (i32.const 70004))))
+    (i32.store (i32.const 66112) (i32.load (i32.const 70012)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#;
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(wat),
+            // The fill loop needs more than the default 1M fuel.
+            PluginLimits {
+                fuel: 50_000_000,
+                ..PluginLimits::default()
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+    assert!(matches!(
+        instance.on_request_headers(Vec::new()),
+        wasm::PhaseResult::Continue
+    ));
+    let mem = instance.memory_bytes(66100, 16).expect("records");
+    assert_eq!(mem[0], 0, "the under-cap set must succeed");
+    assert_eq!(
+        mem[4], 8,
+        "the over-cap set must be refused with the shared-data error status"
+    );
+    assert_eq!(mem[8], b'v', "the get path still sees the stored value");
+    assert_eq!(
+        u32::from_le_bytes([mem[12], mem[13], mem[14], mem[15]]),
+        1,
+        "the get path still reports the CAS version"
+    );
+    let shared = instance.shared_data_snapshot();
+    assert_eq!(shared.len(), 1, "only the under-cap key is stored");
+    assert!(!shared.contains_key("big"));
+    instance.on_done();
+}
+
+#[test]
+fn shared_data_entry_count_cap_refuses_new_keys_but_updates_existing() {
+    // The 1024-entry cap refuses a 1025th NEW key but still allows
+    // updating an existing one (the cap bounds the entry count, not
+    // writes). Keys are 4-byte little-endian counter strings written
+    // in a loop; the extra key at 704096 carries the value 1024 so it
+    // is distinct from every loop key.
+    let wat = r#"(module
+  (import "env" "proxy_set_shared_data"
+    (func $set_shared (param i32 i32 i32 i32 i32) (result i32)))
+  ;; 11 pages: the key region ends at byte 704100.
+  (memory (export "memory") 11 32)
+  (data (i32.const 65552) "v")
+  (func (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (i32.const 1024))
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  ;; Four VALID-UTF-8 key bytes per counter: [i % 64, '@' + i / 64,
+  ;; 0, 0] — byte 1 spans '@'..'O' across the loop (i < 1024) and 'P'
+  ;; for the extra 1025th key, so every key is distinct after the
+  ;; host's lossy UTF-8 key decode.
+  (func $keybits (param $i i32) (result i32)
+    (i32.or (i32.const 16384)
+      (i32.or (i32.and (local.get $i) (i32.const 63))
+              (i32.shl (i32.and (i32.shr_u (local.get $i) (i32.const 6)) (i32.const 63))
+                       (i32.const 8)))))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (local $i i32)
+    (loop $fill
+      (i32.store (i32.add (i32.const 700000) (i32.shl (local.get $i) (i32.const 2)))
+                 (call $keybits (local.get $i)))
+      (drop (call $set_shared
+              (i32.add (i32.const 700000) (i32.shl (local.get $i) (i32.const 2)))
+              (i32.const 4)
+              (i32.const 65552) (i32.const 1) (i32.const 0)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $fill (i32.lt_u (local.get $i) (i32.const 1024))))
+    ;; The 1025th NEW key (counter value 1024): refused at 66100.
+    (i32.store (i32.const 704096) (call $keybits (i32.const 1024)))
+    (i32.store8 (i32.const 66100)
+      (call $set_shared (i32.const 704096) (i32.const 4)
+                        (i32.const 65552) (i32.const 1) (i32.const 0)))
+    ;; Re-setting the FIRST key (an update, not a new entry): Ok at 66104.
+    (i32.store8 (i32.const 66104)
+      (call $set_shared (i32.const 700000) (i32.const 4)
+                        (i32.const 65552) (i32.const 1) (i32.const 0)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#;
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(wat),
+            PluginLimits {
+                fuel: 50_000_000,
+                ..PluginLimits::default()
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+    assert!(matches!(
+        instance.on_request_headers(Vec::new()),
+        wasm::PhaseResult::Continue
+    ));
+    let mem = instance.memory_bytes(66100, 5).expect("records");
+    assert_eq!(
+        mem[0], 8,
+        "a 1025th new key must be refused at the entry cap"
+    );
+    assert_eq!(
+        mem[4], 0,
+        "updating an existing key under the entry cap must succeed"
+    );
+    assert_eq!(
+        instance.shared_data_snapshot().len(),
+        1024,
+        "exactly the cap's worth of entries is stored"
+    );
+    instance.on_done();
 }

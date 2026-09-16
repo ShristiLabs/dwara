@@ -37,6 +37,19 @@ pub const BUFFER_REQUEST_TRAILERS: u32 = 1;
 pub const BUFFER_RESPONSE_HEADERS: u32 = 2;
 /// Map type: HTTP response trailers (header-map hostcalls).
 pub const BUFFER_RESPONSE_TRAILERS: u32 = 3;
+/// Map type: HTTP callout response headers (proxy-wasm MapType 6, the
+/// map `proxy_on_http_call_response` callbacks read via
+/// `proxy_get_header_map_pairs`/`proxy_get_header_map_value`).
+pub const BUFFER_CALLOUT_RESPONSE_HEADERS: u32 = 6;
+/// Map type: HTTP callout response trailers (proxy-wasm MapType 7).
+/// Not plumbed (the sync callout transport never surfaces trailers);
+/// reads answer empty and writes are accepted and discarded, like the
+/// request/response trailer maps.
+pub const BUFFER_CALLOUT_RESPONSE_TRAILERS: u32 = 7;
+/// Buffer type: HTTP callout response body (`proxy_get_buffer_bytes`;
+/// proxy-wasm BufferType 4, what the SDK's `get_http_call_response_body`
+/// reads).
+pub const BUFFER_CALLOUT_RESPONSE_BODY: u32 = 4;
 /// Buffer type: VM configuration (passed to `proxy_on_vm_start`).
 pub const BUFFER_VM_CONFIGURATION: u32 = 6;
 /// Buffer type: Plugin configuration (passed to `proxy_on_configure`).
@@ -54,11 +67,18 @@ pub const LOG_CRITICAL: u32 = 5;
 // --- Action return values (the return type of phase exports) -----------
 //
 // The plugin returns an action from each phase callback. For HTTP
-// filters, only Continue and EndStream matter (Pause is for streaming
-// TCP contexts; PauseAndContinueIfUsed is for partial data).
+// filters, Continue and EndStream are the phase outcomes; Pause is
+// what a plugin returns after `proxy_http_call` registered a callout
+// (DW-167) — the host performs the callout, delivers
+// `proxy_on_http_call_response`, and the phase resumes from the
+// plugin's post-callback state.
 
 /// Continue processing — the request/response proceeds normally.
 pub const ACTION_CONTINUE: u32 = 0;
+/// Pause for a host async operation — the plugin dispatched an HTTP
+/// callout (`proxy_http_call`) and awaits its response callback
+/// (proxy-wasm Action value 1; the Rust SDK's `Action::Pause`).
+pub const ACTION_PAUSE: u32 = 1;
 /// End the stream — short-circuit the request (e.g. after
 /// `proxy_send_http_response`). No further phase callbacks fire.
 pub const ACTION_END_STREAM: u32 = 2;

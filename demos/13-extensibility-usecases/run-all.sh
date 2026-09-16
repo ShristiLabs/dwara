@@ -23,6 +23,7 @@ DEMOS=(
   04-feature-flag-nano
   05-tenant-routing
   06-embedding-analytics-sink
+  07-per-request-decision
 )
 
 step() { echo; echo "=== $1 ==="; }

@@ -56,11 +56,19 @@ pub mod adapter;
 // SHA-256 digest + Ed25519 signature verification, atomic digest-
 // named cache) — the step before `lifecycle` loads the bytes.
 pub mod source;
+// DW-167: the plugin HTTP callout transport (proxy_http_call). The
+// pause/resume driver lives at the async plugin_dispatch boundary in
+// the dataplane; this module is the synchronous exchange itself.
+pub mod callout;
 
 pub use abi::{deserialize_header_map, serialize_header_map, ACTION_CONTINUE, ACTION_END_STREAM};
+pub use callout::{
+    perform_callout, CalloutError, CalloutRequest, CalloutResponse, CALLOUT_BODY_CAP_BYTES,
+    CALLOUT_TIMEOUT_MAX_MS, CALLOUT_TIMEOUT_MIN_MS, MAX_CALLOUT_ROUNDS,
+};
 pub use host::{
-    LocalResponse, PhaseResult, PluginContext, PluginInstance, PluginLimits, PluginMetric,
-    PluginMetricType, PluginModule, WasmEngine,
+    LocalResponse, PendingCallout, PhaseResult, PluginContext, PluginInstance, PluginLimits,
+    PluginMetric, PluginMetricType, PluginModule, WasmEngine,
 };
 pub use lifecycle::{LoadError, LoadedPlugin, PluginHealth, PluginLifecycle, ValidationError};
 pub use runner::{PhaseOutcome, PluginInstances, PluginRunner};

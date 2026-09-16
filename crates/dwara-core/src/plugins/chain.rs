@@ -53,6 +53,13 @@ pub enum ChainOutcome {
     /// dataplane can attribute the failure in logs and metrics
     /// (`dwara_plugin_failures_total{name,reason}`, DW-157).
     Error { plugin: String, message: String },
+    /// A WASM plugin registered HTTP callouts and paused (DW-167).
+    /// Native filters never produce this. The caller (the async
+    /// plugin_dispatch boundary) performs the callouts through the
+    /// adapter, delivers the responses, and then continues the phase
+    /// with the matching `resume_*` method — entries BEFORE (and the
+    /// paused one itself) do not run again.
+    CalloutPending,
 }
 
 /// A minimal per-request WASM dispatch interface the `wasm` domain
@@ -147,6 +154,21 @@ pub struct NativeCreateFailure {
     pub message: String,
 }
 
+/// The fail-closed outcome for a `resume_*` call whose recorded pause
+/// does not match the resumed phase (or records no pause at all):
+/// unreachable with today's driver (every `CalloutPending` sets the
+/// record; every matching resume consumes it), and silently falling
+/// back to `start = 0` would RE-RUN the phase — plugins before the
+/// pause would execute twice. A driver bug fails closed instead.
+fn callout_resume_mismatch(phase: &str) -> ChainOutcome {
+    ChainOutcome::Error {
+        plugin: "plugin_chain".to_string(),
+        message: format!(
+            "callout resume on {phase} without a matching recorded pause; failing closed"
+        ),
+    }
+}
+
 /// The unified per-request plugin chain.
 ///
 /// Built from a route's plugin names + the gateway's plugin configs +
@@ -161,6 +183,11 @@ pub struct PluginChain<W: WasmDispatch = NoWasm> {
     phases: HashMap<PluginPhase, Vec<ChainEntry>>,
     /// The WASM dispatch adapter (owns per-request WASM instances).
     wasm: W,
+    /// The phase-list index of the WASM entry that paused for callouts
+    /// (DW-167), set when a phase drive returns
+    /// [`ChainOutcome::CalloutPending`] and consumed by the matching
+    /// `resume_*` method (which continues from the entry AFTER it).
+    paused_entry: Option<(PluginPhase, usize)>,
 }
 
 impl<W: WasmDispatch> PluginChain<W> {
@@ -229,7 +256,14 @@ impl<W: WasmDispatch> PluginChain<W> {
             }
         }
 
-        (Self { phases, wasm }, create_failures)
+        (
+            Self {
+                phases,
+                wasm,
+                paused_entry: None,
+            },
+            create_failures,
+        )
     }
 
     /// Whether the chain has any plugins at all.
@@ -251,11 +285,34 @@ impl<W: WasmDispatch> PluginChain<W> {
         &mut self,
         headers: Vec<(String, String)>,
     ) -> (ChainOutcome, Vec<(String, String)>) {
+        self.request_headers_from(headers, 0)
+    }
+
+    /// Continue the `request_headers` phase AFTER the paused entry
+    /// (DW-167): `headers` is the resumed plugin's post-callout
+    /// output. Plugins before (and including) the paused entry do not
+    /// run again.
+    pub fn resume_request_headers(
+        &mut self,
+        headers: Vec<(String, String)>,
+    ) -> (ChainOutcome, Vec<(String, String)>) {
+        let start = match self.paused_entry.take() {
+            Some((PluginPhase::RequestHeaders, idx)) => idx + 1,
+            _ => return (callout_resume_mismatch("request_headers"), headers),
+        };
+        self.request_headers_from(headers, start)
+    }
+
+    fn request_headers_from(
+        &mut self,
+        headers: Vec<(String, String)>,
+        start: usize,
+    ) -> (ChainOutcome, Vec<(String, String)>) {
         let Some(entries) = self.phases.get_mut(&PluginPhase::RequestHeaders) else {
             return (ChainOutcome::Continue, headers);
         };
         let mut current = headers;
-        for entry in entries.iter_mut() {
+        for (idx, entry) in entries.iter_mut().enumerate().skip(start) {
             match entry {
                 ChainEntry::Native(name, filter) => {
                     match filter.on_request_headers(current.clone()) {
@@ -282,6 +339,10 @@ impl<W: WasmDispatch> PluginChain<W> {
                             return (ChainOutcome::LocalResponse(resp), h);
                         }
                         ChainOutcome::Error { .. } => return (outcome, h),
+                        ChainOutcome::CalloutPending => {
+                            self.paused_entry = Some((PluginPhase::RequestHeaders, idx));
+                            return (ChainOutcome::CalloutPending, h);
+                        }
                     }
                 }
             }
@@ -292,11 +353,25 @@ impl<W: WasmDispatch> PluginChain<W> {
     /// Run the `request_body` phase across all plugins in order.
     /// Returns the outcome and the (possibly modified) body.
     pub fn on_request_body(&mut self, body: Vec<u8>) -> (ChainOutcome, Vec<u8>) {
+        self.request_body_from(body, 0)
+    }
+
+    /// Continue the `request_body` phase AFTER the paused entry
+    /// (DW-167): `body` is the resumed plugin's post-callout output.
+    pub fn resume_request_body(&mut self, body: Vec<u8>) -> (ChainOutcome, Vec<u8>) {
+        let start = match self.paused_entry.take() {
+            Some((PluginPhase::RequestBody, idx)) => idx + 1,
+            _ => return (callout_resume_mismatch("request_body"), body),
+        };
+        self.request_body_from(body, start)
+    }
+
+    fn request_body_from(&mut self, body: Vec<u8>, start: usize) -> (ChainOutcome, Vec<u8>) {
         let Some(entries) = self.phases.get_mut(&PluginPhase::RequestBody) else {
             return (ChainOutcome::Continue, body);
         };
         let mut current = body;
-        for entry in entries.iter_mut() {
+        for (idx, entry) in entries.iter_mut().enumerate().skip(start) {
             match entry {
                 ChainEntry::Native(name, filter) => match filter.on_request_body(current.clone()) {
                     FilterOutcome::Continue { body, .. } => current = body,
@@ -321,6 +396,10 @@ impl<W: WasmDispatch> PluginChain<W> {
                             return (ChainOutcome::LocalResponse(resp), b);
                         }
                         ChainOutcome::Error { .. } => return (outcome, b),
+                        ChainOutcome::CalloutPending => {
+                            self.paused_entry = Some((PluginPhase::RequestBody, idx));
+                            return (ChainOutcome::CalloutPending, b);
+                        }
                     }
                 }
             }
@@ -334,11 +413,33 @@ impl<W: WasmDispatch> PluginChain<W> {
         &mut self,
         headers: Vec<(String, String)>,
     ) -> (ChainOutcome, Vec<(String, String)>) {
+        self.response_headers_from(headers, 0)
+    }
+
+    /// Continue the `response_headers` phase AFTER the paused entry
+    /// (DW-167): `headers` is the resumed plugin's post-callout
+    /// output.
+    pub fn resume_response_headers(
+        &mut self,
+        headers: Vec<(String, String)>,
+    ) -> (ChainOutcome, Vec<(String, String)>) {
+        let start = match self.paused_entry.take() {
+            Some((PluginPhase::ResponseHeaders, idx)) => idx + 1,
+            _ => return (callout_resume_mismatch("response_headers"), headers),
+        };
+        self.response_headers_from(headers, start)
+    }
+
+    fn response_headers_from(
+        &mut self,
+        headers: Vec<(String, String)>,
+        start: usize,
+    ) -> (ChainOutcome, Vec<(String, String)>) {
         let Some(entries) = self.phases.get_mut(&PluginPhase::ResponseHeaders) else {
             return (ChainOutcome::Continue, headers);
         };
         let mut current = headers;
-        for entry in entries.iter_mut() {
+        for (idx, entry) in entries.iter_mut().enumerate().skip(start) {
             match entry {
                 ChainEntry::Native(name, filter) => {
                     match filter.on_response_headers(current.clone()) {
@@ -365,6 +466,10 @@ impl<W: WasmDispatch> PluginChain<W> {
                             return (ChainOutcome::LocalResponse(resp), h);
                         }
                         ChainOutcome::Error { .. } => return (outcome, h),
+                        ChainOutcome::CalloutPending => {
+                            self.paused_entry = Some((PluginPhase::ResponseHeaders, idx));
+                            return (ChainOutcome::CalloutPending, h);
+                        }
                     }
                 }
             }
@@ -375,11 +480,25 @@ impl<W: WasmDispatch> PluginChain<W> {
     /// Run the `response_body` phase across all plugins in order.
     /// Returns the outcome and the (possibly modified) body.
     pub fn on_response_body(&mut self, body: Vec<u8>) -> (ChainOutcome, Vec<u8>) {
+        self.response_body_from(body, 0)
+    }
+
+    /// Continue the `response_body` phase AFTER the paused entry
+    /// (DW-167): `body` is the resumed plugin's post-callout output.
+    pub fn resume_response_body(&mut self, body: Vec<u8>) -> (ChainOutcome, Vec<u8>) {
+        let start = match self.paused_entry.take() {
+            Some((PluginPhase::ResponseBody, idx)) => idx + 1,
+            _ => return (callout_resume_mismatch("response_body"), body),
+        };
+        self.response_body_from(body, start)
+    }
+
+    fn response_body_from(&mut self, body: Vec<u8>, start: usize) -> (ChainOutcome, Vec<u8>) {
         let Some(entries) = self.phases.get_mut(&PluginPhase::ResponseBody) else {
             return (ChainOutcome::Continue, body);
         };
         let mut current = body;
-        for entry in entries.iter_mut() {
+        for (idx, entry) in entries.iter_mut().enumerate().skip(start) {
             match entry {
                 ChainEntry::Native(name, filter) => {
                     match filter.on_response_body(current.clone()) {
@@ -406,6 +525,10 @@ impl<W: WasmDispatch> PluginChain<W> {
                             return (ChainOutcome::LocalResponse(resp), b);
                         }
                         ChainOutcome::Error { .. } => return (outcome, b),
+                        ChainOutcome::CalloutPending => {
+                            self.paused_entry = Some((PluginPhase::ResponseBody, idx));
+                            return (ChainOutcome::CalloutPending, b);
+                        }
                     }
                 }
             }

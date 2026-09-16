@@ -42,6 +42,45 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Added
 
+- Plugin HTTP callouts (#285, DW-167): `proxy_http_call` is now
+  supported. A plugin phase callback dispatches an HTTP callout
+  (`http://`/`https://` only; anything else answers `BadArgument`
+  fail-closed) and pauses; the async plugin-dispatch boundary performs
+  the exchange on `spawn_blocking` around the synchronous callout
+  client (plain-http support added to the registry fetcher's
+  transport; SSRF egress filter applied at connect time against every
+  resolved IP), delivers the response through the SDK-shaped
+  `proxy_on_http_call_response(context_id, token, num_headers,
+  body_size, num_trailers)` callback (`:status` via MapType 6, body
+  via BufferType 4), and resumes the chain from the paused entry —
+  the wasm runner stays synchronous. Guardrails are hard caps with no
+  config surface: the plugin's timeout clamped to [1ms, 5s] as a
+  whole-exchange wall clock, at most 8 callout rounds per phase per
+  request (loop guard), a 4 MiB response-body cap, and redirects
+  refused (a 3xx is delivered as data, as is any completed non-2xx
+  response). A callout that cannot complete (timeout, refused
+  connection, over-cap, SSRF rejection) fails the route closed — 500
+  `plugin_failed`, a deliberate deviation from Envoy's empty-callback
+  delivery documented in the plugin SDK guide. New metric
+  `dwara_plugin_callouts_total{name,outcome}` (ok, timeout, error,
+  loop_guard); new failure reasons `callout_failed` and `callout_loop`
+  on `dwara_plugin_failures_total`. `proxy_get/set_shared_data` is
+  now VM-scoped — one map shared by every per-request instance of a
+  plugin module (the proxy-wasm contract; what a callout plugin's TTL
+  cache is built on) instead of per-instance request-local state.
+  The shared map is capped per module at 1024 entries and 1 MiB of
+  key+value bytes: an over-cap set fails with an error status the
+  plugin can branch on (the Rust SDK surfaces
+  `Err(Status::CasMismatch)` — its only branchable error for this
+  hostcall) instead of evicting, and a CAS-mismatched set now answers
+  the spec's CasMismatch status. Callout request heads are validated
+  fail-closed at the hostcall: `:method` and header names must be
+  HTTP tokens, and names, values, and the map `:path` must be free
+  of CR/LF/NUL — violations answer BadArgument with no connection
+  attempted (request-splitting posture).
+  Extensibility use-case recipe 7 is unblocked with the runnable demo
+  `demos/13-extensibility-usecases/07-per-request-decision/`
+  (decision service + in-plugin TTL cache + fail-closed timeout).
 - Listener hot-reload (#182, SCALE-03): the listener bind set is now
   diffed on every config reload. Added listeners are bound and spawned
   without restart; removed listeners are drained (per-listener shutdown

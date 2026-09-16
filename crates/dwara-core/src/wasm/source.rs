@@ -945,7 +945,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// re-statement of the same set the webhook client and the pooled
 /// upstream connector default to (the wasm domain must not import
 /// events/security for it; the roots are the identical public set).
-fn webpki_root_store() -> rustls::RootCertStore {
+/// Shared with the plugin-callout transport (`super::callout`), whose
+/// https targets verify against the same public set.
+pub(crate) fn webpki_root_store() -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     roots

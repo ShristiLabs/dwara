@@ -1414,3 +1414,695 @@ async fn plugin_change_invalidates_cached_responses() {
     );
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+// --- HTTP callouts (DW-167) ------------------------------------------------
+//
+// The e2e callout fixtures pin the SDK's dispatch/response contract
+// against a local plaintext decision service: `proxy_http_call` (10
+// spec-arity params — URI string, spec-serialized headers, optional
+// body, spec-serialized trailers, timeout in MILLISECONDS, token
+// return pointer), a Pause return, and the 5-parameter
+// `proxy_on_http_call_response(context_id, token, num_headers,
+// body_size, num_trailers)` export the Rust proxy-wasm SDK 0.2.5
+// emits (its context slot is ignored by the SDK; it routes by token).
+
+/// Render bytes as a WAT data-segment string body (tests/wasm_host.rs'
+/// helper, duplicated here because support/ only carries
+/// byte-identical helpers).
+fn wat_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 4);
+    for b in bytes {
+        out.push_str(&format!("\\{b:02x}"));
+    }
+    out
+}
+
+/// The imports every callout fixture needs: the dispatcher, the
+/// MapType-6 header lookup, the request-map add, and the local
+/// response.
+const CALLOUT_IMPORTS: &str = r#"
+  (import "env" "proxy_http_call"
+    (func $http_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_header_map_value"
+    (func $get_header (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_add_header_map_value"
+    (func $add_header (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_send_http_response"
+    (func $send (param i32 i32 i32 i32 i32 i32 i32) (result i32)))"#;
+
+/// A `request_headers` plugin that dispatches ONE callout to `uri`
+/// with `timeout_ms` and pauses. `callback` is the WAT body of
+/// `proxy_on_http_call_response` (5 SDK-shape params; num_headers is
+/// param 2, body_size param 3).
+fn callout_wat(uri: &str, timeout_ms: i32, callback: &str) -> String {
+    let empty_map = wat_bytes(&serialize_header_map_spec_wasm(&[]));
+    format!(
+        r#"(module
+  {CALLOUT_IMPORTS}
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{uri}")
+  (data (i32.const 65600) "{empty_map}")
+  (data (i32.const 66000) ":status")
+  (data (i32.const 66032) "x-verdict")
+  (data (i32.const 66064) "entitlement denied")
+
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})
+      (i32.const 65600) (i32.const {map_len})
+      (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0)
+      (i32.const {timeout_ms})
+      (i32.const 70000)))
+    (i32.const 1))
+
+  (func (export "proxy_on_http_call_response") (param i32 i32 i32 i32 i32)
+    {callback})
+
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        uri_len = uri.len(),
+        map_len = empty_map.len(),
+    )
+}
+
+/// The spec/SDK header-map serialization (the same wire format
+/// `dwara_core::wasm::abi::serialize_header_map_spec` produces).
+fn serialize_header_map_spec_wasm(map: &[(String, String)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
+    for (k, v) in map {
+        buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+    }
+    for (k, v) in map {
+        buf.extend_from_slice(k.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(v.as_bytes());
+        buf.push(0);
+    }
+    buf
+}
+
+/// Callback: copy the callout response's `x-verdict` header (MapType
+/// 6) onto the REQUEST map (the resumed plugin's decision), then
+/// implicitly resume Continue.
+const CALLBACK_COPY_VERDICT: &str = r#"
+    (local $vp i32)
+    (local.set $vp (call $proxy_on_memory_allocate (i32.const 4)))
+    (drop (call $get_header (i32.const 6) (i32.const 66032) (i32.const 9)
+              (local.get $vp) (i32.const 70004)))
+    (drop (call $add_header (i32.const 0) (i32.const 66032) (i32.const 9)
+              (i32.load (local.get $vp)) (i32.load (i32.const 70004))))"#;
+
+/// Callback: read `:status` (MapType 6) and short-circuit with 403
+/// when the delivered status starts with '4' — a non-2xx callout
+/// response is DATA the plugin decides on.
+const CALLBACK_DENY_ON_4XX: &str = r#"
+    (local $vp i32)
+    (local.set $vp (call $proxy_on_memory_allocate (i32.const 4)))
+    (drop (call $get_header (i32.const 6) (i32.const 66000) (i32.const 7)
+              (local.get $vp) (i32.const 70004)))
+    (if (i32.eq (i32.load8_u (i32.load (local.get $vp))) (i32.const 52))
+      (then
+        (drop (call $send (i32.const 403)
+                 (i32.const 0) (i32.const 0)
+                 (i32.const 66064) (i32.const 18)
+                 (i32.const 0) (i32.const 0)))))"#;
+
+/// Callback: dispatch ANOTHER callout (the runaway loop fixture —
+/// every delivered response triggers one more dispatch).
+fn callback_redispatch(uri_len: usize) -> String {
+    format!(
+        r#"
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})
+      (i32.const 65600) (i32.const 4)
+      (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0)
+      (i32.const 1000)
+      (i32.const 70000)))"#
+    )
+}
+
+#[tokio::test]
+async fn callout_round_trip_pauses_resumes_and_upstream_sees_decision() {
+    // The full DW-167 round trip: the phase dispatches, pauses; the
+    // gateway performs the exchange against the local decision
+    // service; the response callback reads the verdict (MapType 6) and
+    // stamps it on the request; the chain resumes; the upstream sees
+    // the plugin-applied decision; the decision service saw exactly
+    // one hit.
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, decision_hits) = spawn_backend(
+        |_n, _m, _p, _b| {
+            let mut resp = Response::new(Full::new(Bytes::from_static(b"allow")));
+            resp.headers_mut().insert(
+                "x-verdict",
+                hyper::header::HeaderValue::from_static("allow"),
+            );
+            resp
+        },
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "entitlement.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            2000,
+            CALLBACK_COPY_VERDICT,
+        ),
+    );
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let backend = spawn_backend_full(Arc::new(move |req: Request<hyper::body::Incoming>| {
+        {
+            let mut g = recorder.lock().unwrap();
+            for (k, v) in req.headers() {
+                g.push((k.to_string(), v.to_str().unwrap_or("").to_string()));
+            }
+        }
+        Response::new(Full::new(Bytes::from_static(b"ok")))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: ent\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [ent]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "x-verdict" && v == "allow"),
+        "the callout verdict must reach the upstream, saw: {:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(
+        decision_hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one decision-service hit per request"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"ent\",outcome=\"ok\"} 1"),
+        "the callout outcome is counted: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn callout_timeout_fails_closed() {
+    // A decision service slower than the plugin's timeout fails the
+    // route closed (the deliberate Envoy deviation): 500
+    // plugin_failed, metric outcome=timeout + failure reason
+    // callout_failed, upstream never dialed.
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, _hits) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"late"))),
+        Duration::from_millis(1500),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "ent.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            100,
+            CALLBACK_COPY_VERDICT,
+        ),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: ent\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [ent]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"ent\",outcome=\"timeout\"}"),
+        "the timeout outcome is counted: {metrics}"
+    );
+    assert!(
+        metrics.contains("dwara_plugin_failures_total{name=\"ent\",reason=\"callout_failed\"}"),
+        "the callout failure is attributed: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn callout_refused_connection_fails_closed() {
+    // A dead decision port (connection refused) is a callout error:
+    // fail-closed 500, outcome=error.
+    let dir = tempfile::tempdir().unwrap();
+    let dead = support::dead_port();
+    let wasm = write_plugin(
+        dir.path(),
+        "ent.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{dead}/decide"),
+            500,
+            CALLBACK_COPY_VERDICT,
+        ),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: ent\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [ent]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"ent\",outcome=\"error\"}"),
+        "the refused outcome is counted: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn callout_loop_guard_stops_runaway_dispatch() {
+    // Every delivered response triggers one more dispatch: after
+    // 8 rounds (the per-phase cap) the route fails closed with
+    // outcome=loop_guard and failure reason=callout_loop.
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, hits) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"x"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "looper.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            2000,
+            &callback_redispatch(format!("http://127.0.0.1:{decision_port}/decide").len()),
+        ),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: looper\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [looper]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        8,
+        "exactly MAX_CALLOUT_ROUNDS exchanges before the guard trips"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"looper\",outcome=\"loop_guard\"} 1"),
+        "the loop-guard outcome is counted once: {metrics}"
+    );
+    assert!(
+        metrics.contains("dwara_plugin_failures_total{name=\"looper\",reason=\"callout_loop\"}"),
+        "the loop failure is attributed: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn callout_non_2xx_response_is_delivered_as_data() {
+    // A 403 from the decision service IS delivered (non-2xx is data):
+    // the plugin reads :status from MapType 6 and short-circuits with
+    // its own 403.
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, hits) = spawn_backend(
+        |_n, _m, _p, _b| {
+            let mut resp = Response::new(Full::new(Bytes::from_static(b"no")));
+            *resp.status_mut() = StatusCode::FORBIDDEN;
+            resp.headers_mut()
+                .insert("x-verdict", hyper::header::HeaderValue::from_static("deny"));
+            resp
+        },
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "ent.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            2000,
+            CALLBACK_DENY_ON_4XX,
+        ),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: ent\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [ent]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "entitlement denied",
+        "the plugin decided from the delivered 403"
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"ent\",outcome=\"ok\"} 1"),
+        "a completed non-2xx callout is an ok outcome: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn callout_response_body_over_cap_fails_closed() {
+    // The 4 MiB callout body cap is an error, never a truncation: the
+    // route fails closed with outcome=error.
+    let dir = tempfile::tempdir().unwrap();
+    let oversized: Vec<u8> = vec![b'x'; 4 * 1024 * 1024 + 1];
+    let (decision_port, _hits) = spawn_backend(
+        move |_n, _m, _p, _b| Response::new(Full::new(Bytes::from(oversized.clone()))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "ent.wasm",
+        &callout_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            4000,
+            CALLBACK_COPY_VERDICT,
+        ),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: ent\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [ent]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"ent\",outcome=\"error\"}"),
+        "the over-cap body is an error outcome: {metrics}"
+    );
+}
+
+/// A `request_headers` fixture that dispatches ONE callout with a
+/// FULL dispatch map (the `serialize_header_map_spec_wasm` wire
+/// format) and pauses; its response callback is a no-op. Used for the
+/// request-head validation cases, where the map plants the hostile
+/// bytes and the dispatch itself is expected to be refused.
+fn callout_map_wat(uri: &str, map: &[(String, String)], timeout_ms: i32) -> String {
+    let serialized = serialize_header_map_spec_wasm(map);
+    format!(
+        r#"(module
+  {CALLOUT_IMPORTS}
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{uri}")
+  (data (i32.const 65600) "{bytes}")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})
+      (i32.const 65600) (i32.const {map_len})
+      (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0)
+      (i32.const {timeout_ms})
+      (i32.const 70000)))
+    (i32.const 1))
+  (func (export "proxy_on_http_call_response") (param i32 i32 i32 i32 i32))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        bytes = wat_bytes(&serialized),
+        uri_len = uri.len(),
+        map_len = serialized.len(),
+    )
+}
+
+#[tokio::test]
+async fn callout_request_splitting_payload_never_reaches_the_network() {
+    // The canonical request-splitting recipe: a plugin reflecting
+    // attacker-shaped data into a callout header VALUE. The hostcall
+    // validates the request-head grammar fail-closed (BadArgument
+    // before any registration), so the decision service is never
+    // dialed, no callout is counted, and the phase resumes as a
+    // normal Continue (the dispatch registered nothing).
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, decision_hits) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "reflect.wasm",
+        &callout_map_wat(
+            &format!("http://127.0.0.1:{decision_port}/decide"),
+            &[(
+                "x-injected".to_string(),
+                "ok\r\nHost: evil.example\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: evil.example"
+                    .to_string(),
+            )],
+            2000,
+        ),
+    );
+    let backend = spawn_backend_full(Arc::new(move |_req: Request<hyper::body::Incoming>| {
+        Response::new(Full::new(Bytes::from_static(b"ok")))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: reflect\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [reflect]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the refused dispatch resumes the phase; the upstream answers normally"
+    );
+    assert_eq!(
+        decision_hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a rejected dispatch must never open the callout connection"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        !metrics.contains("dwara_plugin_callouts_total"),
+        "no callout exchange was performed or counted: {metrics}"
+    );
+}
+
+/// The DW-167 mid-queue re-dispatch fixture: `request_headers`
+/// dispatches TWO callouts (tokens 1 and 2); the token-1 callback
+/// dispatches a THIRD (token 3). Every callback stamps an `x-token`
+/// request header with its token digit, so the upstream records
+/// exactly which callbacks ran.
+fn callout_two_dispatch_redispatch_wat(uri: &str) -> String {
+    let empty_map = wat_bytes(&serialize_header_map_spec_wasm(&[]));
+    format!(
+        r#"(module
+  {CALLOUT_IMPORTS}
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{uri}")
+  (data (i32.const 65600) "{empty_map}")
+  (data (i32.const 66032) "x-token")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})
+      (i32.const 65600) (i32.const {map_len})
+      (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0)
+      (i32.const 2000)
+      (i32.const 70010)))
+    (drop (call $http_call
+      (i32.const 65536) (i32.const {uri_len})
+      (i32.const 65600) (i32.const {map_len})
+      (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0)
+      (i32.const 2000)
+      (i32.const 70012)))
+    (i32.const 1))
+  (func (export "proxy_on_http_call_response")
+    (param $ctx i32) (param $token i32) (param $num_headers i32) (param $body_size i32) (param $num_trailers i32)
+    ;; Record this callback: stamp x-token = ASCII digit of the token.
+    (i32.store8 (i32.const 66200) (i32.add (local.get $token) (i32.const 48)))
+    (drop (call $add_header (i32.const 0) (i32.const 66032) (i32.const 7)
+                            (i32.const 66200) (i32.const 1)))
+    ;; Token 1's callback dispatches a third callout mid-queue.
+    (if (i32.eq (local.get $token) (i32.const 1))
+      (then (drop (call $http_call
+        (i32.const 65536) (i32.const {uri_len})
+        (i32.const 65600) (i32.const {map_len})
+        (i32.const 0) (i32.const 0)
+        (i32.const 0) (i32.const 0)
+        (i32.const 2000)
+        (i32.const 70014))))))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        map_len = empty_map.len(),
+        uri_len = uri.len(),
+    )
+}
+
+#[tokio::test]
+async fn callout_redispatch_mid_queue_performs_every_dispatched_callout() {
+    // The DW-167 review finding: a plugin dispatching TWO callouts
+    // before pausing, whose FIRST delivery callback dispatches a
+    // third, must not abandon the second queued callout. The driver
+    // re-enqueues the un-performed remainder ahead of the new queue,
+    // so all three exchanges run (three decision hits), all three
+    // callbacks fire (x-token 1, 2, 3 reach the upstream), and the
+    // phase resumes normally.
+    let dir = tempfile::tempdir().unwrap();
+    let (decision_port, decision_hits) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"allow"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let wasm = write_plugin(
+        dir.path(),
+        "multi.wasm",
+        &callout_two_dispatch_redispatch_wat(&format!("http://127.0.0.1:{decision_port}/decide")),
+    );
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let backend = spawn_backend_full(Arc::new(move |req: Request<hyper::body::Incoming>| {
+        {
+            let mut g = recorder.lock().unwrap();
+            for (k, v) in req.headers() {
+                g.push((k.to_string(), v.to_str().unwrap_or("").to_string()));
+            }
+        }
+        Response::new(Full::new(Bytes::from_static(b"ok")))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: multi\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [multi]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/orders")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        decision_hits.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "every dispatched callout is performed: the two queued plus the mid-delivery re-dispatch"
+    );
+    let tokens: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| k == "x-token")
+        .map(|(_, v)| v.clone())
+        .collect();
+    assert_eq!(
+        tokens,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "every callout callback fired (its token reached the upstream), saw: {tokens:?}"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        metrics.contains("dwara_plugin_callouts_total{name=\"multi\",outcome=\"ok\"} 3"),
+        "three ok exchanges are counted: {metrics}"
+    );
+}

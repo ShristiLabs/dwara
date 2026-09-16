@@ -961,3 +961,43 @@ mod wasm_adapter {
         assert_wasm_dispatch::<WasmChainAdapter>();
     }
 }
+
+#[test]
+fn chain_resume_without_matching_pause_fails_closed() {
+    // Defensive posture (DW-167 review): a `resume_*` call whose
+    // recorded pause does not match the phase — or records no pause at
+    // all, the case constructible here — is a driver bug. It must
+    // fail closed with an Error outcome instead of silently falling
+    // back to start = 0, which would re-run the phase and
+    // double-execute every plugin before the supposed pause.
+    let registry = make_registry();
+    let configs = configs_map(vec![PluginConfig {
+        name: "p".to_string(),
+        wasm: None,
+        source: None,
+        native: Some("add-header".to_string()),
+        phases: vec![PluginPhase::RequestHeaders],
+        config: None,
+        limits: None,
+    }]);
+    let (mut chain, create_failures) =
+        PluginChain::new(&["p".to_string()], &configs, &registry, NoWasm);
+    assert!(create_failures.is_empty());
+
+    let input = vec![("host".to_string(), "example.com".to_string())];
+    let (outcome, headers) = chain.resume_request_headers(input.clone());
+    assert!(
+        matches!(outcome, ChainOutcome::Error { .. }),
+        "a resume without a matching pause must fail closed, got {outcome:?}"
+    );
+    assert_eq!(
+        headers, input,
+        "no entry may run on a mismatched resume (the add-header filter did not fire)"
+    );
+
+    let (outcome, _) = chain.resume_request_body(b"body".to_vec());
+    assert!(
+        matches!(outcome, ChainOutcome::Error { .. }),
+        "every phase's mismatched resume fails closed, got {outcome:?}"
+    );
+}

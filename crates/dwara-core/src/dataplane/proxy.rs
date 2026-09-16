@@ -2011,6 +2011,17 @@ impl DataPlane {
         if route.plugins.is_empty() {
             return Ok(None);
         }
+        // DW-167: the generation's SSRF egress filter rides the plugin
+        // state so plugin HTTP callouts are checked at connect time —
+        // the same posture as webhook deliveries and registry fetches.
+        let ssrf = self
+            .current()
+            .snapshot
+            .gateway()
+            .ssrf_filter
+            .as_ref()
+            .map(crate::config::ssrf::SsrfFilter::from_config)
+            .unwrap_or_else(crate::config::ssrf::SsrfFilter::disabled);
         RequestPlugins::build(
             &self.plugins,
             &self.plugin_configs.load(),
@@ -2018,6 +2029,7 @@ impl DataPlane {
             route,
             &self.obs,
             rid,
+            ssrf,
         )
     }
 
@@ -3966,14 +3978,17 @@ where
             .path_and_query()
             .map(|pq| pq.as_str().to_string())
             .unwrap_or_else(|| req.uri().path().to_string());
-        match p.request_headers_phase(
-            &method,
-            &path_and_query,
-            req.headers_mut(),
-            &dp.obs,
-            rid,
-            &route.name,
-        ) {
+        match p
+            .request_headers_phase(
+                &method,
+                &path_and_query,
+                req.headers_mut(),
+                &dp.obs,
+                rid,
+                &route.name,
+            )
+            .await
+        {
             // The chain's `:path`/`:method`/`:authority` writes ride
             // the request extensions to the forward build (the apply
             // site in `proxy_request`): the rewrite shapes the
@@ -5008,8 +5023,9 @@ where
     if !cache_hit {
         if let Some(p) = plugins.as_mut() {
             let status = resp.status();
-            if let Err(short) =
-                p.response_headers_phase(status, resp.headers_mut(), &dp.obs, rid, &route.name)
+            if let Err(short) = p
+                .response_headers_phase(status, resp.headers_mut(), &dp.obs, rid, &route.name)
+                .await
             {
                 rec.plugin_short_circuit = true;
                 return *short;

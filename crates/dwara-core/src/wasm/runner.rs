@@ -208,6 +208,43 @@ impl PluginInstances {
             .map(|(_, inst)| inst)
     }
 
+    /// The named plugin's current request header map (DW-167): the
+    /// callout driver reads the resumed plugin's phase payload back
+    /// through the adapter after delivering a callout response.
+    pub fn instance_request_headers(&self, name: &str) -> Option<Vec<(String, String)>> {
+        self.instances
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, inst)| inst.request_headers().to_vec())
+    }
+
+    /// The named plugin's current response header map (DW-167; see
+    /// [`PluginInstances::instance_request_headers`]).
+    pub fn instance_response_headers(&self, name: &str) -> Option<Vec<(String, String)>> {
+        self.instances
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, inst)| inst.response_headers().to_vec())
+    }
+
+    /// The named plugin's current request body (DW-167; see
+    /// [`PluginInstances::instance_request_headers`]).
+    pub fn instance_request_body(&self, name: &str) -> Option<Vec<u8>> {
+        self.instances
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, inst)| inst.request_body().to_vec())
+    }
+
+    /// The named plugin's current response body (DW-167; see
+    /// [`PluginInstances::instance_request_headers`]).
+    pub fn instance_response_body(&self, name: &str) -> Option<Vec<u8>> {
+        self.instances
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, inst)| inst.response_body().to_vec())
+    }
+
     /// Run `proxy_on_request_headers` on all instances. Returns the
     /// outcome and the (possibly modified) headers.
     pub fn on_request_headers(
@@ -225,6 +262,16 @@ impl PluginInstances {
                 }
                 PhaseResult::Trap(e) => {
                     return (PhaseOutcome::Trap(e), current_headers);
+                }
+                PhaseResult::Pause => {
+                    return (
+                        PhaseOutcome::Trap(
+                            "proxy_http_call is not supported on this \
+                             execution path (no callout driver)"
+                                .to_string(),
+                        ),
+                        current_headers,
+                    );
                 }
             }
         }
@@ -245,6 +292,16 @@ impl PluginInstances {
                 }
                 PhaseResult::Trap(e) => {
                     return (PhaseOutcome::Trap(e), current_body);
+                }
+                PhaseResult::Pause => {
+                    return (
+                        PhaseOutcome::Trap(
+                            "proxy_http_call is not supported on this \
+                             execution path (no callout driver)"
+                                .to_string(),
+                        ),
+                        current_body,
+                    );
                 }
             }
         }
@@ -269,6 +326,16 @@ impl PluginInstances {
                 PhaseResult::Trap(e) => {
                     return (PhaseOutcome::Trap(e), current_headers);
                 }
+                PhaseResult::Pause => {
+                    return (
+                        PhaseOutcome::Trap(
+                            "proxy_http_call is not supported on this \
+                             execution path (no callout driver)"
+                                .to_string(),
+                        ),
+                        current_headers,
+                    );
+                }
             }
         }
         (PhaseOutcome::Continue, current_headers)
@@ -288,6 +355,16 @@ impl PluginInstances {
                 }
                 PhaseResult::Trap(e) => {
                     return (PhaseOutcome::Trap(e), current_body);
+                }
+                PhaseResult::Pause => {
+                    return (
+                        PhaseOutcome::Trap(
+                            "proxy_http_call is not supported on this \
+                             execution path (no callout driver)"
+                                .to_string(),
+                        ),
+                        current_body,
+                    );
                 }
             }
         }

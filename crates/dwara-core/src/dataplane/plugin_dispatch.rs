@@ -102,6 +102,47 @@
 //! `:status` writes on the response map stay IGNORED (pipeline-owned)
 //! — a deliberate asymmetry with the request side, documented on
 //! [`RequestPlugins::response_headers_phase`].
+//!
+//! ## HTTP callouts: pause and resume (DW-167)
+//!
+//! A plugin phase callback may dispatch HTTP callouts
+//! (`proxy_http_call`) and return Pause. The phase method here — the
+//! ASYNC boundary — then drives the exchange, keeping the wasm runner
+//! synchronous:
+//!
+//! 1. the chain reports [`ChainOutcome::CalloutPending`] and stops at
+//!    the paused entry;
+//! 2. [`RequestPlugins::resolve_callouts`] performs each pending
+//!    exchange on `spawn_blocking` around the synchronous callout
+//!    client (`wasm::callout`), records
+//!    `dwara_plugin_callouts_total{name,outcome}` (ok, timeout,
+//!    error), and delivers the response to the instance with a
+//!    synchronous re-entry (`proxy_on_http_call_response`); the plugin
+//!    may dispatch again (bounded rounds) or decide the request. A
+//!    mid-delivery re-dispatch never abandons the rest of the drained
+//!    queue: the un-performed remainder is re-enqueued ahead of the
+//!    new dispatches (dispatch order preserved), so every dispatched
+//!    callout is eventually performed or the loop guard trips;
+//! 3. on Continue the chain resumes from the entry AFTER the paused
+//!    one with the plugin's post-callout payload.
+//!
+//! Guardrails (hard caps, no config surface): the plugin's timeout
+//! clamped to [1ms, 5s]; at most [`wasm::callout::MAX_CALLOUT_ROUNDS`]
+//! callout rounds per phase per request (exceeding fails closed, 500
+//! `plugin_failed`, metric reason `callout_loop`); callout response
+//! bodies capped at 4 MiB; redirects refused; the gateway SSRF egress
+//! filter applied at connect time against the resolved IPs.
+//!
+//! **Callout failure is a plugin failure** (a deliberate deviation
+//! from Envoy, which delivers an empty response callback on callout
+//! failure): a timed-out or refused callout answers 500
+//! `plugin_failed` (metric reason `callout_failed`) — the plugin
+//! cannot make a fail-open decision without receiving its decision
+//! input, and dwara's plugin posture is fail-closed end to end. Any
+//! COMPLETED status is delivered as data (non-2xx included); recipes
+//! wanting fail-open semantics scope them explicitly (short timeouts
+//! plus a non-callout fallback, or an extension trait instead of a
+//! plugin).
 
 use std::collections::HashMap;
 
@@ -111,11 +152,13 @@ use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 
+use crate::config::ssrf::SsrfFilter;
 use crate::config::{Gateway, PluginConfig, PluginPhase, Route};
 use crate::dataplane::proxy::ProxyBody;
 use crate::observability::Observability;
 use crate::plugins::{ChainOutcome, LocalResponse, NativeRegistry, PluginChain};
 use crate::wasm::adapter::WasmChainAdapter;
+use crate::wasm::callout;
 use crate::wasm::lifecycle::{PluginHealth, PluginLifecycle};
 
 /// The default body cap for plugin body phases on routes without an
@@ -204,6 +247,10 @@ pub struct RequestPlugins {
     /// The first plugin on the route declaring `response_body` — the
     /// attribution for the response side of the same rule.
     response_body_plugin: Option<String>,
+    /// The generation's SSRF egress filter, applied at callout connect
+    /// time (DW-167) — the same posture as webhook deliveries and
+    /// registry fetches.
+    ssrf: SsrfFilter,
 }
 
 impl Drop for RequestPlugins {
@@ -227,6 +274,7 @@ impl RequestPlugins {
         route: &Route,
         obs: &Observability,
         rid: &str,
+        ssrf: SsrfFilter,
     ) -> Result<Option<Self>, PluginExit> {
         if route.plugins.is_empty() {
             return Ok(None);
@@ -390,6 +438,7 @@ impl RequestPlugins {
             request_headers_plugin,
             request_body_plugin,
             response_body_plugin,
+            ssrf,
         }))
     }
 
@@ -413,8 +462,11 @@ impl RequestPlugins {
     /// carries the chain's validated `:path`/`:method`/`:authority`
     /// writes (see the module's "Header conventions" section) for the
     /// caller to apply at the forward build; on `Err` the caller
-    /// returns the response immediately.
-    pub fn request_headers_phase(
+    /// returns the response immediately. Async because a plugin may
+    /// dispatch HTTP callouts here (DW-167): the phase pauses, the
+    /// callouts are performed off-thread, and the chain resumes with
+    /// the plugin's post-callout output.
+    pub async fn request_headers_phase(
         &mut self,
         method: &hyper::Method,
         path_and_query: &str,
@@ -432,25 +484,41 @@ impl RequestPlugins {
         // The write-back diffs against this snapshot of the input (the
         // chain consumes `map`); see `apply_header_changes`.
         let input = map.clone();
-        match self.chain.on_request_headers(map) {
-            (ChainOutcome::Continue, out) => {
-                apply_header_changes(headers, &input, &out);
-                let rewrite = pseudo_header_rewrite(
-                    &input,
-                    &out,
-                    obs,
-                    rid,
-                    route,
-                    self.request_headers_plugin.as_deref(),
-                )?;
-                Ok(rewrite)
-            }
-            (ChainOutcome::LocalResponse(resp), _) => {
-                plugin_decision(rid, route);
-                Err(Box::new(local_response(resp, rid)))
-            }
-            (ChainOutcome::Error { plugin, message }, _) => {
-                Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)))
+        let mut outcome = self.chain.on_request_headers(map);
+        let mut callout_rounds: u32 = 0;
+        loop {
+            match outcome {
+                (ChainOutcome::Continue, out) => {
+                    apply_header_changes(headers, &input, &out);
+                    let rewrite = pseudo_header_rewrite(
+                        &input,
+                        &out,
+                        obs,
+                        rid,
+                        route,
+                        self.request_headers_plugin.as_deref(),
+                    )?;
+                    return Ok(rewrite);
+                }
+                (ChainOutcome::LocalResponse(resp), _) => {
+                    plugin_decision(rid, route);
+                    return Err(Box::new(local_response(resp, rid)));
+                }
+                (ChainOutcome::Error { plugin, message }, _) => {
+                    return Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)));
+                }
+                (ChainOutcome::CalloutPending, _) => {
+                    if let Some(resp) = self
+                        .resolve_callouts(obs, rid, route, &mut callout_rounds)
+                        .await?
+                    {
+                        plugin_decision(rid, route);
+                        return Err(Box::new(local_response(resp, rid)));
+                    }
+                    let headers = self.chain.wasm().paused_request_headers();
+                    self.chain.wasm_mut().clear_pause();
+                    outcome = self.chain.resume_request_headers(headers);
+                }
             }
         }
     }
@@ -501,18 +569,34 @@ impl RequestPlugins {
                 )));
             }
         };
-        match self.chain.on_request_body(bytes.to_vec()) {
-            (ChainOutcome::Continue, out) => {
-                let bytes = Bytes::from(out);
-                set_content_length(&mut parts.headers, bytes.len());
-                Ok(Request::from_parts(parts, Full::new(bytes)))
-            }
-            (ChainOutcome::LocalResponse(resp), _) => {
-                plugin_decision(rid, route);
-                Err(Box::new(local_response(resp, rid)))
-            }
-            (ChainOutcome::Error { plugin, message }, _) => {
-                Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)))
+        let mut outcome = self.chain.on_request_body(bytes.to_vec());
+        let mut callout_rounds: u32 = 0;
+        loop {
+            match outcome {
+                (ChainOutcome::Continue, out) => {
+                    let bytes = Bytes::from(out);
+                    set_content_length(&mut parts.headers, bytes.len());
+                    return Ok(Request::from_parts(parts, Full::new(bytes)));
+                }
+                (ChainOutcome::LocalResponse(resp), _) => {
+                    plugin_decision(rid, route);
+                    return Err(Box::new(local_response(resp, rid)));
+                }
+                (ChainOutcome::Error { plugin, message }, _) => {
+                    return Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)));
+                }
+                (ChainOutcome::CalloutPending, _) => {
+                    if let Some(resp) = self
+                        .resolve_callouts(obs, rid, route, &mut callout_rounds)
+                        .await?
+                    {
+                        plugin_decision(rid, route);
+                        return Err(Box::new(local_response(resp, rid)));
+                    }
+                    let body = self.chain.wasm().paused_request_body();
+                    self.chain.wasm_mut().clear_pause();
+                    outcome = self.chain.resume_request_body(body);
+                }
             }
         }
     }
@@ -527,8 +611,9 @@ impl RequestPlugins {
     /// matches the upstream bytes a later phase may rewrite), so a
     /// mid-pipeline flip would desynchronize both. A plugin that
     /// wants to DECIDE the answer has `send_http_response` at the
-    /// request phases.
-    pub fn response_headers_phase(
+    /// request phases. Async for the callout pause/resume path
+    /// (DW-167), like every phase method.
+    pub async fn response_headers_phase(
         &mut self,
         status: StatusCode,
         headers: &mut HeaderMap,
@@ -544,17 +629,33 @@ impl RequestPlugins {
         // The write-back diffs against this snapshot of the input (the
         // chain consumes `map`); see `apply_header_changes`.
         let input = map.clone();
-        match self.chain.on_response_headers(map) {
-            (ChainOutcome::Continue, out) => {
-                apply_header_changes(headers, &input, &out);
-                Ok(())
-            }
-            (ChainOutcome::LocalResponse(resp), _) => {
-                plugin_decision(rid, route);
-                Err(Box::new(local_response(resp, rid)))
-            }
-            (ChainOutcome::Error { plugin, message }, _) => {
-                Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)))
+        let mut outcome = self.chain.on_response_headers(map);
+        let mut callout_rounds: u32 = 0;
+        loop {
+            match outcome {
+                (ChainOutcome::Continue, out) => {
+                    apply_header_changes(headers, &input, &out);
+                    return Ok(());
+                }
+                (ChainOutcome::LocalResponse(resp), _) => {
+                    plugin_decision(rid, route);
+                    return Err(Box::new(local_response(resp, rid)));
+                }
+                (ChainOutcome::Error { plugin, message }, _) => {
+                    return Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)));
+                }
+                (ChainOutcome::CalloutPending, _) => {
+                    if let Some(resp) = self
+                        .resolve_callouts(obs, rid, route, &mut callout_rounds)
+                        .await?
+                    {
+                        plugin_decision(rid, route);
+                        return Err(Box::new(local_response(resp, rid)));
+                    }
+                    let headers = self.chain.wasm().paused_response_headers();
+                    self.chain.wasm_mut().clear_pause();
+                    outcome = self.chain.resume_response_headers(headers);
+                }
             }
         }
     }
@@ -632,23 +733,174 @@ impl RequestPlugins {
                 return Err(Box::new(plugin_failed_response(rid)));
             }
         };
-        match self.chain.on_response_body(bytes.to_vec()) {
-            (ChainOutcome::Continue, out) => {
-                let bytes = Bytes::from(out);
-                set_content_length(&mut parts.headers, bytes.len());
-                Ok(Response::from_parts(
-                    parts,
-                    ProxyBody::Full(Full::new(bytes)),
-                ))
-            }
-            (ChainOutcome::LocalResponse(resp), _) => {
-                plugin_decision(rid, route);
-                Err(Box::new(local_response(resp, rid)))
-            }
-            (ChainOutcome::Error { plugin, message }, _) => {
-                Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)))
+        let mut outcome = self.chain.on_response_body(bytes.to_vec());
+        let mut callout_rounds: u32 = 0;
+        loop {
+            match outcome {
+                (ChainOutcome::Continue, out) => {
+                    let bytes = Bytes::from(out);
+                    set_content_length(&mut parts.headers, bytes.len());
+                    return Ok(Response::from_parts(
+                        parts,
+                        ProxyBody::Full(Full::new(bytes)),
+                    ));
+                }
+                (ChainOutcome::LocalResponse(resp), _) => {
+                    plugin_decision(rid, route);
+                    return Err(Box::new(local_response(resp, rid)));
+                }
+                (ChainOutcome::Error { plugin, message }, _) => {
+                    return Err(Box::new(plugin_error(obs, rid, route, &plugin, &message)));
+                }
+                (ChainOutcome::CalloutPending, _) => {
+                    if let Some(resp) = self
+                        .resolve_callouts(obs, rid, route, &mut callout_rounds)
+                        .await?
+                    {
+                        plugin_decision(rid, route);
+                        return Err(Box::new(local_response(resp, rid)));
+                    }
+                    let body = self.chain.wasm().paused_response_body();
+                    self.chain.wasm_mut().clear_pause();
+                    outcome = self.chain.resume_response_body(body);
+                }
             }
         }
+    }
+
+    /// The callout pause/resume driver (DW-167): perform every pending
+    /// exchange of the paused plugin off-thread, record the outcome
+    /// metric, deliver the response with a synchronous wasmtime
+    /// re-entry, and repeat while the plugin keeps dispatching —
+    /// `rounds` counts this PHASE's exchanges (the caller owns the
+    /// counter, so the cap spans every plugin and pause in the phase).
+    /// `Ok(None)` = resolved; the caller reads the resumed payload and
+    /// resumes the chain. `Ok(Some(resp))` = the plugin decided the
+    /// request from a callout callback (`send_http_response`); the
+    /// caller answers with it. `Err` = a fail-closed exit (callout
+    /// failure, loop guard, or plugin trap).
+    async fn resolve_callouts(
+        &mut self,
+        obs: &Observability,
+        rid: &str,
+        route: &str,
+        rounds: &mut u32,
+    ) -> Result<Option<LocalResponse>, PluginExit> {
+        loop {
+            // Drain the paused plugin's queue (FIFO; usually one). An
+            // empty drain means the paused plugin finished (its last
+            // delivery resumed Continue and the payload waits for the
+            // caller) — or nothing paused at all.
+            let Some((name, requests)) = self.chain.wasm_mut().pending_callouts() else {
+                break;
+            };
+            if requests.is_empty() {
+                break;
+            }
+            let mut queue = requests.into_iter();
+            while let Some(request) = queue.next() {
+                *rounds += 1;
+                if *rounds > callout::MAX_CALLOUT_ROUNDS {
+                    return Err(Box::new(self.callout_loop_guard(obs, rid, route)));
+                }
+                let token = request.token;
+                let ssrf = self.ssrf.clone();
+                let result = match tokio::task::spawn_blocking(move || {
+                    callout::perform_callout(&request, &ssrf)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    // The blocking task itself died (panic): same
+                    // fail-closed error path as a transport failure.
+                    Err(join) => Err(callout::CalloutError::Failed(format!(
+                        "callout task failed: {join}"
+                    ))),
+                };
+                match result {
+                    Ok(resp) => {
+                        obs.record_plugin_callout(&name, "ok");
+                        match self.chain.wasm_mut().deliver_callout(token, &resp) {
+                            // Continue: deliver any remaining queued
+                            // responses; the phase resumes when the
+                            // queue drains.
+                            ChainOutcome::Continue => {}
+                            // The callback dispatched again mid-queue:
+                            // the un-performed remainder must NOT be
+                            // abandoned (its callback would never fire
+                            // while the phase resumed as if it had) —
+                            // re-enqueue it ahead of the new queue and
+                            // let the next iteration drain both.
+                            ChainOutcome::CalloutPending => {
+                                let remainder: Vec<callout::CalloutRequest> = queue.collect();
+                                if !remainder.is_empty() {
+                                    self.chain.wasm_mut().requeue_callouts(remainder);
+                                }
+                                break;
+                            }
+                            ChainOutcome::LocalResponse(resp) => return Ok(Some(resp)),
+                            ChainOutcome::Error { plugin, message } => {
+                                return Err(Box::new(plugin_error(
+                                    obs, rid, route, &plugin, &message,
+                                )));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Callout failure = plugin failure (see the
+                        // module docs for the deliberate deviation
+                        // from Envoy's empty-callback delivery).
+                        obs.record_plugin_callout(&name, e.outcome());
+                        tracing::warn!(
+                            code = "plugin_failed",
+                            request_id = %rid,
+                            route = %route,
+                            plugin = %name,
+                            outcome = e.outcome(),
+                            reason = %e,
+                            "plugin callout failed; failing closed"
+                        );
+                        obs.record_plugin_failure(&name, "callout_failed");
+                        return Err(Box::new(plugin_failed_response(rid)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The fail-closed 500 for the callout loop guard: a plugin that
+    /// never stops dispatching callouts (every response callback
+    /// dispatches another) is stopped after
+    /// [`callout::MAX_CALLOUT_ROUNDS`] rounds — the metrics record
+    /// both the loop_guard callout outcome and the `callout_loop`
+    /// failure reason, attributed to the paused plugin. Missing
+    /// attribution uses the fixed "unknown" sentinel (a route NAME is
+    /// not a plugin name; the label space stays config-bounded
+    /// either way).
+    fn callout_loop_guard(
+        &mut self,
+        obs: &Observability,
+        rid: &str,
+        route: &str,
+    ) -> Response<ProxyBody> {
+        let name = self
+            .chain
+            .wasm()
+            .paused_plugin()
+            .unwrap_or("unknown")
+            .to_string();
+        tracing::warn!(
+            code = "plugin_failed",
+            request_id = %rid,
+            route = %route,
+            plugin = %name,
+            rounds = callout::MAX_CALLOUT_ROUNDS,
+            "plugin exceeded the per-phase callout round cap; failing closed"
+        );
+        obs.record_plugin_callout(&name, "loop_guard");
+        obs.record_plugin_failure(&name, "callout_loop");
+        plugin_failed_response(rid)
     }
 }
 

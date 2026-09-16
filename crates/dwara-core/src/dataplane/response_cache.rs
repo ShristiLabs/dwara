@@ -915,13 +915,16 @@ impl ResponseCache {
         };
         if let Some(p) = plugins.as_mut() {
             let status = resp.status();
-            if let Err(short) = p.response_headers_phase(
-                status,
-                resp.headers_mut(),
-                dp.observability(),
-                &rid,
-                &route.name,
-            ) {
+            if let Err(short) = p
+                .response_headers_phase(
+                    status,
+                    resp.headers_mut(),
+                    dp.observability(),
+                    &rid,
+                    &route.name,
+                )
+                .await
+            {
                 rec.plugin_short_circuit = true;
                 resp = *short;
                 plugin_failed = true;

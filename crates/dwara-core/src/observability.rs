@@ -854,6 +854,7 @@ pub struct Observability {
     /// deliberate `send_http_response` short-circuit is a decision, not
     /// a failure, and is not counted.
     plugin_failures_total: IntCounterVec,
+    plugin_callouts_total: IntCounterVec,
     /// DW-158: plugins per lifecycle state — the CLOSED label set
     /// `healthy`, `crashed`, `disabled`, `not_loaded`,
     /// `not_registered` (an unregistered native filter or an
@@ -1680,12 +1681,29 @@ impl Observability {
                  reason. name is the config-declared plugin name \
                  (config-bounded); reason is the closed set crashed, \
                  disabled, not_loaded, not_registered, instantiate_failed, \
-                 trap, body_too_large, response_stream_ended. Counted once \
+                 trap, body_too_large, response_stream_ended, \
+                 callout_failed, callout_loop. Counted once \
                  per request the plugin \
                  chain answered with an error (a send_http_response \
                  short-circuit is a plugin decision, not a failure).",
             ),
             &["name", "reason"],
+        )
+        .expect("valid metric definition");
+        let plugin_callouts_total = IntCounterVec::new(
+            Opts::new(
+                "dwara_plugin_callouts_total",
+                "Plugin HTTP callout outcomes (DW-167), by plugin name \
+                 and outcome. name is the config-declared plugin name \
+                 (config-bounded); outcome is the closed set ok (a \
+                 completed response was delivered, any status), timeout \
+                 (the clamped whole-exchange deadline expired), error \
+                 (connect/DNS/TLS/SSRF/framing/cap failures), loop_guard \
+                 (the per-phase round cap stopped a runaway dispatch \
+                 loop). Counted once per performed callout (loop_guard \
+                 once per guard trip).",
+            ),
+            &["name", "outcome"],
         )
         .expect("valid metric definition");
         let plugin_total = IntGaugeVec::new(
@@ -1959,6 +1977,7 @@ impl Observability {
             Box::new(nano_service_requests_total.clone()),
             Box::new(nano_service_duration_seconds.clone()),
             Box::new(plugin_failures_total.clone()),
+            Box::new(plugin_callouts_total.clone()),
             Box::new(plugin_total.clone()),
             Box::new(tls_pq_handshakes_total.clone()),
             Box::new(rate_limiter_adaptive_factor.clone()),
@@ -2062,6 +2081,7 @@ impl Observability {
             nano_service_requests_total,
             nano_service_duration_seconds,
             plugin_failures_total,
+            plugin_callouts_total,
             plugin_total,
             tls_pq_handshakes_total,
             rate_limiter_adaptive_factor,
@@ -2742,6 +2762,21 @@ impl Observability {
     pub fn record_plugin_failure(&self, name: &str, reason: &str) {
         self.plugin_failures_total
             .with_label_values(&[name, reason])
+            .inc();
+    }
+
+    /// Count one plugin HTTP callout outcome (DW-167) in
+    /// `dwara_plugin_callouts_total{name,outcome}`. `name` is the
+    /// config-declared plugin name (config-bounded); `outcome` is one
+    /// of the closed set `ok` (a completed response was delivered to
+    /// the plugin, any status), `timeout`, `error`, `loop_guard`.
+    /// Counted once per performed callout (`loop_guard` once per guard
+    /// trip); a callout ERROR additionally increments
+    /// `dwara_plugin_failures_total{name,reason=callout_failed}`
+    /// because the route fails closed.
+    pub fn record_plugin_callout(&self, name: &str, outcome: &str) {
+        self.plugin_callouts_total
+            .with_label_values(&[name, outcome])
             .inc();
     }
 

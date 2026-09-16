@@ -6,9 +6,8 @@ forward-looking; code samples use only hostcalls from the
 [supported set](./plugin-sdk#hostcall-support-matrix) unless clearly
 marked otherwise.
 
-Status legend: **works today** · **needs callouts** (blocked on the
-`proxy_http_call` stub) · **embedding** (requires a build that embeds
-dwara-core).
+Status legend: **works today** · **embedding** (requires a build that
+embeds dwara-core).
 
 ---
 
@@ -41,7 +40,7 @@ at all. Check that first.
 | Option | How | Latency | Freshness of the decision | Works today? |
 | --- | --- | --- | --- | --- |
 | **A. Entitlement-snapshot plugin** (recommended) | The microservice publishes the allow-list; it lands in the plugin's `config:` block; the plugin rewrites `:path` per request | Zero added (local lookup) | Per config reload (publisher-triggered; seconds) | ✅ works today |
-| B. Per-request callout plugin | Plugin calls the microservice (`proxy_http_call`), caches the verdict, rewrites | One hop on cache miss | Per request | ❌ `proxy_http_call` is a [stub](./plugin-sdk#hostcall-support-matrix) — the hostcall returns an error to the plugin today |
+| B. Per-request callout plugin | Plugin calls the microservice (`proxy_http_call`), caches the verdict, rewrites | One hop on cache miss | Per request | ✅ works today ([HTTP callouts](./plugin-sdk#http-callouts-proxy_http_call); see use case 7) |
 | C. Auth-layer header | IdP / edge auth sets a version header; config-only rewrite | Zero | Per token/session | ✅ works today (no extension) |
 
 **Why A over B even when B lands:** a per-request hop adds tail
@@ -130,14 +129,15 @@ Operational notes:
    [plugin-testing](./plugin-testing); use `dwara replay` to prove
    config-change neutrality for users outside the list.
 
-### Option B sketch (when callouts land)
+### Option B sketch (now that callouts exist)
 
 Same phase; instead of the local lookup, `dispatch_http_call` to the
-microservice with a short TTL cache keyed by user, a strict timeout,
-and an explicit fail-open (default `/v1/`) vs fail-closed (503)
-decision made by YOU, not by accident. Track the
-[hostcall matrix](./plugin-sdk#hostcall-support-matrix) — this page
-will be updated when `proxy_http_call` moves to supported.
+microservice with a short TTL cache keyed by user and a strict
+timeout. Make the fail-open (default `/v1/`) vs fail-closed decision
+deliberately: the gateway itself fails a route closed when a callout
+cannot COMPLETE (timeout/refused — the plugin never sees an empty
+callback), so fail-open needs a fallback the plugin applies without a
+callout answer. Use case 7's demo shows the full pattern.
 
 ### Runnable demo
 
@@ -245,8 +245,10 @@ everyone on `/v1`; plugin-less routes unaffected).
 - **Tradeoffs**: build-time integration (no hot loading); you own the
   failure semantics of your backend (fail-open rate limiting at the
   edge is usually wrong — decide explicitly). Per-request HTTP
-  callouts from a plugin are NOT the substitute (callout stub), which
-  is exactly why these traits exist.
+  callouts from a plugin exist now (use case 7) but are not the
+  substitute for stateful backends — a callout plugin has no
+  connection pooling or shared client for your store, which is
+  exactly why these traits exist.
 - **Status**: works today (embedding).
 - **Runnable demo**: [`demos/13-extensibility-usecases/06-embedding-analytics-sink/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/06-embedding-analytics-sink)
   is a standalone binary embedding dwara-core with a custom
@@ -263,12 +265,20 @@ everyone on `/v1`; plugin-less routes unaffected).
 - **Tradeoffs**: added tail latency, a hard dependency at the edge,
   cache-consistency windows; budget the callout under the route's
   timeouts and ALWAYS choose fail-open vs fail-closed deliberately.
-- **Status**: **needs callouts** — `proxy_http_call` is stubbed
-  today (the hostcall returns a clean error; the plugin must treat it
-  as "decision unavailable"). Until it lands, use the
-  snapshot-publishing pattern from use case 1 or an auth-layer
-  header.
-- **Runnable demo**: blocked on the same stub — no demo exists for
-  this recipe yet. The snapshot-publishing fallback IS
-  [`demos/13-extensibility-usecases/01-user-subset-migration/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/01-user-subset-migration),
-  and this page will gain the callout demo when the hostcall lands.
+  Note the gateway's own semantics here: a callout that cannot
+  COMPLETE (timeout, refused) fails the route closed — the plugin
+  never sees an empty-response callback (the
+  [Plugin SDK: HTTP callouts](./plugin-sdk#http-callouts-proxy_http_call)
+  section documents the deliberate deviation from Envoy) — so a
+  fail-open recipe needs a fallback that does not depend on the
+  callout answering.
+- **Status**: works today — `proxy_http_call` is supported
+  (http/https, plugin timeout clamped to [1ms, 5s], 4 MiB response
+  cap, SSRF-checked, redirects refused, 8 callout rounds per phase,
+  non-2xx responses delivered as data).
+- **Runnable demo**: [`demos/13-extensibility-usecases/07-per-request-decision/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/07-per-request-decision)
+  runs the full recipe against a mock decision service: pause ->
+  callout -> response callback -> resume, the verdict stamped on the
+  forwarded request, a 2-second in-plugin TTL cache suppressing
+  repeat hits, a denied verdict short-circuiting at the edge, and the
+  timeout failing closed.

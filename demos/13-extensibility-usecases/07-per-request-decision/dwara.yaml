@@ -1,0 +1,60 @@
+# Demo 07 wiring: per-request external decisions with a TTL cache.
+#
+# The test script runs the gateway against THIS file as-is (cwd at the
+# repository root, so the .wasm path resolves). ONE plugged route,
+# /api/*, carries the entitlement-guard plugin: every request is
+# decided by the mock decision service (18262) through a live
+# proxy_http_call, with a 2s in-plugin cache suppressing repeat hits;
+# the verdict rides the forwarded request as x-entitlement headers the
+# mock user API (18263) echoes back. A decision that cannot complete
+# in the plugin's 400ms callout budget fails the route closed (500
+# plugin_failed) -- the documented fail-closed semantics.
+
+listeners:
+  - name: decision-http
+    address: 127.0.0.1
+    port: 18261
+    protocol: http
+
+routes:
+  - name: user-api
+    service: user-api-service
+    match:
+      path:
+        type: prefix
+        value: /api/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - entitlement-guard
+
+  - name: healthz
+    service: user-api-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+    auth_required: false
+
+services:
+  - name: user-api-service
+    upstream: user-api-pool
+
+upstreams:
+  - name: user-api-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 18263
+
+plugins:
+  - name: entitlement-guard
+    wasm: demos/13-extensibility-usecases/07-per-request-decision/plugin/target/wasm32-wasip1/release/entitlement_guard.wasm
+    phases:
+      - request_headers

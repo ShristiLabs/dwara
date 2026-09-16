@@ -53,11 +53,48 @@
 //! other WASI functions fails to instantiate (fail-closed).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use wasmtime::{Engine, Linker, Module, ResourceLimiter, Store};
 
 use super::abi;
+use super::callout::CalloutResponse;
+
+/// The VM-scoped shared-data store (DW-167): one map per compiled
+/// plugin module, shared by every per-request instance through the
+/// Mutex. Keys are strings; values are bytes with a CAS version for
+/// optimistic concurrency.
+pub type SharedData = HashMap<String, (Vec<u8>, u32)>;
+
+/// Per-module cap on the VM-scoped shared-data store: total bytes
+/// (key + value lengths summed over the entries). The store outlives
+/// every request (module lifetime), so an unbounded map is a slow OOM
+/// the wasm `ResourceLimiter` cannot see. A set that would exceed the
+/// cap FAILS (the plugin gets an error status it can branch on) —
+/// entries are never evicted: a silently evicted rate-limit counter
+/// or cache entry is a correctness bug, a refused set is a signal.
+pub const SHARED_DATA_CAP_BYTES: usize = 1024 * 1024;
+/// Per-module cap on the VM-scoped shared-data store: entry count
+/// (same posture as [`SHARED_DATA_CAP_BYTES`]; bounds key overhead a
+/// byte cap alone would miss).
+pub const SHARED_DATA_CAP_ENTRIES: usize = 1024;
+
+/// Whether inserting `key` -> `value` (replacing the current value if
+/// any) fits the shared-data caps ([`SHARED_DATA_CAP_BYTES`] /
+/// [`SHARED_DATA_CAP_ENTRIES`]). Runs inside the caller's critical
+/// section; the entry cap bounds the byte-sum walk to 1024 entries.
+fn shared_data_fits(shared: &SharedData, key: &str, value: &[u8]) -> bool {
+    let exists = shared.contains_key(key);
+    if !exists && shared.len() >= SHARED_DATA_CAP_ENTRIES {
+        return false;
+    }
+    let occupied: usize = shared.iter().map(|(k, (v, _))| k.len() + v.len()).sum();
+    let replaced = shared
+        .get(key)
+        .map(|(v, _)| key.len() + v.len())
+        .unwrap_or(0);
+    occupied - replaced + key.len() + value.len() <= SHARED_DATA_CAP_BYTES
+}
 
 /// Per-instance cap on buffered plugin log output (`proxy_log` plus
 /// the `fd_write` sink), in bytes. Fuel bounds plugin EXECUTION but
@@ -89,6 +126,12 @@ pub struct PluginModule {
     limits: PluginLimits,
     plugin_config: Vec<u8>,
     vm_config: Vec<u8>,
+    /// The VM-scoped shared-data store (DW-167): every per-request
+    /// instance of THIS module sees the same map — the proxy-wasm
+    /// `proxy_get/set_shared_data` contract Envoy implements (shared
+    /// across the contexts of one VM). Instances on different tokio
+    /// tasks share it through the Mutex.
+    shared: Arc<Mutex<SharedData>>,
 }
 
 /// Per-plugin resource limits (DW-055 decision 4; §9.3).
@@ -142,10 +185,22 @@ pub struct PluginContext {
     pub local_response: Option<LocalResponse>,
     /// Log lines emitted by the plugin via `proxy_log`.
     pub logs: Vec<(u32, String)>,
-    /// Shared data store (cross-instance, within one plugin module).
-    /// Keys are strings; values are bytes with a CAS version for
-    /// optimistic concurrency.
-    pub shared_data: HashMap<String, (Vec<u8>, u32)>,
+    /// The VM-scoped shared-data store handle (see [`SharedData`]).
+    pub shared_data: Arc<Mutex<SharedData>>,
+    /// Callouts registered by `proxy_http_call` and not yet answered
+    /// (DW-167). One instance can queue several; the dispatch driver
+    /// performs them in FIFO order, one round each.
+    pub pending_callouts: Vec<PendingCallout>,
+    /// Monotonic callout-token counter (tokens are handed out by the
+    /// host and delivered back with `proxy_on_http_call_response`).
+    pub callout_token_counter: u32,
+    /// The last delivered callout response's header map (`:status`
+    /// plus ordinary headers, hop-by-hop stripped) — what MapType 6
+    /// reads return inside `proxy_on_http_call_response`.
+    pub callout_response_headers: Vec<(String, String)>,
+    /// The last delivered callout response's body — what BufferType 4
+    /// reads return inside `proxy_on_http_call_response`.
+    pub callout_response_body: Vec<u8>,
     /// Metrics registered by the plugin.
     pub metrics: HashMap<String, PluginMetric>,
     /// The current context ID (set by the host before calling exports).
@@ -180,6 +235,32 @@ pub struct PluginMetric {
     pub value: f64,
 }
 
+/// One `proxy_http_call` dispatch, parsed and validated at the
+/// hostcall boundary (DW-167). The instance queues it; the dispatch
+/// driver (the async plugin_dispatch boundary) performs the exchange
+/// and delivers the response back through
+/// [`PluginInstance::deliver_callout_response`].
+#[derive(Clone, Debug)]
+pub struct PendingCallout {
+    /// The token the host handed the plugin (returned with the
+    /// response; the SDK dispatcher routes by it).
+    pub token: u32,
+    /// The full `http(s)://host[:port]/path?query` URI string.
+    pub uri: String,
+    /// The request method (`:method`; GET when the dispatch map
+    /// carried none).
+    pub method: String,
+    /// Ordinary headers (pseudo-headers stripped; `:authority` folds
+    /// into the URI's authority when the map carried one).
+    pub headers: Vec<(String, String)>,
+    /// The request body (may be empty).
+    pub body: Vec<u8>,
+    /// The plugin-requested timeout in milliseconds (the unit the
+    /// Rust SDK's `dispatch_http_call` sends); clamped at perform
+    /// time.
+    pub timeout_ms: u32,
+}
+
 /// Metric types (proxy-wasm §2.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PluginMetricType {
@@ -189,7 +270,12 @@ pub enum PluginMetricType {
 }
 
 impl PluginContext {
-    fn new(plugin_config: Vec<u8>, vm_config: Vec<u8>, memory_cap: usize) -> Self {
+    fn new(
+        plugin_config: Vec<u8>,
+        vm_config: Vec<u8>,
+        memory_cap: usize,
+        shared: Arc<Mutex<SharedData>>,
+    ) -> Self {
         Self {
             request_headers: Vec::new(),
             response_headers: Vec::new(),
@@ -200,7 +286,11 @@ impl PluginContext {
             action: abi::ACTION_CONTINUE,
             local_response: None,
             logs: Vec::new(),
-            shared_data: HashMap::new(),
+            shared_data: shared,
+            pending_callouts: Vec::new(),
+            callout_token_counter: 0,
+            callout_response_headers: Vec::new(),
+            callout_response_body: Vec::new(),
             metrics: HashMap::new(),
             current_context_id: 0,
             effective_context_id: 0,
@@ -342,6 +432,7 @@ impl WasmEngine {
                         let data = match bt as u32 {
                             abi::BUFFER_REQUEST_BODY => &ctx.request_body,
                             abi::BUFFER_RESPONSE_BODY => &ctx.response_body,
+                            abi::BUFFER_CALLOUT_RESPONSE_BODY => &ctx.callout_response_body,
                             abi::BUFFER_PLUGIN_CONFIGURATION => &ctx.plugin_config,
                             abi::BUFFER_VM_CONFIGURATION => &ctx.vm_config,
                             _ => return 1,
@@ -415,6 +506,7 @@ impl WasmEngine {
                     let len = match bt as u32 {
                         abi::BUFFER_REQUEST_BODY => ctx.request_body.len(),
                         abi::BUFFER_RESPONSE_BODY => ctx.response_body.len(),
+                        abi::BUFFER_CALLOUT_RESPONSE_BODY => ctx.callout_response_body.len(),
                         abi::BUFFER_PLUGIN_CONFIGURATION => ctx.plugin_config.len(),
                         abi::BUFFER_VM_CONFIGURATION => ctx.vm_config.len(),
                         _ => return 1,
@@ -493,11 +585,17 @@ impl WasmEngine {
                         match bt as u32 {
                             abi::BUFFER_REQUEST_HEADERS => ctx.request_headers.clone(),
                             abi::BUFFER_RESPONSE_HEADERS => ctx.response_headers.clone(),
+                            // The delivered callout response's headers
+                            // (DW-167): `:status` first, then the
+                            // ordinary headers (hop-by-hop stripped).
+                            abi::BUFFER_CALLOUT_RESPONSE_HEADERS => {
+                                ctx.callout_response_headers.clone()
+                            }
                             // Trailers are not plumbed through dwara's
                             // pipeline: they read as an empty map.
-                            abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => {
-                                Vec::new()
-                            }
+                            abi::BUFFER_REQUEST_TRAILERS
+                            | abi::BUFFER_RESPONSE_TRAILERS
+                            | abi::BUFFER_CALLOUT_RESPONSE_TRAILERS => Vec::new(),
                             _ => return 1,
                         }
                     };
@@ -577,11 +675,15 @@ impl WasmEngine {
                     match bt as u32 {
                         abi::BUFFER_REQUEST_HEADERS => ctx.request_headers = headers,
                         abi::BUFFER_RESPONSE_HEADERS => ctx.response_headers = headers,
-                        // Trailer stores are accepted and discarded
-                        // (trailers are not plumbed through the
-                        // pipeline); reporting success keeps SDK
-                        // plugins from panicking on a benign store.
-                        abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => {}
+                        // Trailer and callout-response-map stores are
+                        // accepted and discarded (neither is plumbed
+                        // through the pipeline); reporting success
+                        // keeps SDK plugins from panicking on a
+                        // benign store.
+                        abi::BUFFER_REQUEST_TRAILERS
+                        | abi::BUFFER_RESPONSE_TRAILERS
+                        | abi::BUFFER_CALLOUT_RESPONSE_HEADERS
+                        | abi::BUFFER_CALLOUT_RESPONSE_TRAILERS => {}
                         _ => return 1,
                     }
                     0
@@ -620,10 +722,16 @@ impl WasmEngine {
                         let headers: &[(String, String)] = match bt as u32 {
                             abi::BUFFER_REQUEST_HEADERS => &ctx.request_headers,
                             abi::BUFFER_RESPONSE_HEADERS => &ctx.response_headers,
+                            // The delivered callout response's headers
+                            // (DW-167): a lookup lands on `:status` or
+                            // an ordinary header the target sent.
+                            abi::BUFFER_CALLOUT_RESPONSE_HEADERS => &ctx.callout_response_headers,
                             // Trailers are not plumbed through dwara's
                             // pipeline: they read as empty (the SDK
                             // maps an empty result to None).
-                            abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => &[],
+                            abi::BUFFER_REQUEST_TRAILERS
+                            | abi::BUFFER_RESPONSE_TRAILERS
+                            | abi::BUFFER_CALLOUT_RESPONSE_TRAILERS => &[],
                             _ => return 1,
                         };
                         headers
@@ -706,12 +814,14 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
-                    // Trailer mutations are accepted and discarded
-                    // (trailers are not plumbed through the pipeline);
-                    // reporting success keeps SDK plugins from
-                    // panicking on a benign trailer store.
+                    // Trailer and callout-response-map mutations are
+                    // accepted and discarded (neither is plumbed
+                    // through the pipeline); reporting success keeps
+                    // SDK plugins from panicking on a benign store.
                     if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
                         || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_HEADERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_TRAILERS
                     {
                         return 0;
                     }
@@ -760,12 +870,14 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
-                    // Trailer mutations are accepted and discarded
-                    // (trailers are not plumbed through the pipeline);
-                    // reporting success keeps SDK plugins from
-                    // panicking on a benign trailer store.
+                    // Trailer and callout-response-map mutations are
+                    // accepted and discarded (neither is plumbed
+                    // through the pipeline); reporting success keeps
+                    // SDK plugins from panicking on a benign store.
                     if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
                         || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_HEADERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_TRAILERS
                     {
                         return 0;
                     }
@@ -812,12 +924,14 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
-                    // Trailer mutations are accepted and discarded
-                    // (trailers are not plumbed through the pipeline);
-                    // reporting success keeps SDK plugins from
-                    // panicking on a benign trailer store.
+                    // Trailer and callout-response-map mutations are
+                    // accepted and discarded (neither is plumbed
+                    // through the pipeline); reporting success keeps
+                    // SDK plugins from panicking on a benign store.
                     if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
                         || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_HEADERS
+                        || bt as u32 == abi::BUFFER_CALLOUT_RESPONSE_TRAILERS
                     {
                         return 0;
                     }
@@ -954,28 +1068,33 @@ impl WasmEngine {
                         Some(slice) => String::from_utf8_lossy(slice).into_owned(),
                         None => return 1,
                     };
-                    let (value, cas) = {
-                        let ctx = caller.data();
-                        match ctx.shared_data.get(&key) {
-                            Some((v, c)) => (v.clone(), *c),
-                            None => {
-                                // Not found: return OK with zero values.
-                                if write_i32_to_memory(&memory, &mut caller, value_ptr_ptr, 0)
-                                    .is_err()
-                                {
-                                    return 1;
-                                }
-                                if write_i32_to_memory(&memory, &mut caller, value_size_ptr, 0)
-                                    .is_err()
-                                {
-                                    return 1;
-                                }
-                                if write_i32_to_memory(&memory, &mut caller, cas_ptr, 0).is_err() {
-                                    return 1;
-                                }
-                                return 0;
-                            }
+                    // VM-scoped store (DW-167): the lock is held only
+                    // for the clone, never across a hostcall that
+                    // re-enters wasm or writes plugin memory. Poison
+                    // recovery: the critical section is a read+clone
+                    // (nothing can half-mutate the map), so a panic
+                    // elsewhere must not take every later request on
+                    // this module down with the lock.
+                    let lookup = {
+                        let shared = caller
+                            .data()
+                            .shared_data
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        shared.get(&key).map(|(v, c)| (v.clone(), *c))
+                    };
+                    let Some((value, cas)) = lookup else {
+                        // Not found: return OK with zero values.
+                        if write_i32_to_memory(&memory, &mut caller, value_ptr_ptr, 0).is_err() {
+                            return 1;
                         }
+                        if write_i32_to_memory(&memory, &mut caller, value_size_ptr, 0).is_err() {
+                            return 1;
+                        }
+                        if write_i32_to_memory(&memory, &mut caller, cas_ptr, 0).is_err() {
+                            return 1;
+                        }
+                        return 0;
                     };
                     let alloc_ptr = match allocate_in_plugin(&mut caller, &memory, value.len()) {
                         Ok(p) => p,
@@ -1045,12 +1164,34 @@ impl WasmEngine {
                         Vec::new()
                     };
                     let ctx = caller.data_mut();
-                    let current_cas = ctx.shared_data.get(&key).map(|(_, c)| *c).unwrap_or(0);
+                    // VM-scoped store (DW-167): the CAS read, the cap
+                    // check, and the write are one critical section, so
+                    // two instances racing a compare-and-set cannot
+                    // interleave. Poison recovery: the section is a
+                    // read plus one `insert` (the map cannot be left
+                    // half-mutated), so a panic elsewhere must not
+                    // poison every later request on this module.
+                    let mut shared = ctx
+                        .shared_data
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let current_cas = shared.get(&key).map(|(_, c)| *c).unwrap_or(0);
                     if cas > 0 && cas != current_cas as i32 {
-                        return 1; // CAS mismatch
+                        // Status::CasMismatch — the ONE error status
+                        // the Rust SDK's set_shared_data maps to a
+                        // clean Err (any other status panics the
+                        // module).
+                        return 8;
+                    }
+                    if !shared_data_fits(&shared, &key, &value) {
+                        // Over-cap set: refused, never evicted (see
+                        // SHARED_DATA_CAP_BYTES). The same error-status
+                        // surface as the CAS mismatch — the SDK's only
+                        // branchable error for this hostcall.
+                        return 8;
                     }
                     let new_cas = current_cas + 1;
-                    ctx.shared_data.insert(key, (value, new_cas));
+                    shared.insert(key, (value, new_cas));
                     0
                 },
             )
@@ -1398,8 +1539,99 @@ impl WasmEngine {
         linker
             .func_wrap("env", "proxy_grpc_stream", stub_unsupported_9)
             .map_err(|e| format!("linker proxy_grpc_stream: {e}"))?;
+        // proxy_http_call(upstream_ptr, upstream_size, headers_ptr,
+        //                 headers_size, body_ptr, body_size,
+        //                 trailers_ptr, trailers_size, timeout_ms,
+        //                 return_token_ptr) -> i32
+        // The proxy-wasm HTTP callout dispatcher (DW-167). The Rust
+        // SDK's `dispatch_http_call` (hostcalls.rs ~812) sends the URI
+        // string, the headers/trailers in the spec map serialization
+        // (what `proxy_set_header_map_pairs` parses), an optional
+        // body, and the timeout in MILLISECONDS; it reads the token
+        // from the return pointer and maps Ok/BadArgument/
+        // InternalFailure to `Ok(token)`/`Err(BadArgument)`/
+        // `Err(InternalFailure)` — every other status panics the
+        // module, so this import answers only 0/2/10.
         linker
-            .func_wrap("env", "proxy_http_call", stub_unsupported_10)
+            .func_wrap(
+                "env",
+                "proxy_http_call",
+                |mut caller: wasmtime::Caller<PluginContext>,
+                 upstream_ptr: i32,
+                 upstream_size: i32,
+                 headers_ptr: i32,
+                 headers_size: i32,
+                 body_ptr: i32,
+                 body_size: i32,
+                 _trailers_ptr: i32,
+                 _trailers_size: i32,
+                 timeout_ms: i32,
+                 return_token_ptr: i32|
+                 -> i32 {
+                    if upstream_ptr < 0 || upstream_size < 0 || headers_ptr < 0 || headers_size < 0
+                    {
+                        return 2; // Status::BadArgument
+                    }
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 10,
+                    };
+                    let read = |ptr: i32, size: i32| -> Option<Vec<u8>> {
+                        memory
+                            .data(&caller)
+                            .get(ptr as usize..(ptr as usize + size as usize))
+                            .map(|s| s.to_vec())
+                    };
+                    let uri_bytes = match read(upstream_ptr, upstream_size) {
+                        Some(b) => b,
+                        None => return 2,
+                    };
+                    let uri = match String::from_utf8(uri_bytes) {
+                        Ok(u) => u,
+                        Err(_) => return 2,
+                    };
+                    let headers_bytes = match read(headers_ptr, headers_size) {
+                        Some(b) => b,
+                        None => return 2,
+                    };
+                    let body = if body_ptr > 0 && body_size > 0 {
+                        match read(body_ptr, body_size) {
+                            Some(b) => b,
+                            None => return 2,
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    // Trailers are accepted and ignored (dwara does
+                    // not plumb trailers on callout requests).
+                    match register_callout(
+                        caller.data_mut(),
+                        &uri,
+                        &headers_bytes,
+                        body,
+                        timeout_ms,
+                    ) {
+                        Some(token) => {
+                            let memory = match caller.get_export("memory") {
+                                Some(wasmtime::Extern::Memory(m)) => m,
+                                _ => return 10,
+                            };
+                            if write_i32_to_memory(
+                                &memory,
+                                &mut caller,
+                                return_token_ptr,
+                                token as i32,
+                            )
+                            .is_err()
+                            {
+                                return 10;
+                            }
+                            0 // Status::Ok
+                        }
+                        None => 2, // Status::BadArgument (invalid URI/map/head)
+                    }
+                },
+            )
             .map_err(|e| format!("linker proxy_http_call: {e}"))?;
         linker
             .func_wrap("env", "proxy_grpc_call", stub_unsupported_12)
@@ -1641,6 +1873,7 @@ impl WasmEngine {
             limits,
             plugin_config,
             vm_config,
+            shared: Arc::new(Mutex::new(SharedData::new())),
         })
     }
 
@@ -1659,6 +1892,7 @@ impl PluginModule {
             self.plugin_config.clone(),
             self.vm_config.clone(),
             memory_cap,
+            Arc::clone(&self.shared),
         );
         let mut store = Store::new(&engine.engine, ctx);
         store.limiter(move |ctx| ctx as &mut dyn ResourceLimiter);
@@ -1768,6 +2002,11 @@ pub enum PhaseResult {
     LocalResponse(LocalResponse),
     /// The plugin trapped (out of fuel, memory error, or panic).
     Trap(String),
+    /// The plugin registered one or more HTTP callouts and paused
+    /// (DW-167). The dispatch driver performs the exchanges and calls
+    /// [`PluginInstance::deliver_callout_response`]; the phase's
+    /// outcome is then re-collected from the instance.
+    Pause,
 }
 
 impl PluginInstance {
@@ -1899,6 +2138,128 @@ impl PluginInstance {
         &self.store.data().logs
     }
 
+    /// Read `len` bytes of the plugin's linear memory at `offset`
+    /// (test support: asserting a callback's in-memory side effects).
+    pub fn memory_bytes(&mut self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        let export = self.instance.get_export(&mut self.store, "memory")?;
+        let memory = export.into_memory()?;
+        memory
+            .data(&self.store)
+            .get(offset..offset.checked_add(len)?)
+            .map(|s| s.to_vec())
+    }
+
+    /// A snapshot of the VM-scoped shared-data map (test support: the
+    /// cross-instance store DW-167 introduced).
+    pub fn shared_data_snapshot(&self) -> SharedData {
+        self.store
+            .data()
+            .shared_data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Drain the callouts registered since the last phase/callback
+    /// invocation (DW-167). The dispatch driver performs them in FIFO
+    /// order (one round each).
+    pub fn take_pending_callouts(&mut self) -> Vec<PendingCallout> {
+        std::mem::take(&mut self.store.data_mut().pending_callouts)
+    }
+
+    /// Re-enqueue callouts the dispatch driver drained but did NOT
+    /// perform (DW-167): when the first of several queued deliveries
+    /// re-dispatches from its callback, the un-performed remainder
+    /// goes back AHEAD of the newly registered queue — preserving the
+    /// global dispatch order and guaranteeing every dispatched callout
+    /// is eventually performed (or the loop guard trips).
+    pub fn requeue_callouts(&mut self, pending: Vec<PendingCallout>) {
+        if pending.is_empty() {
+            return;
+        }
+        let ctx = self.store.data_mut();
+        let mut merged = pending;
+        merged.append(&mut ctx.pending_callouts);
+        ctx.pending_callouts = merged;
+    }
+
+    /// Deliver a completed callout response and collect the plugin's
+    /// resumed outcome (DW-167): the response's headers (`:status`
+    /// first, hop-by-hop stripped) and body land in the context's
+    /// callout-response stores, then the host calls
+    /// `proxy_on_http_call_response(context_id, token, num_headers,
+    /// body_size, num_trailers)` — the 5-parameter shape the Rust SDK
+    /// 0.2.5 exports (its first parameter is the ABI's context slot,
+    /// which the SDK ignores; it routes by token inside the module).
+    /// The export returns nothing in the SDK: the plugin's decision is
+    /// expressed through what it does inside the callback
+    /// (`send_http_response`, header mutations, another dispatch, or
+    /// nothing = resume Continue). A module without the export resumes
+    /// Continue (nothing to tell).
+    pub fn deliver_callout_response(&mut self, token: u32, resp: &CalloutResponse) -> PhaseResult {
+        {
+            let ctx = self.store.data_mut();
+            ctx.callout_response_headers =
+                std::iter::once((":status".to_string(), resp.status.to_string()))
+                    .chain(resp.headers.iter().cloned())
+                    .collect();
+            ctx.callout_response_body = resp.body.clone();
+        }
+        let num_headers = self.store.data().callout_response_headers.len() as i32;
+        let body_size = self.store.data().callout_response_body.len() as i32;
+        self.set_context_id(2);
+        self.ensure_http_context();
+        let Some(export) = self
+            .instance
+            .get_export(&mut self.store, "proxy_on_http_call_response")
+        else {
+            return PhaseResult::Continue;
+        };
+        let Some(func) = export.into_func() else {
+            return PhaseResult::Continue;
+        };
+        let args = (2, token as i32, num_headers, body_size, 0);
+        // The SDK's export returns (); a hand-written fixture may
+        // return an action — tolerate both shapes (the value is
+        // recorded but the outcome comes from the instance state
+        // below, matching the SDK's hostcall-driven resume model).
+        let result: Result<u32, wasmtime::Error> =
+            if let Ok(typed) = func.typed::<(i32, i32, i32, i32, i32), ()>(&self.store) {
+                typed
+                    .call(&mut self.store, args)
+                    .map(|()| abi::ACTION_CONTINUE)
+            } else if let Ok(typed) = func.typed::<(i32, i32, i32, i32, i32), i32>(&self.store) {
+                typed.call(&mut self.store, args).map(|a| a as u32)
+            } else {
+                return PhaseResult::Trap(
+                    "proxy_on_http_call_response has an unusable signature".to_string(),
+                );
+            };
+        match result {
+            Ok(action) => {
+                let ctx = self.store.data_mut();
+                ctx.action = action;
+                if let Some(resp) = ctx.local_response.take() {
+                    PhaseResult::LocalResponse(resp)
+                } else if !ctx.pending_callouts.is_empty() {
+                    // The callback dispatched another callout: pause
+                    // again (the driver's next round picks it up).
+                    PhaseResult::Pause
+                } else {
+                    PhaseResult::Continue
+                }
+            }
+            Err(e) => {
+                let fuel_left = self.store.get_fuel().unwrap_or(0);
+                if fuel_left == 0 {
+                    PhaseResult::Trap(format!("proxy_on_http_call_response: fuel exhausted: {e}"))
+                } else {
+                    PhaseResult::Trap(format!("proxy_on_http_call_response: {e}"))
+                }
+            }
+        }
+    }
+
     /// Call `proxy_on_done` and `proxy_on_log` (the cleanup path).
     /// The SDK's `proxy_on_done` returns a bool while the WAT fixtures
     /// return nothing — the result is ignored either way, so both
@@ -1961,6 +2322,15 @@ impl PluginInstance {
                         headers: Vec::new(),
                         body: Vec::new(),
                     })
+                } else if !ctx.pending_callouts.is_empty() {
+                    // The phase registered callouts (proxy_http_call)
+                    // and did not short-circuit: pause for the host to
+                    // perform them (DW-167). The returned action value
+                    // is advisory — a plugin that dispatches a callout
+                    // and returns Continue still pauses, because the
+                    // phase's outcome cannot be known until the
+                    // callout's callback ran.
+                    PhaseResult::Pause
                 } else {
                     PhaseResult::Continue
                 }
@@ -1982,14 +2352,105 @@ impl PluginInstance {
 
 // --- Helper functions ----------------------------------------------------
 
+/// Validate and register one `proxy_http_call` dispatch (DW-167) into
+/// the instance's pending list, handing out the next token. `None`
+/// maps to `Status::BadArgument` at the import (the Rust SDK surfaces
+/// that as `Err(Status::BadArgument)` from `dispatch_http_call`).
+///
+/// Validation: the URI must parse with an `http://`/`https://` scheme
+/// and a host — the URI is the whole callout target (scheme,
+/// authority, and optionally its own path+query), and the callout's
+/// `Host` header derives from it. The dispatch header map's
+/// pseudo-headers steer what they can: `:method` (default `GET`) and
+/// `:path` (applied only when the URI carries no path of its own —
+/// the URI-embedded target wins, and must be origin-form). `:authority`
+/// and unknown pseudo-headers are advisory here and dropped (the
+/// plugin shapes neither the dial target nor the Host; the same
+/// authority-shapes-Host-only posture the request-path rewrite
+/// enforces would need a cluster abstraction dwara does not have).
+///
+/// Request-head integrity (fail-closed BEFORE any network work): the
+/// callout request head interpolates the method, the header names and
+/// values, and the map `:path` verbatim, so each must be
+/// splitting-safe — the method and every header name an RFC 7230
+/// token, and no CR, LF, or NUL anywhere in a name, value, or the map
+/// `:path`. A plugin reflecting client data into a callout cannot
+/// smuggle a second request into the gateway-initiated connection;
+/// violations register nothing and answer BadArgument.
+fn register_callout(
+    ctx: &mut PluginContext,
+    uri: &str,
+    headers_bytes: &[u8],
+    body: Vec<u8>,
+    timeout_ms: i32,
+) -> Option<u32> {
+    let parsed: http::Uri = uri.parse().ok()?;
+    let scheme = match parsed.scheme_str() {
+        Some("http") | Some("https") => parsed.scheme_str().unwrap(),
+        _ => return None,
+    };
+    let host = parsed.host()?;
+    let map = abi::deserialize_header_map_spec(headers_bytes)?;
+    let mut method = "GET".to_string();
+    let mut map_path: Option<String> = None;
+    let mut headers = Vec::with_capacity(map.len());
+    for (name, value) in map {
+        match name.as_str() {
+            ":method" if !value.is_empty() => method = value,
+            ":path" if !value.is_empty() => map_path = Some(value),
+            n if n.starts_with(':') => {} // :authority and unknown pseudo-headers dropped
+            _ => headers.push((name, value)),
+        }
+    }
+    if !super::callout::is_rfc7230_token(&method) {
+        return None;
+    }
+    if let Some(p) = &map_path {
+        if !super::callout::is_head_safe(p) {
+            return None;
+        }
+    }
+    for (name, value) in &headers {
+        if !super::callout::is_rfc7230_token(name) || !super::callout::is_head_safe(name) {
+            return None;
+        }
+        if !super::callout::is_head_safe(value) {
+            return None;
+        }
+    }
+    let mut effective = format!("{scheme}://{host}");
+    if let Some(port) = parsed.port_u16() {
+        effective.push_str(&format!(":{port}"));
+    }
+    let target = match parsed.path_and_query() {
+        Some(pq) if pq.as_str() != "/" => pq.as_str().to_string(),
+        _ => match map_path {
+            Some(p) if p.starts_with('/') => p,
+            _ => "/".to_string(),
+        },
+    };
+    effective.push_str(&target);
+    ctx.callout_token_counter = ctx.callout_token_counter.saturating_add(1);
+    let token = ctx.callout_token_counter;
+    ctx.pending_callouts.push(PendingCallout {
+        token,
+        uri: effective,
+        method,
+        headers,
+        body,
+        timeout_ms: timeout_ms.max(0) as u32,
+    });
+    Some(token)
+}
+
 // Unsupported-hostcall stubs, one per proxy-wasm spec ARITY (wasmtime's
 // typed linking requires the import signature to match exactly; the
 // Rust SDK declares every import with its spec signature even when the
 // plugin never calls it). All return Status::InternalFailure (10).
 // SDK 0.2.5 mapping of that status, exactly (hostcalls.rs):
-//   - clean Err(Status::InternalFailure): ONLY the three callout
-//     dispatchers — dispatch_http_call, dispatch_grpc_call, and
-//     open_grpc_stream.
+//   - clean Err(Status::InternalFailure): the two remaining callout
+//     dispatchers — dispatch_grpc_call and open_grpc_stream
+//     (dispatch_http_call is implemented, DW-167).
 //   - panic! on any non-Ok status: every other wrapper, including
 //     send_grpc_stream_message and cancel_grpc_call/cancel_grpc_stream
 //     (they map only BadArgument/NotFound to Err), set_tick_period,
@@ -2053,23 +2514,6 @@ fn stub_unsupported_9(
     _g: i32,
     _h: i32,
     _i: i32,
-) -> i32 {
-    10 // Status::InternalFailure
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stub_unsupported_10(
-    _: wasmtime::Caller<PluginContext>,
-    _a: i32,
-    _b: i32,
-    _c: i32,
-    _d: i32,
-    _e: i32,
-    _f: i32,
-    _g: i32,
-    _h: i32,
-    _i: i32,
-    _j: i32,
 ) -> i32 {
     10 // Status::InternalFailure
 }

@@ -105,22 +105,73 @@ The host implements the HTTP filter subset of the proxy-wasm ABI:
   individual header operations
 - `proxy_send_http_response` — short-circuit with a local response
 - `proxy_continue_stream` / `proxy_close_stream` — stream control
-- `proxy_get_shared_data` / `proxy_set_shared_data` — cross-instance
-  shared data with CAS
+- `proxy_get_shared_data` / `proxy_set_shared_data` — VM-scoped
+  shared data with CAS (one map per compiled module, shared by every
+  per-request instance of that plugin — DW-167; what a callout
+  plugin's TTL cache is built on). Capped per module at 1024 entries
+  and 1 MiB of key+value bytes: an over-cap set fails with an error
+  status (the SDK surfaces `Err(Status::CasMismatch)`), never evicts
 - `proxy_set_effective_context` / `proxy_done` — context management
 - `proxy_get_property` / `proxy_set_property` — property access
   (minimal: returns empty for unknown properties)
 - `proxy_define_metric` / `proxy_record_metric` /
   `proxy_increment_metric` / `proxy_get_metric` — plugin metrics
 - `proxy_get_current_time` — current time in nanoseconds
+- `proxy_http_call` — HTTP callouts to http/https targets (DW-167):
+  registers the exchange, the phase pauses, and the dispatch driver
+  in `dataplane::plugin_dispatch` performs it off-thread and delivers
+  `proxy_on_http_call_response` (see below)
 - `proxy_on_memory_allocate` — the standard proxy-wasm allocation
   pattern (the plugin exports this; the host calls it to allocate
   space for returned data)
 
 The following ABI functions are stubbed (return error): shared queues,
-HTTP/gRPC calls, foreign function calls, and tick periods. These are
+gRPC calls, foreign function calls, and tick periods. These are
 not needed for the HTTP filter subset and will be added in future
 stories.
+
+## HTTP callouts (DW-167)
+
+`proxy_http_call` follows the proxy-wasm pause/resume contract with
+the wasm runner kept fully synchronous:
+
+1. the phase callback dispatches (URI string, spec-serialized
+   header/trailer maps, optional body, timeout in MILLISECONDS — the
+   Rust SDK's `dispatch_http_call` encoding) and the host registers a
+   token-tagged pending callout on the instance;
+2. the chain reports `ChainOutcome::CalloutPending` and stops at the
+   paused entry (a new outcome variant; native filters never produce
+   it);
+3. the ASYNC boundary — `plugin_dispatch::RequestPlugins::
+   resolve_callouts` — performs each exchange on `spawn_blocking`
+   around the synchronous client in `wasm::callout` (the registry
+   fetcher's transport with `http://` and arbitrary methods added),
+   records `dwara_plugin_callouts_total{name,outcome}`, and delivers
+   the response with a synchronous wasmtime re-entry (the SDK's
+   5-parameter `proxy_on_http_call_response(context_id, token,
+   num_headers, body_size, num_trailers)` export; `:status` rides the
+   MapType-6 header map, the body the BufferType-4 buffer);
+4. on resume the chain continues from the entry AFTER the paused one
+   with the plugin's post-callback payload (`PluginChain::resume_*`).
+
+Guardrails (hard caps, no config surface): timeout clamped to
+[1ms, 5s] as a whole-exchange wall clock; 8 callout rounds per phase
+per request (the loop guard — exceeding fails closed, metric reason
+`callout_loop`); 4 MiB response-body cap; 16 KiB head cap; the request
+head validated fail-closed at the hostcall (`:method` and header
+names must be HTTP tokens; names, values, and `:path` must be
+CR/LF/NUL-free — violations answer BadArgument with no connection
+attempted, the request-splitting posture); redirects refused (a 3xx is
+delivered as data); the gateway SSRF egress filter applied at connect
+time against every resolved IP.
+
+Failure semantics (a deliberate deviation from Envoy's empty-callback
+delivery): any COMPLETED response is delivered — non-2xx included —
+but a callout that cannot complete (timeout, refused, over-cap, SSRF)
+fails the route closed (500 `plugin_failed`, metric reason
+`callout_failed`): a plugin must not resume as though its decision
+input had arrived. Recipes wanting fail-open behavior scope it
+without depending on the callout answering.
 
 ## Architecture
 

@@ -15,11 +15,7 @@ guide describes them.
 | `04-feature-flag-nano/` | Zero-upstream endpoints | hand-written no_std WASM nano-service module | The route's action IS a WASM module: canned `{"flag":bool}` verdicts parsed from the path, no upstream configured |
 | `05-tenant-routing/` | Tenant-aware routing and tagging | SDK-style proxy-wasm plugin, two phases | Tenant decoded from a header grammar; request tagged + path rewritten per tenant; response header stamped |
 | `06-embedding-analytics-sink/` | Your own analytics/config/cache/... backend | embedding binary (dwara-core path dep) | A custom `AnalyticsSink` registered at startup sees every completed request, 200s and 404s alike |
-
-The seventh recipe (per-request external decisions via
-`proxy_http_call`) is blocked on the callout stub; until it lands the
-guide's fallback IS demo 01's snapshot-publishing pattern, which is
-why there is no `07-` directory.
+| `07-per-request-decision/` | Per-request external decisions (entitlements, experiments, fraud) | SDK-style proxy-wasm plugin with `proxy_http_call` | Pause -> decision-service callout -> response callback -> resume; the verdict rides the request; a 2s in-plugin cache suppresses repeat hits; non-2xx verdicts short-circuit; a callout slower than the plugin's timeout fails the route closed |
 
 ## How these differ from category 08
 
@@ -70,6 +66,7 @@ demo and no two demos share a port while `run-all.sh` is going.
 | 04 | 18231 | gateway (no upstream by design) |
 | 05 | 18241, 18242 | gateway, per-tenant upstream |
 | 06 | 18251 | embedded gateway |
+| 07 | 18261, 18262, 18263 | gateway, decision service, user API |
 
 ## Files
 

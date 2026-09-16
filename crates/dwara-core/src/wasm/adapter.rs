@@ -21,8 +21,36 @@
 //! `plugins::LocalResponse` at the dispatch boundary, and attributes
 //! traps to the named plugin so the dataplane can record
 //! `dwara_plugin_failures_total{name,reason}` (DW-157).
+//!
+//! ## HTTP callouts: the pause/resume seam (DW-167)
+//!
+//! When a phase dispatch ends with the plugin having registered
+//! `proxy_http_call` callouts ([`PhaseResult::Pause`]), the adapter
+//! records WHICH plugin paused and reports
+//! [`ChainOutcome::CalloutPending`] up the chain; the chain stops and
+//! the async driver in `dataplane::plugin_dispatch` takes over:
+//!
+//! 1. [`WasmChainAdapter::pending_callouts`] drains the paused
+//!    instance's queue (FIFO) as transport-ready [`CalloutRequest`]s;
+//! 2. the driver performs each exchange off-thread
+//!    (`spawn_blocking` around the synchronous client) and records the
+//!    `dwara_plugin_callouts_total{name,outcome}` metric;
+//! 3. [`WasmChainAdapter::deliver_callout`] re-enters the instance
+//!    (synchronous wasmtime) with `proxy_on_http_call_response` and
+//!    returns the plugin's resumed outcome — Continue, a local
+//!    response, a trap, or another `CalloutPending` (the plugin
+//!    dispatched again; the driver loops, bounded);
+//! 4. on Continue the driver reads the resumed plugin's phase payload
+//!    back through this adapter and continues the chain from the entry
+//!    AFTER the paused one (`PluginChain::resume_*`).
+//!
+//! The wasm runner stays fully synchronous; only the driver awaits.
 
+use crate::config::PluginPhase;
 use crate::plugins::{ChainOutcome, LocalResponse, WasmDispatch};
+use crate::wasm::callout::CalloutRequest;
+use crate::wasm::callout::CalloutResponse;
+use crate::wasm::host::PendingCallout;
 use crate::wasm::host::PhaseResult;
 use crate::wasm::runner::PluginInstances;
 
@@ -45,13 +73,164 @@ fn convert_local(resp: crate::wasm::host::LocalResponse) -> LocalResponse {
 /// filters with no dataplane-visible difference in attachment semantics.
 pub struct WasmChainAdapter {
     instances: PluginInstances,
+    /// The plugin that paused for callouts (DW-167): the driver
+    /// performs its pending exchanges, delivers the responses to it,
+    /// and reads its resumed phase payload back. `None` between
+    /// phases.
+    paused: Option<(String, PluginPhase)>,
 }
 
 impl WasmChainAdapter {
     /// Wrap a per-request [`PluginInstances`] (created by
     /// [`crate::wasm::runner::PluginRunner::instantiate`]).
     pub fn new(instances: PluginInstances) -> Self {
-        Self { instances }
+        Self {
+            instances,
+            paused: None,
+        }
+    }
+
+    /// Whether a plugin is paused for callouts (the driver's loop
+    /// condition, DW-167).
+    pub fn has_pause(&self) -> bool {
+        self.paused.is_some()
+    }
+
+    /// The paused plugin's name (failure attribution for the loop
+    /// guard and callout errors; falls back to the caller's choice).
+    pub fn paused_plugin(&self) -> Option<&str> {
+        self.paused.as_ref().map(|(name, _)| name.as_str())
+    }
+
+    /// Drain the paused plugin's pending callouts as transport-ready
+    /// requests (FIFO — the order the plugin dispatched them). `None`
+    /// when nothing is paused (the driver's defensive path).
+    pub fn pending_callouts(&mut self) -> Option<(String, Vec<CalloutRequest>)> {
+        let (name, _) = self.paused.as_ref()?;
+        let name = name.clone();
+        let pending: Vec<PendingCallout> = match self.instances.instance_mut(&name) {
+            Some(inst) => inst.take_pending_callouts(),
+            None => Vec::new(),
+        };
+        let requests = pending
+            .into_iter()
+            .map(|p| CalloutRequest {
+                plugin: name.clone(),
+                token: p.token,
+                uri: p.uri,
+                method: p.method,
+                headers: p.headers,
+                body: p.body,
+                timeout_ms: p.timeout_ms,
+            })
+            .collect();
+        Some((name, requests))
+    }
+
+    /// Re-enqueue callouts the driver drained but did not perform: a
+    /// mid-delivery re-dispatch (`ChainOutcome::CalloutPending` while
+    /// queued requests remain) must not abandon them — the remainder
+    /// goes back AHEAD of the new queue, preserving dispatch order,
+    /// so every dispatched callout is eventually performed (or the
+    /// loop guard trips). No-op when nothing is paused.
+    pub fn requeue_callouts(&mut self, requests: Vec<CalloutRequest>) {
+        let Some((name, _)) = self.paused.as_ref() else {
+            return;
+        };
+        let name = name.clone();
+        let pending = requests
+            .into_iter()
+            .map(|r| PendingCallout {
+                token: r.token,
+                uri: r.uri,
+                method: r.method,
+                headers: r.headers,
+                body: r.body,
+                timeout_ms: r.timeout_ms,
+            })
+            .collect();
+        if let Some(inst) = self.instances.instance_mut(&name) {
+            inst.requeue_callouts(pending);
+        }
+    }
+
+    /// Deliver a completed callout response to the paused plugin
+    /// (synchronous wasmtime re-entry) and collect its resumed
+    /// outcome. [`ChainOutcome::CalloutPending`] means the plugin
+    /// dispatched another callout inside the callback — keep driving.
+    /// On every terminal outcome the pause record is cleared.
+    pub fn deliver_callout(&mut self, token: u32, resp: &CalloutResponse) -> ChainOutcome {
+        let Some((name, _)) = self.paused.clone() else {
+            return ChainOutcome::Continue;
+        };
+        let outcome = match self.instances.instance_mut(&name) {
+            Some(inst) => inst.deliver_callout_response(token, resp),
+            None => PhaseResult::Continue,
+        };
+        self.map_resumed(&name, outcome)
+    }
+
+    /// The paused plugin's resumed `request_headers` payload (its
+    /// post-callout header map) — what the chain resumes from.
+    pub fn paused_request_headers(&self) -> Vec<(String, String)> {
+        self.paused
+            .as_ref()
+            .and_then(|(name, _)| self.instances.instance_request_headers(name))
+            .unwrap_or_default()
+    }
+
+    /// The paused plugin's resumed `response_headers` payload.
+    pub fn paused_response_headers(&self) -> Vec<(String, String)> {
+        self.paused
+            .as_ref()
+            .and_then(|(name, _)| self.instances.instance_response_headers(name))
+            .unwrap_or_default()
+    }
+
+    /// The paused plugin's resumed `request_body` payload.
+    pub fn paused_request_body(&self) -> Vec<u8> {
+        self.paused
+            .as_ref()
+            .and_then(|(name, _)| self.instances.instance_request_body(name))
+            .unwrap_or_default()
+    }
+
+    /// The paused plugin's resumed `response_body` payload.
+    pub fn paused_response_body(&self) -> Vec<u8> {
+        self.paused
+            .as_ref()
+            .and_then(|(name, _)| self.instances.instance_response_body(name))
+            .unwrap_or_default()
+    }
+
+    /// Clear the pause record after the driver collected the resumed
+    /// plugin's phase payload (the record survives the Continue
+    /// delivery so `paused_*` can read the payload afterwards).
+    pub fn clear_pause(&mut self) {
+        self.paused = None;
+    }
+
+    /// Map a resumed [`PhaseResult`] from a callout callback to the
+    /// chain vocabulary. On Continue the pause record STAYS (the
+    /// driver reads the resumed payload through `paused_*` next and
+    /// clears it with [`WasmChainAdapter::clear_pause`]); terminal
+    /// outcomes clear it; another pending round keeps it.
+    fn map_resumed(&mut self, name: &str, result: PhaseResult) -> ChainOutcome {
+        match result {
+            PhaseResult::Continue => ChainOutcome::Continue,
+            PhaseResult::LocalResponse(r) => {
+                self.paused = None;
+                ChainOutcome::LocalResponse(convert_local(r))
+            }
+            PhaseResult::Trap(e) => {
+                self.paused = None;
+                ChainOutcome::Error {
+                    plugin: name.to_string(),
+                    message: e,
+                }
+            }
+            PhaseResult::Pause => ChainOutcome::CalloutPending,
+        }
     }
 }
 
@@ -83,6 +262,13 @@ impl WasmDispatch for WasmChainAdapter {
                 },
                 Vec::new(),
             ),
+            PhaseResult::Pause => {
+                self.paused = Some((name.to_string(), PluginPhase::RequestHeaders));
+                (
+                    ChainOutcome::CalloutPending,
+                    inst.request_headers().to_vec(),
+                )
+            }
         }
     }
 
@@ -102,6 +288,10 @@ impl WasmDispatch for WasmChainAdapter {
                 },
                 Vec::new(),
             ),
+            PhaseResult::Pause => {
+                self.paused = Some((name.to_string(), PluginPhase::RequestBody));
+                (ChainOutcome::CalloutPending, inst.request_body().to_vec())
+            }
         }
     }
 
@@ -125,6 +315,13 @@ impl WasmDispatch for WasmChainAdapter {
                 },
                 Vec::new(),
             ),
+            PhaseResult::Pause => {
+                self.paused = Some((name.to_string(), PluginPhase::ResponseHeaders));
+                (
+                    ChainOutcome::CalloutPending,
+                    inst.response_headers().to_vec(),
+                )
+            }
         }
     }
 
@@ -144,10 +341,15 @@ impl WasmDispatch for WasmChainAdapter {
                 },
                 Vec::new(),
             ),
+            PhaseResult::Pause => {
+                self.paused = Some((name.to_string(), PluginPhase::ResponseBody));
+                (ChainOutcome::CalloutPending, inst.response_body().to_vec())
+            }
         }
     }
 
     fn on_done(&mut self) {
+        self.paused = None;
         self.instances.on_done();
     }
 }

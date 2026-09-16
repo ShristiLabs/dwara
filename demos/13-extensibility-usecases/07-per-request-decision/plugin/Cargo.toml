@@ -1,0 +1,18 @@
+[package]
+name = "entitlement-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Per-request entitlement plugin with an in-VM TTL cache (dwara extension use case: external decisions)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proxy-wasm = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

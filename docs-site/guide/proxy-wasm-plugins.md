@@ -159,10 +159,14 @@ A phase callback returns one of:
 - **Continue** (`0`): proceed to the next phase or plugin.
 - **End stream** (`2`): stop calling further callbacks. Returning it
   after `proxy_send_local_response` is the standard short-circuit.
-
-`Pause` is not used by the HTTP filter path (there are no async
-callouts today; unsupported callout hostcalls return an error to the
-plugin instead).
+- **Pause** (`1`): the plugin dispatched HTTP callout(s) with
+  `proxy_http_call` and awaits the response callback. The gateway
+  performs the exchange, delivers `proxy_on_http_call_response`, and
+  the phase resumes from the plugin's post-callback state (later
+  plugins in the phase then run). A plugin that dispatches a callout
+  pauses even if it returns Continue — the phase's outcome cannot be
+  known until the callback ran. See
+ [Plugin SDK: HTTP callouts](./plugin-sdk#http-callouts-proxy_http_call).
 
 ## Short-circuiting
 
@@ -181,13 +185,20 @@ that cannot run never turns into a silently skipped plugin:
 | Plugin crashed (unreadable/uncompilable `.wasm` marked at publish), disabled, or failed per-request instantiation | 500 `plugin_unavailable` | `crashed`, `disabled`, `instantiate_failed` |
 | WASM trap (fuel exhaustion, memory cap, panic) | 500 `plugin_failed` | `trap` |
 | Plugin writes an invalid `:path`/`:method`/`:authority` at `request_headers` | 500 `plugin_failed` | `invalid_rewrite` |
+| Plugin callout cannot complete (timeout, refused connection, over-cap response, SSRF rejection) | 500 `plugin_failed` | `callout_failed` |
+| Plugin exceeds 8 callout rounds in one phase (runaway dispatch loop) | 500 `plugin_failed` | `callout_loop` |
 | Body over the buffering cap for a body phase | 500 `plugin_body_too_large` | `body_too_large` |
 | Response stream died mid-body before the phase could run | 500 `plugin_failed` | `response_stream_ended` |
 
 Every failure increments `dwara_plugin_failures_total{name,reason}`
 and logs one server-side event naming the plugin. Routes that do not
 reference the failing plugin are unaffected, and the plugin-less fast
-path is byte-identical to a no-plugin gateway.
+path is byte-identical to a no-plugin gateway. Callout outcomes are
+additionally counted per exchange in
+`dwara_plugin_callouts_total{name,outcome}` (`ok`, `timeout`,
+`error`, `loop_guard`) — a non-2xx callout response is an `ok`
+outcome, because only the plugin knows what its decision service's
+403 means.
 
 The response cache participates: a plugin definition change (config
 bytes or `.wasm` checksum) bumps the cache epoch of every route
