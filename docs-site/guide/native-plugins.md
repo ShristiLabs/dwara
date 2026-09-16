@@ -181,6 +181,9 @@ itself (typically JSON or YAML).
 Both share the same phase slot on a route, selected by config, with no
 dataplane-visible difference in attachment semantics.
 
+Full signatures (`NativeFilter`, `FilterOutcome`, the registry):
+[Extension API reference](../reference/extension-api).
+
 ## Runnable demo
 
 Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test

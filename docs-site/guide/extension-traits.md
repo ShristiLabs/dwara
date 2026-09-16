@@ -58,3 +58,6 @@ category's test scripts cover the config-driven plugin families.
   - the internal design of the extension boundaries.
 - [Plugins](./extensibility-overview) - the per-route filter chain,
   which is a separate extensibility layer from the extension traits.
+- [Extension API reference](../reference/extension-api) - full
+  signatures: every trait method, its parameter and return types, and
+  the shared error type.

@@ -631,6 +631,10 @@ export default withMermaid(
                   text: "Configuration schema",
                   link: "/reference/configuration-schema",
                 },
+                {
+                  text: "Extension API",
+                  link: "/reference/extension-api",
+                },
               ],
             },
           ],

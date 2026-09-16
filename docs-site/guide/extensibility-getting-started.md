@@ -161,3 +161,5 @@ else keeps serving.
   semver guidance
 - [Native plugin filters](./native-plugins) / [Nano-services](./nano-services)
   / [Extension traits](./extension-traits) — the other surfaces
+- [Extension API reference](../reference/extension-api) — full
+  signatures for every extension surface

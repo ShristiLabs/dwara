@@ -162,6 +162,9 @@ bytes, non-UTF-8 (obs-text) values included.
 
 ## Hostcall support matrix
 
+Full hostcall signatures, buffer/map selector values, and status
+codes: [Extension API reference](../reference/extension-api).
+
 Audited against the host implementation (`crates/dwara-core/src/wasm/`).
 "Per-instance" state lives inside one request's module instance: it
 does not survive the request and is not shared across plugins.
