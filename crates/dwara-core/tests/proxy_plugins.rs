@@ -117,7 +117,7 @@ fn add_header_wat(value: &str) -> String {
         ADD_IMPORT,
         &format!(r#"(data (i32.const 65536) "x-wasm-filter") (data (i32.const 65560) "{value}")"#),
         &format!(
-            r#"(drop (call $add_header (i32.const 2) (i32.const 65536) (i32.const 13)
+            r#"(drop (call $add_header (i32.const 0) (i32.const 65536) (i32.const 13)
                  (i32.const 65560) (i32.const {value_len})))
                (i32.const 0)"#
         ),
@@ -139,12 +139,12 @@ fn copy_path_wat() -> String {
         &(COPY_PATH_IMPORTS.to_string() + ADD_IMPORT),
         r#"(data (i32.const 65536) ":path") (data (i32.const 65552) "x-seen-path")"#,
         r#"(local $vp i32) (local $vs i32)
-           (drop (call $get_header (i32.const 2) (i32.const 65536) (i32.const 5)
+           (drop (call $get_header (i32.const 0) (i32.const 65536) (i32.const 5)
                  (i32.const 70000) (i32.const 70004)))
            (local.set $vp (i32.load (i32.const 70000)))
            (local.set $vs (i32.load (i32.const 70004)))
            (if (i32.gt_s (local.get $vs) (i32.const 0))
-             (then (drop (call $add_header (i32.const 2) (i32.const 65552) (i32.const 11)
+             (then (drop (call $add_header (i32.const 0) (i32.const 65552) (i32.const 11)
                   (local.get $vp) (local.get $vs)))))
            (i32.const 0)"#,
         "(i32.const 0)",
@@ -233,7 +233,7 @@ fn add_response_header_wat() -> String {
         r#"(data (i32.const 65536) "x-resp-plugin") (data (i32.const 65560) "yes")"#,
         "(i32.const 0)",
         "(i32.const 0)",
-        r#"(drop (call $add_header (i32.const 3) (i32.const 65536) (i32.const 13)
+        r#"(drop (call $add_header (i32.const 2) (i32.const 65536) (i32.const 13)
              (i32.const 65560) (i32.const 3)))
            (i32.const 0)"#,
         "(i32.const 0)",

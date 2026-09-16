@@ -38,6 +38,19 @@
 //! [`PluginLimits::memory_mb`] caps the linear memory the plugin can
 //! allocate. wasmtime's `ResourceLimiter` trait enforces this at the
 //! allocation boundary.
+//!
+//! ## Import names and WASI
+//!
+//! Modules built with the Rust `proxy-wasm` SDK (what
+//! `dwara-cli plugin new` scaffolds) import the spec ABI names, so the
+//! host registers BOTH the spec names (`proxy_send_local_response`,
+//! `proxy_get_current_time_nanoseconds`) and dwara's original spellings
+//! (`proxy_send_http_response`, `proxy_get_current_time`) with
+//! identical behavior. The `wasm32-wasip1` target additionally emits a
+//! small `wasi_snapshot_preview1` import set (environment, fd_write,
+//! proc_exit, random_get, clock_time_get, sched_yield); the host
+//! provides minimal stubs for exactly that set — a module importing
+//! other WASI functions fails to instantiate (fail-closed).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +58,16 @@ use std::sync::Arc;
 use wasmtime::{Engine, Linker, Module, ResourceLimiter, Store};
 
 use super::abi;
+
+/// Per-instance cap on buffered plugin log output (`proxy_log` plus
+/// the `fd_write` sink), in bytes. Fuel bounds plugin EXECUTION but
+/// not host-side copies: without this cap a plugin looping over
+/// `proxy_log`/`fd_write` would grow the host-side buffer without
+/// bound. When the cap is hit the head of the overflowing line is
+/// kept (if any budget remains), a marker line is appended, and every
+/// further line is dropped. 64 KiB is far above any legitimate
+/// diagnostic output.
+const LOG_BUFFER_CAP_BYTES: usize = 64 * 1024;
 
 /// Process-wide wasmtime engine + linker for proxy-wasm plugins.
 ///
@@ -135,6 +158,11 @@ pub struct PluginContext {
     pub memory_used: usize,
     /// Memory cap in bytes.
     pub memory_cap: usize,
+    /// Log bytes buffered so far (the buffer is capped at
+    /// [`LOG_BUFFER_CAP_BYTES`]; see [`PluginContext::push_log`]).
+    log_bytes: usize,
+    /// Whether the log cap was hit — every further line is dropped.
+    log_dropped: bool,
 }
 
 /// A local response set by the plugin via `proxy_send_http_response`.
@@ -179,7 +207,47 @@ impl PluginContext {
             done: false,
             memory_used: 0,
             memory_cap,
+            log_bytes: 0,
+            log_dropped: false,
         }
+    }
+
+    /// Append a log line to the per-instance buffer, enforcing the
+    /// [`LOG_BUFFER_CAP_BYTES`] cap: once the budget is spent, the
+    /// head of the overflowing line is kept (if it fits), a truncation
+    /// marker is appended, and every further line is dropped. Use this
+    /// instead of pushing to `logs` directly.
+    fn push_log(&mut self, level: u32, msg: String) {
+        if self.log_dropped {
+            return;
+        }
+        if self.log_bytes + msg.len() > LOG_BUFFER_CAP_BYTES {
+            let remaining = LOG_BUFFER_CAP_BYTES - self.log_bytes;
+            if remaining > 0 {
+                // Keep the head of the overflowing line (a panic's
+                // first line is the diagnostic that matters).
+                let mut cut = remaining.min(msg.len());
+                while cut > 0 && !msg.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if cut > 0 {
+                    self.log_bytes += cut;
+                    let head = msg[..cut].to_string();
+                    self.logs.push((level, head));
+                }
+            }
+            self.log_dropped = true;
+            self.logs.push((
+                level,
+                format!(
+                    "... log buffer cap ({} KiB) reached; further plugin log output dropped",
+                    LOG_BUFFER_CAP_BYTES / 1024
+                ),
+            ));
+            return;
+        }
+        self.log_bytes += msg.len();
+        self.logs.push((level, msg));
     }
 }
 
@@ -249,7 +317,7 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let msg = String::from_utf8_lossy(&msg).into_owned();
-                    caller.data_mut().logs.push((level as u32, msg));
+                    caller.data_mut().push_log(level as u32, msg);
                     0
                 },
             )
@@ -406,6 +474,11 @@ impl WasmEngine {
             .map_err(|e| format!("linker proxy_set_buffer_bytes: {e}"))?;
 
         // proxy_get_header_map_pairs(bt, ptr_ptr, size_ptr) -> i32
+        // Serialized in the spec/SDK wire layout (LE count + length
+        // table + NUL-terminated strings — what the Rust proxy-wasm
+        // SDK's get_map parses; see abi::serialize_header_map_spec).
+        // An empty map reports ptr=0/size=0 (the SDK reads that as an
+        // empty map without allocating).
         linker
             .func_wrap(
                 "env",
@@ -420,15 +493,20 @@ impl WasmEngine {
                         match bt as u32 {
                             abi::BUFFER_REQUEST_HEADERS => ctx.request_headers.clone(),
                             abi::BUFFER_RESPONSE_HEADERS => ctx.response_headers.clone(),
+                            // Trailers are not plumbed through dwara's
+                            // pipeline: they read as an empty map.
+                            abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => {
+                                Vec::new()
+                            }
                             _ => return 1,
                         }
                     };
-                    let encoded = abi::serialize_header_map(&headers);
+                    let encoded = abi::serialize_header_map_spec(&headers);
                     let memory = match caller.get_export("memory") {
                         Some(wasmtime::Extern::Memory(m)) => m,
                         _ => return 1,
                     };
-                    if encoded.is_empty() {
+                    if encoded.len() <= 4 {
                         if write_i32_to_memory(&memory, &mut caller, ptr_ptr, 0).is_err() {
                             return 1;
                         }
@@ -464,6 +542,10 @@ impl WasmEngine {
             .map_err(|e| format!("linker proxy_get_header_map_pairs: {e}"))?;
 
         // proxy_set_header_map_pairs(bt, ptr, size) -> i32
+        // Parses the spec/SDK wire layout (what the Rust proxy-wasm
+        // SDK's set_map serializes; see
+        // abi::deserialize_header_map_spec). A zero-size buffer is an
+        // empty map.
         linker
             .func_wrap(
                 "env",
@@ -487,7 +569,7 @@ impl WasmEngine {
                         Some(slice) => slice.to_vec(),
                         None => return 1,
                     };
-                    let headers = match abi::deserialize_header_map(&data) {
+                    let headers = match abi::deserialize_header_map_spec(&data) {
                         Some(h) => h,
                         None => return 1,
                     };
@@ -495,6 +577,11 @@ impl WasmEngine {
                     match bt as u32 {
                         abi::BUFFER_REQUEST_HEADERS => ctx.request_headers = headers,
                         abi::BUFFER_RESPONSE_HEADERS => ctx.response_headers = headers,
+                        // Trailer stores are accepted and discarded
+                        // (trailers are not plumbed through the
+                        // pipeline); reporting success keeps SDK
+                        // plugins from panicking on a benign store.
+                        abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => {}
                         _ => return 1,
                     }
                     0
@@ -530,9 +617,13 @@ impl WasmEngine {
                     };
                     let value = {
                         let ctx = caller.data();
-                        let headers = match bt as u32 {
+                        let headers: &[(String, String)] = match bt as u32 {
                             abi::BUFFER_REQUEST_HEADERS => &ctx.request_headers,
                             abi::BUFFER_RESPONSE_HEADERS => &ctx.response_headers,
+                            // Trailers are not plumbed through dwara's
+                            // pipeline: they read as empty (the SDK
+                            // maps an empty result to None).
+                            abi::BUFFER_REQUEST_TRAILERS | abi::BUFFER_RESPONSE_TRAILERS => &[],
                             _ => return 1,
                         };
                         headers
@@ -615,6 +706,15 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
+                    // Trailer mutations are accepted and discarded
+                    // (trailers are not plumbed through the pipeline);
+                    // reporting success keeps SDK plugins from
+                    // panicking on a benign trailer store.
+                    if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
+                        || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                    {
+                        return 0;
+                    }
                     let headers = match bt as u32 {
                         abi::BUFFER_REQUEST_HEADERS => &mut ctx.request_headers,
                         abi::BUFFER_RESPONSE_HEADERS => &mut ctx.response_headers,
@@ -660,6 +760,15 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
+                    // Trailer mutations are accepted and discarded
+                    // (trailers are not plumbed through the pipeline);
+                    // reporting success keeps SDK plugins from
+                    // panicking on a benign trailer store.
+                    if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
+                        || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                    {
+                        return 0;
+                    }
                     let headers = match bt as u32 {
                         abi::BUFFER_REQUEST_HEADERS => &mut ctx.request_headers,
                         abi::BUFFER_RESPONSE_HEADERS => &mut ctx.response_headers,
@@ -703,6 +812,15 @@ impl WasmEngine {
                         None => return 1,
                     };
                     let ctx = caller.data_mut();
+                    // Trailer mutations are accepted and discarded
+                    // (trailers are not plumbed through the pipeline);
+                    // reporting success keeps SDK plugins from
+                    // panicking on a benign trailer store.
+                    if bt as u32 == abi::BUFFER_REQUEST_TRAILERS
+                        || bt as u32 == abi::BUFFER_RESPONSE_TRAILERS
+                    {
+                        return 0;
+                    }
                     let headers = match bt as u32 {
                         abi::BUFFER_REQUEST_HEADERS => &mut ctx.request_headers,
                         abi::BUFFER_RESPONSE_HEADERS => &mut ctx.response_headers,
@@ -715,18 +833,38 @@ impl WasmEngine {
             .map_err(|e| format!("linker proxy_remove_header_map_value: {e}"))?;
 
         // proxy_send_http_response(status, headers_ptr, headers_size, body_ptr, body_size, trailers_ptr, trailers_size) -> i32
+        // dwara's original spelling (the WAT fixtures and host tests
+        // use it).
+        linker
+            .func_wrap("env", "proxy_send_http_response", send_http_response_impl)
+            .map_err(|e| format!("linker proxy_send_http_response: {e}"))?;
+
+        // proxy_send_local_response(status_code, details_ptr, details_size,
+        //                            body_ptr, body_size, headers_ptr,
+        //                            headers_size, grpc_status) -> i32
+        // The proxy-wasm SPEC hostcall (a different signature and
+        // argument order than dwara's original spelling above): the
+        // Rust proxy-wasm SDK's `send_http_response` imports this name
+        // with this shape, and its header argument is always the
+        // spec/SDK map serialization (serialize_map — for empty
+        // headers that is the 4-byte LE count 0, so a 4-byte buffer
+        // parses as an empty map, never a parse failure). Status-code
+        // details and the gRPC status are carried on the
+        // LocalResponse's status/body path only — dwara does not
+        // forward them anywhere today.
         linker
             .func_wrap(
                 "env",
-                "proxy_send_http_response",
+                "proxy_send_local_response",
                 |mut caller: wasmtime::Caller<PluginContext>,
-                 status: i32,
-                 headers_ptr: i32,
-                 headers_size: i32,
+                 status_code: i32,
+                 _details_ptr: i32,
+                 _details_size: i32,
                  body_ptr: i32,
                  body_size: i32,
-                 _trailers_ptr: i32,
-                 _trailers_size: i32|
+                 headers_ptr: i32,
+                 headers_size: i32,
+                 _grpc_status: i32|
                  -> i32 {
                     let memory = match caller.get_export("memory") {
                         Some(wasmtime::Extern::Memory(m)) => m,
@@ -739,7 +877,7 @@ impl WasmEngine {
                             Some(slice) => slice.to_vec(),
                             None => return 1,
                         };
-                        match abi::deserialize_header_map(&data) {
+                        match abi::deserialize_header_map_spec(&data) {
                             Some(h) => h,
                             None => return 1,
                         }
@@ -759,7 +897,7 @@ impl WasmEngine {
                     };
                     let ctx = caller.data_mut();
                     ctx.local_response = Some(LocalResponse {
-                        status: status as u16,
+                        status: status_code as u16,
                         headers,
                         body,
                     });
@@ -767,7 +905,7 @@ impl WasmEngine {
                     0
                 },
             )
-            .map_err(|e| format!("linker proxy_send_http_response: {e}"))?;
+            .map_err(|e| format!("linker proxy_send_local_response: {e}"))?;
 
         // proxy_continue_stream(bt) -> i32
         linker
@@ -1154,11 +1292,298 @@ impl WasmEngine {
             .map_err(|e| format!("linker proxy_get_metric: {e}"))?;
 
         // proxy_get_current_time(return_value_ptr) -> i32
+        // proxy_get_current_time_nanoseconds(return_time) -> i32 (the
+        // proxy-wasm spec name; the Rust SDK's `get_current_time`
+        // imports this spelling). Both names share one implementation.
+        for name in [
+            "proxy_get_current_time",
+            "proxy_get_current_time_nanoseconds",
+        ] {
+            linker
+                .func_wrap("env", name, get_current_time_impl)
+                .map_err(|e| format!("linker {name}: {e}"))?;
+        }
+
+        // proxy_get_log_level(return_level_ptr) -> i32
+        // The host buffers every proxy_log line (no level filtering),
+        // so the query always reports Info. Registered because the Rust
+        // SDK declares the import even when unused; plugins that gate
+        // work on the reported level see Info.
         linker
             .func_wrap(
                 "env",
-                "proxy_get_current_time",
-                |mut caller: wasmtime::Caller<PluginContext>, return_value_ptr: i32| -> i32 {
+                "proxy_get_log_level",
+                |mut caller: wasmtime::Caller<PluginContext>, return_level_ptr: i32| -> i32 {
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 1,
+                    };
+                    if write_i32_to_memory(
+                        &memory,
+                        &mut caller,
+                        return_level_ptr,
+                        abi::LOG_INFO as i32,
+                    )
+                    .is_err()
+                    {
+                        return 1;
+                    }
+                    0
+                },
+            )
+            .map_err(|e| format!("linker proxy_get_log_level: {e}"))?;
+
+        // proxy_get_status(return_code_ptr, return_message_ptr_ptr, return_message_size_ptr) -> i32
+        // The gRPC callout status fetch (the Rust SDK's
+        // `get_grpc_status`). dwara's grpc_* hostcalls never put a
+        // callout in flight, so there is no status to report — but the
+        // SDK 0.2.5 wrapper PANICS on any non-Ok status (hostcalls.rs
+        // `get_grpc_status`, ~line 1037), so answering NotFound would
+        // trap every SDK caller. Return Ok with code 0 and a null
+        // message (the SDK reads that as `(0, None)`: no gRPC status).
+        linker
+            .func_wrap(
+                "env",
+                "proxy_get_status",
+                |mut caller: wasmtime::Caller<PluginContext>,
+                 return_code_ptr: i32,
+                 return_message_ptr_ptr: i32,
+                 return_message_size_ptr: i32|
+                 -> i32 {
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 1,
+                    };
+                    for (ptr, value) in [
+                        (return_code_ptr, 0),
+                        (return_message_ptr_ptr, 0),
+                        (return_message_size_ptr, 0),
+                    ] {
+                        if write_i32_to_memory(&memory, &mut caller, ptr, value).is_err() {
+                            return 1;
+                        }
+                    }
+                    0 // Ok: no callout, no gRPC status (code 0, null message)
+                },
+            )
+            .map_err(|e| format!("linker proxy_get_status: {e}"))?;
+
+        // Stub imports for functions we don't implement but the plugin
+        // may call (returns error to signal unsupported). Each is
+        // registered with its proxy-wasm spec ARITY: wasmtime's typed
+        // linking rejects a module whose import signature does not
+        // match, and the Rust SDK declares every import with its spec
+        // signature even when the plugin never calls it.
+        for name in [
+            "proxy_set_tick_period_milliseconds",
+            "proxy_grpc_cancel",
+            "proxy_grpc_close",
+        ] {
+            linker
+                .func_wrap("env", name, stub_unsupported_1)
+                .map_err(|e| format!("linker {name}: {e}"))?;
+        }
+        for name in [
+            "proxy_register_shared_queue",
+            "proxy_dequeue_shared_queue",
+            "proxy_enqueue_shared_queue",
+        ] {
+            linker
+                .func_wrap("env", name, stub_unsupported_3)
+                .map_err(|e| format!("linker {name}: {e}"))?;
+        }
+        linker
+            .func_wrap("env", "proxy_resolve_shared_queue", stub_unsupported_5)
+            .map_err(|e| format!("linker proxy_resolve_shared_queue: {e}"))?;
+        linker
+            .func_wrap("env", "proxy_grpc_stream", stub_unsupported_9)
+            .map_err(|e| format!("linker proxy_grpc_stream: {e}"))?;
+        linker
+            .func_wrap("env", "proxy_http_call", stub_unsupported_10)
+            .map_err(|e| format!("linker proxy_http_call: {e}"))?;
+        linker
+            .func_wrap("env", "proxy_grpc_call", stub_unsupported_12)
+            .map_err(|e| format!("linker proxy_grpc_call: {e}"))?;
+        linker
+            .func_wrap("env", "proxy_grpc_send", stub_unsupported_4)
+            .map_err(|e| format!("linker proxy_grpc_send: {e}"))?;
+        linker
+            .func_wrap("env", "proxy_call_foreign_function", stub_unsupported_6)
+            .map_err(|e| format!("linker proxy_call_foreign_function: {e}"))?;
+
+        // --- WASI p1 stubs (wasm32-wasip1) ----------------------------------
+        //
+        // Modules built for wasm32-wasip1 emit a small
+        // `wasi_snapshot_preview1` import set even when they never
+        // touch WASI consciously (Rust std's panic printing, HashMap
+        // seeding, environment access). The host provides minimal
+        // stubs for exactly that observed set; anything beyond it
+        // (files, sockets) fails to instantiate, fail-closed.
+
+        // environ_sizes_get(environ_count_ptr, environ_buf_size_ptr) -> errno
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "environ_sizes_get",
+                |mut caller: wasmtime::Caller<PluginContext>,
+                 count_ptr: i32,
+                 buf_size_ptr: i32|
+                 -> i32 {
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 1,
+                    };
+                    let _ = caller.data_mut();
+                    // Empty environment: count 0, buffer size 0.
+                    for (ptr, value) in [(count_ptr, 0), (buf_size_ptr, 0)] {
+                        if write_i32_to_memory(&memory, &mut caller, ptr, value).is_err() {
+                            return 1; // EPERM-ish; any non-zero is an errno
+                        }
+                    }
+                    0 // ESUCCESS
+                },
+            )
+            .map_err(|e| format!("linker environ_sizes_get: {e}"))?;
+
+        // environ_get(environ_ptrs_ptr, environ_buf_ptr) -> errno
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "environ_get",
+                |_caller: wasmtime::Caller<PluginContext>,
+                 _environ_ptrs_ptr: i32,
+                 _environ_buf_ptr: i32|
+                 -> i32 {
+                    0 // ESUCCESS: the (empty) environment needs no writes
+                },
+            )
+            .map_err(|e| format!("linker environ_get: {e}"))?;
+
+        // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
+        // Route the plugin's stderr (panic output, debug prints) into
+        // the per-instance log buffer so operators can see why a plugin
+        // died without the bytes escaping the sandbox. The buffer is
+        // capped (PluginContext::push_log): a plugin that spews through
+        // stderr cannot grow host memory without bound — unlike fuel,
+        // which bounds plugin execution, not host-side copies.
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "fd_write",
+                |mut caller: wasmtime::Caller<PluginContext>,
+                 _fd: i32,
+                 iovs_ptr: i32,
+                 iovs_len: i32,
+                 nwritten_ptr: i32|
+                 -> i32 {
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 1,
+                    };
+                    if iovs_ptr < 0 || iovs_len < 0 || nwritten_ptr < 0 {
+                        return 1;
+                    }
+                    let mut out = Vec::new();
+                    for i in 0..iovs_len as usize {
+                        let iov_base = iovs_ptr as usize + i * 8;
+                        let (buf_ptr, buf_len) = {
+                            let data = memory.data(&caller);
+                            let Some(base) = data.get(iov_base..iov_base + 8) else {
+                                return 1;
+                            };
+                            let buf_ptr =
+                                u32::from_le_bytes(base[0..4].try_into().expect("4 bytes"))
+                                    as usize;
+                            let buf_len =
+                                u32::from_le_bytes(base[4..8].try_into().expect("4 bytes"))
+                                    as usize;
+                            (buf_ptr, buf_len)
+                        };
+                        match memory.data(&caller).get(buf_ptr..buf_ptr + buf_len) {
+                            Some(slice) => out.extend_from_slice(slice),
+                            None => return 1,
+                        }
+                    }
+                    let written = out.len() as i32;
+                    caller
+                        .data_mut()
+                        .push_log(abi::LOG_INFO, String::from_utf8_lossy(&out).into_owned());
+                    if write_i32_to_memory(&memory, &mut caller, nwritten_ptr, written).is_err() {
+                        return 1;
+                    }
+                    0 // ESUCCESS
+                },
+            )
+            .map_err(|e| format!("linker fd_write: {e}"))?;
+
+        // proc_exit(code) -> ! : the plugin terminated itself. Trap the
+        // instance (the runner reports the trap like any other plugin
+        // failure; the code rides the trap message).
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "proc_exit",
+                |_caller: wasmtime::Caller<PluginContext>,
+                 code: i32|
+                 -> Result<(), wasmtime::Error> {
+                    Err(wasmtime::format_err!(
+                        "wasi proc_exit({code}): the plugin terminated itself"
+                    ))
+                },
+            )
+            .map_err(|e| format!("linker proc_exit: {e}"))?;
+
+        // random_get(buf_ptr, buf_len) -> errno
+        // Non-cryptographic: splitmix64 seeded from the wall clock and
+        // a process-global counter. Enough to seed std collections;
+        // plugins must not use it for key material.
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "random_get",
+                |mut caller: wasmtime::Caller<PluginContext>, buf_ptr: i32, buf_len: i32| -> i32 {
+                    if buf_ptr < 0 || buf_len < 0 {
+                        return 1;
+                    }
+                    let memory = match caller.get_export("memory") {
+                        Some(wasmtime::Extern::Memory(m)) => m,
+                        _ => return 1,
+                    };
+                    let mut state = wasi_random_seed();
+                    let mut filled = 0usize;
+                    while filled < buf_len as usize {
+                        state = state.wrapping_add(0x9E3779B97F4A7C15);
+                        let mut z = state;
+                        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+                        z ^= z >> 31;
+                        for byte in z.to_le_bytes() {
+                            if filled >= buf_len as usize {
+                                break;
+                            }
+                            let dst = buf_ptr as usize + filled;
+                            match memory.data_mut(&mut caller).get_mut(dst..dst + 1) {
+                                Some(slot) => slot[0] = byte,
+                                None => return 1,
+                            }
+                            filled += 1;
+                        }
+                    }
+                    0 // ESUCCESS
+                },
+            )
+            .map_err(|e| format!("linker random_get: {e}"))?;
+
+        // clock_time_get(clock_id, precision, time_ptr) -> errno
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "clock_time_get",
+                |mut caller: wasmtime::Caller<PluginContext>,
+                 _clock_id: i32,
+                 _precision: i64,
+                 time_ptr: i32|
+                 -> i32 {
                     let memory = match caller.get_export("memory") {
                         Some(wasmtime::Extern::Memory(m)) => m,
                         _ => return 1,
@@ -1170,39 +1595,25 @@ impl WasmEngine {
                     let bytes = now.to_le_bytes();
                     if memory
                         .data_mut(&mut caller)
-                        .get_mut(return_value_ptr as usize..(return_value_ptr as usize + 8))
+                        .get_mut(time_ptr as usize..(time_ptr as usize + 8))
                         .map(|dst| dst.copy_from_slice(&bytes))
                         .is_none()
                     {
                         return 1;
                     }
-                    0
+                    0 // ESUCCESS
                 },
             )
-            .map_err(|e| format!("linker proxy_get_current_time: {e}"))?;
+            .map_err(|e| format!("linker clock_time_get: {e}"))?;
 
-        // Stub imports for functions we don't implement but the plugin
-        // may call (returns error to signal unsupported).
-        for name in [
-            "proxy_register_shared_queue",
-            "proxy_resolve_shared_queue",
-            "proxy_dequeue_shared_queue",
-            "proxy_enqueue_shared_queue",
-            "proxy_http_call",
-            "proxy_grpc_call",
-            "proxy_grpc_stream",
-            "proxy_grpc_cancel",
-            "proxy_grpc_close",
-            "proxy_grpc_send",
-            "proxy_set_tick_period_milliseconds",
-            "proxy_call_foreign_function",
-        ] {
-            linker
-                .func_wrap("env", name, |_: wasmtime::Caller<PluginContext>| -> i32 {
-                    1
-                })
-                .map_err(|e| format!("linker {name}: {e}"))?;
-        }
+        // sched_yield() -> errno
+        linker
+            .func_wrap(
+                "wasi_snapshot_preview1",
+                "sched_yield",
+                |_caller: wasmtime::Caller<PluginContext>| -> i32 { 0 },
+            )
+            .map_err(|e| format!("linker sched_yield: {e}"))?;
 
         Ok(Self {
             engine,
@@ -1270,7 +1681,22 @@ impl PluginModule {
             .instantiate(&mut store, &self.module)
             .map_err(|e| format!("wasm instantiate: {e}"))?;
 
-        let mut inst = PluginInstance { store, instance };
+        let mut inst = PluginInstance {
+            store,
+            instance,
+            http_context_created: false,
+        };
+
+        // Standard proxy-wasm VM initialization (SDK modules, e.g.
+        // anything built from `dwara-cli plugin new`): the module
+        // registers its root-context factory in `_start` and builds its
+        // contexts on `proxy_on_context_create`; calling
+        // `proxy_on_vm_start` without both panics inside the module.
+        // Both exports are optional (dwara's WAT fixtures implement
+        // neither) — call them when present, skip when absent. A trap
+        // inside `_start` fails the instantiation with the trap itself.
+        inst.call_optional_start()?;
+        inst.call_optional_context_create(1, 0);
 
         // Call proxy_on_vm_start(root_context_id=1, vm_config_size).
         inst.set_context_id(1);
@@ -1326,6 +1752,11 @@ impl PluginModule {
 pub struct PluginInstance {
     store: Store<PluginContext>,
     instance: wasmtime::Instance,
+    /// Whether `proxy_on_context_create(2, 1)` has been called for the
+    /// per-request HTTP context (SDK modules panic on a phase call for
+    /// a context they were never told to create; fixtures without the
+    /// export skip it).
+    http_context_created: bool,
 }
 
 /// The result of a phase callback.
@@ -1347,12 +1778,69 @@ impl PluginInstance {
         self.store.data_mut().effective_context_id = id;
     }
 
+    /// Call `_start()` when the module exports it (SDK modules register
+    /// their context factories there). Absent in dwara's WAT fixtures —
+    /// a missing export is skipped, not an error. A trapping `_start`
+    /// is PROPAGATED as the instance's error: swallowing it here would
+    /// surface later as an unrelated panic inside
+    /// `proxy_on_context_create` (the SDK dispatcher finds no
+    /// registered root context), hiding the real failure.
+    fn call_optional_start(&mut self) -> Result<(), String> {
+        let Some(export) = self.instance.get_export(&mut self.store, "_start") else {
+            return Ok(());
+        };
+        let Some(func) = export.into_func() else {
+            return Ok(());
+        };
+        let Ok(typed) = func.typed::<(), ()>(&self.store) else {
+            return Ok(());
+        };
+        typed
+            .call(&mut self.store, ())
+            .map_err(|e| format!("_start: {e}"))
+    }
+
+    /// Call `proxy_on_context_create(context_id, root_context_id)` when
+    /// the module exports it (SDK modules build their contexts there).
+    /// Absent in dwara's WAT fixtures — a missing export is skipped.
+    fn call_optional_context_create(&mut self, context_id: i32, root_context_id: i32) {
+        let Some(export) = self
+            .instance
+            .get_export(&mut self.store, "proxy_on_context_create")
+        else {
+            return;
+        };
+        let Some(func) = export.into_func() else {
+            return;
+        };
+        let Ok(typed) = func.typed::<(i32, i32), ()>(&self.store) else {
+            return;
+        };
+        let _: () = typed
+            .call(&mut self.store, (context_id, root_context_id))
+            .unwrap_or_default();
+    }
+
+    /// Ensure the per-request HTTP context exists before a phase call:
+    /// SDK modules panic inside `proxy_on_*` for a context they were
+    /// never told to create, so the first phase (or `on_done`) for
+    /// context 2 first calls `proxy_on_context_create(2, 1)`. Modules
+    /// without the export (dwara's WAT fixtures) skip it.
+    fn ensure_http_context(&mut self) {
+        if self.http_context_created {
+            return;
+        }
+        self.http_context_created = true;
+        self.call_optional_context_create(2, 1);
+    }
+
     /// Call `proxy_on_request_headers(context_id, num_headers, end_of_stream)`.
     /// Sets the request headers in the context before calling.
     pub fn on_request_headers(&mut self, headers: Vec<(String, String)>) -> PhaseResult {
         self.store.data_mut().request_headers = headers;
         let num_headers = self.store.data().request_headers.len() as i32;
         self.set_context_id(2);
+        self.ensure_http_context();
         self.call_phase_export("proxy_on_request_headers", (2, num_headers, 1))
     }
 
@@ -1362,6 +1850,7 @@ impl PluginInstance {
         self.store.data_mut().request_body = body;
         let body_size = self.store.data().request_body.len() as i32;
         self.set_context_id(2);
+        self.ensure_http_context();
         self.call_phase_export("proxy_on_request_body", (2, body_size, 1))
     }
 
@@ -1371,6 +1860,7 @@ impl PluginInstance {
         self.store.data_mut().response_headers = headers;
         let num_headers = self.store.data().response_headers.len() as i32;
         self.set_context_id(2);
+        self.ensure_http_context();
         self.call_phase_export("proxy_on_response_headers", (2, num_headers, 1))
     }
 
@@ -1380,6 +1870,7 @@ impl PluginInstance {
         self.store.data_mut().response_body = body;
         let body_size = self.store.data().response_body.len() as i32;
         self.set_context_id(2);
+        self.ensure_http_context();
         self.call_phase_export("proxy_on_response_body", (2, body_size, 1))
     }
 
@@ -1409,10 +1900,39 @@ impl PluginInstance {
     }
 
     /// Call `proxy_on_done` and `proxy_on_log` (the cleanup path).
+    /// The SDK's `proxy_on_done` returns a bool while the WAT fixtures
+    /// return nothing — the result is ignored either way, so both
+    /// shapes are accepted.
     pub fn on_done(&mut self) {
         self.set_context_id(2);
-        let _ = self.call_phase_export_no_result("proxy_on_done", (2,));
-        let _ = self.call_phase_export_no_result("proxy_on_log", (2,));
+        self.ensure_http_context();
+        let _ = self.call_optional_i32_export("proxy_on_done", 2);
+        let _ = self.call_optional_i32_export("proxy_on_log", 2);
+        let _ = self.call_optional_i32_export("proxy_on_delete", 2);
+    }
+
+    /// Call an optional `(i32) -> ()`-or-`(i32) -> i32` export with
+    /// `arg`, tolerating either return shape (fixtures return nothing;
+    /// the SDK returns a bool). Missing exports are skipped.
+    fn call_optional_i32_export(&mut self, name: &str, arg: i32) -> Result<(), String> {
+        let Some(export) = self.instance.get_export(&mut self.store, name) else {
+            return Ok(());
+        };
+        let Some(func) = export.into_func() else {
+            return Ok(());
+        };
+        if let Ok(typed) = func.typed::<(i32,), ()>(&self.store) {
+            return typed
+                .call(&mut self.store, (arg,))
+                .map_err(|e| format!("{name}: {e}"));
+        }
+        if let Ok(typed) = func.typed::<(i32,), i32>(&self.store) {
+            return typed
+                .call(&mut self.store, (arg,))
+                .map(|_| ())
+                .map_err(|e| format!("{name}: {e}"));
+        }
+        Ok(())
     }
 
     /// Call a phase export that takes (context_id, a, b) and returns an action.
@@ -1458,28 +1978,223 @@ impl PluginInstance {
             }
         }
     }
-
-    /// Call a phase export that takes (context_id,) and returns nothing.
-    fn call_phase_export_no_result(&mut self, name: &str, args: (i32,)) -> Result<(), String> {
-        let export = match self.instance.get_export(&mut self.store, name) {
-            Some(e) => e,
-            None => return Ok(()),
-        };
-        let func = match export.into_func() {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-        let typed: wasmtime::TypedFunc<(i32,), ()> = match func.typed(&self.store) {
-            Ok(t) => t,
-            Err(e) => return Err(format!("{name} typed: {e}")),
-        };
-        typed
-            .call(&mut self.store, args)
-            .map_err(|e| format!("{name}: {e}"))
-    }
 }
 
 // --- Helper functions ----------------------------------------------------
+
+// Unsupported-hostcall stubs, one per proxy-wasm spec ARITY (wasmtime's
+// typed linking requires the import signature to match exactly; the
+// Rust SDK declares every import with its spec signature even when the
+// plugin never calls it). All return Status::InternalFailure (10).
+// SDK 0.2.5 mapping of that status, exactly (hostcalls.rs):
+//   - clean Err(Status::InternalFailure): ONLY the three callout
+//     dispatchers — dispatch_http_call, dispatch_grpc_call, and
+//     open_grpc_stream.
+//   - panic! on any non-Ok status: every other wrapper, including
+//     send_grpc_stream_message and cancel_grpc_call/cancel_grpc_stream
+//     (they map only BadArgument/NotFound to Err), set_tick_period,
+//     the shared-queue calls, and call_foreign_function.
+// A panicking wrapper traps the module, which the host reports as a
+// plugin failure (trap -> 500 on the referencing route) — host-safe
+// either way; the point of returning InternalFailure rather than some
+// other status is that it is the one status the largest set of SDK
+// wrappers handles without trapping. It is NOT a general "clean Err"
+// for all callers.
+fn stub_unsupported_1(_: wasmtime::Caller<PluginContext>, _a: i32) -> i32 {
+    10 // Status::InternalFailure
+}
+
+fn stub_unsupported_3(_: wasmtime::Caller<PluginContext>, _a: i32, _b: i32, _c: i32) -> i32 {
+    10 // Status::InternalFailure
+}
+
+fn stub_unsupported_4(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+fn stub_unsupported_5(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+    _e: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+fn stub_unsupported_6(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+    _e: i32,
+    _f: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stub_unsupported_9(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+    _e: i32,
+    _f: i32,
+    _g: i32,
+    _h: i32,
+    _i: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stub_unsupported_10(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+    _e: i32,
+    _f: i32,
+    _g: i32,
+    _h: i32,
+    _i: i32,
+    _j: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stub_unsupported_12(
+    _: wasmtime::Caller<PluginContext>,
+    _a: i32,
+    _b: i32,
+    _c: i32,
+    _d: i32,
+    _e: i32,
+    _f: i32,
+    _g: i32,
+    _h: i32,
+    _i: i32,
+    _j: i32,
+    _k: i32,
+    _l: i32,
+) -> i32 {
+    10 // Status::InternalFailure
+}
+
+/// The body of dwara's original `proxy_send_http_response` hostcall
+/// (7 params; the WAT fixtures and host tests use this spelling). The
+/// spec name `proxy_send_local_response` has a different signature and
+/// is registered separately in [`WasmEngine::new`]. The header
+/// argument here deliberately keeps dwara's LEGACY big-endian map
+/// layout (abi::deserialize_header_map): modules written against this
+/// spelling (dwara's example plugins) serialize that way, while the
+/// spec-named hostcalls speak the SDK layout. The additive rule: the
+/// legacy spelling keeps the legacy wire format.
+#[allow(clippy::too_many_arguments)]
+fn send_http_response_impl(
+    mut caller: wasmtime::Caller<PluginContext>,
+    status: i32,
+    headers_ptr: i32,
+    headers_size: i32,
+    body_ptr: i32,
+    body_size: i32,
+    _trailers_ptr: i32,
+    _trailers_size: i32,
+) -> i32 {
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(m)) => m,
+        _ => return 1,
+    };
+    let headers = if headers_ptr > 0 && headers_size > 0 {
+        let data = match memory
+            .data(&caller)
+            .get(headers_ptr as usize..(headers_ptr as usize + headers_size as usize))
+        {
+            Some(slice) => slice.to_vec(),
+            None => return 1,
+        };
+        match abi::deserialize_header_map(&data) {
+            Some(h) => h,
+            None => return 1,
+        }
+    } else {
+        Vec::new()
+    };
+    let body = if body_ptr > 0 && body_size > 0 {
+        match memory
+            .data(&caller)
+            .get(body_ptr as usize..(body_ptr as usize + body_size as usize))
+        {
+            Some(slice) => slice.to_vec(),
+            None => return 1,
+        }
+    } else {
+        Vec::new()
+    };
+    let ctx = caller.data_mut();
+    ctx.local_response = Some(LocalResponse {
+        status: status as u16,
+        headers,
+        body,
+    });
+    ctx.action = abi::ACTION_END_STREAM;
+    0
+}
+
+/// The shared body of `proxy_get_current_time` /
+/// `proxy_get_current_time_nanoseconds` (dwara's spelling and the
+/// proxy-wasm spec spelling): nanoseconds since the Unix epoch.
+fn get_current_time_impl(
+    mut caller: wasmtime::Caller<PluginContext>,
+    return_value_ptr: i32,
+) -> i32 {
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(m)) => m,
+        _ => return 1,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let bytes = now.to_le_bytes();
+    if memory
+        .data_mut(&mut caller)
+        .get_mut(return_value_ptr as usize..(return_value_ptr as usize + 8))
+        .map(|dst| dst.copy_from_slice(&bytes))
+        .is_none()
+    {
+        return 1;
+    }
+    0
+}
+
+/// Seed for the WASI `random_get` stub: wall-clock nanoseconds mixed
+/// with a process-global counter (two plugins seeded in the same
+/// nanosecond still diverge). Not cryptographic.
+fn wasi_random_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    now ^ COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_mul(0x9E3779B97F4A7C15)
+}
 
 /// Write an i32 value to a pointer in plugin memory.
 fn write_i32_to_memory(

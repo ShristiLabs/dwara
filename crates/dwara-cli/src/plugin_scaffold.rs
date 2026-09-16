@@ -166,53 +166,56 @@ use proxy_wasm::traits::*;
 use proxy_wasm::types::*;
 
 #[no_mangle]
-pub fn _start() {{
+pub fn _start() {
     proxy_wasm::set_log_level(LogLevel::Info);
-    proxy_wasm::set_root_context(|_| -> Box<dyn RootContext> {{
+    proxy_wasm::set_root_context(|_| -> Box<dyn RootContext> {
         Box::new(MyPluginRoot)
-    }});
-}}
+    });
+}
 
 struct MyPluginRoot;
 
-impl Context for MyPluginRoot {{}}
+impl Context for MyPluginRoot {}
 
-impl RootContext for MyPluginRoot {{
-    fn on_configure(&mut self, _config_size: usize) -> bool {{
+impl RootContext for MyPluginRoot {
+    fn on_configure(&mut self, _config_size: usize) -> bool {
         true
-    }}
+    }
 
-    fn get_type(&self) -> Option<ContextType> {{
+    fn get_type(&self) -> Option<ContextType> {
         Some(ContextType::HttpContext)
-    }}
+    }
 
-    fn create_http_context(&self, _context_id: u32) -> Option<Box<dyn HttpContext>> {{
+    fn create_http_context(&self, _context_id: u32) -> Option<Box<dyn HttpContext>> {
         Some(Box::new(MyPluginHttp))
-    }}
-}}
+    }
+}
 
 struct MyPluginHttp;
 
-impl Context for MyPluginHttp {{}}
+impl Context for MyPluginHttp {}
 
-impl HttpContext for MyPluginHttp {{
-    fn on_http_request_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {{
+impl HttpContext for MyPluginHttp {
+    fn on_http_request_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
         let path = self.get_http_request_header(":path").unwrap_or_default();
-        self.log(LogLevel::Info, &format!("request path: {{}}", path));
+        let _ = proxy_wasm::hostcalls::log(LogLevel::Info, &format!("request path: {}", path));
         Action::Continue
-    }}
+    }
 
-    fn on_http_response_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {{
+    fn on_http_response_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
         Action::Continue
-    }}
-}}
+    }
+}
 "#
     .to_string()
 }
 
 fn dwara_yaml(name: &str) -> String {
     format!(
-        r#"listeners:
+        r#"# A minimal gateway config that loads the plugin. It validates
+# as generated: `dwara-cli validate dwara.yaml` passes before the
+# .wasm exists (validation does not check file existence).
+listeners:
   - name: http
     address: 127.0.0.1
     port: 8080
@@ -224,9 +227,9 @@ routes:
     match:
       path:
         type: prefix
-        value: /
+        value: /api
     action:
-      proxy: {{}}
+      type: proxy
     plugins:
       - {name}
 
@@ -278,20 +281,23 @@ The compiled `.wasm` file is at
 
 ## Run
 
-Start the dwara gateway with the included config:
+The included `dwara.yaml` is a complete, valid gateway config (verify
+with `dwara-cli validate dwara.yaml`). Start the gateway with it (the
+binary reads its config from `DWARA_CONFIG`, defaulting to
+`./dwara.yaml` — run from this directory):
 
 ```sh
-dwara run --config dwara.yaml
+DWARA_CONFIG=dwara.yaml dwara
 ```
 
 Or, if running from the dwara source tree:
 
 ```sh
-cargo run -p dwara-bin -- run --config dwara.yaml
+DWARA_CONFIG=dwara.yaml cargo run -p dwara-bin
 ```
 
-The gateway listens on `127.0.0.1:8080` and forwards requests to
-`127.0.0.1:9000`. The plugin logs the request path at the
+The gateway listens on `127.0.0.1:8080` and forwards `/api` requests
+to `127.0.0.1:9000`. The plugin logs the request path at the
 `request_headers` phase.
 
 ## Phase contract

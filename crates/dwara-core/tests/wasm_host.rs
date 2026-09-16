@@ -12,6 +12,7 @@
 //! by the host implementing the full ABI surface that such filters
 //! depend on; these tests prove each ABI method works correctly.
 
+use dwara_core::wasm::abi::{deserialize_header_map_spec, serialize_header_map_spec};
 use dwara_core::wasm::{
     self, deserialize_header_map, serialize_header_map, PluginLimits, WasmEngine, ACTION_CONTINUE,
     ACTION_END_STREAM,
@@ -23,6 +24,16 @@ fn wat_to_wasm(wat: &str) -> Vec<u8> {
     let buf = ParseBuffer::new(wat).expect("WAT parse buffer");
     let mut wat: wast::Wat = parse(&buf).expect("WAT parse");
     wat.encode().expect("WAT encode")
+}
+
+/// Render bytes as a WAT data-segment string body (every byte as a
+/// `\xx` escape) so a fixture can embed an exact wire-format blob.
+fn wat_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 4);
+    for b in bytes {
+        out.push_str(&format!("\\{b:02x}"));
+    }
+    out
 }
 
 /// A minimal proxy-wasm filter that:
@@ -113,7 +124,7 @@ const FILTER_ADD_HEADER_WAT: &str = r#"
     (i32.store8 (i32.add (local.get $val_ptr) (i32.const 4)) (i32.const 97))   ;; a
 
     (drop (call $proxy_add_header_map_value
-      (i32.const 2)           ;; BUFFER_REQUEST_HEADERS
+      (i32.const 0)           ;; BUFFER_REQUEST_HEADERS (spec MapType)
       (local.get $key_ptr) (i32.const 13)
       (local.get $val_ptr) (i32.const 5)))
     (i32.const 0)             ;; ACTION_CONTINUE
@@ -222,7 +233,7 @@ const FILTER_READ_HEADER_WAT: &str = r#"
 
     ;; Call proxy_get_header_map_value
     (drop (call $proxy_get_header_map_value
-      (i32.const 2)           ;; BUFFER_REQUEST_HEADERS
+      (i32.const 0)           ;; BUFFER_REQUEST_HEADERS (spec MapType)
       (local.get $key_ptr) (i32.const 5)
       (local.get $val_ptr_ptr) (local.get $val_size_ptr)))
 
@@ -248,6 +259,210 @@ const FILTER_READ_HEADER_WAT: &str = r#"
   (func (export "proxy_on_log") (param i32))
 )
 "#;
+
+/// A module shaped like the Rust proxy-wasm SDK's output (`dwara-cli
+/// plugin new` scaffolds against that SDK): the SPEC import names and
+/// arities (`proxy_send_local_response` with 8 params,
+/// `proxy_get_current_time_nanoseconds`, `proxy_get_log_level`,
+/// `proxy_get_status`, the callout/queue stubs with their spec
+/// arities), the spec MAP-TYPE constants for header lookups (request
+/// headers = 0), the `_start` / `proxy_on_context_create` lifecycle
+/// exports, and the wasi_snapshot_preview1 import set the
+/// wasm32-wasip1 target emits.
+const SDK_SHAPED_WAT: &str = r#"
+(module
+  ;; --- spec-named imports (the Rust proxy-wasm SDK's set) ---
+  (import "env" "proxy_log" (func $log (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_log_level" (func $get_log_level (param i32) (result i32)))
+  (import "env" "proxy_get_current_time_nanoseconds" (func $now (param i32) (result i32)))
+  (import "env" "proxy_get_header_map_value" (func $get_header (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_add_header_map_value" (func $add_header (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_send_local_response"
+    (func $send_local (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_get_status" (func $get_status (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_set_tick_period_milliseconds" (func $set_tick (param i32) (result i32)))
+  (import "env" "proxy_register_shared_queue" (func $reg_queue (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_resolve_shared_queue" (func $res_queue (param i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_dequeue_shared_queue" (func $deq_queue (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_enqueue_shared_queue" (func $enq_queue (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_http_call"
+    (func $http_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_grpc_call"
+    (func $grpc_call (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_grpc_stream"
+    (func $grpc_stream (param i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_grpc_send" (func $grpc_send (param i32 i32 i32 i32) (result i32)))
+  (import "env" "proxy_grpc_cancel" (func $grpc_cancel (param i32) (result i32)))
+  (import "env" "proxy_grpc_close" (func $grpc_close (param i32) (result i32)))
+  (import "env" "proxy_call_foreign_function"
+    (func $foreign (param i32 i32 i32 i32 i32 i32) (result i32)))
+  ;; --- the wasi subset wasm32-wasip1 emits ---
+  (import "wasi_snapshot_preview1" "environ_get" (func $environ_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_sizes_get"
+    (func $environ_sizes (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (import "wasi_snapshot_preview1" "random_get" (func $random_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_time_get"
+    (func $clock_time (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sched_yield" (func $sched_yield (param) (result i32)))
+
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (global $started (mut i32) (i32.const 0))
+  (global $root_created (mut i32) (i32.const 0))
+  (global $http_created (mut i32) (i32.const 0))
+
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+
+  (data (i32.const 65536) ":path")
+  (data (i32.const 65552) "x-sdk-path")
+  (data (i32.const 65584) "x-sdk-alive")
+  (data (i32.const 65616) "sdk module vm start")
+  (data (i32.const 65640) "ok")
+
+  ;; The SDK registers its context factories in _start.
+  (func (export "_start")
+    (global.set $started (i32.const 1)))
+
+  ;; The SDK builds its contexts on proxy_on_context_create.
+  (func (export "proxy_on_context_create") (param $ctx i32) (param $root i32)
+    (if (i32.eq (local.get $root) (i32.const 0))
+      (then (global.set $root_created (i32.const 1)))
+      (else (global.set $http_created (i32.const 1)))))
+
+  ;; Refuse to start unless _start and the root context creation ran —
+  ;; the exact sequence the SDK's dispatcher requires.
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32)
+    (if (i32.or (i32.eq (global.get $started) (i32.const 0))
+                (i32.eq (global.get $root_created) (i32.const 0)))
+      (then (return (i32.const 0))))
+    (drop (call $log (i32.const 2) (i32.const 65616) (i32.const 21)))
+    (drop (call $get_log_level (i32.const 70040)))
+    (drop (call $now (i32.const 70048)))
+    (drop (call $get_status (i32.const 70056) (i32.const 70060) (i32.const 70064)))
+    ;; get_status must answer Ok (0): the SDK's get_grpc_status wrapper
+    ;; panics on any non-Ok status, which would trap the module.
+    (if (i32.ne (call $get_status (i32.const 70056) (i32.const 70060) (i32.const 70064))
+                (i32.const 0))
+      (then (return (i32.const 0))))
+    (drop (call $set_tick (i32.const 0)))
+    (drop (call $reg_queue (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $res_queue (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $deq_queue (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $enq_queue (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $http_call (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                           (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                           (i32.const 0) (i32.const 0)))
+    (drop (call $grpc_call (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                           (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                           (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $grpc_stream (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                             (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                             (i32.const 0)))
+    (drop (call $grpc_send (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+    (drop (call $grpc_cancel (i32.const 0)))
+    (drop (call $grpc_close (i32.const 0)))
+    (drop (call $foreign (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+                         (i32.const 0) (i32.const 0)))
+    (drop (call $environ_sizes (i32.const 70072) (i32.const 70076)))
+    (drop (call $environ_get (i32.const 0) (i32.const 0)))
+    (drop (call $random_get (i32.const 70080) (i32.const 8)))
+    (drop (call $clock_time (i32.const 0) (i64.const 1) (i32.const 70088)))
+    (drop (call $sched_yield))
+    (i32.const 1)
+  )
+
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+
+  ;; The SDK dispatcher panics for a context it was never told to
+  ;; create; emulate that by refusing (no effects) when the http
+  ;; context was not created first.
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (local $vp i32) (local $vs i32)
+    (if (i32.eq (global.get $http_created) (i32.const 0)) (then (return (i32.const 0))))
+    (drop (call $get_header (i32.const 0) (i32.const 65536) (i32.const 5)
+              (i32.const 70000) (i32.const 70004)))
+    (local.set $vp (i32.load (i32.const 70000)))
+    (local.set $vs (i32.load (i32.const 70004)))
+    (if (i32.gt_s (local.get $vs) (i32.const 0))
+      (then (drop (call $add_header (i32.const 0) (i32.const 65552) (i32.const 10)
+                    (local.get $vp) (local.get $vs)))))
+    (i32.const 0))
+
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32)
+    (drop (call $add_header (i32.const 2) (i32.const 65584) (i32.const 11)
+              (i32.const 65640) (i32.const 2)))
+    (i32.const 0))
+
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_log") (param i32))
+  (func (export "proxy_on_delete") (param i32))
+)
+"#;
+
+#[test]
+fn sdk_shaped_module_runs_the_full_contract() {
+    // Guards the SDK-module path end to end at the host level: the
+    // spec import names/arities link, _start and proxy_on_context_create
+    // run before the phase exports, the spec map-type constants route
+    // header lookups to the right maps, and the wasi subset resolves.
+    let wasm = wat_to_wasm(SDK_SHAPED_WAT);
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(&wasm, PluginLimits::default(), Vec::new(), Vec::new())
+        .expect("compile");
+    // instantiate runs _start -> proxy_on_context_create(1, 0) ->
+    // proxy_on_vm_start; the module's vm_start returns 0 unless the
+    // sequence held, which surfaces here as an instantiate error.
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    // The vm_start log line proves the lifecycle sequence.
+    let logs = instance.logs();
+    assert!(
+        logs.iter()
+            .any(|(_, msg)| msg.contains("sdk module vm start")),
+        "expected vm-start log, got: {:?}",
+        logs
+    );
+
+    // Request phase: the :path lookup (spec bt=0) must find the value
+    // and copy it into x-sdk-path.
+    let headers = vec![(":path".to_string(), "/sdk/echo".to_string())];
+    let result = instance.on_request_headers(headers);
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    let modified = instance.request_headers();
+    assert!(
+        modified
+            .iter()
+            .any(|(k, v)| k == "x-sdk-path" && v == "/sdk/echo"),
+        "expected the :path copied to x-sdk-path, got: {:?}",
+        modified
+    );
+
+    // Response phase: the spec response-map constant (bt=2) must route
+    // the add to the response map.
+    let result =
+        instance.on_response_headers(vec![("content-type".to_string(), "text/plain".to_string())]);
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    let resp = instance.response_headers();
+    assert!(
+        resp.iter().any(|(k, v)| k == "x-sdk-alive" && v == "ok"),
+        "expected x-sdk-alive on the response map, got: {:?}",
+        resp
+    );
+
+    instance.on_done();
+}
 
 #[test]
 fn filter_adds_request_header() {
@@ -410,6 +625,461 @@ fn header_map_serialization_round_trip() {
     assert_eq!(decoded, headers);
 }
 
+// --- spec/SDK map wire format (proxy-wasm 0.2.5 layout) --------------------
+//
+// The spec-named hostcalls (proxy_get/set_header_map_pairs,
+// proxy_send_local_response) speak the layout the Rust proxy-wasm SDK
+// serializes and parses (hostcalls.rs utils::serialize_map /
+// deserialize_map): LE u32 entry count, then an LE u32 (key_len,
+// value_len) table, then NUL-terminated key/value strings. The tests
+// below pin the exact bytes and drive the hostcalls from WAT modules
+// that ENCODE or DECODE that layout themselves — the same algorithm
+// the SDK runs inside a plugin.
+
+#[test]
+fn spec_map_serialization_matches_sdk_layout_byte_for_byte() {
+    // Hand-pinned expected bytes (NOT produced by our serializer):
+    // [(":method", "GET")] -> count 1 (LE), table {7, 3} (LE),
+    // strings ":method\0GET\0".
+    let encoded = serialize_header_map_spec(&[(":method".to_string(), "GET".to_string())]);
+    assert_eq!(
+        encoded, b"\x01\x00\x00\x00\x07\x00\x00\x00\x03\x00\x00\x00:method\x00GET\x00",
+        "the spec layout is LE count + LE length table + NUL-terminated strings"
+    );
+    // Two entries: the length table lists BOTH entries' lengths before
+    // any string data (all lengths first, then all strings).
+    let encoded = serialize_header_map_spec(&[
+        ("a".to_string(), "1".to_string()),
+        ("bb".to_string(), "22".to_string()),
+    ]);
+    assert_eq!(
+        encoded,
+        b"\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00a\x001\x00bb\x0022\x00"
+    );
+    // The SDK's empty-map bytes: exactly the 4-byte LE count 0 (what
+    // send_http_response passes for empty headers).
+    assert_eq!(serialize_header_map_spec(&[]), b"\x00\x00\x00\x00");
+}
+
+#[test]
+fn spec_map_deserialization_mirrors_the_sdk() {
+    // An empty buffer is an empty map (the SDK's convention).
+    assert_eq!(
+        deserialize_header_map_spec(&[]),
+        Some(Vec::<(String, String)>::new())
+    );
+    // The SDK's empty-map bytes decode to an empty map.
+    assert_eq!(
+        deserialize_header_map_spec(b"\x00\x00\x00\x00"),
+        Some(Vec::<(String, String)>::new())
+    );
+    // Hand-written bytes (not our serializer's output) round-trip.
+    let hand = b"\x01\x00\x00\x00\x07\x00\x00\x00\x03\x00\x00\x00:method\x00GET\x00";
+    assert_eq!(
+        deserialize_header_map_spec(hand).unwrap(),
+        vec![(":method".to_string(), "GET".to_string())]
+    );
+    // Corrupt inputs are rejected (the SDK would panic on its unwraps;
+    // the host fails the hostcall instead): a count that overruns the
+    // length table, a truncated string, a missing NUL, a short buffer,
+    // non-UTF-8 bytes.
+    assert_eq!(deserialize_header_map_spec(b"\x01"), None);
+    assert_eq!(
+        deserialize_header_map_spec(b"\x01\x00\x00\x00\x00\x00\x00\x00\x00"),
+        None
+    );
+    assert_eq!(
+        deserialize_header_map_spec(b"\x01\x00\x00\x00\x07\x00\x00\x00\x03\x00\x00\x00:method"),
+        None
+    );
+    assert_eq!(
+        deserialize_header_map_spec(b"\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00aX"),
+        None
+    );
+    assert_eq!(
+        deserialize_header_map_spec(
+            b"\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\xff\x00\x41\x00"
+        ),
+        None
+    );
+    // Full round trip through our own pair of functions.
+    let headers = vec![
+        (":method".to_string(), "GET".to_string()),
+        ("x-custom".to_string(), "value with spaces".to_string()),
+    ];
+    let encoded = serialize_header_map_spec(&headers);
+    assert_eq!(deserialize_header_map_spec(&encoded).unwrap(), headers);
+}
+
+/// A WAT module that calls `proxy_send_local_response` with
+/// SDK-serialized header bytes (built by the test with
+/// serialize_header_map_spec — the byte layout itself is pinned by the
+/// tests above) and an optional body, then returns EndStream.
+fn send_local_response_wat(status: i32, headers: &[(String, String)], body: &[u8]) -> String {
+    let header_bytes = serialize_header_map_spec(headers);
+    let hdr_data = wat_bytes(&header_bytes);
+    let hdr_size = header_bytes.len();
+    let body_segment = if body.is_empty() {
+        String::new()
+    } else {
+        format!(r#"(data (i32.const 65600) "{}")"#, wat_bytes(body))
+    };
+    let (body_ptr, body_size) = if body.is_empty() {
+        (0, 0)
+    } else {
+        (65600, body.len())
+    };
+    format!(
+        r#"(module
+  (import "env" "proxy_send_local_response"
+    (func $send_local (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{hdr_data}")
+  {body_segment}
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $send_local
+      (i32.const {status})    ;; status_code
+      (i32.const 0) (i32.const 0)  ;; no status-code details
+      (i32.const {body_ptr}) (i32.const {body_size})
+      (i32.const 65536) (i32.const {hdr_size})  ;; SDK-serialized headers
+      (i32.const -1)))        ;; grpc_status: -1 (unused by send_http_response)
+    (i32.const 2))            ;; ACTION_END_STREAM
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#
+    )
+}
+
+#[test]
+fn send_local_response_accepts_sdk_serialized_headers() {
+    // The exact call every Rust proxy-wasm SDK plugin makes to
+    // short-circuit: send_http_response(status, headers, body)
+    // imports proxy_send_local_response with serialize_map(headers).
+    // Pre-fix, the host parsed those bytes with the legacy BE layout,
+    // failed, returned 1, and the SDK wrapper PANICKED on the
+    // non-Ok status.
+    let wat = send_local_response_wat(403, &[("x-local".to_string(), "hi".to_string())], b"denied");
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(Vec::new());
+    match result {
+        wasm::PhaseResult::LocalResponse(resp) => {
+            assert_eq!(resp.status, 403);
+            assert_eq!(
+                resp.headers,
+                vec![("x-local".to_string(), "hi".to_string())]
+            );
+            assert_eq!(resp.body, b"denied");
+        }
+        other => panic!("expected LocalResponse, got {:?}", other),
+    }
+    instance.on_done();
+}
+
+#[test]
+fn send_local_response_accepts_sdk_empty_map_bytes() {
+    // send_http_response(status, vec![], body) serializes the empty
+    // header map as the 4-byte LE count 0 — the host must parse that
+    // as "no headers", not as a corrupt buffer.
+    let wat = send_local_response_wat(429, &[], b"slow down");
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(Vec::new());
+    match result {
+        wasm::PhaseResult::LocalResponse(resp) => {
+            assert_eq!(resp.status, 429);
+            assert!(resp.headers.is_empty(), "no headers were sent");
+            assert_eq!(resp.body, b"slow down");
+        }
+        other => panic!("expected LocalResponse, got {:?}", other),
+    }
+    instance.on_done();
+}
+
+/// A WAT module that decodes `proxy_get_header_map_pairs` output using
+/// the SDK's exact algorithm (LE count at offset 0, LE length table at
+/// 4, NUL-terminated strings at 4 + count*8) and copies entry 0's key
+/// and value into request headers where the test can see them.
+const GET_PAIRS_SDK_WAT: &str = r#"
+(module
+  (import "env" "proxy_get_header_map_pairs"
+    (func $get_pairs (param i32 i32 i32) (result i32)))
+  (import "env" "proxy_add_header_map_value"
+    (func $add_header (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "x-k0")
+  (data (i32.const 65552) "x-v0")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (local $ptr i32) (local $count i32) (local $klen i32) (local $vlen i32)
+    (local $strs i32) (local $kp i32) (local $vp i32)
+    (drop (call $get_pairs (i32.const 0) (i32.const 70000) (i32.const 70004)))
+    (local.set $ptr (i32.load (i32.const 70000)))
+    ;; ptr 0 = the host's empty-map convention; nothing to decode.
+    (if (i32.eq (local.get $ptr) (i32.const 0)) (then (return (i32.const 0))))
+    ;; The SDK's deserialize: count (LE) at 0, the length table at 4.
+    (local.set $count (i32.load (local.get $ptr)))
+    (if (i32.ne (local.get $count) (i32.const 2)) (then (return (i32.const 0))))
+    (local.set $klen (i32.load (i32.add (local.get $ptr) (i32.const 4))))
+    (local.set $vlen (i32.load (i32.add (local.get $ptr) (i32.const 8))))
+    ;; Strings start after the whole length table: 4 + count*8.
+    (local.set $strs (i32.add (local.get $ptr)
+      (i32.add (i32.const 4) (i32.mul (local.get $count) (i32.const 8)))))
+    (local.set $kp (local.get $strs))
+    (local.set $vp (i32.add (local.get $kp) (i32.add (local.get $klen) (i32.const 1))))
+    (drop (call $add_header (i32.const 0) (i32.const 65536) (i32.const 4)
+              (local.get $kp) (local.get $klen)))
+    (drop (call $add_header (i32.const 0) (i32.const 65552) (i32.const 4)
+              (local.get $vp) (local.get $vlen)))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)
+"#;
+
+#[test]
+fn get_header_map_pairs_returns_sdk_wire_format() {
+    // A module running the SDK's decode algorithm over the returned
+    // buffer must recover the request headers entry for entry. Pre-fix
+    // the host emitted the legacy BE layout, which this decoder (and
+    // the SDK's) misparses as a huge count.
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(GET_PAIRS_SDK_WAT),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let headers = vec![
+        (":method".to_string(), "GET".to_string()),
+        (":path".to_string(), "/sdk/map".to_string()),
+    ];
+    let result = instance.on_request_headers(headers);
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    let modified = instance.request_headers();
+    assert!(
+        modified.iter().any(|(k, v)| k == "x-k0" && v == ":method"),
+        "entry 0's key decoded per the SDK layout, got: {modified:?}"
+    );
+    assert!(
+        modified.iter().any(|(k, v)| k == "x-v0" && v == "GET"),
+        "entry 0's value decoded per the SDK layout, got: {modified:?}"
+    );
+    instance.on_done();
+}
+
+#[test]
+fn set_header_map_pairs_accepts_sdk_wire_format() {
+    // A module replacing the request-headers map with SDK-serialized
+    // bytes (what the Rust SDK's set_map sends): the host must adopt
+    // exactly those pairs.
+    let encoded = serialize_header_map_spec(&[
+        ("x-set".to_string(), "yes".to_string()),
+        ("x-two".to_string(), "b".to_string()),
+    ]);
+    let wat = format!(
+        r#"(module
+  (import "env" "proxy_set_header_map_pairs"
+    (func $set_pairs (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{data}")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $set_pairs (i32.const 0) (i32.const 65536) (i32.const {size})))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        data = wat_bytes(&encoded),
+        size = encoded.len(),
+    );
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(vec![
+        (":method".to_string(), "GET".to_string()),
+        (":path".to_string(), "/old".to_string()),
+    ]);
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    assert_eq!(
+        instance.request_headers(),
+        &[
+            ("x-set".to_string(), "yes".to_string()),
+            ("x-two".to_string(), "b".to_string()),
+        ],
+        "the whole map is replaced with the SDK-serialized pairs"
+    );
+    instance.on_done();
+}
+
+#[test]
+fn log_buffer_is_capped_at_64_kib() {
+    // A plugin that spews through proxy_log must not grow the
+    // host-side buffer without bound: 5 x 16 KiB lines (80 KiB)
+    // buffer 64 KiB, then a truncation marker, then nothing more.
+    let line = vec![b'a'; 16 * 1024];
+    let wat = format!(
+        r#"(module
+  (import "env" "proxy_log" (func $log (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 2 32)
+  (global $alloc_ptr (mut i32) (i32.const 1024))
+  (func $proxy_on_memory_allocate (export "proxy_on_memory_allocate") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $alloc_ptr))
+    (global.set $alloc_ptr (i32.add (global.get $alloc_ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  (data (i32.const 65536) "{data}")
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_configure") (param i32 i32) (result i32) (i32.const 1))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    ;; This one crosses the cap; everything after it is dropped.
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    (drop (call $log (i32.const 2) (i32.const 65536) (i32.const {len})))
+    (i32.const 0))
+  (func (export "proxy_on_request_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_headers") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_response_body") (param i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "proxy_on_done") (param i32))
+  (func (export "proxy_on_log") (param i32))
+)"#,
+        data = wat_bytes(&line),
+        len = line.len(),
+    );
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(&wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let mut instance = module.instantiate(&engine).expect("instantiate");
+
+    let result = instance.on_request_headers(Vec::new());
+    assert!(matches!(result, wasm::PhaseResult::Continue));
+    let logs = instance.logs();
+    let total: usize = logs.iter().map(|(_, m)| m.len()).sum();
+    assert!(
+        total <= 64 * 1024 + 128,
+        "buffered log bytes stay bounded (64 KiB + marker), got {total}"
+    );
+    assert_eq!(
+        logs.len(),
+        5,
+        "4 full lines fit the cap, then one marker; the 5th and 6th lines are dropped"
+    );
+    assert!(
+        logs[logs.len() - 1]
+            .1
+            .contains("log buffer cap (64 KiB) reached; further plugin log output dropped"),
+        "the cap is visible in the buffer as a marker line: {:?}",
+        logs[logs.len() - 1]
+    );
+    instance.on_done();
+}
+
+#[test]
+fn trapped_start_fails_instantiation_with_its_own_error() {
+    // A module whose _start traps must fail AT INSTANTIATION with the
+    // _start trap itself — not surface later as an unrelated panic in
+    // proxy_on_context_create (the SDK dispatcher would find no
+    // registered root context).
+    let wat = r#"
+(module
+  (memory (export "memory") 1 32)
+  (func (export "_start") unreachable)
+  (func (export "proxy_on_vm_start") (param i32 i32) (result i32) (i32.const 1))
+)
+"#;
+    let engine = WasmEngine::new().expect("engine");
+    let module = engine
+        .compile(
+            &wat_to_wasm(wat),
+            PluginLimits::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("compile");
+    let err = match module.instantiate(&engine) {
+        Err(e) => e,
+        Ok(_) => panic!("a trapped _start must fail instantiation"),
+    };
+    assert!(
+        err.contains("_start"),
+        "the error names the phase that trapped: {err}"
+    );
+}
+
 #[test]
 fn plugin_limits_default_are_sensible() {
     let limits = PluginLimits::default();
@@ -525,9 +1195,21 @@ routes:
 
 #[test]
 fn abi_constants_match_proxy_wasm_spec() {
-    // Buffer types
+    // Buffer types (the BufferType namespace of proxy-wasm spec 2.1:
+    // used by proxy_get/set_buffer_bytes and proxy_get_buffer_status).
     assert_eq!(wasm::abi::BUFFER_REQUEST_BODY, 0);
     assert_eq!(wasm::abi::BUFFER_RESPONSE_BODY, 1);
+    assert_eq!(wasm::abi::BUFFER_VM_CONFIGURATION, 6);
+    assert_eq!(wasm::abi::BUFFER_PLUGIN_CONFIGURATION, 7);
+    // Map types (the MapType namespace: used by the header-map
+    // hostcalls). These are the values the Rust proxy-wasm SDK sends —
+    // request headers 0, response headers 2 — which is what makes
+    // SDK-built modules (e.g. `dwara-cli plugin new` output) work
+    // against the host.
+    assert_eq!(wasm::abi::BUFFER_REQUEST_HEADERS, 0);
+    assert_eq!(wasm::abi::BUFFER_REQUEST_TRAILERS, 1);
+    assert_eq!(wasm::abi::BUFFER_RESPONSE_HEADERS, 2);
+    assert_eq!(wasm::abi::BUFFER_RESPONSE_TRAILERS, 3);
     // Actions
     assert_eq!(ACTION_CONTINUE, 0);
     assert_eq!(ACTION_END_STREAM, 2);

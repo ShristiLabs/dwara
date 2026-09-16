@@ -12,8 +12,14 @@ use std::path::Path;
 use std::path::PathBuf;
 
 fn temp_dir() -> PathBuf {
+    // Process id + wall clock + a monotonically increasing counter:
+    // parallel tests within one process can observe the same clock
+    // tick, and a colliding dir makes scaffold() fail with
+    // "already exists" for a directory the test just made.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "dwara-plugin-test-{}-{}",
+        "dwara-plugin-test-{}-{}-{n}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -73,6 +79,25 @@ fn scaffold_dwara_yaml_references_plugin() {
     assert!(yaml.contains("my-plugin"));
     assert!(yaml.contains("request_headers"));
     assert!(yaml.contains("wasm32-wasip1"));
+}
+
+#[test]
+fn scaffold_dwara_yaml_validates_as_generated() {
+    // The generated manifest must pass the full CLI validate pipeline
+    // (parse + validate + compile dry-run) without edits: a real
+    // `action: { type: proxy }` on a sane prefix with its
+    // service/upstream chain. Validation deliberately does not check
+    // that the .wasm file exists yet.
+    let dir = temp_dir();
+    scaffold("my-plugin", dir.to_str().unwrap()).unwrap();
+
+    let yaml = fs::read_to_string(dir.join("my-plugin/dwara.yaml")).unwrap();
+    match dwara_cli::validate_config_text(&yaml) {
+        dwara_cli::ValidateOutcome::Valid { routes } => assert_eq!(routes, 1),
+        dwara_cli::ValidateOutcome::Invalid(issues) => {
+            panic!("as-generated dwara.yaml must validate, got: {issues:?}")
+        }
+    }
 }
 
 #[test]
