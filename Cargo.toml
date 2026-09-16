@@ -16,7 +16,13 @@ members = [
 # Linux-only scaffold (kernel 5.1+ io_uring) with no linked runtime;
 # excluded from the default workspace build and CI matrix. See
 # docs/adr/0003-io-uring-engine.md.
-exclude = ["crates/dwara-ebpf", "crates/dwara-uring"]
+# DW-161: example proxy-wasm plugin gallery. Each example is a
+# self-contained cdylib crate built for wasm32-wasip1 with NO
+# dependencies; they are copy-paste starters for plugin authors, not
+# workspace members (a wasm cdylib has no host artifact and pulling
+# them in would put the proxy-wasm examples on every `cargo
+# build --workspace`). Built/tested by plugins/examples/run-all.sh.
+exclude = ["crates/dwara-ebpf", "crates/dwara-uring", "plugins/examples"]
 
 [workspace.package]
 version = "0.1.0"

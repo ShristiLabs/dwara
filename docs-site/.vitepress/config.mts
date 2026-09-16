@@ -379,8 +379,16 @@ export default withMermaid(
                   link: "/guide/plugin-registry",
                 },
                 {
+                  text: "Plugin compatibility",
+                  link: "/guide/plugin-compat",
+                },
+                {
                   text: "Plugin SDK",
                   link: "/guide/plugin-sdk",
+                },
+                {
+                  text: "Plugin testing",
+                  link: "/guide/plugin-testing",
                 },
                 {
                   text: "Extension traits",

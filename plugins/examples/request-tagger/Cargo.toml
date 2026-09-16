@@ -1,0 +1,21 @@
+[package]
+name = "request-tagger"
+version = "0.1.0"
+edition = "2021"
+description = "dwara example plugin: stamp x-plugin-* correlation headers on request and response"
+license = "Apache-2.0"
+publish = false
+
+# A proxy-wasm plugin is a wasm cdylib: the artifact the gateway loads
+# is target/wasm32-wasip1/release/request_tagger.wasm. The extra
+# "rlib" is not part of that artifact; it exists so `cargo test` on
+# the host can link the crate and drive its callbacks. No
+# dependencies: src/abi.rs binds the proxy-wasm host imports
+# directly.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

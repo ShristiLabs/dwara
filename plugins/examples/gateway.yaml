@@ -1,0 +1,116 @@
+# Example plugin gallery gateway.
+#
+# Loaded by plugins/examples/run-all.sh with the working directory at
+# the repository root, so the .wasm paths below are relative to the
+# repo root (each example crate builds into its own target/):
+#
+#   DWARA_CONFIG=plugins/examples/gateway.yaml ./target/debug/dwara
+#
+# One route per example plus a /healthz responder, all proxying to the
+# harness echo upstream (plugins/examples/echo-upstream.py) on
+# 127.0.0.1:18102. Each example's README documents its route and
+# plugin entry in isolation.
+
+listeners:
+  - name: examples-http
+    address: 127.0.0.1
+    port: 18101
+    protocol: http
+
+routes:
+  - name: healthz
+    service: echo-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+    auth_required: false
+
+  - name: header-guard
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /guard/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - header-guard
+
+  - name: static-auth
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /auth/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - static-auth
+
+  - name: response-body-redact
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /statement
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - response-body-redact
+
+  - name: request-tagger
+    service: echo-service
+    match:
+      path:
+        type: prefix
+        value: /tag/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - request-tagger
+
+services:
+  - name: echo-service
+    upstream: echo-upstream
+
+upstreams:
+  - name: echo-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 18102
+
+plugins:
+  - name: header-guard
+    wasm: plugins/examples/header-guard/target/wasm32-wasip1/release/header_guard.wasm
+    phases:
+      - request_headers
+    config: '{"header":"x-guard-key","value":"open-sesame"}'
+
+  - name: static-auth
+    wasm: plugins/examples/static-auth/target/wasm32-wasip1/release/static_auth.wasm
+    phases:
+      - request_headers
+    config: '{"header":"authorization","scheme":"Bearer","token":"dwara-example-token"}'
+
+  - name: response-body-redact
+    wasm: plugins/examples/response-body-redact/target/wasm32-wasip1/release/response_body_redact.wasm
+    phases:
+      - response_body
+    config: '{"literals":["sk-live-12345"]}'
+
+  - name: request-tagger
+    wasm: plugins/examples/request-tagger/target/wasm32-wasip1/release/request_tagger.wasm
+    phases:
+      - request_headers
+      - response_headers
