@@ -357,6 +357,7 @@ export default withMermaid(
               link: "/guide/extensibility-overview",
               collapsed: true,
               items: [
+                { text: "Getting started", link: "/guide/extensibility-getting-started" },
                 { text: "Overview", link: "/guide/extensibility-overview" },
                 {
                   text: "Proxy-Wasm plugins",
