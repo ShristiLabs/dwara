@@ -1,17 +1,22 @@
 #!/bin/bash
-# test-07-plugin-sdk.sh — Plugin SDK: host CLI scaffolding (DW-057).
+# test-07-plugin-sdk.sh — Plugin SDK: host CLI scaffolding to a running
+# plugin (DW-057 / DW-159).
 #
 # `dwara-cli plugin new <NAME>` scaffolds a ready-to-build proxy-wasm
 # plugin project (see crates/dwara-cli/src/plugin_scaffold.rs): a Rust
 # crate targeting wasm32-wasip1 with the proxy-wasm dependency wired
-# up, a minimal filter implementing the four phase callbacks, a
-# dwara.yaml manifest for loading the plugin into the gateway, a README
-# with build instructions, and a .gitignore.
+# up, a minimal filter implementing the phase callbacks, a dwara.yaml
+# manifest for loading the plugin into the gateway, a README with
+# build instructions, and a .gitignore.
 #
 # This is a HOST CLI demo: the scratch demo image (dwara:demo, FROM
 # scratch) ships only the gateway server binary, so the plugin
 # subcommand runs on the host operator CLI (`dwara-cli`), not in the
-# container.
+# container. The final section additionally uses the prebuilt HOST
+# gateway (target/{debug,release}/dwara) to prove the whole
+# scaffold-to-running path on a DEFAULT build (plugins run with no
+# cargo feature; DW-157) and skips that section when the gateway
+# binary is missing.
 #
 # This test:
 #   1) Runs `dwara-cli plugin new` into a temp dir.
@@ -21,13 +26,15 @@
 #      src/lib.rs implements the four phase callbacks.
 #   4) Asserts the generated manifest references the plugin and its
 #      phases.
-#   5) Documents known scaffold quirks (verified live): the generated
-#      manifest does not pass gateway validation as-is. It emits
-#      `action: proxy: {}` (the schema requires `type: proxy`) and a
-#      prefix match on `/` (validation rejects a prefix that would
-#      match every path). The test asserts the as-generated manifest
-#      fails validation, then asserts the corrected manifest (action
-#      type + a non-root prefix) validates.
+#   5) Asserts the generated manifest is a VALID gateway config as
+#      generated: `dwara-cli validate` passes on the untouched
+#      dwara.yaml (a real `action: { type: proxy }` route on the /api
+#      prefix with its service/upstream chain; validation does not
+#      check that the .wasm exists yet).
+#   6) The SDK round-trip (DW-159): builds the scaffolded crate with
+#      `cargo build --release --target wasm32-wasip1`, loads the .wasm
+#      into a real gateway, and asserts the plugin's header effect on
+#      a live response.
 #
 # See docs-site/guide/plugin-sdk.md for the workflow: scaffold, build
 # with `cargo build --release --target wasm32-wasip1`, load the .wasm
@@ -36,6 +43,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../_shared/helpers.sh"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "=== test-07-plugin-sdk ==="
 
@@ -53,6 +62,15 @@ if [ -z "$CLI" ]; then
   exit 1
 fi
 echo "using dwara-cli at: $CLI"
+
+# Locate the host gateway for the round-trip section (skip-with-note
+# when missing; sections 1-5 are CLI-only and still run).
+DWARA=""
+for c in "$REPO_ROOT/target/debug/dwara" \
+         "$REPO_ROOT/target/release/dwara" \
+         "$(command -v dwara 2>/dev/null || true)"; do
+  if [ -n "$c" ] && [ -x "$c" ]; then DWARA="$c"; break; fi
+done
 
 # 1) Scaffold a plugin into a temp dir (cleaned up on exit).
 SCRATCH="$(mktemp -d)"
@@ -90,6 +108,7 @@ assert_contains "$cargo_toml" "proxy-wasm" "Cargo.toml depends on proxy-wasm"
 lib_rs=$(cat "$PLUGIN_DIR/src/lib.rs")
 assert_contains "$lib_rs" "on_http_request_headers" "lib.rs stubs on_http_request_headers"
 assert_contains "$lib_rs" "on_http_response_headers" "lib.rs stubs on_http_response_headers"
+assert_contains "$lib_rs" "hostcalls::log" "lib.rs logs via the proxy-wasm hostcalls module"
 
 # 4) Assert the generated manifest declares the plugin + phases.
 manifest=$(cat "$PLUGIN_DIR/dwara.yaml")
@@ -98,28 +117,132 @@ assert_contains "$manifest" "request_headers" "manifest declares the request_hea
 assert_contains "$manifest" "response_headers" "manifest declares the response_headers phase"
 assert_contains "$manifest" "wasm32-wasip1" "manifest points at the wasm32-wasip1 build output"
 
-# 5) Known scaffold quirks, verified live: the generated manifest does
-#    not pass gateway validation as-is -- it emits `action: proxy: {}`
-#    (the schema requires `type: proxy`) and a prefix match on `/`
-#    (validation rejects a prefix that would match every path). Assert
-#    the rejection, then fix both shapes and assert the corrected
-#    manifest validates.
+# 5) The generated manifest is a valid gateway config as generated:
+#    the scaffold emits a real `action: { type: proxy }` route on the
+#    /api prefix with its service/upstream chain, so `dwara-cli
+#    validate` passes on the untouched dwara.yaml (validation does not
+#    check that the .wasm exists yet).
 out=$("$CLI" validate "$PLUGIN_DIR/dwara.yaml" 2>&1) && rc=0 || rc=1
-assert_status 1 "$rc" "as-generated manifest fails validation (scaffold quirks)"
-assert_contains "$out" "config error" "rejection is a config error naming the issue"
+assert_status 0 "$rc" "as-generated manifest passes validation"
+assert_contains "$out" "ok:" "validation prints ok for the generated manifest"
 
-sed -i.bak -e 's/^      proxy: {}$/      type: proxy/' \
-           -e 's|^        value: /$|        value: /api/|' "$PLUGIN_DIR/dwara.yaml"
-rm -f "$PLUGIN_DIR/dwara.yaml.bak"
-out=$("$CLI" validate "$PLUGIN_DIR/dwara.yaml" 2>&1) && rc=0 || rc=1
-assert_status 0 "$rc" "corrected manifest (type: proxy + /api/ prefix) validates"
-assert_contains "$out" "ok:" "validation prints ok for the corrected manifest"
+# 6) The SDK round-trip (DW-159): build the scaffolded crate, load it
+#    into a real gateway, assert the plugin's header effect live.
+#    Plugins run on every DEFAULT build (no cargo feature).
+if [ -z "$DWARA" ]; then
+  echo ""
+  echo "NOTE: host gateway binary not found (build it: cargo build -p"
+  echo "dwara-bin) — skipping the build-and-run round-trip; sections"
+  echo "1-5 above verified the scaffold itself."
+  print_summary
+  exit 0
+fi
+echo "using gateway at: $DWARA"
 
 echo ""
-echo "NOTE: the plugin SDK is a host-side workflow (DW-057). Scaffold"
-echo "with 'dwara-cli plugin new <name>', build with 'cargo build"
-echo "--release --target wasm32-wasip1', then load the .wasm via the"
-echo "gateway's top-level plugins block (requires a feature-enabled"
-echo "build). See docs-site/guide/plugin-sdk.md."
+echo "--- SDK round-trip: build the scaffolded plugin ---"
+# Give the scaffold its effect: a response header at response_headers
+# (the workflow every plugin author starts with).
+python3 - "$PLUGIN_DIR/src/lib.rs" "$PLUGIN_NAME" <<'PYEOF'
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+old = """    fn on_http_response_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
+        Action::Continue
+    }"""
+new = """    fn on_http_response_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
+        self.add_http_response_header("x-dwara-plugin", "%s");
+        Action::Continue
+    }""" % name
+assert old in src, "response headers callback not found in the scaffold"
+open(path, "w").write(src.replace(old, new))
+PYEOF
+assert_status 0 $? "the response-headers callback was patched"
+
+rustup target add wasm32-wasip1 >/dev/null 2>&1
+assert_status 0 $? "rustup target add wasm32-wasip1 is installed (idempotent)"
+(cd "$PLUGIN_DIR" && cargo build --release --target wasm32-wasip1 >"$SCRATCH/build.log" 2>&1) && rc=0 || rc=1
+if [ "$rc" != "0" ]; then tail -20 "$SCRATCH/build.log"; fi
+assert_status 0 "$rc" "the scaffolded crate builds to wasm32-wasip1"
+
+WASM="$PLUGIN_DIR/target/wasm32-wasip1/release/${PLUGIN_NAME//-/_}.wasm"
+if [ -f "$WASM" ]; then
+  echo -e "${GREEN}PASS${NC}: the .wasm artifact exists"
+  PASS=$((PASS + 1))
+else
+  echo -e "${RED}FAIL${NC}: the .wasm artifact is missing (expected $WASM)"
+  FAIL=$((FAIL + 1))
+fi
+
+PORT=18095
+BASE_URL="http://127.0.0.1:$PORT"
+LOG="$SCRATCH/gateway.log"
+gw_pid=""
+cleanup() {
+  [ -n "$gw_pid" ] && kill "$gw_pid" 2>/dev/null || true
+  rm -rf "$SCRATCH"
+}
+trap cleanup EXIT
+
+cat >"$SCRATCH/gw.yaml" <<YAML
+listeners:
+  - name: sdk-http
+    address: 127.0.0.1
+    port: $PORT
+    protocol: http
+
+routes:
+  - name: hello
+    service: sdk-service
+    match:
+      path:
+        type: prefix
+        value: /hello
+    action:
+      type: respond
+      status: 200
+      body: '{"hello":"world"}'
+      headers:
+        Content-Type: application/json
+    plugins:
+      - $PLUGIN_NAME
+
+services:
+  - name: sdk-service
+    upstream: sdk-upstream
+
+upstreams:
+  - name: sdk-upstream
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 1
+
+plugins:
+  - name: $PLUGIN_NAME
+    wasm: $WASM
+    phases:
+      - request_headers
+      - response_headers
+YAML
+
+echo ""
+echo "--- SDK round-trip: run the gateway, assert the effect ---"
+DWARA_CONFIG="$SCRATCH/gw.yaml" "$DWARA" >"$LOG" 2>&1 &
+gw_pid=$!
+wait_for "$BASE_URL/hello" 30
+
+status=$(http_status "$BASE_URL/hello")
+assert_status "200" "$status" "GET /hello returns 200 with the plugin loaded"
+headers=$(http_headers "$BASE_URL/hello")
+assert_header "$headers" "x-dwara-plugin" "$PLUGIN_NAME" \
+  "the scaffolded plugin stamped x-dwara-plugin: $PLUGIN_NAME"
+
+echo ""
+echo "NOTE: plugins run on every default build (no cargo feature). The"
+echo "15-minute quickstart this test mirrors — scaffold, implement,"
+echo "build, load, curl — is documented in docs-site/guide/plugin-sdk.md."
 
 print_summary

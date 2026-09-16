@@ -208,10 +208,11 @@ request or admin path. There are no compile-time feature packs: the
 only cargo features are `ent`, the test-only `loom`, and the optional
 `cel-jit` accelerator. What varies is dispatch and config wiring:
 
-- **proxy-wasm host and native filter chain** — host, runner,
-  lifecycle manager, and the `plugins:` config block all exist; the
-  live dataplane still runs a no-wasm placeholder while chain
-  dispatch lands.
+- **proxy-wasm plugins are live on the request path** (see
+  [Proxy-Wasm plugins](./proxy-wasm-plugins)); the native
+  filter chain dispatches in the same unified chain, but ships no
+  built-in filters and registers through an embedder seam (see
+  [Native plugin filters](./native-plugins)).
 - **CEL expressions** — engine compiled in (plus the optional
   `cel-jit`); no config keys consume expressions yet.
 - **Cedar policy and OPA authorization** — both authorizers compiled

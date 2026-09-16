@@ -6,13 +6,12 @@ companion to [Proxy-Wasm plugins](./proxy-wasm-plugins) and [Native
 plugin filters](./native-plugins).
 
 ::: info Status
-The plugin runtime compiles into every build — there are no
-`wasm`/`plugins` cargo features (see
-[Editions](./editions#scaffolded-surfaces)). The lifecycle manager,
-runner, and unified dispatch chain are complete and test-covered as
-library components; wiring them into the gateway's request path is
-landing iteratively (see the [changelog](https://github.com/shristilabs/dwara/blob/main/CHANGELOG.md)).
-This page documents the lifecycle behavior the runtime implements.
+The plugin runtime is live: plugins load, run on the request path,
+hot-swap on reload, and are health-tracked in every build — there are
+no `wasm`/`plugins` cargo features. Health is observable through the
+admin API's plugin status surface (`GET /plugins`), the
+`dwara_plugin_failures_total{name,reason}` /
+`dwara_plugin_total{state}` metrics, and the load-failure log lines.
 :::
 
 ## When to use this
@@ -25,28 +24,31 @@ This page documents the lifecycle behavior the runtime implements.
 
 ## Loading
 
-On load, the plugin lifecycle manager, for each configured plugin:
+On every config publish (startup and reload), the plugin lifecycle
+manager, for each configured plugin:
 
 1. Reads the plugin's `.wasm` file from the configured path.
-2. Computes a SHA-256 checksum of the module.
-3. Compiles the module with wasmtime (via the plugin runner).
-4. Validates the module against the proxy-wasm ABI: required exports
-   (`proxy_on_vm_start` at minimum), an exported linear `memory`, and
-   no unknown host-function imports.
-5. Instantiates the module with the configured resource limits
-   (fuel, memory, timeout).
+2. Computes a checksum of the module (hot-swap keying).
+3. Compiles the module with wasmtime and validates the proxy-wasm ABI
+   (`proxy_on_vm_start` export at minimum, an exported linear
+   `memory`, no unknown host imports) via the plugin runner.
+4. Tracks the plugin's health from the outcome.
 
-A plugin whose file cannot be read or whose module fails to compile
-**fails the load** -- the operator is expected to know, not discover
-it later from silently missing behavior. (Native filters do not go
-through this path: they are registered in the
+A plugin whose file cannot be read or whose module fails to compile is
+marked **Crashed at publish time** and logged (`plugin_load_failed` /
+`plugin_compile_failed`) -- the rest of the config still loads, and
+routes referencing the crashed plugin fail closed with 500
+`plugin_unavailable` from the first request of the new generation.
+The operator is expected to know, not discover it later from silently
+missing behavior. (Native filters do not go through this path: they
+are registered in the
 [`NativeRegistry`](./native-plugins#registration) at startup and
 dispatched by the unified chain.)
 
 ## Hot swap on reload
 
-When config is reloaded, plugins are re-evaluated by comparing
-checksums:
+When config is reloaded, plugins are re-evaluated by comparing the
+module checksum:
 
 - **Unchanged plugin** (same checksum): the previously loaded instance
   and its health state are kept -- nothing is recompiled.
@@ -65,21 +67,29 @@ The runtime tracks per-plugin health:
 | State | Description |
 | --- | --- |
 | `Healthy` | Loaded and serving normally. |
-| `Crashed { error, crash_count }` | The plugin failed at runtime (e.g. a trap); `crash_count` increments per crash. Routes referencing a crashed plugin fail closed with `500`. |
-| `Disabled { reason }` | The plugin was disabled -- manually or by the circuit breaker. |
+| `Crashed { error, crash_count }` | The plugin cannot serve: its `.wasm` could not be read or compiled at publish time. `crash_count` grows across reloads of the same broken file. Routes referencing a crashed plugin fail closed with `500`. |
+| `Disabled { reason }` | The plugin was disabled through the lifecycle API. |
 
 Transitions:
 
-- A runtime failure calls `mark_crashed` with the error; the counter
-  accumulates across crashes.
-- A successful invocation (or a changed checksum on reload) calls
-  `mark_healthy`, resetting to `Healthy`.
-- The circuit breaker can `disable` a plugin with a reason; a disabled
-  plugin is not invoked.
+- A read or compile failure at publish marks the plugin `Crashed`
+  (logged as `plugin_load_failed` / `plugin_compile_failed`); the
+  crash counter accumulates while the file stays broken.
+- A reload that fixes the file (the checksum changes, or the plugin
+  re-publishes clean) resets the plugin to `Healthy`.
+- `mark_crashed` / `mark_healthy` / `disable` are lifecycle APIs for
+  embedders; the stock gateway sets health at publish time only.
 
-Health state currently lives in the lifecycle manager. Exposing plugin
-health through the admin API is a documented follow-up -- there is no
-`/plugins` admin endpoint yet.
+One honest caveat: a **runtime** trap (fuel exhaustion, panic) answers
+500 `plugin_failed` on the affected requests but does not flip the
+stored health state -- the plugin still reads `Healthy`, and fixing it
+means shipping new bytes (a checksum change) and reloading. Watch
+`dwara_plugin_failures_total{name,reason="trap"}` for runtime traps.
+
+Health state lives in the lifecycle manager and is served through the
+admin API's plugin status surface: `GET /plugins` returns one entry
+per declared plugin with its state, checksum, and the routes
+referencing it (see [Admin API](./admin-api)).
 
 ## Failure isolation
 
@@ -88,12 +98,15 @@ isolated to the routes that actually use the plugin:
 
 1. The failure is recorded on the plugin (`Crashed`), with the error.
 2. Requests on routes referencing the crashed plugin fail closed with
-   `500` -- a broken plugin must not silently turn into an open pipe.
-3. Requests on routes that do not reference it are unaffected.
+   `500` `plugin_unavailable` -- a broken plugin must not silently
+   turn into an open pipe.
+3. Requests on routes that do not reference it are unaffected, and the
+   plugin-less fast path never touches the plugin machinery at all.
 
-A crash does not disable the plugin permanently: the next successful
-invocation marks it healthy again (and a reload that changes the
-module resets health outright).
+A crash does not disable the plugin permanently: a reload that fixes
+the file publishes the plugin `Healthy` again. Every request-path
+failure also increments `dwara_plugin_failures_total{name,reason}` and
+sets the access log's `plugin_short_circuit` flag.
 
 ## Phase ordering
 
@@ -106,7 +119,8 @@ execution order.
 
 ## Runnable demo
 
-Run this feature against a live gateway: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) (test
-script: `test-06-plugin-lifecycle.sh`) in the repository.
-The demo documents the current limitations alongside what
-runs today; see its README.
+Run this feature against a live gateway: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository.
+`test-06-plugin-lifecycle.sh` verifies the lifecycle config shape and
+the live hot-reload flow; `test-02-proxy-wasm.sh` additionally asserts
+the crashed-plugin fail-closed behavior live. See the category README
+for prerequisites and teardown.

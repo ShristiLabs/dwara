@@ -3,9 +3,10 @@
 This demo documents dwara's extensibility surface: native plugin filters,
 Proxy-Wasm (WebAssembly) plugins, CEL (Common Expression Language) expressions,
 the nano-services pattern, the Extism PDK plugin runtime, plugin lifecycle
-management, and the plugin SDK scaffolding CLI. It verifies the gateway
-starts and proxies correctly with the default build, and documents how to
-enable each extensibility mechanism via custom builds.
+management, and the plugin SDK scaffolding CLI. Proxy-wasm plugins run on
+the live request path of every default build; the remaining mechanisms are
+either embedder seams (native filters) or feature-gated custom builds
+(CEL, nano-services, Extism).
 
 ## What the demo covers
 
@@ -31,19 +32,34 @@ and optional `config`. Routes reference plugins via `plugins: [name]`.
 
 **Build:** `cargo build --release --features plugins`
 
-### Proxy-Wasm (WebAssembly) plugins (DW-055)
+### Proxy-Wasm (WebAssembly) plugins (DW-055 / DW-157)
 
-dwara supports Proxy-Wasm (WebAssembly) plugins via the `wasm` cargo
-feature (default OFF). Each plugin is a `.wasm` module loaded at startup
-and run on the request pipeline phases it declares. The host uses
-wasmtime as the WebAssembly engine. Community Kong/Envoy proxy-wasm
-filters run unmodified.
+Proxy-Wasm plugins run on the live request path in every DEFAULT
+build — there is no `wasm` cargo feature to enable. Each plugin is a
+`.wasm` module loaded at config publish time (checksum-tracked across
+hot reloads) and run at the phases it declares. The host uses wasmtime
+as the WebAssembly engine and registers the proxy-wasm spec ABI names,
+so plugins built with the Rust `proxy-wasm` SDK (what
+`dwara-cli plugin new` scaffolds) run as-is.
 
 **Config:** top-level `plugins` list with `wasm: <path>`, `phases`,
 optional `config` and `limits` (fuel, memory_mb, timeout_ms). Routes
 reference plugins via `plugins: [name]`.
 
-**Build:** `cargo build --release --features wasm`
+**Dispatch contract (DW-157):** `request_headers` runs after route
+resolution before authn; `request_body` runs before the upstream (the
+body is buffered up to the route's `limits.max_body_bytes`, else 1
+MiB — an over-cap body answers 500 `plugin_body_too_large`);
+`response_headers` runs after the upstream responds;
+`response_body` runs after masking (skipped, and logged, for
+streaming/SSE and content-encoded bodies). A plugin's
+`send_http_response` short-circuits without dialing the upstream.
+Everything fails closed on the referencing route only: a
+crashed/disabled/unloadable plugin answers 500 `plugin_unavailable`, a
+WASM trap answers 500 `plugin_failed`. `test-02` proves the whole
+scaffold-to-running path live.
+
+**Build:** none beyond `cargo build` — the host is always compiled in.
 
 ### CEL (Common Expression Language) expressions (DW-058 / DW-059)
 
@@ -131,11 +147,12 @@ The plugin lifecycle manager owns how plugins are loaded, hot-swapped,
 and health-tracked (see `crates/dwara-core/src/wasm/lifecycle.rs` and
 the [plugin lifecycle guide](../../docs-site/guide/plugin-lifecycle.md)):
 
-- **Loading:** read the `.wasm` file, compute a SHA-256 checksum,
-  compile with wasmtime, validate the proxy-wasm ABI (`proxy_on_vm_start`
-  export at minimum, exported linear memory, no unknown host imports),
-  instantiate with the configured limits. A module that cannot be read
-  or compiled **fails the load** -- the operator knows up front.
+- **Loading:** read the `.wasm` file, compute a checksum, compile with
+  wasmtime, validate the proxy-wasm ABI (`proxy_on_vm_start` export at
+  minimum, exported linear memory, no unknown host imports), register
+  the module with the per-request runner. A module that cannot be read
+  or compiled marks that plugin `Crashed` at publish time (the load
+  itself succeeds; routes referencing the plugin fail closed with 500).
 - **Hot swap on reload:** plugins are re-evaluated by comparing
   checksums. Unchanged: the loaded instance and health state are kept
   (no recompilation). Changed: the old module is replaced and health
@@ -152,12 +169,14 @@ the [plugin lifecycle guide](../../docs-site/guide/plugin-lifecycle.md)):
   routes are unaffected. Phase ordering across multiple plugins is
   deterministic (phase first, then the route's plugin-list order).
 
-The lifecycle manager is a complete, test-covered library component
-behind the `wasm` feature (default OFF) -- the default `dwara:demo`
-image exposes no live plugin surface. `test-06` verifies the config
-schema the lifecycle manager consumes (plugins block + route
-attachment) and the live config hot-reload flow (DW-006) that triggers
-checksum re-evaluation in a feature-enabled build.
+The lifecycle manager runs on every DEFAULT build (no cargo feature).
+An unreadable or uncompilable `.wasm` marks THAT plugin `Crashed` at
+publish time — the rest of the config loads, and routes referencing
+the crashed plugin fail closed with 500 from the first request of the
+new generation. `test-06` verifies the config schema the lifecycle
+manager consumes (plugins block + route attachment) and the live
+config hot-reload flow (DW-006) that triggers checksum re-evaluation;
+`test-02` asserts the crashed-plugin fail-closed behavior live.
 
 ### Plugin SDK: host CLI scaffolding (DW-057)
 
@@ -170,19 +189,20 @@ dwara-cli plugin new my-plugin
 This creates `my-plugin/` with a `Cargo.toml` (cdylib targeting
 `wasm32-wasip1`, `proxy-wasm` dependency), `src/lib.rs` (the
 request/response headers phase callbacks stubbed out), a `dwara.yaml`
-manifest, a README, and a `.gitignore`. Build with `cargo build
---release --target wasm32-wasip1`, then load the `.wasm` via the
-gateway's top-level `plugins` block. See the
+manifest, a README, and a `.gitignore`. The generated manifest is a
+complete, valid gateway config — `dwara-cli validate dwara.yaml`
+passes as generated (the `.wasm` path is not checked for existence
+until the gateway loads it). Build with `cargo build --release
+--target wasm32-wasip1`, then load the `.wasm` via the gateway's
+top-level `plugins` block. See the
 [plugin SDK guide](../../docs-site/guide/plugin-sdk.md).
 
-The scratch demo image ships only the gateway server binary, so this
-is a **host CLI** workflow. `test-07` runs the scaffold into a temp
-dir and asserts the generated files and their contents. Known quirks
-(verified live): the generated manifest does not pass gateway
-validation as-is -- it emits `action: proxy: {}` (the schema requires
-`type: proxy`) and a prefix match on `/` (validation rejects a prefix
-that would match every path). Fix both before `dwara-cli validate`
-passes.
+The scratch demo image ships only the gateway server binary, so the
+scaffold runs on the **host CLI**; `test-07` additionally drives the
+full SDK round-trip against the prebuilt host gateway (scaffold ->
+implement a header effect -> build -> load -> curl asserts the
+effect) — plugins run on every default build, no cargo feature
+needed.
 
 ### Extension traits (developer-facing)
 
@@ -212,29 +232,27 @@ documents the enterprise backends behind the same traits.
 
 | Feature | Cargo feature | Default build | Config accepted | Runtime effect |
 |---------|---------------|---------------|-----------------|----------------|
-| Native filters | `plugins` | OFF | Yes (inert) | None without feature |
-| Proxy-Wasm | `wasm` | OFF | Yes (inert) | None without feature |
+| Native filters | none | ON (dispatch live; registration is an embedder seam) | Yes | Unified chain dispatches registered filters; no built-in filters ship |
+| Proxy-Wasm | none | ON (live on the request path) | Yes | Four dispatch phases, fail-closed 500s, short-circuit |
 | CEL | `cel` | OFF | Fields not in schema | None without feature |
 | Nano-services | `nano_services` | OFF | Yes (inert, 502) | None without feature |
 | Extism PDK | `extism` | OFF | No (`extism:` selector rejected) | Stubbed no-ops |
-| Plugin lifecycle | `wasm` | OFF | Yes (inert; no admin endpoint) | None without feature |
-| Plugin SDK | (host CLI) | CLI on host | n/a (scaffolds files) | Host-side scaffold |
+| Plugin lifecycle | none | ON (loads, hot-swaps, health-tracks) | Yes | Checksum hot-swap; Crashed plugins fail closed |
+| Plugin SDK | (host CLI) | CLI on host | n/a (scaffolds files) | Scaffold builds and runs on a default gateway |
 | Extension traits | (developer-facing) | n/a | No config surface | n/a (trait swap) |
 
 The default `dwara:demo` image (built from `Dockerfile.scratch`) uses
-`cargo build --release` with NO features enabled. This keeps the binary
-within the 25MB budget (wasmtime + cranelift alone add significant size).
-The config schema ACCEPTS the `plugins` top-level block and the
-`nano_service` route action regardless of features (so configs
-round-trip without the features), but they are inert without the
-features compiled in.
-
-To build a feature-enabled image, modify `Dockerfile.scratch` to add
-the desired features to the `cargo build` line, e.g.:
+a plain `cargo build --release`. The proxy-wasm host, the unified
+dispatch chain, and the plugin lifecycle are always compiled in — a
+`.wasm` placed at a readable path in the container loads and runs.
+The remaining feature-gated surfaces (CEL, nano-services, Extism) are
+inert without their features; to enable them in an image, modify
+`Dockerfile.scratch` to add the features to the `cargo build` line,
+e.g.:
 
 ```sh
 RUN cargo build --release --target "$(cat /target.triple)" --bin dwara \
-    -p dwara-bin --features "plugins,wasm,nano_services,cel"
+    -p dwara-bin --features "nano_services,cel"
 ```
 
 ## Prerequisites
@@ -314,17 +332,24 @@ build, while documenting the extensibility mechanism it covers:
 | Test | Verifies | Expected |
 |------|----------|----------|
 | test-01-native-plugins | gateway starts, /healthz 200, /v1/echo/test 200 | All pass |
-| test-02-proxy-wasm | gateway starts, /healthz 200, /v1/echo/test 200 | All pass |
+| test-02-proxy-wasm | scaffold -> build -> load -> curl asserts the plugin's header effect; plugin-less fast path intact; broken plugin fails closed 500; blast radius isolated (host-based) | All pass |
 | test-03-cel-expressions | gateway starts, /healthz 200, /v1/echo/test 200, / 200 | All pass |
 | test-04-nano-services | gateway starts, echo + static composed services work | All pass |
 | test-05-extism-pdk | plugins-block shape validates; `extism:` selector rejected (documented limitation); gateway proxies | All pass |
 | test-06-plugin-lifecycle | lifecycle config shape validates; reload-nudge flow keeps serving | All pass |
-| test-07-plugin-sdk | `dwara-cli plugin new` scaffolds the 5 files; manifest quirk documented + fixed manifest validates | All pass |
+| test-07-plugin-sdk | `dwara-cli plugin new` scaffolds the 5 files; manifest quirk documented + fixed manifest validates; SDK round-trip (build + load + curl) passes | All pass |
 
-Tests 05-07 additionally use the **host** operator CLI
-(`dwara-cli`, at `target/debug/dwara-cli` or `target/release/dwara-cli`
-after `cargo build -p dwara-cli`) for config-shape validation and the
-plugin scaffold; the container image ships only the gateway server.
+Tests 05-07 use the **host** operator CLI (`dwara-cli`, at
+`target/debug/dwara-cli` or `target/release/dwara-cli` after
+`cargo build -p dwara-cli`) for config-shape validation and the plugin
+scaffold; the container image ships only the gateway server. Tests 02
+and 07 are **host-based end-to-end** (like `09-operations`' test-09):
+they additionally use the prebuilt host gateway
+(`target/{debug,release}/dwara` after `cargo build -p dwara-bin`) and
+skip their round-trip sections with a message when it is missing. The
+plugin builds need the `wasm32-wasip1` rustup target (installed
+idempotently by the scripts) and network access for the first
+`proxy-wasm` crate fetch.
 
 ## Files
 
@@ -334,12 +359,12 @@ plugin scaffold; the container image ships only the gateway server.
   dwara.yaml                      gateway config (listeners, routes, services,
                                   upstreams, admin, documented plugins block)
   test-01-native-plugins.sh       native plugin filters (NativeFilter, DW-119)
-  test-02-proxy-wasm.sh           proxy-wasm (WebAssembly) plugins (DW-055)
+  test-02-proxy-wasm.sh           proxy-wasm plugins live: scaffold -> build -> load -> curl (DW-055/DW-157/DW-159)
   test-03-cel-expressions.sh      CEL expressions (DW-058/059)
   test-04-nano-services.sh        nano-services pattern (DW-106)
   test-05-extism-pdk.sh           Extism PDK runtime (DW-109, stubbed + config-shape)
   test-06-plugin-lifecycle.sh     plugin lifecycle (DW-056, config shape + reload flow)
-  test-07-plugin-sdk.sh           plugin SDK scaffold via host CLI (DW-057)
+  test-07-plugin-sdk.sh           plugin SDK scaffold + SDK round-trip on a default build (DW-057/DW-159)
   README.md                       this file
   data/                           SQLite state DB (mounted volume)
 ```

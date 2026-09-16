@@ -18,13 +18,17 @@ contract. Only the implementation differs -- compiled-in vs
 sandboxed-and-hot-loaded.
 
 ::: info Status
-Native filters compile into every build — there is no `plugins` cargo
-feature (see [Editions](./editions#scaffolded-surfaces)). The
-`NativeFilter` trait, registry, and unified `PluginChain` are complete
-and test-covered as library components; dispatching the chain from the
-gateway's request path is landing iteratively. The `plugins:` config
-below (including the `native:`/`wasm:` mutual-exclusion validation)
-parses and validates in any build.
+The unified dispatch chain runs native filters on the live request
+path in every build, and a native filter behaves exactly like a WASM
+plugin once registered (same phases, same fail-closed semantics; a
+factory that errors while the chain is built answers 500
+`plugin_unavailable`, never a silent skip). One honest caveat: **no
+built-in native filters ship with the gateway, and filter registration
+is an embedder seam** — filters register through
+`DataPlane::native_plugin_registry()` in code that embeds dwara-core.
+There is no config-file or plugin-file mechanism that loads a native
+filter into the stock gateway binary today; if you want loadable,
+config-attached logic, use [proxy-wasm plugins](./proxy-wasm-plugins).
 :::
 
 ## When to use this
@@ -40,21 +44,12 @@ filters run unmodified) or hot-loading without a rebuild.
 
 ## Enabling
 
-Native filters are compiled into the OSS build
-(default OFF):
-
-```sh
-cargo build -p dwara-core
-```
-
-Combine with `wasm` for both paths:
-
-```sh
-cargo build -p dwara-core,wasm
-```
-
-When `plugins` is on but `wasm` is off, only native filters work. When
-both are on, both work and share the unified dispatch chain.
+There is nothing to enable at build time: the `NativeFilter` trait,
+registry, and unified `PluginChain` compile into every build. A native
+filter activates when an embedding binary registers it (see
+[Registration](#registration) below) — the stock gateway binary ships
+with none registered, which is why the `native:` selector is
+embedder-facing today.
 
 ## Configuration
 
