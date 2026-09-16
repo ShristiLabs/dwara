@@ -9,6 +9,18 @@ the project follows semantic versioning once 1.0 is reached.
 
 ### Changed
 
+- Proxy-wasm target rewrites: a plugin's CHANGED `:path`, `:method`,
+  or `:authority` write at the `request_headers` phase is now applied
+  to the forwarded request (previously pseudo-header writes were
+  silently dropped). `:path` is the final upstream target (origin-form,
+  query string included) and composes after the route's own rewrite
+  with no route re-match; `:method` must be a valid token; `:authority`
+  overrides the forwarded `Host` header only. Unchanged values have
+  zero effect; invalid values fail closed with 500 `plugin_failed`
+  (metric reason `invalid_rewrite`). `:status` writes on
+  `response_headers` remain ignored. The `13-extensibility-usecases`
+  demos 01 and 05 now exercise the real `:path` rewrite at their mock
+  upstreams instead of the ordinary-header workaround.
 - Build-pack simplification: consolidated all optional feature packs
   into the OSS build. The repository now maintains only two editions:
   **OSS** (`cargo build --release`) and **Enterprise**

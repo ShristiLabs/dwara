@@ -152,10 +152,13 @@ request on a route referencing your plugin, the gateway:
 The header maps your plugin sees follow the proxy-wasm convention:
 the request map carries `:method` and `:path` (the path **including
 the query string**) ahead of the real headers; the response map
-carries `:status`. Pseudo-header edits are ignored when the map is
-written back — a plugin shapes ordinary headers only. The write-back
-applies only the headers the chain changed: headers no plugin touched
-keep their original bytes, non-UTF-8 (obs-text) values included.
+carries `:status`. A changed `:path`, `:method`, or `:authority` at
+`request_headers` rewrites the FORWARDED request — `:path` is the
+final upstream target (see
+[Proxy-Wasm plugins: pseudo-header writes](./proxy-wasm-plugins#pseudo-header-writes));
+`:status` writes are ignored. The write-back applies only the headers
+the chain changed: headers no plugin touched keep their original
+bytes, non-UTF-8 (obs-text) values included.
 
 ## Hostcall support matrix
 

@@ -100,9 +100,9 @@ for the full pipeline these hook points sit in.
 
 | Phase | Runs | Notes |
 |---|---|---|
-| `request_headers` | after route resolution, before authn | Authn sees plugin-modified headers. The map carries `:method` and `:path` (path including the query string). |
+| `request_headers` | after route resolution, before authn | Authn sees plugin-modified headers. The map carries `:method` and `:path` (path including the query string). Writes to `:path`/`:method`/`:authority` are applied to the forwarded request -- see [Pseudo-header writes](#pseudo-header-writes). |
 | `request_body` | after authn/authz/rate-limit, before the route action | The body is buffered up to the route's `limits.max_body_bytes` (default 1 MiB); an over-cap body answers 500 `plugin_body_too_large`. Request validation then sees the post-plugin bytes. |
-| `response_headers` | after the response arrives (any action), before masking | The map carries `:status`. |
+| `response_headers` | after the response arrives (any action), before masking | The map carries `:status`; writes to it are ignored (the status is pipeline-owned -- see [Pseudo-header writes](#pseudo-header-writes)). |
 | `response_body` | after masking, before compression | Skipped, and logged, for streaming bodies (`text/event-stream`, no content length) and content-encoded bodies -- buffering those would stall the route or feed the plugin opaque bytes. |
 
 Header phases always run for a route's plugins; body phases only when
@@ -110,6 +110,39 @@ a plugin declares them, and only the side (request/response) that is
 declared. Only headers a plugin actually changed are written back --
 untouched headers keep their original bytes, including non-UTF-8
 values.
+
+### Pseudo-header writes
+
+At `request_headers`, a plugin that changes `:path`, `:method`, or
+`:authority` rewrites the forwarded request:
+
+- `:path` is the final upstream target -- origin-form (`/...`), the
+  whole target including any query string (a written path without a
+  query forwards without one). It composes with the route's own
+  `rewrite`: the route rewrite applies first, the plugin's `:path` is
+  the final say, and routes are never re-matched. Only the upstream
+  sees the rewritten target; route matching, authentication, the
+  response cache key, and the access log all evaluated the original
+  target and keep it.
+- `:method` must be a valid method token; it replaces the forwarded
+  method.
+- `:authority` overrides the forwarded `Host` header only -- the
+  endpoint the gateway dials stays the load balancer's pick (HTTP/1
+  upstreams; HTTP/2 and HTTP/3 upstreams derive `:authority` from the
+  dialed endpoint).
+
+Only changed values apply: writing back the value the map carried has
+zero effect, and removing a pseudo-header is ignored. An invalid value
+(empty, non-`/`-prefixed, or unparseable `:path`; a non-token
+`:method`; an unparseable `:authority`) fails closed -- 500
+`plugin_failed` (metric reason `invalid_rewrite`) and the upstream is
+never dialed.
+
+On the response side, `:status` writes are ignored: by the time
+`response_headers` runs the status is bound to the response's framing
+(204/304/101 carry no body, and `Content-Length` already matches the
+upstream bytes). A plugin that wants to decide the answer uses
+`send_http_response` at a request phase.
 
 ### Resource limits
 
@@ -147,6 +180,7 @@ that cannot run never turns into a silently skipped plugin:
 |---|---|---|
 | Plugin crashed (unreadable/uncompilable `.wasm` marked at publish), disabled, or failed per-request instantiation | 500 `plugin_unavailable` | `crashed`, `disabled`, `instantiate_failed` |
 | WASM trap (fuel exhaustion, memory cap, panic) | 500 `plugin_failed` | `trap` |
+| Plugin writes an invalid `:path`/`:method`/`:authority` at `request_headers` | 500 `plugin_failed` | `invalid_rewrite` |
 | Body over the buffering cap for a body phase | 500 `plugin_body_too_large` | `body_too_large` |
 | Response stream died mid-body before the phase could run | 500 `plugin_failed` | `response_stream_ended` |
 
@@ -168,6 +202,12 @@ replayed against a new plugin.
   body-rewriting plugins with HMAC request signing.
 - **Streaming responses**: a `response_body` plugin never sees SSE or
   content-encoded bodies (see the phase table). Design for the skip.
+- **Response caching**: the cache key uses the ORIGINAL request path.
+  A plugin whose `:path` rewrite varies with request headers (per-user
+  migration) must not be combined with the route's response caching
+  unless the cache's vary configuration covers those headers --
+  otherwise two users of the same original path can share a cached
+  entry.
 
 ## Creating a plugin
 

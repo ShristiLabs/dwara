@@ -1445,6 +1445,16 @@ impl UpstreamHandle {
             .path_and_query()
             .cloned()
             .unwrap_or_else(|| PathAndQuery::from_static("/"));
+        // DW-157: a plugin's `:authority` rewrite, staged by the proxy's
+        // forward build as the Host value the forwarded request should
+        // carry. The dial target and the URI authority stay the picked
+        // endpoint's (a plugin shapes the Host header, never which
+        // origin the gateway dials); applied per dispatch below, pooled
+        // and H3 alike.
+        let plugin_host = req
+            .extensions()
+            .get::<crate::dataplane::plugin_dispatch::PluginForwardHost>()
+            .map(|host| host.0.clone());
         // Guard rather than dialing a fabricated address: empty endpoint
         // lists are only possible via unvalidated construction. The pick,
         // endpoint resolution, and in-flight acquisition all run against
@@ -1488,7 +1498,14 @@ impl UpstreamHandle {
                         // Buffer the request body (the H3 path sends it as
                         // one DATA frame; see `dataplane::upstream_h3`).
                         let method = req.method().clone();
-                        let headers = req.headers().clone();
+                        let mut headers = req.headers().clone();
+                        // The plugin's `:authority` rewrite applies to the
+                        // Host header here too (the H3 request's own
+                        // authority pseudo-header is the dialed endpoint,
+                        // per the note above).
+                        if let Some(host) = plugin_host.clone() {
+                            headers.insert(hyper::header::HOST, host);
+                        }
                         let body_bytes = match req.into_body().collect().await {
                             Ok(collected) => collected.to_bytes(),
                             Err(e) => {
@@ -1570,14 +1587,19 @@ impl UpstreamHandle {
         }?;
         *req.uri_mut() = uri;
         // The gateway, not the client, names the origin it dials: the
-        // picked endpoint's authority replaces any Host the caller set.
-        // PERF: the HeaderValue is precomputed with the authority; the
-        // fallback (and the skip-on-failure shape) mirrors the Uri note
-        // above — unreachable for validated configs.
-        let host = dispatch
-            .host_value
-            .clone()
-            .or_else(|| hyper::header::HeaderValue::from_str(&dispatch.authority).ok());
+        // picked endpoint's authority replaces any Host the caller set —
+        // EXCEPT a plugin's `:authority` rewrite (DW-157), which names
+        // the Host header the upstream should see while the dial target
+        // stays the balancer's pick. PERF: the HeaderValue is
+        // precomputed with the authority; the fallback (and the
+        // skip-on-failure shape) mirrors the Uri note above —
+        // unreachable for validated configs.
+        let host = plugin_host.or_else(|| {
+            dispatch
+                .host_value
+                .clone()
+                .or_else(|| hyper::header::HeaderValue::from_str(&dispatch.authority).ok())
+        });
         if let Some(v) = host {
             req.headers_mut().insert(hyper::header::HOST, v);
         }

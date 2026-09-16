@@ -70,16 +70,43 @@
 //! Matching the host/runner tests (tests/wasm_host.rs), the request
 //! header map carries `:method` and `:path` (path INCLUDING the query
 //! string) ahead of the real headers (`host` included verbatim); the
-//! response map carries `:status`. Pseudo-header modifications by a
-//! plugin are ignored when the map is written back — a plugin shapes
-//! ordinary headers only; the method/path/status are pipeline-owned.
-//! The write-back applies ONLY the headers the chain changed
-//! (`apply_header_changes`): headers no plugin touched keep their
-//! original bytes, non-UTF-8 (obs-text) values included.
+//! response map carries `:status`. The write-back of ORDINARY headers
+//! applies ONLY the names the chain changed (`apply_header_changes`):
+//! headers no plugin touched keep their original bytes, non-UTF-8
+//! (obs-text) values included. Pseudo-headers never enter the ordinary
+//! map — the three target pseudo-headers a chain may rewrite are
+//! captured separately ([`pseudo_header_rewrite`]) and applied when
+//! the forwarded request is built:
+//!
+//! - `:path` — the FINAL upstream target, origin-form (`/...`),
+//!   query string included (a written path without a query forwards
+//!   without one). It composes with the route's own rewrite: the
+//!   route rewrite applies first, the plugin's `:path` is the final
+//!   say, and routes are never re-matched. Only the upstream sees the
+//!   rewritten target — route matching, authn/authz, the cache key,
+//!   anomaly scoring, and the access log all evaluated the ORIGINAL
+//!   target and keep it.
+//! - `:method` — a valid method token; replaces the forwarded method.
+//! - `:authority` — overrides the forwarded `Host` header only (see
+//!   [`PluginForwardHost`]); the dialed endpoint stays the balancer's
+//!   pick.
+//!
+//! Only CHANGED values apply: writing back the value the map carried
+//! has zero effect, and REMOVING a pseudo-header is ignored (the
+//! request keeps its real method/path). An invalid changed value
+//! (empty, non-`/`-prefixed, or unparseable `:path`; a non-token
+//! `:method`; an unparseable `:authority`) fails closed: 500
+//! `plugin_failed`, metric reason `invalid_rewrite`, upstream never
+//! dialed.
+//!
+//! `:status` writes on the response map stay IGNORED (pipeline-owned)
+//! — a deliberate asymmetry with the request side, documented on
+//! [`RequestPlugins::response_headers_phase`].
 
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use http::uri::PathAndQuery;
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
@@ -118,6 +145,46 @@ pub fn plugin_body_cap(route: &Route) -> u64 {
 /// clippy `result_large_err` gate holds the hot-path `Result`s small.
 pub type PluginExit = Box<Response<ProxyBody>>;
 
+/// A chain's rewrite of the forwarded request target, captured at the
+/// `request_headers` phase ([`pseudo_header_rewrite`]) and applied
+/// when the upstream request is built: the phase runs early (before
+/// authn) but the rewrite shapes the UPSTREAM request only, so it
+/// rides the request extensions from the phase to the forward build
+/// (`proxy::proxy_request` removes it there — after the route's own
+/// rewrite and the query transforms, with no route re-match; see the
+/// module's "Header conventions" section). `Default` is the no-rewrite
+/// case (no pseudo-header changed); `is_noop` lets the caller skip
+/// the extension entirely on that fast path.
+#[derive(Clone, Debug, Default)]
+pub struct PluginTargetRewrite {
+    /// The validated `:path` write: origin-form, the WHOLE upstream
+    /// target including any query string.
+    pub path: Option<PathAndQuery>,
+    /// The validated `:method` write (a method token).
+    pub method: Option<hyper::Method>,
+    /// The validated `:authority` write, as the `Host` header value
+    /// the forwarded request will carry (see [`PluginForwardHost`]).
+    pub authority: Option<HeaderValue>,
+}
+
+impl PluginTargetRewrite {
+    /// Whether every field is unset — no pseudo-header was changed
+    /// (the common case; the caller skips the extension ride).
+    pub fn is_noop(&self) -> bool {
+        self.path.is_none() && self.method.is_none() && self.authority.is_none()
+    }
+}
+
+/// The `Host` override a plugin's `:authority` write produced. Rides
+/// the request extensions from the forward build to the upstream
+/// dispatch (`upstream::UpstreamHandle` owns the forwarded `Host`):
+/// the header the plugin named replaces the picked endpoint's
+/// authority there, and ONLY there — the dial target and the URI
+/// authority stay the balancer's pick (a plugin shapes the `Host`
+/// header, never which origin the gateway dials).
+#[derive(Clone, Debug)]
+pub struct PluginForwardHost(pub HeaderValue);
+
 /// The per-request plugin execution state (DW-157): the unified chain
 /// plus the fail-closed helpers that drive it. Constructed by
 /// [`RequestPlugins::build`] only on routes that reference plugins;
@@ -125,6 +192,11 @@ pub type PluginExit = Box<Response<ProxyBody>>;
 /// (early short-circuits, failures, and the natural tail alike).
 pub struct RequestPlugins {
     chain: PluginChain<WasmChainAdapter>,
+    /// The first plugin on the route declaring `request_headers` —
+    /// the deterministic attribution for a fail-closed invalid target
+    /// rewrite (the merged header map has no per-plugin author; the
+    /// same first-declarer rule the body phases attribute by).
+    request_headers_plugin: Option<String>,
     /// The first plugin on the route declaring `request_body` — the
     /// deterministic attribution for a request body the gateway could
     /// not buffer for the phase (over-cap).
@@ -159,6 +231,7 @@ impl RequestPlugins {
         if route.plugins.is_empty() {
             return Ok(None);
         }
+        let mut request_headers_plugin = None;
         let mut request_body_plugin = None;
         let mut response_body_plugin = None;
         // Health gate: every referenced plugin must be usable BEFORE the
@@ -170,6 +243,11 @@ impl RequestPlugins {
             let Some(config) = configs.get(name) else {
                 return Err(Box::new(unavailable(obs, name, "not_loaded", route, rid)));
             };
+            if config.phases.contains(&PluginPhase::RequestHeaders)
+                && request_headers_plugin.is_none()
+            {
+                request_headers_plugin = Some(name.clone());
+            }
             if config.phases.contains(&PluginPhase::RequestBody) && request_body_plugin.is_none() {
                 request_body_plugin = Some(name.clone());
             }
@@ -309,6 +387,7 @@ impl RequestPlugins {
         }
         Ok(Some(Self {
             chain,
+            request_headers_plugin,
             request_body_plugin,
             response_body_plugin,
         }))
@@ -330,8 +409,11 @@ impl RequestPlugins {
     /// authn (the documented contract — authn sees plugin-modified
     /// headers). `path_and_query` is the full request target (path
     /// including any query string). On `Ok` the (possibly rewritten)
-    /// header map is in place; on `Err` the caller returns the response
-    /// immediately.
+    /// header map is in place and the returned [`PluginTargetRewrite`]
+    /// carries the chain's validated `:path`/`:method`/`:authority`
+    /// writes (see the module's "Header conventions" section) for the
+    /// caller to apply at the forward build; on `Err` the caller
+    /// returns the response immediately.
     pub fn request_headers_phase(
         &mut self,
         method: &hyper::Method,
@@ -340,7 +422,7 @@ impl RequestPlugins {
         obs: &Observability,
         rid: &str,
         route: &str,
-    ) -> Result<(), PluginExit> {
+    ) -> Result<PluginTargetRewrite, PluginExit> {
         let mut map = Vec::with_capacity(headers.len() + 2);
         map.push((":method".to_string(), method.as_str().to_string()));
         map.push((":path".to_string(), path_and_query.to_string()));
@@ -353,7 +435,15 @@ impl RequestPlugins {
         match self.chain.on_request_headers(map) {
             (ChainOutcome::Continue, out) => {
                 apply_header_changes(headers, &input, &out);
-                Ok(())
+                let rewrite = pseudo_header_rewrite(
+                    &input,
+                    &out,
+                    obs,
+                    rid,
+                    route,
+                    self.request_headers_plugin.as_deref(),
+                )?;
+                Ok(rewrite)
             }
             (ChainOutcome::LocalResponse(resp), _) => {
                 plugin_decision(rid, route);
@@ -430,8 +520,14 @@ impl RequestPlugins {
     /// Run the `response_headers` phase: after the response arrives
     /// (any action: proxy, mock, respond, redirect alike — plugins are
     /// route-level), before masking. `:status` rides the map for
-    /// visibility; the status itself is pipeline-owned and plugin
-    /// modifications to it are ignored.
+    /// visibility; plugin writes to it are IGNORED — a deliberate
+    /// asymmetry with the request-side target rewrite: by the time
+    /// this phase runs the status is bound to the response's framing
+    /// (204/304/101 carry no body, and `Content-Length` already
+    /// matches the upstream bytes a later phase may rewrite), so a
+    /// mid-pipeline flip would desynchronize both. A plugin that
+    /// wants to DECIDE the answer has `send_http_response` at the
+    /// request phases.
     pub fn response_headers_phase(
         &mut self,
         status: StatusCode,
@@ -732,7 +828,9 @@ fn effective_limits(config: &PluginConfig) -> (u64, usize, u64) {
 
 /// Group a header list by name (first-seen order), preserving each
 /// name's value sequence so multiplicity is compared exactly.
-/// Pseudo-headers (leading `:`) are excluded — pipeline-owned.
+/// Pseudo-headers (leading `:`) are excluded — the ordinary header map
+/// never carries them; the request-side target pseudo-headers are
+/// captured separately by [`pseudo_header_rewrite`].
 fn group_header_list(list: &[(String, String)]) -> Vec<(String, Vec<&str>)> {
     let mut grouped: Vec<(String, Vec<&str>)> = Vec::new();
     for (name, value) in list {
@@ -745,6 +843,120 @@ fn group_header_list(list: &[(String, String)]) -> Vec<(String, Vec<&str>)> {
         }
     }
     grouped
+}
+
+/// The pseudo-headers whose CHANGED values rewrite the forwarded
+/// request (see the module docs): `:path` (the whole upstream target,
+/// query string included), `:method`, and `:authority` (the forwarded
+/// `Host`). Any other pseudo-header name stays ignored.
+const TARGET_PSEUDO_HEADERS: [&str; 3] = [":path", ":method", ":authority"];
+
+/// The LAST value a header list carries for `name` (case-insensitive
+/// — the host's replace/add hostcalls both land the newest write at or
+/// after the previous one), or `None` when the name is absent.
+fn last_header_value<'a>(list: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    list.iter()
+        .rev()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// Extract the chain's pseudo-header target rewrite from the
+/// `request_headers` output and validate it (see the module's "Header
+/// conventions" section). Only names whose value the chain CHANGED
+/// participate — writing back the value the map carried is the
+/// documented no-op, and a REMOVED pseudo-header is ignored (the
+/// request keeps its real method/path). An invalid changed value fails
+/// closed (500 `plugin_failed`, metric reason `invalid_rewrite`),
+/// attributed to the first plugin declaring the phase (`plugin`; the
+/// merged chain output has no per-plugin author — the same
+/// deterministic first-declarer attribution the body phases use).
+/// The invalid value itself is never logged: a `:path` carries the
+/// query string, which logs must not see.
+fn pseudo_header_rewrite(
+    input: &[(String, String)],
+    output: &[(String, String)],
+    obs: &Observability,
+    rid: &str,
+    route: &str,
+    plugin: Option<&str>,
+) -> Result<PluginTargetRewrite, PluginExit> {
+    let mut rewrite = PluginTargetRewrite::default();
+    for name in TARGET_PSEUDO_HEADERS {
+        // Absent from the output (never written, or removed): no
+        // rewrite from this name.
+        let Some(new) = last_header_value(output, name) else {
+            continue;
+        };
+        // Identical to the input value: zero effect.
+        if last_header_value(input, name) == Some(new) {
+            continue;
+        }
+        match name {
+            // Origin-form only: non-empty, leading '/', parseable as a
+            // path-and-query (rejects bad characters and fragments).
+            // An absolute-form target would move the dial target — the
+            // upstream pick is the balancer's, never the plugin's.
+            ":path" => match if new.is_empty() || !new.starts_with('/') {
+                None
+            } else {
+                new.parse::<PathAndQuery>().ok()
+            } {
+                Some(target) => rewrite.path = Some(target),
+                None => {
+                    return Err(Box::new(invalid_rewrite(obs, rid, route, plugin, name)));
+                }
+            },
+            ":method" => match new.parse::<hyper::Method>() {
+                Ok(method) => rewrite.method = Some(method),
+                Err(_) => {
+                    return Err(Box::new(invalid_rewrite(obs, rid, route, plugin, name)));
+                }
+            },
+            // The authority grammar, converted to the header value the
+            // forward will carry: either parse failing (empty,
+            // userinfo, bad bytes) is an unusable Host — fail closed.
+            ":authority" => match new
+                .parse::<http::uri::Authority>()
+                .ok()
+                .and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+            {
+                Some(host) => rewrite.authority = Some(host),
+                None => {
+                    return Err(Box::new(invalid_rewrite(obs, rid, route, plugin, name)));
+                }
+            },
+            _ => unreachable!("TARGET_PSEUDO_HEADERS enumerates every match arm"),
+        }
+    }
+    Ok(rewrite)
+}
+
+/// The fail-closed 500 for a plugin's invalid target rewrite (empty,
+/// non-`/`-prefixed, or unparseable `:path`; a non-token `:method`;
+/// an unparseable `:authority`): one failure metric (`invalid_rewrite`
+/// — attributed to the first `request_headers` plugin, falling back to
+/// the route name exactly like the body-cap attribution), one
+/// server-side log naming the pseudo-header but never the value, and
+/// the generic envelope. The request does not proceed to the upstream.
+fn invalid_rewrite(
+    obs: &Observability,
+    rid: &str,
+    route: &str,
+    plugin: Option<&str>,
+    name: &str,
+) -> Response<ProxyBody> {
+    let attribution = plugin.unwrap_or(route);
+    tracing::warn!(
+        code = "plugin_failed",
+        request_id = %rid,
+        route = %route,
+        plugin = %attribution,
+        pseudo_header = name,
+        "plugin wrote an invalid target rewrite; failing closed"
+    );
+    obs.record_plugin_failure(attribution, "invalid_rewrite");
+    plugin_failed_response(rid)
 }
 
 /// Why a response's `response_body` plugin phase is skipped (DW-157):
@@ -924,9 +1136,12 @@ fn local_response(resp: LocalResponse, rid: &str) -> Response<ProxyBody> {
 ///   are rewritten in the map; every other header keeps its original
 ///   bytes, non-UTF-8 values included.
 ///
-/// Pseudo-headers (leading `:`) are pipeline-owned and excluded from
-/// both sides. Unparseable names/values a changed name produced are
-/// skipped (the sandbox cannot crash the gateway with a bad header).
+/// Pseudo-headers (leading `:`) are excluded from both sides — the
+/// ordinary header map never carries them (the request-side target
+/// pseudo-headers are applied separately; see
+/// [`pseudo_header_rewrite`]). Unparseable names/values a changed name
+/// produced are skipped (the sandbox cannot crash the gateway with a
+/// bad header).
 fn apply_header_changes(
     headers: &mut HeaderMap,
     input: &[(String, String)],

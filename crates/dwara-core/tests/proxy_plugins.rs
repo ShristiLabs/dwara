@@ -8,6 +8,10 @@
 //! - a healthy header plugin's effect is visible at the upstream;
 //! - the proxy-wasm pseudo-header convention (`:method`/`:path`) is
 //!   what plugins see;
+//! - a plugin's `:path`/`:method`/`:authority` writes rewrite the
+//!   FORWARDED request (`:path` is the final upstream target and wins
+//!   over the route's own rewrite; unchanged values have zero effect;
+//!   invalid values fail closed);
 //! - `send_http_response` short-circuits with the plugin's status and
 //!   the upstream is never dialed;
 //! - a trapping plugin (fuel exhaustion) fails closed (500
@@ -145,6 +149,54 @@ fn copy_path_wat() -> String {
            (local.set $vs (i32.load (i32.const 70004)))
            (if (i32.gt_s (local.get $vs) (i32.const 0))
              (then (drop (call $add_header (i32.const 0) (i32.const 65552) (i32.const 11)
+                  (local.get $vp) (local.get $vs)))))
+           (i32.const 0)"#,
+        "(i32.const 0)",
+        "(i32.const 0)",
+        "(i32.const 0)",
+    )
+}
+
+const REPLACE_IMPORT: &str = r#"
+  (import "env" "proxy_replace_header_map_value"
+    (func $replace_header (param i32 i32 i32 i32 i32) (result i32)))"#;
+
+/// A filter that REPLACES one pseudo-header with a fixed value:
+/// `replace_pseudo_wat(":path", "/v2/items")`. An empty `value` writes
+/// the empty string (the fail-closed fixture); `:authority` is not in
+/// the phase's input map, so replacing it lands as an addition — the
+/// documented changed-value shape for that name.
+fn replace_pseudo_wat(name: &str, value: &str) -> String {
+    filter_wat(
+        REPLACE_IMPORT,
+        &format!(r#"(data (i32.const 65536) "{name}") (data (i32.const 65560) "{value}")"#),
+        &format!(
+            r#"(drop (call $replace_header (i32.const 0) (i32.const 65536) (i32.const {})
+                 (i32.const 65560) (i32.const {})))
+               (i32.const 0)"#,
+            name.len(),
+            value.len()
+        ),
+        "(i32.const 0)",
+        "(i32.const 0)",
+        "(i32.const 0)",
+    )
+}
+
+/// A filter that reads `:path` and writes the SAME value back: the
+/// output pseudo-header equals the input, so the diff must treat the
+/// write as unchanged (zero effect on the forwarded target).
+fn echo_path_wat() -> String {
+    filter_wat(
+        &(COPY_PATH_IMPORTS.to_string() + REPLACE_IMPORT),
+        r#"(data (i32.const 65536) ":path")"#,
+        r#"(local $vp i32) (local $vs i32)
+           (drop (call $get_header (i32.const 0) (i32.const 65536) (i32.const 5)
+                 (i32.const 70000) (i32.const 70004)))
+           (local.set $vp (i32.load (i32.const 70000)))
+           (local.set $vs (i32.load (i32.const 70004)))
+           (if (i32.gt_s (local.get $vs) (i32.const 0))
+             (then (drop (call $replace_header (i32.const 0) (i32.const 65536) (i32.const 5)
                   (local.get $vp) (local.get $vs)))))
            (i32.const 0)"#,
         "(i32.const 0)",
@@ -362,6 +414,280 @@ async fn plugin_sees_proxy_wasm_pseudo_headers() {
             .any(|(k, v)| k == "x-seen-path" && v == "/v1/items?flag=1"),
         "the :path pseudo-header (path + query) must be visible to the plugin, saw: {:?}",
         seen.lock().unwrap()
+    );
+}
+
+// --- pseudo-header target rewrites -----------------------------------------
+
+#[tokio::test]
+async fn plugin_path_rewrite_is_the_final_upstream_target() {
+    // `:path` is the WHOLE upstream target, query string included: the
+    // plugin writes a path carrying no query, so the inbound ?flag=1
+    // is dropped. The rewrite lands on the upstream request only — and
+    // no route re-match happens ("/v2/items" matches no configured
+    // route; the request still proxies, 200, on the route it matched).
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":path", "/v2/items"),
+    );
+    let backend = spawn_backend_full(Arc::new(|req: Request<hyper::body::Incoming>| {
+        Response::new(Full::new(Bytes::from(req.uri().to_string())))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: rewriter\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [rewriter]\n"),
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client()
+        .get(uri(port, "/v1/items?flag=1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "/v2/items",
+        "the plugin's :path write is the final upstream target (its value carried no query, so none is forwarded)"
+    );
+}
+
+#[tokio::test]
+async fn plugin_method_rewrite_changes_upstream_method() {
+    // GET in, PUT upstream: the rewrite applies to the forwarded
+    // request only (route matching and the gateway's own method-aware
+    // phases saw the original GET).
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":method", "PUT"),
+    );
+    let (backend, _count) = spawn_backend(
+        |_n, method, _p, _b| Response::new(Full::new(Bytes::from(method.to_string()))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: rewriter\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [rewriter]\n"),
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/items")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "PUT",
+        "the plugin's :method write reaches the upstream"
+    );
+}
+
+#[tokio::test]
+async fn plugin_authority_rewrite_overrides_forwarded_host() {
+    // `:authority` shapes the forwarded Host header only: the dial
+    // target stays the configured endpoint (the request still lands
+    // on the mock), and the Host the backend parses is the plugin's.
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":authority", "api.internal.example"),
+    );
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let backend = spawn_backend_full(Arc::new(move |req: Request<hyper::body::Incoming>| {
+        {
+            let mut g = recorder.lock().unwrap();
+            for (k, v) in req.headers() {
+                g.push((k.to_string(), v.to_str().unwrap_or("").to_string()));
+            }
+        }
+        Response::new(Full::new(Bytes::from_static(b"ok")))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: rewriter\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [rewriter]\n"),
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/items")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "host" && v == "api.internal.example"),
+        "the plugin's :authority write is the forwarded Host, saw: {:?}",
+        seen.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn unchanged_pseudo_headers_have_zero_effect() {
+    // The plugin writes `:path` back with the value it read: identical
+    // input and output, so the forwarded target must not move — method
+    // and full target (query included) survive byte-exact.
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(dir.path(), "echoer.wasm", &echo_path_wat());
+    let backend = spawn_backend_full(Arc::new(|req: Request<hyper::body::Incoming>| {
+        Response::new(Full::new(Bytes::from(format!(
+            "{} {}",
+            req.method(),
+            req.uri()
+        ))))
+    }))
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: echoer\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [echoer]\n"),
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    let resp = h1_client()
+        .get(uri(port, "/v1/items?flag=1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "GET /v1/items?flag=1",
+        "a pseudo-header written back unchanged has zero effect"
+    );
+}
+
+#[tokio::test]
+async fn empty_path_rewrite_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":path", ""),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: rewriter\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [rewriter]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/items")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an invalid :path never reaches the upstream"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        metrics
+            .contains("dwara_plugin_failures_total{name=\"rewriter\",reason=\"invalid_rewrite\"}"),
+        "the invalid rewrite is attributed: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn non_rooted_path_rewrite_fails_closed() {
+    // Not origin-form (no leading '/'): an absolute-form or relative
+    // target would move the dial semantics, so it is rejected exactly
+    // like the empty write.
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":path", "v2/items"),
+    );
+    let (backend, count) = spawn_backend(
+        |_n, _m, _p, _b| Response::new(Full::new(Bytes::from_static(b"never"))),
+        Duration::from_millis(0),
+    )
+    .await;
+    let yaml = gateway_yaml(
+        backend,
+        &format!("  - name: rewriter\n    wasm: {wasm}\n    phases: [request_headers]\n"),
+        &plugged_route_yaml("    plugins: [rewriter]\n"),
+    );
+    let dp = dataplane_from(&yaml);
+    let port = spawn_gateway(Arc::clone(&dp)).await;
+
+    let resp = h1_client().get(uri(port, "/v1/items")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(envelope_code(body.as_bytes()), "plugin_failed");
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an invalid :path never reaches the upstream"
+    );
+    let metrics = dp.observability().render();
+    assert!(
+        metrics
+            .contains("dwara_plugin_failures_total{name=\"rewriter\",reason=\"invalid_rewrite\"}"),
+        "the invalid rewrite is attributed: {metrics}"
+    );
+}
+
+#[tokio::test]
+async fn plugin_path_rewrite_wins_over_route_rewrite() {
+    // Composition (DW-010 + DW-157): the route's replace_prefix
+    // rewrite applies first, and a plugin's :path write is the FINAL
+    // say for the upstream request. Two routes with the SAME rewrite
+    // shape: `plugged` carries a :path-rewriting plugin (the plugin's
+    // target wins), `tagged` carries an ordinary-header plugin (no
+    // :path write — the route rewrite stands).
+    let dir = tempfile::tempdir().unwrap();
+    let rewriter = write_plugin(
+        dir.path(),
+        "rewriter.wasm",
+        &replace_pseudo_wat(":path", "/final/target"),
+    );
+    let tagger = write_plugin(dir.path(), "tagger.wasm", &add_header_wat("tagged"));
+    let backend = spawn_backend_full(Arc::new(|req: Request<hyper::body::Incoming>| {
+        Response::new(Full::new(Bytes::from(req.uri().path().to_string())))
+    }))
+    .await;
+    let routes = "  - name: plugged\n    service: svc\n    match:\n      path:\n        type: prefix\n        value: /v1\n    action:\n      type: proxy\n      rewrite: { type: replace_prefix, prefix: /v1, replacement: /backend }\n    plugins: [rewriter]\n  - name: tagged\n    service: svc\n    match:\n      path:\n        type: prefix\n        value: /v2\n    action:\n      type: proxy\n      rewrite: { type: replace_prefix, prefix: /v2, replacement: /backend }\n    plugins: [tagger]\n";
+    let yaml = gateway_yaml(
+        backend,
+        &format!(
+            "  - name: rewriter\n    wasm: {rewriter}\n    phases: [request_headers]\n  - name: tagger\n    wasm: {tagger}\n    phases: [request_headers]\n"
+        ),
+        routes,
+    );
+    let port = spawn_gateway(dataplane_from(&yaml)).await;
+
+    // The plugin's :path replaces the route rewrite's output. It also
+    // proves no route re-match: "/final/target" matches neither route.
+    let resp = h1_client().get(uri(port, "/v1/x")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "/final/target",
+        "the plugin's :path write is the final say over the route rewrite"
+    );
+
+    // Without a :path write the route rewrite stands.
+    let resp = h1_client().get(uri(port, "/v2/x")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(resp.into_body()).await,
+        "/backend/x",
+        "the route rewrite applies when the plugin leaves :path alone"
     );
 }
 

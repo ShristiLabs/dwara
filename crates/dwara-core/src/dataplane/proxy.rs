@@ -3966,7 +3966,7 @@ where
             .path_and_query()
             .map(|pq| pq.as_str().to_string())
             .unwrap_or_else(|| req.uri().path().to_string());
-        if let Err(resp) = p.request_headers_phase(
+        match p.request_headers_phase(
             &method,
             &path_and_query,
             req.headers_mut(),
@@ -3974,8 +3974,21 @@ where
             rid,
             &route.name,
         ) {
-            rec.plugin_short_circuit = true;
-            return *resp;
+            // The chain's `:path`/`:method`/`:authority` writes ride
+            // the request extensions to the forward build (the apply
+            // site in `proxy_request`): the rewrite shapes the
+            // UPSTREAM request only — everything below (anomaly
+            // scoring, limits, authn/authz, the cache key, the access
+            // log) keeps evaluating the ORIGINAL target.
+            Ok(rewrite) => {
+                if !rewrite.is_noop() {
+                    req.extensions_mut().insert(rewrite);
+                }
+            }
+            Err(resp) => {
+                rec.plugin_short_circuit = true;
+                return *resp;
+            }
         }
     }
 
@@ -4986,11 +4999,12 @@ where
     // arrives (any action), before masking (the documented contract).
     // Uniform across actions — plugins attach to the ROUTE, and a
     // respond/redirect/mock response is as much "the route's response"
-    // as a proxied one. `:status` rides the map for visibility; the
-    // status itself is pipeline-owned. A cache HIT skips the phase (the
-    // stored bytes/headers are post-plugin, the same replay semantics
-    // masking and the transforms follow — replaying them would apply a
-    // header-stamping or body-rewriting plugin twice).
+    // as a proxied one. `:status` rides the map for visibility; writes
+    // to it are ignored (pipeline-owned — the framing rationale is on
+    // `RequestPlugins::response_headers_phase`). A cache HIT skips the
+    // phase (the stored bytes/headers are post-plugin, the same replay
+    // semantics masking and the transforms follow — replaying them
+    // would apply a header-stamping or body-rewriting plugin twice).
     if !cache_hit {
         if let Some(p) = plugins.as_mut() {
             let status = resp.status();
@@ -6210,6 +6224,38 @@ where
     {
         if let Some(new_uri) = crate::dataplane::transforms::apply_query_ops(req.uri(), ops) {
             *req.uri_mut() = new_uri;
+        }
+    }
+
+    // Plugin target rewrite (DW-157): the `:path`/`:method`/
+    // `:authority` writes the `request_headers` chain CHANGED,
+    // validated at capture (`plugin_dispatch::pseudo_header_rewrite`).
+    // Applied HERE — after the route's own rewrite and the query
+    // transforms — so the plugin has the FINAL say over the upstream
+    // request, and only here: no route re-match (the route, the
+    // upstream pick, and every policy phase ran on the ORIGINAL
+    // target), and non-proxy actions never see it. `:path` is the
+    // whole target, query string included: a plugin that writes a
+    // path without a query drops the query. The `:authority` value
+    // rides one more extension hop — the Host header is the upstream
+    // dispatch's to own (see `plugin_dispatch::PluginForwardHost`).
+    if let Some(rewrite) = req
+        .extensions_mut()
+        .remove::<plugin_dispatch::PluginTargetRewrite>()
+    {
+        if let Some(method) = rewrite.method {
+            *req.method_mut() = method;
+        }
+        if let Some(target) = rewrite.path {
+            let mut parts = http::uri::Parts::default();
+            parts.path_and_query = Some(target);
+            if let Ok(uri) = hyper::Uri::from_parts(parts) {
+                *req.uri_mut() = uri;
+            }
+        }
+        if let Some(host) = rewrite.authority {
+            req.extensions_mut()
+                .insert(plugin_dispatch::PluginForwardHost(host));
         }
     }
 
