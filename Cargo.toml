@@ -22,7 +22,19 @@ members = [
 # workspace members (a wasm cdylib has no host artifact and pulling
 # them in would put the proxy-wasm examples on every `cargo
 # build --workspace`). Built/tested by plugins/examples/run-all.sh.
-exclude = ["crates/dwara-ebpf", "crates/dwara-uring", "plugins/examples"]
+# Extension use-case demos (docs-site/guide/extensibility-use-cases):
+# 01/05 build SDK-style plugin cdylibs, 04 a no_std nano-service
+# module, and 06 an embedding binary with a dwara-core path dep.
+# Demo artifacts built by their test scripts, never by `cargo
+# build --workspace` (06 would put a second dwara-core dependency
+# tree on every workspace build). See
+# demos/13-extensibility-usecases/README.md.
+exclude = [
+    "crates/dwara-ebpf",
+    "crates/dwara-uring",
+    "plugins/examples",
+    "demos/13-extensibility-usecases",
+]
 
 [workspace.package]
 version = "0.1.0"

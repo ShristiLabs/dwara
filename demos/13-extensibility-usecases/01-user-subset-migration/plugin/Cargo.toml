@@ -1,0 +1,19 @@
+[package]
+name = "v2-migrator"
+version = "0.1.0"
+edition = "2021"
+description = "User-subset migration plugin (dwara extension use case 1, Option A)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proxy-wasm = "0.2"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

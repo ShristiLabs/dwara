@@ -1,0 +1,18 @@
+[package]
+name = "tenant-router"
+version = "0.1.0"
+edition = "2021"
+description = "Tenant-aware routing plugin (dwara extension use case: tenant decoding and tagging)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proxy-wasm = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

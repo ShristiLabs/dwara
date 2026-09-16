@@ -139,6 +139,15 @@ decision made by YOU, not by accident. Track the
 [hostcall matrix](./plugin-sdk#hostcall-support-matrix) — this page
 will be updated when `proxy_http_call` moves to supported.
 
+### Runnable demo
+
+[`demos/13-extensibility-usecases/01-user-subset-migration/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/01-user-subset-migration)
+runs this recipe end to end: the SDK-style plugin above, a mock
+entitlement microservice, the publisher writing the generated
+plugins-config include, and the hot-reload flip asserted live
+(add/remove a user; the next request changes verdict; empty list =
+everyone on `/v1`; plugin-less routes unaffected).
+
 ---
 
 ## More use cases
@@ -157,6 +166,10 @@ will be updated when `proxy_http_call` moves to supported.
   redaction costs one body copy. Masking at the gateway is a
   seatbelt, not a fix — prefer fixing the upstream.
 - **Status**: works today.
+- **Runnable demo**: [`demos/13-extensibility-usecases/02-response-pii-redaction/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/02-response-pii-redaction)
+  builds the shipped example by path against a mock leaky upstream:
+  Luhn-gated keep-last-4 masking, the innocent 16-digit number
+  untouched, and the SSE route skipping the phase.
 
 ### Custom request authentication
 
@@ -174,6 +187,10 @@ will be updated when `proxy_http_call` moves to supported.
   A plugin is for schemes only you speak. Secret rotation = plugin
   config reload; never bake long-lived secrets into the module.
 - **Status**: works today.
+- **Runnable demo**: [`demos/13-extensibility-usecases/03-custom-auth/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/03-custom-auth)
+  builds the shipped `static-auth` example by path: 401 +
+  `WWW-Authenticate` on missing/wrong credentials (no upstream dial),
+  the correct token forwarded, a sibling unprotected route unaffected.
 
 ### Zero-upstream endpoints (feature flags, canned responses)
 
@@ -188,6 +205,10 @@ will be updated when `proxy_http_call` moves to supported.
   If the response is static, prefer the built-in `respond`/`mock`
   actions; if it needs a decision call, that is use case 1's Option B.
 - **Status**: works today.
+- **Runnable demo**: [`demos/13-extensibility-usecases/04-feature-flag-nano/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/04-feature-flag-nano)
+  serves a hand-written no_std module that answers
+  `{"flag":<bool>}` parsed from the request path — no upstream
+  configured on the route at all.
 
 ### Tenant-aware routing and tagging
 
@@ -199,11 +220,17 @@ will be updated when `proxy_http_call` moves to supported.
   rewrite the path; the shipped
   [`request-tagger`](https://github.com/shristilabs/dwara/tree/main/plugins/examples/request-tagger)
   shows the header-stamping halves.
-- **Tradeoffs**: keep rewrites at the edge so authz sees the FINAL
-  path; header phases are zero-copy-fast (no body buffering).
+- **Tradeoffs**: keep rewrites at the edge — the rewritten path is
+  what the upstream receives (applied to the forwarded request; no
+  route re-match); header phases are zero-copy-fast (no body
+  buffering).
   If tenant identity arrives as a JWT claim, built-in
   `required_claims` + transforms may suffice — check first.
 - **Status**: works today.
+- **Runnable demo**: [`demos/13-extensibility-usecases/05-tenant-routing/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/05-tenant-routing)
+  decodes the tenant from a header grammar, stamps `x-tenant` on
+  request and response, and rewrites `/portal/*` to
+  `/tenant/<t>/*` — per-tenant routing and tagging asserted live.
 
 ### Your own rate limiting, config, cache, analytics, or secrets backend
 
@@ -221,6 +248,10 @@ will be updated when `proxy_http_call` moves to supported.
   callouts from a plugin are NOT the substitute (callout stub), which
   is exactly why these traits exist.
 - **Status**: works today (embedding).
+- **Runnable demo**: [`demos/13-extensibility-usecases/06-embedding-analytics-sink/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/06-embedding-analytics-sink)
+  is a standalone binary embedding dwara-core with a custom
+  `AnalyticsSink`: every completed request (200s and 404s alike)
+  flows through the registered backend.
 
 ### Per-request external decisions (entitlements, experiment buckets, fraud scores)
 
@@ -237,3 +268,7 @@ will be updated when `proxy_http_call` moves to supported.
   as "decision unavailable"). Until it lands, use the
   snapshot-publishing pattern from use case 1 or an auth-layer
   header.
+- **Runnable demo**: blocked on the same stub — no demo exists for
+  this recipe yet. The snapshot-publishing fallback IS
+  [`demos/13-extensibility-usecases/01-user-subset-migration/`](https://github.com/shristilabs/dwara/tree/main/demos/13-extensibility-usecases/01-user-subset-migration),
+  and this page will gain the callout demo when the hostcall lands.

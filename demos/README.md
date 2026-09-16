@@ -27,6 +27,7 @@ points at the category and test script that covers it.
 | `10-tls-transport/` | TLS & transport | TLS termination, multi-SNI, SNI passthrough, HTTP/2 and HTTP/3 listeners |
 | `11-enterprise/` | Enterprise features | The enterprise surface and the OSS-equivalent behavior shipped today (Redis, PostgreSQL, Vault topologies) |
 | `12-protocol-translation/` | Protocol translation | gRPC proxying, gRPC-Web transcoding, REST<->gRPC bridging, OpenAPI-driven mocks |
+| `13-extensibility-usecases/` | Extension use-case recipes | One runnable demo per recipe from the extensibility use-case guide: user-subset migration with hot-reloaded entitlement snapshots, response PII redaction, custom auth, feature-flag nano-services, tenant-aware routing, an embedding binary with a custom AnalyticsSink |
 
 ## Shared infrastructure
 

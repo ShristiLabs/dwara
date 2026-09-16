@@ -1,0 +1,18 @@
+[package]
+name = "feature-flag-nano"
+version = "0.1.0"
+edition = "2021"
+description = "Feature-flag nano-service module (dwara extension use case: zero-upstream endpoints)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# A nano-service module must be PLAIN WASM: no WASI imports (the host
+# provides only the four `dwara` imports), so the crate is no_std and
+# targets wasm32-unknown-unknown.
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

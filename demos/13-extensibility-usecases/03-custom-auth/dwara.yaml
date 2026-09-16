@@ -1,0 +1,71 @@
+# Demo 03 wiring: custom request authentication.
+#
+# The test script runs the gateway against THIS file as-is (cwd at the
+# repository root). It builds the shipped plugins/examples/static-auth
+# crate BY PATH: a proprietary bearer-style token scheme verified per
+# request at request_headers, short-circuiting 401 (with a
+# WWW-Authenticate challenge) via the plugin itself -- the upstream is
+# never dialed for a denied request.
+#
+# - /protected/* carries the plugin (token: dwara-demo-secret)
+# - /public/* is the sibling control route with NO plugin
+
+listeners:
+  - name: auth-http
+    address: 127.0.0.1
+    port: 18221
+    protocol: http
+
+routes:
+  - name: protected-api
+    service: protected-service
+    match:
+      path:
+        type: prefix
+        value: /protected/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - static-auth
+
+  - name: public-api
+    service: protected-service
+    match:
+      path:
+        type: prefix
+        value: /public/
+    action:
+      type: proxy
+    auth_required: false
+
+  - name: healthz
+    service: protected-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+    auth_required: false
+
+services:
+  - name: protected-service
+    upstream: protected-upstream-pool
+
+upstreams:
+  - name: protected-upstream-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 18222
+
+plugins:
+  - name: static-auth
+    wasm: plugins/examples/static-auth/target/wasm32-wasip1/release/static_auth.wasm
+    phases:
+      - request_headers
+    config: '{"header":"authorization","scheme":"Bearer","token":"dwara-demo-secret"}'

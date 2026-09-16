@@ -1,0 +1,61 @@
+# Demo 02 wiring: response PII redaction at the edge.
+#
+# The test script runs the gateway against THIS file as-is (cwd at the
+# repository root, so the .wasm path below resolves). It builds the
+# shipped plugins/examples/response-body-redact crate BY PATH -- the
+# demo adds no plugin code of its own, exactly the recipe's point:
+# "the shipped example IS the surface".
+#
+# Both routes attach the redaction plugin; the leaky upstream's
+# /api/account answers buffered JSON (masked) and /api/stream answers
+# text/event-stream (phase skipped, streams through untouched).
+
+listeners:
+  - name: redact-http
+    address: 127.0.0.1
+    port: 18211
+    protocol: http
+
+routes:
+  - name: leaky-api
+    service: leaky-service
+    match:
+      path:
+        type: prefix
+        value: /api/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - response-body-redact
+
+  - name: healthz
+    service: leaky-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+    auth_required: false
+
+services:
+  - name: leaky-service
+    upstream: leaky-upstream-pool
+
+upstreams:
+  - name: leaky-upstream-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 18212
+
+plugins:
+  - name: response-body-redact
+    wasm: plugins/examples/response-body-redact/target/wasm32-wasip1/release/response_body_redact.wasm
+    phases:
+      - response_body
+    config: '{"literals":["sk-live-12345"]}'

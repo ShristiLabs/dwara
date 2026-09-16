@@ -1,0 +1,64 @@
+# Demo 05 wiring: tenant-aware routing and tagging.
+#
+# The test script runs the gateway against THIS file as-is (cwd at the
+# repository root, so the .wasm path resolves). ONE route,
+# /portal/*, carries the tenant-router plugin: the tenant is decoded
+# from the x-org-domain header grammar at request_headers, the request
+# is tagged x-tenant, and the path is rewritten
+# /portal/<rest> -> /tenant/<tenant>/<rest> -- the prefix the mock
+# upstream answers per tenant (standing in for per-tenant pools).
+#
+# The rewrite is applied to the FORWARDED request: it happens after
+# route resolution (no route re-match) and the upstream receives the
+# /tenant/<t>/ prefix, while route matching and the policy phases
+# evaluated the original /portal/ target.
+
+listeners:
+  - name: tenant-http
+    address: 127.0.0.1
+    port: 18241
+    protocol: http
+
+routes:
+  - name: portal
+    service: tenants-service
+    match:
+      path:
+        type: prefix
+        value: /portal/
+    action:
+      type: proxy
+    auth_required: false
+    plugins:
+      - tenant-router
+
+  - name: healthz
+    service: tenants-service
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+    auth_required: false
+
+services:
+  - name: tenants-service
+    upstream: tenants-upstream-pool
+
+upstreams:
+  - name: tenants-upstream-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 18242
+
+plugins:
+  - name: tenant-router
+    wasm: demos/13-extensibility-usecases/05-tenant-routing/plugin/target/wasm32-wasip1/release/tenant_router.wasm
+    phases:
+      - request_headers
+      - response_headers

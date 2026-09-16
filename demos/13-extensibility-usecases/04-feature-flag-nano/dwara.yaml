@@ -1,0 +1,57 @@
+# Demo 04 wiring: zero-upstream endpoints (feature flags).
+#
+# The test script runs the gateway against THIS file as-is (cwd at the
+# repository root, so the module path resolves). The /flags/ route's
+# action is a nano_service: the whole response -- status, headers,
+# body -- is produced by the module/ WASM handler. The route's
+# `service` is still required by the schema but is NEVER dialed (the
+# endpoint points at dead port 1 on purpose: any request that somehow
+# reached it would fail loudly, not silently).
+#
+# The nano-service action compiles into every build; no cargo feature.
+
+listeners:
+  - name: flags-http
+    address: 127.0.0.1
+    port: 18231
+    protocol: http
+
+routes:
+  - name: feature-flags
+    service: never-dialed
+    match:
+      path:
+        type: prefix
+        value: /flags/
+    action:
+      type: nano_service
+      module: demos/13-extensibility-usecases/04-feature-flag-nano/module/target/wasm32-unknown-unknown/release/feature_flag_nano.wasm
+      # 2 MiB: a Rust no_std cdylib still declares a 17-page (1.09 MiB)
+      # memory minimum (static data + the default stack reservation),
+      # which exceeds the 1 MiB schema default; hand-written WAT could
+      # fit under 1 MiB. Max is 64 MiB.
+      memory_limit: 2097152
+      execution_timeout_ms: 100
+
+  - name: healthz
+    service: never-dialed
+    match:
+      path:
+        type: exact
+        value: /healthz
+    action:
+      type: respond
+      status: 200
+      body: ok
+
+services:
+  - name: never-dialed
+    upstream: never-dialed-pool
+
+upstreams:
+  - name: never-dialed-pool
+    load_balancer: round_robin
+    protocol: http1
+    endpoints:
+      - address: 127.0.0.1
+        port: 1

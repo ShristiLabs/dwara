@@ -1,0 +1,20 @@
+[package]
+name = "dwara-embed-analytics"
+version = "0.1.0"
+edition = "2021"
+description = "Embedding demo: dwara-core as a library with a custom AnalyticsSink (extension use case)"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# The whole point: dwara-core as a PATH DEPENDENCY. This crate is
+# EXCLUDED from the cargo workspace (see the root Cargo.toml) so the
+# workspace build never picks it up; it builds its own dependency
+# tree, which makes the first build slow and every later one cached.
+dwara-core = { path = "../../../crates/dwara-core" }
+async-trait = "0.1"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "server", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
