@@ -224,3 +224,16 @@ surface; level 2 guards plugin behavior. Use both.
 - Before shipping any gateway config change that touches plugin
   wiring: level 3 (`dwara-cli replay ... --config ...`) as a CI gate,
   requiring exit 0 against a captured recording.
+
+## Author CI
+
+The levels above are what the registry's author CI template runs on
+every push and tag. Copy
+[`templates/plugin-ci.yml`](https://github.com/shristilabs/dwara-plugins/blob/main/templates/plugin-ci.yml)
+from the [plugin registry repository](https://github.com/shristilabs/dwara-plugins)
+into your plugin's `.github/workflows/`: it builds for
+`wasm32-wasip1`, runs the host tests, prints the artifact's SHA-256
+digest, and — on a tag — generates the registry manifest entry with
+`dwara-cli plugin publish` and opens the registry PR. The registry's
+[Author CI](https://github.com/shristilabs/dwara-plugins#author-ci)
+notes cover the two repository secrets the publish step needs.

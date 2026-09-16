@@ -36,6 +36,8 @@ pub mod import_haproxy;
 pub mod loadgen;
 // DW-057: Plugin scaffolding (`dwara plugin new`).
 pub mod plugin_scaffold;
+// DW-166 (#284): vendored example templates (`dwara plugin new --template`).
+pub mod plugin_templates;
 // SCALE-12 (#192): Remote/signed plugin registry (`dwara plugin search/install`).
 pub mod plugin_registry;
 // DW-164 (#282): plugin publish tooling (`dwara plugin keygen/sign/publish`).

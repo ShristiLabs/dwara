@@ -4,11 +4,18 @@
 //! template: a Rust crate targeting `wasm32-wasip1` that implements the
 //! proxy-wasm ABI and hooks dwara's phase contract.
 //!
-//! The scaffold includes:
+//! The default scaffold includes:
 //! - `Cargo.toml` (targeting `wasm32-wasip1`, depending on `proxy-wasm`)
 //! - `src/lib.rs` (a minimal proxy-wasm filter with the phase callbacks)
 //! - `dwara.yaml` (a minimal gateway config that loads the plugin)
 //! - `README.md` (build + run instructions)
+//!
+//! DW-166 (#284): `--template <name>` scaffolds from one of the four
+//! example plugins instead (see [`crate::plugin_templates`]): the
+//! example's source is vendored with the crate name substituted, so
+//! the scaffolded project carries the example's tests (host-runnable
+//! via the fake host in `src/abi.rs`) and builds with zero
+//! dependencies.
 //!
 //! ## Done-when
 //!
@@ -31,56 +38,49 @@ pub struct ScaffoldResult {
 ///
 /// `name` is the plugin name (used for the crate name and the
 /// directory). `dir` is the parent directory; the scaffold is created
-/// in `dir/<name>/`.
-pub fn scaffold(name: &str, dir: &str) -> Result<ScaffoldResult, String> {
+/// in `dir/<name>/`. `template` names an example plugin to scaffold
+/// from ([`crate::plugin_templates`]); `None` is the hello-world
+/// default.
+pub fn scaffold(name: &str, dir: &str, template: Option<&str>) -> Result<ScaffoldResult, String> {
     validate_name(name)?;
 
     let plugin_dir = Path::new(dir).join(name);
-    let src_dir = plugin_dir.join("src");
 
     if plugin_dir.exists() {
         return Err(format!("directory {} already exists", plugin_dir.display()));
     }
 
-    std::fs::create_dir_all(&src_dir)
-        .map_err(|e| format!("cannot create {}: {e}", plugin_dir.display()))?;
+    // (relative path, contents) pairs; parent directories are created
+    // per file so the two branches share one writer.
+    let files: Vec<(String, String)> = match template {
+        Some(t) => {
+            let template = crate::plugin_templates::find(t)?;
+            crate::plugin_templates::render_files(template, name)
+        }
+        None => vec![
+            ("Cargo.toml".to_string(), cargo_toml(name)),
+            ("src/lib.rs".to_string(), lib_rs()),
+            ("dwara.yaml".to_string(), dwara_yaml(name)),
+            ("README.md".to_string(), readme(name)),
+            (".gitignore".to_string(), gitignore()),
+        ],
+    };
 
-    let mut files = Vec::new();
-
-    // Cargo.toml
-    let cargo_toml = cargo_toml(name);
-    let path = plugin_dir.join("Cargo.toml");
-    write_file(&path, &cargo_toml)?;
-    files.push(path.display().to_string());
-
-    // src/lib.rs
-    let lib_rs = lib_rs();
-    let path = src_dir.join("lib.rs");
-    write_file(&path, &lib_rs)?;
-    files.push(path.display().to_string());
-
-    // dwara.yaml
-    let dwara_yaml = dwara_yaml(name);
-    let path = plugin_dir.join("dwara.yaml");
-    write_file(&path, &dwara_yaml)?;
-    files.push(path.display().to_string());
-
-    // README.md
-    let readme = readme(name);
-    let path = plugin_dir.join("README.md");
-    write_file(&path, &readme)?;
-    files.push(path.display().to_string());
-
-    // .gitignore
-    let gitignore = gitignore();
-    let path = plugin_dir.join(".gitignore");
-    write_file(&path, &gitignore)?;
-    files.push(path.display().to_string());
+    let mut written = Vec::new();
+    for (rel, contents) in &files {
+        let path = plugin_dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        write_file(&path, contents)?;
+        written.push(path.display().to_string());
+    }
 
     Ok(ScaffoldResult {
         dir: plugin_dir.display().to_string(),
         name: name.to_string(),
-        files,
+        files: written,
     })
 }
 

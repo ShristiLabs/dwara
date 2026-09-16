@@ -263,6 +263,14 @@ enum PluginKind {
         /// Defaults to the current directory.
         #[arg(long, short = 'o', default_value = ".")]
         dir: String,
+        /// DW-166 (#284): scaffold from one of the example plugins
+        /// (static-auth, header-guard, response-body-redact,
+        /// request-tagger) instead of the hello-world default. The
+        /// example's source is vendored with the crate name
+        /// substituted, tests included. An unknown name lists the
+        /// available templates.
+        #[arg(long)]
+        template: Option<String>,
     },
     /// SCALE-12 (#192): Search the plugin registry for available plugins.
     Search {
@@ -954,8 +962,12 @@ fn main() {
             ack_timeout_ms,
         } => run_upgrade(pid, pid_file, fleet, controller, ack_timeout_ms),
         Command::Plugin { kind } => match kind {
-            PluginKind::New { name, dir } => {
-                match dwara_cli::plugin_scaffold::scaffold(&name, &dir) {
+            PluginKind::New {
+                name,
+                dir,
+                template,
+            } => {
+                match dwara_cli::plugin_scaffold::scaffold(&name, &dir, template.as_deref()) {
                     Ok(result) => {
                         println!(
                             "created plugin '{}' in {} ({} files)",
@@ -966,6 +978,11 @@ fn main() {
                         println!();
                         println!("next steps:");
                         println!("  cd {}", result.dir);
+                        if template.is_some() {
+                            // Templates carry the example's host-runnable
+                            // tests (fake host in src/abi.rs).
+                            println!("  cargo test");
+                        }
                         println!("  rustup target add wasm32-wasip1");
                         println!("  cargo build --release --target wasm32-wasip1");
                         println!("  dwara run --config dwara.yaml");

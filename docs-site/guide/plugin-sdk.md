@@ -32,6 +32,15 @@ This creates `Cargo.toml` (a `cdylib` depending on `proxy-wasm`),
 callbacks), `dwara.yaml` (a manifest wiring the plugin into a gateway
 config), `README.md`, and `.gitignore`.
 
+To start from a working example instead of the hello-world filter,
+pass `--template` with one of `static-auth`, `header-guard`,
+`response-body-redact`, or `request-tagger` — the example's source is
+scaffolded under your crate name, its host-runnable tests included:
+
+```sh
+dwara-cli plugin new my-plugin --template static-auth
+```
+
 ### 2. Implement your logic
 
 Edit the phase callbacks in `src/lib.rs`. The scaffold logs the

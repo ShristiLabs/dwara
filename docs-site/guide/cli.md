@@ -166,7 +166,7 @@ Terraform-compatible state export/plan/apply over the admin API. See
 ## `plugin`
 
 ```sh
-dwara-cli plugin new my-plugin
+dwara-cli plugin new my-plugin [--template NAME]
 dwara-cli plugin search [query] [--registry URL]
 dwara-cli plugin install <name> [--version VERSION] [--registry URL] [--digest HASH] [-o DIR]
 dwara-cli plugin keygen [--out-dir DIR]
@@ -176,7 +176,15 @@ dwara-cli plugin publish <wasm> --name NAME --version VERSION \
 ```
 
 `plugin new` scaffolds a ready-to-build proxy-wasm plugin crate (see
-[Plugin SDK](./plugin-sdk)). `plugin search` and `plugin install` work
+[Plugin SDK](./plugin-sdk)). Pass `--template` to start from one of
+the runnable example plugins instead of the hello-world default:
+`static-auth` (token gate with a 401 challenge), `header-guard`
+(header allow/deny), `response-body-redact` (card-number and secret
+scrubbing), or `request-tagger` (correlation headers). The example's
+source is vendored with your crate name substituted — its unit tests
+included, runnable on the host with `cargo test` and building for
+`wasm32-wasip1` with zero dependencies; an unknown name lists the
+available templates. `plugin search` and `plugin install` work
 against a plugin registry (default `https://shristilabs.github.io/dwara-plugins`,
 override with `--registry` or the `DWARA_PLUGIN_REGISTRY` env var;
 requires `curl`). When the registry lists several versions of a
@@ -262,6 +270,7 @@ entry anyway — paste it into `manifest.json` on a manual branch.
 
 ```sh
 # 1. Scaffold and build the plugin (.wasm targets wasm32-wasip1).
+#    Add --template static-auth to start from a working example.
 dwara-cli plugin new my-plugin && cd my-plugin
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
