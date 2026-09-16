@@ -168,16 +168,121 @@ Terraform-compatible state export/plan/apply over the admin API. See
 ```sh
 dwara-cli plugin new my-plugin
 dwara-cli plugin search [query] [--registry URL]
-dwara-cli plugin install <name> [--registry URL] [--digest HASH] [-o DIR]
+dwara-cli plugin install <name> [--version VERSION] [--registry URL] [--digest HASH] [-o DIR]
+dwara-cli plugin keygen [--out-dir DIR]
+dwara-cli plugin sign <wasm> --key <plugin.key | HEX>
+dwara-cli plugin publish <wasm> --name NAME --version VERSION \
+  [--url URL] [--key KEY] [--registry URL] [--pr] [--repo OWNER/NAME] [--base BRANCH]
 ```
 
 `plugin new` scaffolds a ready-to-build proxy-wasm plugin crate (see
 [Plugin SDK](./plugin-sdk)). `plugin search` and `plugin install` work
 against a plugin registry (default `https://registry.dwara.dev/plugins`,
 override with `--registry` or the `DWARA_PLUGIN_REGISTRY` env var;
-requires `curl`). Installs are digest-pinned — pass `--digest` or take
-the digest the registry reports. See
+requires `curl`). When the registry lists several versions of a
+plugin, `install` picks the highest semantic version; pass
+`--version` to pin an exact one (a missing version errors with the
+list of available versions). Installs are digest-pinned — pass
+`--digest` or take the digest the registry reports. `plugin keygen`,
+`plugin sign`, and `plugin publish` are the author side: they produce
+the signed, digest-pinned manifest entries the registry serves. See
 [Plugin registry](./plugin-registry).
+
+### `plugin keygen`
+
+```sh
+dwara-cli plugin keygen                    # prints both hex keys
+dwara-cli plugin keygen --out-dir keys/    # writes keys/plugin.pub + keys/plugin.key
+```
+
+Generates an Ed25519 keypair for signing plugins. Without `--out-dir`,
+both keys print to stdout as hex (`public_key:` / `private_key:`
+lines). With `--out-dir`, `plugin.pub` (the public key — publish this
+with your manifest entries) and `plugin.key` (the private key, written
+with owner-only 0600 permissions) are written to the directory;
+existing key files are never overwritten. Keep `plugin.key` secret:
+anyone holding it can sign plugins as you.
+
+### `plugin sign`
+
+```sh
+dwara-cli plugin sign target/wasm32-wasip1/release/my_plugin.wasm --key keys/plugin.key
+```
+
+Signs the artifact's bytes with Ed25519 and prints the 128-character
+hex signature — the same bytes the manifest's SHA-256 `digest` covers,
+so digest and signature always bind to the same artifact. `--key`
+accepts a path to a key file (as written by `keygen --out-dir`) or a
+literal 64-character hex key; prefer the key-file form — a literal
+`--key <hex>` lands in your shell history and in process listings
+while the command runs.
+
+### `plugin publish`
+
+```sh
+dwara-cli plugin publish target/wasm32-wasip1/release/my_plugin.wasm \
+  --name my-plugin --version 1.0.0 \
+  --url https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm \
+  --key keys/plugin.key
+```
+
+Reads the built `.wasm` from disk, computes its SHA-256 digest, signs
+it when `--key` is given (self-verifying the signature before it is
+emitted), and prints a ready-to-paste registry manifest entry (fields
+in alphabetical key order, exactly as the tool prints them):
+
+```json
+{
+  "digest": "9f2a7c3b...",
+  "name": "my-plugin",
+  "public_key": "9f2a7c3b1e8d...",
+  "signature": "c41d8cd9...",
+  "url": "https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm",
+  "version": "1.0.0"
+}
+```
+
+`signature` and `public_key` are present only when signing (hex, over
+the artifact bytes); unsigned entries omit them. Without `--url` the
+artifact URL defaults to
+`<registry>/<name>-<version>.wasm` (`--registry` / `DWARA_PLUGIN_REGISTRY`
+/ `https://registry.dwara.dev/plugins`).
+
+With `--pr`, the CLI opens the pull request itself using the GitHub
+CLI (`gh`): it fetches the registry's current `manifest.json`, merges
+your entry (replacing a previous entry with the same name and version,
+appending otherwise), commits it to a
+`plugin/<name>-<version>` branch, and opens a PR against `--repo`
+(default `shristilabs/dwara-plugins`, branch `main` via `--base`). If
+you do not have write access to the repository, it forks first and
+opens the PR from your fork. On any failure it prints the manifest
+entry anyway — paste it into `manifest.json` on a manual branch.
+
+### Author walkthrough: build to registry PR
+
+```sh
+# 1. Scaffold and build the plugin (.wasm targets wasm32-wasip1).
+dwara-cli plugin new my-plugin && cd my-plugin
+rustup target add wasm32-wasip1
+cargo build --release --target wasm32-wasip1
+
+# 2. Generate a signing keypair once per author (keep plugin.key secret).
+dwara-cli plugin keygen --out-dir keys
+
+# 3. Host the artifact at a URL, then publish its manifest entry.
+#    Without --pr this prints the entry for a manual PR.
+dwara-cli plugin publish target/wasm32-wasip1/release/my_plugin.wasm \
+  --name my-plugin --version 1.0.0 \
+  --url https://registry.dwara.dev/plugins/my-plugin-1.0.0.wasm \
+  --key keys/plugin.key --pr
+
+# 4. After the registry PR merges, gateways install with the same pin:
+dwara-cli plugin install my-plugin -o /var/lib/dwara/plugins
+```
+
+The published `digest`, `signature`, and `public_key` are the fields a
+gateway's `source:` block pins; see
+[Plugin registry](./plugin-registry) for the verification flow.
 
 ## `replay`
 

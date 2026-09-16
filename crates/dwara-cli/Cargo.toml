@@ -54,6 +54,26 @@ rusqlite = { workspace = true }
 # downloads. Already a workspace dependency (dwara-core uses it for
 # API-key hashing); no new external crate enters the tree.
 sha2 = { workspace = true }
+# DW-164 (#282): Ed25519 plugin signing (`plugin keygen/sign/publish`).
+# This is the ONE new external crate for the publish tooling. Nothing
+# usable existed in the OSS tree: the only Ed25519 implementation in
+# Cargo.lock is ed25519-dalek 2.2.0, pulled in by licensing-core (the
+# private ent-gated git dependency), which OSS builds never compile.
+# Declared here with the default features (fast/std/zeroize; zeroize
+# wipes key material in memory, matching the workspace's key-hygiene
+# stance) plus rand_core for SigningKey::generate. BSD-3-Clause, which
+# deny.toml allow-lists; versions are already resolved in Cargo.lock,
+# so no new package enters the dependency graph for cargo-deny to
+# evaluate.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+# DW-164 (#282): OS entropy (rand_core::OsRng) for `plugin keygen`.
+# This is ed25519-dalek's own dependency (its rand_core feature
+# activates it); declaring it directly only names the RNG type the
+# caller must supply to SigningKey::generate. Version 0.6.4 is already
+# resolved in Cargo.lock (ed25519-dalek's pinned line); the getrandom
+# feature enables OsRng, and getrandom 0.2 is already in dwara-cli's
+# normal dependency graph. MIT OR Apache-2.0.
+rand_core = { version = "0.6", features = ["getrandom"] }
 # DW-066: tracing subscriber for the ent controller/edge binaries (the
 # same registry + EnvFilter + JSON fmt stack dwara-bin installs).
 # Optional + ent-gated so the default CLI build never pulls it in.

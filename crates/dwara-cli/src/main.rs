@@ -277,6 +277,10 @@ enum PluginKind {
     Install {
         /// The plugin name to install.
         name: String,
+        /// The exact version to install. If absent, the highest
+        /// semantic version listed for the name is installed.
+        #[arg(long)]
+        version: Option<String>,
         /// The registry URL to install from. If absent, uses the
         /// `DWARA_PLUGIN_REGISTRY` env var or the default registry.
         #[arg(long)]
@@ -288,6 +292,63 @@ enum PluginKind {
         /// Output directory for the downloaded .wasm file.
         #[arg(long, short = 'o', default_value = ".")]
         dir: String,
+    },
+    /// DW-164 (#282): Generate an Ed25519 plugin signing keypair.
+    /// Without --out-dir both hex keys are printed to stdout; with it,
+    /// `plugin.pub` and `plugin.key` (mode 0600) are written to the
+    /// directory.
+    Keygen {
+        /// Directory to write `plugin.pub`/`plugin.key` into. If
+        /// absent, the keys are printed to stdout instead.
+        #[arg(long)]
+        out_dir: Option<String>,
+    },
+    /// DW-164 (#282): Sign a built .wasm artifact with an Ed25519
+    /// key; prints the hex signature.
+    Sign {
+        /// Path to the .wasm artifact to sign.
+        wasm: String,
+        /// The signing key: a path to a hex key file (as written by
+        /// `plugin keygen --out-dir`) or a literal 64-char hex string.
+        #[arg(long)]
+        key: String,
+    },
+    /// DW-164 (#282): Publish a built .wasm to the plugin registry:
+    /// computes the SHA-256 digest, optionally signs, prints the
+    /// manifest entry, and with --pr opens the registry PR via gh.
+    Publish {
+        /// Path to the built .wasm artifact.
+        wasm: String,
+        /// The plugin name (registry-wide identifier).
+        #[arg(long)]
+        name: String,
+        /// The plugin version of this artifact.
+        #[arg(long)]
+        version: String,
+        /// Where the artifact is hosted. Defaults to
+        /// `<registry>/<name>-<version>.wasm`.
+        #[arg(long)]
+        url: Option<String>,
+        /// Ed25519 signing key (path to a hex key file or literal
+        /// hex). If absent, the entry is published unsigned.
+        #[arg(long)]
+        key: Option<String>,
+        /// Registry base URL (only used to derive the default --url).
+        /// If absent, uses the `DWARA_PLUGIN_REGISTRY` env var or the
+        /// default registry.
+        #[arg(long)]
+        registry: Option<String>,
+        /// Open the registry PR with the GitHub CLI (gh): branch, and
+        /// a PR against --repo. Best-effort — on any failure the
+        /// printed entry is still valid for a manual PR.
+        #[arg(long)]
+        pr: bool,
+        /// The repository hosting `manifest.json`.
+        #[arg(long, default_value = "shristilabs/dwara-plugins")]
+        repo: String,
+        /// The branch to target with --pr.
+        #[arg(long, default_value = "main")]
+        base: String,
     },
 }
 
@@ -930,12 +991,14 @@ fn main() {
             }
             PluginKind::Install {
                 name,
+                version,
                 registry,
                 digest,
                 dir,
             } => {
                 match dwara_cli::plugin_registry::install(
                     &name,
+                    version.as_deref(),
                     registry.as_deref(),
                     digest.as_deref(),
                     &dir,
@@ -952,6 +1015,159 @@ fn main() {
                         1
                     }
                 }
+            }
+            PluginKind::Keygen { out_dir } => match out_dir {
+                Some(dir) => match dwara_cli::plugin_publish::write_keypair(&dir) {
+                    Ok(result) => {
+                        println!("public key:  {}", result.public_path);
+                        println!("private key: {} (mode 0600)", result.private_path);
+                        println!("keep plugin.key secret; publish the public key with your manifest entries");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("plugin keygen: {e}");
+                        1
+                    }
+                },
+                None => {
+                    let kp = dwara_cli::plugin_publish::keygen();
+                    println!("public_key: {}", kp.public_key);
+                    println!("private_key: {}", kp.private_key);
+                    0
+                }
+            },
+            PluginKind::Sign { wasm, key } => {
+                // The body is a closure so each failure can early-return
+                // the exit code (same pattern as the publish arm): an
+                // unreadable artifact reports only the read error, never
+                // a spurious follow-on "artifact is empty".
+                let run = || -> i32 {
+                    let artifact = match std::fs::read(&wasm) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("plugin sign: cannot read {wasm}: {e}");
+                            return 1;
+                        }
+                    };
+                    let key = match dwara_cli::plugin_publish::load_signing_key(&key) {
+                        Ok(key) => key,
+                        Err(e) => {
+                            eprintln!("plugin sign: {e}");
+                            return 1;
+                        }
+                    };
+                    if artifact.is_empty() {
+                        eprintln!(
+                            "plugin sign: artifact is empty (did the build produce a .wasm?)"
+                        );
+                        return 1;
+                    }
+                    println!(
+                        "{}",
+                        dwara_cli::plugin_publish::sign_artifact(&key, &artifact)
+                    );
+                    0
+                };
+                run()
+            }
+            PluginKind::Publish {
+                wasm,
+                name,
+                version,
+                url,
+                key,
+                registry,
+                pr,
+                repo,
+                base,
+            } => {
+                // The body is a closure so failures can early-return the
+                // exit code (the surrounding match arms all evaluate to
+                // i32).
+                let run = || -> i32 {
+                    let artifact = std::fs::read(&wasm).unwrap_or_else(|e| {
+                        eprintln!("plugin publish: cannot read {wasm}: {e}");
+                        Vec::new()
+                    });
+                    if artifact.is_empty() {
+                        eprintln!(
+                            "plugin publish: artifact is empty (did the build produce a .wasm?)"
+                        );
+                        return 1;
+                    }
+                    let signing_key = match key.as_deref() {
+                        Some(k) => match dwara_cli::plugin_publish::load_signing_key(k) {
+                            Ok(key) => Some(key),
+                            Err(e) => {
+                                eprintln!("plugin publish: {e}");
+                                return 1;
+                            }
+                        },
+                        None => None,
+                    };
+                    let registry_base =
+                        dwara_cli::plugin_registry::resolve_registry(registry.as_deref());
+                    let entry = match dwara_cli::plugin_publish::build_entry(
+                        &artifact,
+                        &name,
+                        &version,
+                        url.as_deref(),
+                        &registry_base,
+                        signing_key.as_ref(),
+                    ) {
+                        Ok(entry) => entry,
+                        Err(e) => {
+                            eprintln!("plugin publish: {e}");
+                            return 1;
+                        }
+                    };
+                    let entry_json = match dwara_cli::plugin_publish::entry_json(&entry) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            eprintln!("plugin publish: {e}");
+                            return 1;
+                        }
+                    };
+                    println!(
+                        "plugin '{}' {} (artifact: {wasm}, {} bytes)",
+                        entry.name,
+                        entry.version,
+                        artifact.len()
+                    );
+                    println!("digest: {}", entry.digest);
+                    match (&entry.signature, &entry.public_key) {
+                        (Some(sig), Some(pk)) => {
+                            println!("signature: {sig}");
+                            println!("public_key: {pk}");
+                        }
+                        _ => println!("unsigned (pass --key <plugin.key> to sign)"),
+                    }
+                    println!("manifest entry:");
+                    print!("{entry_json}");
+                    if pr {
+                        match dwara_cli::plugin_publish::open_registry_pr(&repo, &base, &entry) {
+                            Ok(pr_url) => {
+                                println!("opened registry PR: {pr_url}");
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("plugin publish: --pr failed: {e}");
+                                eprintln!(
+                                    "the manifest entry above is still valid for a manual PR \
+                                     (edit {repo}'s manifest.json on a branch)"
+                                );
+                                1
+                            }
+                        }
+                    } else {
+                        println!(
+                            "paste the entry above into manifest.json in https://github.com/{repo} \
+                             (or re-run with --pr to open the PR via gh)"
+                        );
+                        0
+                    }
+                };
+                run()
             }
         },
         Command::K8s { kind } => match kind {
